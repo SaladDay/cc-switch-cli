@@ -54,19 +54,14 @@ cc-switch
 cc-switch provider list              # List providers
 cc-switch provider switch <id>       # Switch provider
 cc-switch mcp sync                   # Sync MCP servers
-```
 
-**Multi-App Support**
-
-Use the global `--app` flag to target specific applications:
-
-```bash
+# Use the global `--app` flag to target specific applications:
 cc-switch --app claude provider list    # Manage Claude providers
 cc-switch --app codex mcp sync          # Sync Codex MCP servers
 cc-switch --app gemini prompts list     # List Gemini prompts
-```
 
-Supported apps: `claude` (default), `codex`, `gemini`
+# Supported apps: `claude` (default), `codex`, `gemini`
+```
 
 See the "Features" section below for full command list.
 

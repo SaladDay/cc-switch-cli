@@ -54,19 +54,14 @@ cc-switch
 cc-switch provider list              # 列出供应商
 cc-switch provider switch <id>       # 切换供应商
 cc-switch mcp sync                   # 同步 MCP 服务器
-```
 
-**多应用支持**
-
-使用全局 `--app` 参数来指定目标应用：
-
-```bash
+# 使用全局 `--app` 参数来指定目标应用：
 cc-switch --app claude provider list    # 管理 Claude 供应商
 cc-switch --app codex mcp sync          # 同步 Codex MCP 服务器
 cc-switch --app gemini prompts list     # 列出 Gemini 提示词
-```
 
-支持的应用：`claude`（默认）、`codex`、`gemini`
+# 支持的应用：`claude`（默认）、`codex`、`gemini`
+```
 
 完整命令列表请参考下方「功能特性」章节。
 
