@@ -1,5 +1,5 @@
-use clap::Subcommand;
 use crate::error::AppError;
+use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum SkillsCommand {

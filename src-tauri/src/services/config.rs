@@ -36,7 +36,10 @@ impl ConfigService {
     /// # 命名规则
     /// - 有自定义名称：`{custom_name}_{timestamp}.json`
     /// - 无自定义名称：`backup_{timestamp}.json`
-    pub fn create_backup(config_path: &Path, custom_name: Option<String>) -> Result<String, AppError> {
+    pub fn create_backup(
+        config_path: &Path,
+        custom_name: Option<String>,
+    ) -> Result<String, AppError> {
         if !config_path.exists() {
             return Ok(String::new());
         }
@@ -156,7 +159,8 @@ impl ConfigService {
                 time[2..4].parse::<u32>(),
                 time[4..6].parse::<u32>(),
             ) {
-                let formatted_time = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, min, s);
+                let formatted_time =
+                    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, min, s);
 
                 // 如果是自定义名称，显示名称和时间
                 if !filename.starts_with("backup_") {

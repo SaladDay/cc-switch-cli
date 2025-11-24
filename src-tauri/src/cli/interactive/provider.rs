@@ -100,15 +100,33 @@ fn view_current_provider(
 
             // API 配置
             println!("\n{}", highlight("API 配置 / API Configuration"));
-            println!("  Base URL: {}", config.base_url.unwrap_or_else(|| "N/A".to_string()));
-            println!("  API Key:  {}", config.api_key.unwrap_or_else(|| "N/A".to_string()));
+            println!(
+                "  Base URL: {}",
+                config.base_url.unwrap_or_else(|| "N/A".to_string())
+            );
+            println!(
+                "  API Key:  {}",
+                config.api_key.unwrap_or_else(|| "N/A".to_string())
+            );
 
             // 模型配置
             println!("\n{}", highlight("模型配置 / Model Configuration"));
-            println!("  主模型:   {}", config.model.unwrap_or_else(|| "default".to_string()));
-            println!("  Haiku:    {}", config.haiku_model.unwrap_or_else(|| "default".to_string()));
-            println!("  Sonnet:   {}", config.sonnet_model.unwrap_or_else(|| "default".to_string()));
-            println!("  Opus:     {}", config.opus_model.unwrap_or_else(|| "default".to_string()));
+            println!(
+                "  主模型:   {}",
+                config.model.unwrap_or_else(|| "default".to_string())
+            );
+            println!(
+                "  Haiku:    {}",
+                config.haiku_model.unwrap_or_else(|| "default".to_string())
+            );
+            println!(
+                "  Sonnet:   {}",
+                config.sonnet_model.unwrap_or_else(|| "default".to_string())
+            );
+            println!(
+                "  Opus:     {}",
+                config.opus_model.unwrap_or_else(|| "default".to_string())
+            );
         } else {
             // Codex/Gemini 应用只显示 API URL
             println!("\n{}", highlight("API 配置 / API Configuration"));
@@ -124,13 +142,11 @@ fn view_current_provider(
 
 pub fn extract_api_url(settings_config: &serde_json::Value, app_type: &AppType) -> Option<String> {
     match app_type {
-        AppType::Claude => {
-            settings_config
-                .get("env")?
-                .get("ANTHROPIC_BASE_URL")?
-                .as_str()
-                .map(|s| s.to_string())
-        }
+        AppType::Claude => settings_config
+            .get("env")?
+            .get("ANTHROPIC_BASE_URL")?
+            .as_str()
+            .map(|s| s.to_string()),
         AppType::Codex => {
             if let Some(config_str) = settings_config.get("config")?.as_str() {
                 for line in config_str.lines() {
@@ -145,14 +161,12 @@ pub fn extract_api_url(settings_config: &serde_json::Value, app_type: &AppType) 
             }
             None
         }
-        AppType::Gemini => {
-            settings_config
-                .get("env")?
-                .get("GEMINI_BASE_URL")
-                .or_else(|| settings_config.get("env")?.get("BASE_URL"))?
-                .as_str()
-                .map(|s| s.to_string())
-        }
+        AppType::Gemini => settings_config
+            .get("env")?
+            .get("GEMINI_BASE_URL")
+            .or_else(|| settings_config.get("env")?.get("BASE_URL"))?
+            .as_str()
+            .map(|s| s.to_string()),
     }
 }
 
@@ -247,16 +261,28 @@ fn delete_provider_interactive(
 }
 
 fn add_provider_interactive(_app_type: &AppType) -> Result<(), AppError> {
-    println!("\n{}", highlight(texts::add_provider().trim_start_matches("➕ ")));
+    println!(
+        "\n{}",
+        highlight(texts::add_provider().trim_start_matches("➕ "))
+    );
     println!("{}", "─".repeat(60));
 
     let _name = Text::new("Provider name:")
         .prompt()
         .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
 
-    println!("\n{}", info("Note: Provider configuration is complex and varies by app type."));
-    println!("{}", info("For now, please use the config file directly to add detailed settings."));
-    println!("\n{}", error("Interactive provider creation is not yet fully implemented."));
+    println!(
+        "\n{}",
+        info("Note: Provider configuration is complex and varies by app type.")
+    );
+    println!(
+        "{}",
+        info("For now, please use the config file directly to add detailed settings.")
+    );
+    println!(
+        "\n{}",
+        error("Interactive provider creation is not yet fully implemented.")
+    );
     println!("{}", info("Coming soon in the next update!"));
 
     pause();
@@ -277,29 +303,33 @@ struct ClaudeConfig {
 
 /// 提取 Claude 配置信息
 fn extract_claude_config(settings_config: &serde_json::Value) -> ClaudeConfig {
-    let env = settings_config
-        .get("env")
-        .and_then(|v| v.as_object());
+    let env = settings_config.get("env").and_then(|v| v.as_object());
 
     if let Some(env) = env {
         ClaudeConfig {
-            api_key: env.get("ANTHROPIC_AUTH_TOKEN")
+            api_key: env
+                .get("ANTHROPIC_AUTH_TOKEN")
                 .or_else(|| env.get("ANTHROPIC_API_KEY"))
                 .and_then(|v| v.as_str())
                 .map(|s| mask_api_key(s)),
-            base_url: env.get("ANTHROPIC_BASE_URL")
+            base_url: env
+                .get("ANTHROPIC_BASE_URL")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            model: env.get("ANTHROPIC_MODEL")
+            model: env
+                .get("ANTHROPIC_MODEL")
                 .and_then(|v| v.as_str())
                 .map(|s| simplify_model_name(s)),
-            haiku_model: env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            haiku_model: env
+                .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
                 .and_then(|v| v.as_str())
                 .map(|s| simplify_model_name(s)),
-            sonnet_model: env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+            sonnet_model: env
+                .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
                 .and_then(|v| v.as_str())
                 .map(|s| simplify_model_name(s)),
-            opus_model: env.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            opus_model: env
+                .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
                 .and_then(|v| v.as_str())
                 .map(|s| simplify_model_name(s)),
         }

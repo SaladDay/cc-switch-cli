@@ -2,10 +2,10 @@ use clap::Subcommand;
 use std::sync::RwLock;
 
 use crate::app_config::{AppType, MultiAppConfig};
+use crate::cli::ui::{create_table, error, highlight, info, success};
 use crate::error::AppError;
 use crate::services::PromptService;
 use crate::store::AppState;
-use crate::cli::ui::{create_table, success, error, highlight, info};
 
 #[derive(Subcommand)]
 pub enum PromptsCommand {
@@ -18,6 +18,8 @@ pub enum PromptsCommand {
         /// Prompt preset ID
         id: String,
     },
+    /// Deactivate the current active prompt
+    Deactivate,
     /// Create a new prompt preset
     Create,
     /// Edit a prompt preset
@@ -44,6 +46,7 @@ pub fn execute(cmd: PromptsCommand, app: Option<AppType>) -> Result<(), AppError
         PromptsCommand::List => list_prompts(app_type),
         PromptsCommand::Current => show_current(app_type),
         PromptsCommand::Activate { id } => activate_prompt(app_type, &id),
+        PromptsCommand::Deactivate => deactivate_prompt(app_type),
         PromptsCommand::Create => create_prompt(app_type),
         PromptsCommand::Edit { id } => edit_prompt(app_type, &id),
         PromptsCommand::Delete { id } => delete_prompt(app_type, &id),
@@ -74,13 +77,12 @@ fn list_prompts(app_type: AppType) -> Result<(), AppError> {
 
     // 按更新时间排序
     let mut prompt_list: Vec<_> = prompts.into_iter().collect();
-    prompt_list.sort_by(|(_, a), (_, b)| {
-        b.updated_at.unwrap_or(0).cmp(&a.updated_at.unwrap_or(0))
-    });
+    prompt_list.sort_by(|(_, a), (_, b)| b.updated_at.unwrap_or(0).cmp(&a.updated_at.unwrap_or(0)));
 
     for (id, prompt) in prompt_list {
         let enabled_marker = if prompt.enabled { "✓" } else { " " };
-        let updated = prompt.updated_at
+        let updated = prompt
+            .updated_at
             .map(|ts| {
                 use chrono::{DateTime, Utc};
                 DateTime::<Utc>::from_timestamp(ts, 0)
@@ -89,7 +91,8 @@ fn list_prompts(app_type: AppType) -> Result<(), AppError> {
             })
             .unwrap_or_else(|| "Unknown".to_string());
 
-        let description = prompt.description
+        let description = prompt
+            .description
             .as_deref()
             .unwrap_or("")
             .chars()
@@ -124,13 +127,15 @@ fn show_current(app_type: AppType) -> Result<(), AppError> {
     let prompts = PromptService::get_prompts(&state, app_type.clone())?;
 
     // 找到当前激活的 prompt
-    let active = prompts.iter()
+    let active = prompts
+        .iter()
         .find(|(_, p)| p.enabled)
         .map(|(id, p)| (id.clone(), p.clone()));
 
     match active {
         Some((id, prompt)) => {
-            let updated = prompt.updated_at
+            let updated = prompt
+                .updated_at
                 .and_then(|ts| {
                     use chrono::{DateTime, Utc};
                     DateTime::<Utc>::from_timestamp(ts, 0)
@@ -179,16 +184,25 @@ fn activate_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
     // 检查 prompt 是否存在
     let prompts = PromptService::get_prompts(&state, app_type.clone())?;
     if !prompts.contains_key(id) {
-        return Err(AppError::Message(format!("Prompt preset '{}' not found", id)));
+        return Err(AppError::Message(format!(
+            "Prompt preset '{}' not found",
+            id
+        )));
     }
 
     // 执行激活
     PromptService::enable_prompt(&state, app_type, id)?;
 
-    println!("{}", success(&format!("✓ Activated prompt preset '{}'", id)));
+    println!(
+        "{}",
+        success(&format!("✓ Activated prompt preset '{}'", id))
+    );
     println!("{}", info(&format!("  Application: {}", app_str)));
     println!();
-    println!("{}", info("Note: The prompt has been synced to the live configuration file."));
+    println!(
+        "{}",
+        info("Note: The prompt has been synced to the live configuration file.")
+    );
 
     Ok(())
 }
@@ -198,13 +212,15 @@ fn delete_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
 
     // 检查 prompt 是否存在
     let prompts = PromptService::get_prompts(&state, app_type.clone())?;
-    let prompt = prompts.get(id)
+    let prompt = prompts
+        .get(id)
         .ok_or_else(|| AppError::Message(format!("Prompt preset '{}' not found", id)))?;
 
     // 检查是否是当前激活的 prompt
     if prompt.enabled {
         return Err(AppError::Message(
-            "Cannot delete the currently active prompt. Please activate another prompt first.".to_string()
+            "Cannot delete the currently active prompt. Please activate another prompt first."
+                .to_string(),
         ));
     }
 
@@ -218,10 +234,13 @@ fn delete_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
     println!();
 
     // 确认删除
-    let confirm = inquire::Confirm::new(&format!("Are you sure you want to delete prompt preset '{}'?", id))
-        .with_default(false)
-        .prompt()
-        .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
+    let confirm = inquire::Confirm::new(&format!(
+        "Are you sure you want to delete prompt preset '{}'?",
+        id
+    ))
+    .with_default(false)
+    .prompt()
+    .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
 
     if !confirm {
         println!("{}", info("Cancelled."));
@@ -240,10 +259,12 @@ fn show_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
     let state = get_state()?;
     let prompts = PromptService::get_prompts(&state, app_type)?;
 
-    let prompt = prompts.get(id)
+    let prompt = prompts
+        .get(id)
         .ok_or_else(|| AppError::Message(format!("Prompt preset '{}' not found", id)))?;
 
-    let updated = prompt.updated_at
+    let updated = prompt
+        .updated_at
         .and_then(|ts| {
             use chrono::{DateTime, Utc};
             DateTime::<Utc>::from_timestamp(ts, 0)
@@ -258,7 +279,14 @@ fn show_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
     if let Some(desc) = &prompt.description {
         println!("Description: {}", desc);
     }
-    println!("Status:      {}", if prompt.enabled { highlight("Active") } else { "Inactive".to_string() });
+    println!(
+        "Status:      {}",
+        if prompt.enabled {
+            highlight("Active")
+        } else {
+            "Inactive".to_string()
+        }
+    );
     println!("Updated:     {}", updated);
     println!();
     println!("{}", highlight("Content:"));
@@ -283,8 +311,46 @@ fn create_prompt(_app_type: AppType) -> Result<(), AppError> {
     println!();
     println!("2. Or add a prompt preset manually to the prompts section.");
     println!();
-    println!("{}", error("Interactive prompt creation is not yet fully implemented."));
+    println!(
+        "{}",
+        error("Interactive prompt creation is not yet fully implemented.")
+    );
     println!("{}", info("Coming soon in the next update!"));
+
+    Ok(())
+}
+
+fn deactivate_prompt(app_type: AppType) -> Result<(), AppError> {
+    let state = get_state()?;
+    let prompts = PromptService::get_prompts(&state, app_type.clone())?;
+
+    // Find currently enabled prompt
+    let active = prompts
+        .iter()
+        .find(|(_, p)| p.enabled)
+        .map(|(id, _)| id.clone());
+
+    match active {
+        Some(id) => {
+            // Deactivate the current prompt
+            PromptService::disable_prompt(&state, app_type.clone(), &id)?;
+
+            println!(
+                "{}",
+                success(&format!("✓ Deactivated prompt preset '{}'", id))
+            );
+            println!("{}", info(&format!("  Application: {}", app_type.as_str())));
+            println!();
+            println!(
+                "{}",
+                info("Note: The live configuration file has been cleared.")
+            );
+        }
+        None => {
+            println!("{}", info("No active prompt to deactivate."));
+            println!("Use 'cc-switch prompts activate <id>' to activate a prompt preset.");
+        }
+    }
 
     Ok(())
 }
@@ -292,8 +358,14 @@ fn create_prompt(_app_type: AppType) -> Result<(), AppError> {
 fn edit_prompt(_app_type: AppType, id: &str) -> Result<(), AppError> {
     println!("{}", info(&format!("Editing prompt preset '{}'...", id)));
     println!("{}", error("Prompt editing is not yet implemented."));
-    println!("{}", info("Please edit ~/.cc-switch/config.json directly for now."));
+    println!(
+        "{}",
+        info("Please edit ~/.cc-switch/config.json directly for now.")
+    );
     println!();
-    println!("{}", info("Tip: Use 'cc-switch prompts show <id>' to view the current content."));
+    println!(
+        "{}",
+        info("Tip: Use 'cc-switch prompts show <id>' to view the current content.")
+    );
     Ok(())
 }

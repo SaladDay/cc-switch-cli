@@ -2,10 +2,10 @@ use clap::Subcommand;
 use std::sync::RwLock;
 
 use crate::app_config::{AppType, MultiAppConfig};
+use crate::cli::ui::{create_table, error, highlight, info, success};
 use crate::error::AppError;
 use crate::services::McpService;
 use crate::store::AppState;
-use crate::cli::ui::{create_table, success, error, highlight, info};
 
 #[derive(Subcommand)]
 pub enum McpCommand {
@@ -104,7 +104,11 @@ fn list_servers(app_type: AppType) -> Result<(), AppError> {
     }
 
     println!("{}", table);
-    println!("\n{} Viewing from: {} perspective", info("ℹ"), app_type.as_str());
+    println!(
+        "\n{} Viewing from: {} perspective",
+        info("ℹ"),
+        app_type.as_str()
+    );
     println!("{} ✓ = Enabled for this app", info("→"));
 
     Ok(())
@@ -115,7 +119,8 @@ fn delete_server(id: &str) -> Result<(), AppError> {
 
     // 检查服务器是否存在
     let servers = McpService::get_all_servers(&state)?;
-    let server = servers.get(id)
+    let server = servers
+        .get(id)
         .ok_or_else(|| AppError::Message(format!("MCP server '{}' not found", id)))?;
 
     // 显示将要删除的服务器信息
@@ -124,10 +129,25 @@ fn delete_server(id: &str) -> Result<(), AppError> {
     println!("Name: {}", server.name);
 
     let enabled_apps: Vec<&str> = vec![
-        if server.apps.claude { Some("Claude") } else { None },
-        if server.apps.codex { Some("Codex") } else { None },
-        if server.apps.gemini { Some("Gemini") } else { None },
-    ].into_iter().flatten().collect();
+        if server.apps.claude {
+            Some("Claude")
+        } else {
+            None
+        },
+        if server.apps.codex {
+            Some("Codex")
+        } else {
+            None
+        },
+        if server.apps.gemini {
+            Some("Gemini")
+        } else {
+            None
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
     if !enabled_apps.is_empty() {
         println!("Enabled for: {}", enabled_apps.join(", "));
@@ -135,10 +155,13 @@ fn delete_server(id: &str) -> Result<(), AppError> {
     println!();
 
     // 确认删除
-    let confirm = inquire::Confirm::new(&format!("Are you sure you want to delete MCP server '{}'?", id))
-        .with_default(false)
-        .prompt()
-        .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
+    let confirm = inquire::Confirm::new(&format!(
+        "Are you sure you want to delete MCP server '{}'?",
+        id
+    ))
+    .with_default(false)
+    .prompt()
+    .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
 
     if !confirm {
         println!("{}", info("Cancelled."));
@@ -151,7 +174,10 @@ fn delete_server(id: &str) -> Result<(), AppError> {
     if deleted {
         println!("{}", success(&format!("✓ Deleted MCP server '{}'", id)));
         if !enabled_apps.is_empty() {
-            println!("{}", info(&format!("  Removed from: {}", enabled_apps.join(", "))));
+            println!(
+                "{}",
+                info(&format!("  Removed from: {}", enabled_apps.join(", ")))
+            );
         }
     } else {
         println!("{}", error(&format!("Failed to delete server '{}'", id)));
@@ -173,8 +199,14 @@ fn enable_server(app_type: AppType, id: &str) -> Result<(), AppError> {
     // 执行启用
     McpService::toggle_app(&state, id, app_type, true)?;
 
-    println!("{}", success(&format!("✓ Enabled MCP server '{}' for {}", id, app_str)));
-    println!("{}", info("Note: Configuration has been synced to live file."));
+    println!(
+        "{}",
+        success(&format!("✓ Enabled MCP server '{}' for {}", id, app_str))
+    );
+    println!(
+        "{}",
+        info("Note: Configuration has been synced to live file.")
+    );
 
     Ok(())
 }
@@ -192,8 +224,14 @@ fn disable_server(app_type: AppType, id: &str) -> Result<(), AppError> {
     // 执行禁用
     McpService::toggle_app(&state, id, app_type, false)?;
 
-    println!("{}", success(&format!("✓ Disabled MCP server '{}' for {}", id, app_str)));
-    println!("{}", info("Note: Configuration has been removed from live file."));
+    println!(
+        "{}",
+        success(&format!("✓ Disabled MCP server '{}' for {}", id, app_str))
+    );
+    println!(
+        "{}",
+        info("Note: Configuration has been removed from live file.")
+    );
 
     Ok(())
 }
@@ -206,7 +244,10 @@ fn sync_servers() -> Result<(), AppError> {
     McpService::sync_all_enabled(&state)?;
 
     println!("{}", success("✓ All MCP servers synced successfully"));
-    println!("{}", info("Note: Live configuration files have been updated."));
+    println!(
+        "{}",
+        info("Note: Live configuration files have been updated.")
+    );
 
     Ok(())
 }
@@ -215,7 +256,13 @@ fn import_servers(app_type: AppType) -> Result<(), AppError> {
     let state = get_state()?;
     let app_str = app_type.as_str().to_string();
 
-    println!("{}", info(&format!("Importing MCP servers from {} live config...", app_str)));
+    println!(
+        "{}",
+        info(&format!(
+            "Importing MCP servers from {} live config...",
+            app_str
+        ))
+    );
 
     let count = match app_type {
         AppType::Claude => McpService::import_from_claude(&state)?,
@@ -224,10 +271,22 @@ fn import_servers(app_type: AppType) -> Result<(), AppError> {
     };
 
     if count > 0 {
-        println!("{}", success(&format!("✓ Imported {} MCP server(s) from {}", count, app_str)));
-        println!("{}", info("Note: Servers have been added to unified configuration."));
+        println!(
+            "{}",
+            success(&format!(
+                "✓ Imported {} MCP server(s) from {}",
+                count, app_str
+            ))
+        );
+        println!(
+            "{}",
+            info("Note: Servers have been added to unified configuration.")
+        );
     } else {
-        println!("{}", info(&format!("No new MCP servers found in {} config.", app_str)));
+        println!(
+            "{}",
+            info(&format!("No new MCP servers found in {} config.", app_str))
+        );
     }
 
     Ok(())
@@ -237,7 +296,10 @@ fn add_server(_app_type: AppType) -> Result<(), AppError> {
     println!("{}", highlight("Add New MCP Server"));
     println!("{}", "=".repeat(50));
     println!();
-    println!("{}", info("Note: MCP server configuration is complex and app-specific."));
+    println!(
+        "{}",
+        info("Note: MCP server configuration is complex and app-specific.")
+    );
     println!("{}", info("For now, please use one of these methods:"));
     println!();
     println!("1. Import from existing config:");
@@ -246,7 +308,10 @@ fn add_server(_app_type: AppType) -> Result<(), AppError> {
     println!("2. Edit config file directly:");
     println!("   ~/.cc-switch/config.json");
     println!();
-    println!("{}", error("Interactive MCP server creation is not yet fully implemented."));
+    println!(
+        "{}",
+        error("Interactive MCP server creation is not yet fully implemented.")
+    );
     println!("{}", info("Coming soon in the next update!"));
 
     Ok(())
@@ -255,7 +320,10 @@ fn add_server(_app_type: AppType) -> Result<(), AppError> {
 fn edit_server(_app_type: AppType, id: &str) -> Result<(), AppError> {
     println!("{}", info(&format!("Editing MCP server '{}'...", id)));
     println!("{}", error("MCP server editing is not yet implemented."));
-    println!("{}", info("Please edit ~/.cc-switch/config.json directly for now."));
+    println!(
+        "{}",
+        info("Please edit ~/.cc-switch/config.json directly for now.")
+    );
     Ok(())
 }
 
@@ -264,10 +332,19 @@ fn validate_command(command: &str) -> Result<(), AppError> {
 
     // 检查命令是否在 PATH 中
     if which::which(command).is_ok() {
-        println!("{}", success(&format!("✓ Command '{}' is available in PATH", command)));
+        println!(
+            "{}",
+            success(&format!("✓ Command '{}' is available in PATH", command))
+        );
     } else {
-        println!("{}", error(&format!("✗ Command '{}' not found in PATH", command)));
-        println!("{}", info("Make sure the command is installed and accessible."));
+        println!(
+            "{}",
+            error(&format!("✗ Command '{}' not found in PATH", command))
+        );
+        println!(
+            "{}",
+            info("Make sure the command is installed and accessible.")
+        );
     }
 
     Ok(())

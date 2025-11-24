@@ -1,4 +1,4 @@
-use comfy_table::{Table, presets::UTF8_FULL};
+use comfy_table::{presets::UTF8_FULL, Table};
 
 pub fn create_table() -> Table {
     let mut table = Table::new();

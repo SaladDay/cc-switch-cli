@@ -66,7 +66,10 @@ fn show_config_path_interactive() -> Result<(), AppError> {
     let config_path = get_app_config_path();
     let config_dir = config_path.parent().unwrap_or(&config_path);
 
-    println!("\n{}", highlight(texts::config_show_path().trim_start_matches("📍 ")));
+    println!(
+        "\n{}",
+        highlight(texts::config_show_path().trim_start_matches("📍 "))
+    );
     println!("{}", "─".repeat(60));
     println!("Config file: {}", config_path.display());
     println!("Config dir:  {}", config_dir.display());
@@ -96,7 +99,10 @@ fn show_full_config_interactive() -> Result<(), AppError> {
     let json = serde_json::to_string_pretty(&config)
         .map_err(|e| AppError::Message(format!("Failed to serialize config: {}", e)))?;
 
-    println!("\n{}", highlight(texts::config_show_full().trim_start_matches("👁️  ")));
+    println!(
+        "\n{}",
+        highlight(texts::config_show_full().trim_start_matches("👁️  "))
+    );
     println!("{}", "─".repeat(60));
     println!("{}", json);
 
@@ -155,7 +161,10 @@ fn import_config_interactive(path: &str) -> Result<(), AppError> {
 }
 
 fn backup_config_interactive() -> Result<(), AppError> {
-    println!("\n{}", highlight(texts::config_backup().trim_start_matches("💾 ")));
+    println!(
+        "\n{}",
+        highlight(texts::config_backup().trim_start_matches("💾 "))
+    );
     println!("{}", "─".repeat(60));
 
     // 询问是否使用自定义名称
@@ -193,7 +202,10 @@ fn backup_config_interactive() -> Result<(), AppError> {
 }
 
 fn restore_config_interactive() -> Result<(), AppError> {
-    println!("\n{}", highlight(texts::config_restore().trim_start_matches("♻️  ")));
+    println!(
+        "\n{}",
+        highlight(texts::config_restore().trim_start_matches("♻️  "))
+    );
     println!("{}", "─".repeat(60));
 
     // 获取备份列表
@@ -246,9 +258,15 @@ fn restore_config_interactive() -> Result<(), AppError> {
     let state = get_state()?;
     let pre_restore_backup = ConfigService::restore_from_backup_id(&selected_backup.id, &state)?;
 
-    println!("\n{}", success(&format!("✓ 已从备份恢复: {}", selected_backup.display_name)));
+    println!(
+        "\n{}",
+        success(&format!("✓ 已从备份恢复: {}", selected_backup.display_name))
+    );
     if !pre_restore_backup.is_empty() {
-        println!("{}", info(&format!("  恢复前配置已备份: {}", pre_restore_backup)));
+        println!(
+            "{}",
+            info(&format!("  恢复前配置已备份: {}", pre_restore_backup))
+        );
     }
     println!("\n{}", info("注意：重启 CLI 客户端以应用更改"));
 
@@ -259,7 +277,10 @@ fn restore_config_interactive() -> Result<(), AppError> {
 fn validate_config_interactive() -> Result<(), AppError> {
     let config_path = get_app_config_path();
 
-    println!("\n{}", highlight(texts::config_validate().trim_start_matches("✓ ")));
+    println!(
+        "\n{}",
+        highlight(texts::config_validate().trim_start_matches("✓ "))
+    );
     println!("{}", "─".repeat(60));
 
     if !config_path.exists() {
@@ -278,9 +299,21 @@ fn validate_config_interactive() -> Result<(), AppError> {
     println!("{}", success(texts::config_valid()));
     println!();
 
-    let claude_count = config.apps.get("claude").map(|m| m.providers.len()).unwrap_or(0);
-    let codex_count = config.apps.get("codex").map(|m| m.providers.len()).unwrap_or(0);
-    let gemini_count = config.apps.get("gemini").map(|m| m.providers.len()).unwrap_or(0);
+    let claude_count = config
+        .apps
+        .get("claude")
+        .map(|m| m.providers.len())
+        .unwrap_or(0);
+    let codex_count = config
+        .apps
+        .get("codex")
+        .map(|m| m.providers.len())
+        .unwrap_or(0);
+    let gemini_count = config
+        .apps
+        .get("gemini")
+        .map(|m| m.providers.len())
+        .unwrap_or(0);
     let mcp_count = config.mcp.servers.as_ref().map(|s| s.len()).unwrap_or(0);
 
     println!("Claude providers: {}", claude_count);
@@ -316,7 +349,10 @@ fn reset_config_interactive() -> Result<(), AppError> {
     let _ = MultiAppConfig::load()?;
 
     println!("\n{}", success(texts::config_reset_done()));
-    println!("{}", info(&format!("Previous config backed up: {}", backup_id)));
+    println!(
+        "{}",
+        info(&format!("Previous config backed up: {}", backup_id))
+    );
     pause();
     Ok(())
 }

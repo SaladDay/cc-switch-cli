@@ -1,8 +1,8 @@
-use clap::Subcommand;
 use crate::app_config::AppType;
+use crate::cli::ui::{create_table, error, highlight, info, success};
 use crate::error::AppError;
-use crate::cli::ui::{create_table, success, error, highlight, info};
 use crate::services::env_checker;
+use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum EnvCommand {
@@ -24,7 +24,10 @@ pub fn execute(cmd: EnvCommand, app: Option<AppType>) -> Result<(), AppError> {
 fn check_conflicts(app_type: AppType) -> Result<(), AppError> {
     let app_str = app_type.as_str();
 
-    println!("\n{}", highlight(&format!("Checking Environment Variables for {}", app_str)));
+    println!(
+        "\n{}",
+        highlight(&format!("Checking Environment Variables for {}", app_str))
+    );
     println!("{}", "═".repeat(60));
 
     // 检测冲突
@@ -32,13 +35,28 @@ fn check_conflicts(app_type: AppType) -> Result<(), AppError> {
         .map_err(|e| AppError::Message(format!("Failed to check environment variables: {}", e)))?;
 
     if conflicts.is_empty() {
-        println!("\n{}", success("✓ No environment variable conflicts detected"));
-        println!("{}", info(&format!("Your {} configuration should work correctly.", app_str)));
+        println!(
+            "\n{}",
+            success("✓ No environment variable conflicts detected")
+        );
+        println!(
+            "{}",
+            info(&format!(
+                "Your {} configuration should work correctly.",
+                app_str
+            ))
+        );
         return Ok(());
     }
 
     // 显示冲突
-    println!("\n{}", error(&format!("⚠ Found {} environment variable(s) that may conflict:", conflicts.len())));
+    println!(
+        "\n{}",
+        error(&format!(
+            "⚠ Found {} environment variable(s) that may conflict:",
+            conflicts.len()
+        ))
+    );
     println!();
 
     let mut table = create_table();
@@ -62,8 +80,14 @@ fn check_conflicts(app_type: AppType) -> Result<(), AppError> {
 
     println!("{}", table);
     println!();
-    println!("{}", info("These environment variables may override CC-Switch's configuration."));
-    println!("{}", info("Please manually remove them from your shell config files or system settings."));
+    println!(
+        "{}",
+        info("These environment variables may override CC-Switch's configuration.")
+    );
+    println!(
+        "{}",
+        info("Please manually remove them from your shell config files or system settings.")
+    );
 
     Ok(())
 }
@@ -71,7 +95,10 @@ fn check_conflicts(app_type: AppType) -> Result<(), AppError> {
 fn list_env_vars(app_type: AppType) -> Result<(), AppError> {
     let app_str = app_type.as_str();
 
-    println!("\n{}", highlight(&format!("Environment Variables for {}", app_str)));
+    println!(
+        "\n{}",
+        highlight(&format!("Environment Variables for {}", app_str))
+    );
     println!("{}", "═".repeat(60));
 
     // 获取所有相关环境变量

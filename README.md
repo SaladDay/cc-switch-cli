@@ -112,6 +112,7 @@ Manage system prompt presets for AI coding assistants.
 cc-switch prompts list               # List prompt presets
 cc-switch prompts current            # Show current active prompt
 cc-switch prompts activate <id>      # Activate prompt
+cc-switch prompts deactivate         # Deactivate current active prompt
 cc-switch prompts create             # Create new prompt preset
 cc-switch prompts edit <id>          # Edit prompt preset
 cc-switch prompts show <id>          # Display full content

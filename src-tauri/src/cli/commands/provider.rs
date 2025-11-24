@@ -2,10 +2,10 @@ use clap::Subcommand;
 use std::sync::RwLock;
 
 use crate::app_config::{AppType, MultiAppConfig};
+use crate::cli::ui::{create_table, error, highlight, info, success};
 use crate::error::AppError;
 use crate::services::ProviderService;
 use crate::store::AppState;
-use crate::cli::ui::{create_table, success, error, highlight, info};
 
 #[derive(Subcommand)]
 pub enum ProviderCommand {
@@ -97,7 +97,12 @@ fn list_providers(app_type: AppType) -> Result<(), AppError> {
         let api_url = extract_api_url(&provider.settings_config, &app_type)
             .unwrap_or_else(|| "N/A".to_string());
 
-        table.add_row(vec![current_marker.to_string(), id.clone(), provider.name.clone(), api_url]);
+        table.add_row(vec![
+            current_marker.to_string(),
+            id.clone(),
+            provider.name.clone(),
+            api_url,
+        ]);
     }
 
     println!("{}", table);
@@ -112,7 +117,8 @@ fn show_current(app_type: AppType) -> Result<(), AppError> {
     let current_id = ProviderService::current(&state, app_type.clone())?;
     let providers = ProviderService::list(&state, app_type.clone())?;
 
-    let provider = providers.get(&current_id)
+    let provider = providers
+        .get(&current_id)
         .ok_or_else(|| AppError::Message(format!("Current provider '{}' not found", current_id)))?;
 
     println!("{}", highlight("Current Provider"));
@@ -130,15 +136,33 @@ fn show_current(app_type: AppType) -> Result<(), AppError> {
 
         // API 配置
         println!("\n{}", highlight("API 配置 / API Configuration"));
-        println!("  Base URL: {}", config.base_url.unwrap_or_else(|| "N/A".to_string()));
-        println!("  API Key:  {}", config.api_key.unwrap_or_else(|| "N/A".to_string()));
+        println!(
+            "  Base URL: {}",
+            config.base_url.unwrap_or_else(|| "N/A".to_string())
+        );
+        println!(
+            "  API Key:  {}",
+            config.api_key.unwrap_or_else(|| "N/A".to_string())
+        );
 
         // 模型配置
         println!("\n{}", highlight("模型配置 / Model Configuration"));
-        println!("  主模型:   {}", config.model.unwrap_or_else(|| "default".to_string()));
-        println!("  Haiku:    {}", config.haiku_model.unwrap_or_else(|| "default".to_string()));
-        println!("  Sonnet:   {}", config.sonnet_model.unwrap_or_else(|| "default".to_string()));
-        println!("  Opus:     {}", config.opus_model.unwrap_or_else(|| "default".to_string()));
+        println!(
+            "  主模型:   {}",
+            config.model.unwrap_or_else(|| "default".to_string())
+        );
+        println!(
+            "  Haiku:    {}",
+            config.haiku_model.unwrap_or_else(|| "default".to_string())
+        );
+        println!(
+            "  Sonnet:   {}",
+            config.sonnet_model.unwrap_or_else(|| "default".to_string())
+        );
+        println!(
+            "  Opus:     {}",
+            config.opus_model.unwrap_or_else(|| "default".to_string())
+        );
     } else {
         // Codex/Gemini 应用只显示 API URL
         println!("\n{}", highlight("API 配置 / API Configuration"));
@@ -167,7 +191,10 @@ fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
 
     println!("{}", success(&format!("✓ Switched to provider '{}'", id)));
     println!("{}", info(&format!("  Application: {}", app_str)));
-    println!("\n{}", info("Note: Restart your CLI client to apply the changes."));
+    println!(
+        "\n{}",
+        info("Note: Restart your CLI client to apply the changes.")
+    );
 
     Ok(())
 }
@@ -179,15 +206,19 @@ fn delete_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let current_id = ProviderService::current(&state, app_type.clone())?;
     if id == current_id {
         return Err(AppError::Message(
-            "Cannot delete the current active provider. Please switch to another provider first.".to_string()
+            "Cannot delete the current active provider. Please switch to another provider first."
+                .to_string(),
         ));
     }
 
     // 确认删除
-    let confirm = inquire::Confirm::new(&format!("Are you sure you want to delete provider '{}'?", id))
-        .with_default(false)
-        .prompt()
-        .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
+    let confirm = inquire::Confirm::new(&format!(
+        "Are you sure you want to delete provider '{}'?",
+        id
+    ))
+    .with_default(false)
+    .prompt()
+    .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
 
     if !confirm {
         println!("{}", info("Cancelled."));
@@ -211,9 +242,18 @@ fn add_provider(_app_type: AppType) -> Result<(), AppError> {
         .prompt()
         .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
 
-    println!("\n{}", info("Note: Provider configuration is complex and varies by app type."));
-    println!("{}", info("For now, please use the config file directly to add detailed settings."));
-    println!("\n{}", error("Interactive provider creation is not yet fully implemented."));
+    println!(
+        "\n{}",
+        info("Note: Provider configuration is complex and varies by app type.")
+    );
+    println!(
+        "{}",
+        info("For now, please use the config file directly to add detailed settings.")
+    );
+    println!(
+        "\n{}",
+        error("Interactive provider creation is not yet fully implemented.")
+    );
     println!("{}", info("Coming soon in the next update!"));
 
     Ok(())
@@ -222,7 +262,10 @@ fn add_provider(_app_type: AppType) -> Result<(), AppError> {
 fn edit_provider(_app_type: AppType, id: &str) -> Result<(), AppError> {
     println!("{}", info(&format!("Editing provider '{}'...", id)));
     println!("{}", error("Provider editing is not yet implemented."));
-    println!("{}", info("Please edit ~/.cc-switch/config.json directly for now."));
+    println!(
+        "{}",
+        info("Please edit ~/.cc-switch/config.json directly for now.")
+    );
     Ok(())
 }
 
@@ -240,13 +283,11 @@ fn speedtest_provider(_app_type: AppType, id: &str) -> Result<(), AppError> {
 
 fn extract_api_url(settings_config: &serde_json::Value, app_type: &AppType) -> Option<String> {
     match app_type {
-        AppType::Claude => {
-            settings_config
-                .get("env")?
-                .get("ANTHROPIC_BASE_URL")?
-                .as_str()
-                .map(|s| s.to_string())
-        }
+        AppType::Claude => settings_config
+            .get("env")?
+            .get("ANTHROPIC_BASE_URL")?
+            .as_str()
+            .map(|s| s.to_string()),
         AppType::Codex => {
             if let Some(config_str) = settings_config.get("config")?.as_str() {
                 for line in config_str.lines() {
@@ -261,14 +302,12 @@ fn extract_api_url(settings_config: &serde_json::Value, app_type: &AppType) -> O
             }
             None
         }
-        AppType::Gemini => {
-            settings_config
-                .get("env")?
-                .get("GEMINI_BASE_URL")
-                .or_else(|| settings_config.get("env")?.get("BASE_URL"))?
-                .as_str()
-                .map(|s| s.to_string())
-        }
+        AppType::Gemini => settings_config
+            .get("env")?
+            .get("GEMINI_BASE_URL")
+            .or_else(|| settings_config.get("env")?.get("BASE_URL"))?
+            .as_str()
+            .map(|s| s.to_string()),
     }
 }
 
@@ -285,29 +324,33 @@ struct ClaudeConfig {
 
 /// 提取 Claude 配置信息
 fn extract_claude_config(settings_config: &serde_json::Value) -> ClaudeConfig {
-    let env = settings_config
-        .get("env")
-        .and_then(|v| v.as_object());
+    let env = settings_config.get("env").and_then(|v| v.as_object());
 
     if let Some(env) = env {
         ClaudeConfig {
-            api_key: env.get("ANTHROPIC_AUTH_TOKEN")
+            api_key: env
+                .get("ANTHROPIC_AUTH_TOKEN")
                 .or_else(|| env.get("ANTHROPIC_API_KEY"))
                 .and_then(|v| v.as_str())
                 .map(|s| mask_api_key(s)),
-            base_url: env.get("ANTHROPIC_BASE_URL")
+            base_url: env
+                .get("ANTHROPIC_BASE_URL")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            model: env.get("ANTHROPIC_MODEL")
+            model: env
+                .get("ANTHROPIC_MODEL")
                 .and_then(|v| v.as_str())
                 .map(|s| simplify_model_name(s)),
-            haiku_model: env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            haiku_model: env
+                .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
                 .and_then(|v| v.as_str())
                 .map(|s| simplify_model_name(s)),
-            sonnet_model: env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+            sonnet_model: env
+                .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
                 .and_then(|v| v.as_str())
                 .map(|s| simplify_model_name(s)),
-            opus_model: env.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            opus_model: env
+                .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
                 .and_then(|v| v.as_str())
                 .map(|s| simplify_model_name(s)),
         }

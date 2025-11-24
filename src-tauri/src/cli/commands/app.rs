@@ -1,6 +1,6 @@
-use clap::Subcommand;
 use crate::app_config::AppType;
 use crate::error::AppError;
+use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum AppCommand {

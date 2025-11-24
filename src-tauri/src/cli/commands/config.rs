@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use crate::app_config::MultiAppConfig;
+use crate::cli::ui::{error, highlight, info, success, to_json};
 use crate::error::AppError;
 use crate::services::ConfigService;
 use crate::store::AppState;
-use crate::cli::ui::{success, error, highlight, info, to_json};
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
@@ -54,7 +54,9 @@ pub fn execute(cmd: ConfigCommand) -> Result<(), AppError> {
         ConfigCommand::Export { file } => export_config(&file),
         ConfigCommand::Import { file } => import_config(&file),
         ConfigCommand::Backup { name } => backup_config(name.as_deref()),
-        ConfigCommand::Restore { backup, file } => restore_config(backup.as_deref(), file.as_deref()),
+        ConfigCommand::Restore { backup, file } => {
+            restore_config(backup.as_deref(), file.as_deref())
+        }
         ConfigCommand::Validate => validate_config(),
         ConfigCommand::Reset => reset_config(),
     }
@@ -118,14 +120,20 @@ fn show_path() -> Result<(), AppError> {
 }
 
 fn export_config(file: &PathBuf) -> Result<(), AppError> {
-    println!("{}", info(&format!("Exporting configuration to {}...", file.display())));
+    println!(
+        "{}",
+        info(&format!("Exporting configuration to {}...", file.display()))
+    );
 
     // Check if target file already exists
     if file.exists() {
-        let confirm = inquire::Confirm::new(&format!("File '{}' already exists. Overwrite?", file.display()))
-            .with_default(false)
-            .prompt()
-            .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
+        let confirm = inquire::Confirm::new(&format!(
+            "File '{}' already exists. Overwrite?",
+            file.display()
+        ))
+        .with_default(false)
+        .prompt()
+        .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
 
         if !confirm {
             println!("{}", info("Cancelled."));
@@ -141,17 +149,29 @@ fn export_config(file: &PathBuf) -> Result<(), AppError> {
     // Export configuration
     ConfigService::export_config_to_path(file)?;
 
-    println!("{}", success(&format!("✓ Configuration exported to {}", file.display())));
+    println!(
+        "{}",
+        success(&format!("✓ Configuration exported to {}", file.display()))
+    );
 
     Ok(())
 }
 
 fn import_config(file: &PathBuf) -> Result<(), AppError> {
-    println!("{}", info(&format!("Importing configuration from {}...", file.display())));
+    println!(
+        "{}",
+        info(&format!(
+            "Importing configuration from {}...",
+            file.display()
+        ))
+    );
 
     // Check if source file exists
     if !file.exists() {
-        return Err(AppError::Message(format!("File '{}' not found", file.display())));
+        return Err(AppError::Message(format!(
+            "File '{}' not found",
+            file.display()
+        )));
     }
 
     // Validate the file is valid JSON
@@ -180,12 +200,18 @@ fn import_config(file: &PathBuf) -> Result<(), AppError> {
     let state = get_state()?;
     let backup_id = ConfigService::import_config_from_path(file, &state)?;
 
-    println!("{}", success(&format!("✓ Configuration imported from {}", file.display())));
+    println!(
+        "{}",
+        success(&format!("✓ Configuration imported from {}", file.display()))
+    );
     if !backup_id.is_empty() {
         println!("{}", info(&format!("  Backup created: {}", backup_id)));
     }
     println!();
-    println!("{}", info("Note: Restart your CLI clients to apply the changes."));
+    println!(
+        "{}",
+        info("Note: Restart your CLI clients to apply the changes.")
+    );
 
     Ok(())
 }
@@ -200,7 +226,10 @@ fn backup_config(custom_name: Option<&str>) -> Result<(), AppError> {
     }
 
     if let Some(name) = custom_name {
-        println!("{}", info(&format!("Creating backup with name '{}'...", name)));
+        println!(
+            "{}",
+            info(&format!("Creating backup with name '{}'...", name))
+        );
     } else {
         println!("{}", info("Creating backup of current configuration..."));
     }
@@ -227,10 +256,11 @@ fn restore_config(backup_id: Option<&str>, file_path: Option<&Path>) -> Result<(
     if let Some(id) = backup_id {
         println!("{}", info(&format!("Restoring from backup '{}'...", id)));
 
-        let confirm = inquire::Confirm::new("This will replace your current configuration. Continue?")
-            .with_default(false)
-            .prompt()
-            .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
+        let confirm =
+            inquire::Confirm::new("This will replace your current configuration. Continue?")
+                .with_default(false)
+                .prompt()
+                .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
 
         if !confirm {
             println!("{}", info("Cancelled."));
@@ -240,22 +270,40 @@ fn restore_config(backup_id: Option<&str>, file_path: Option<&Path>) -> Result<(
         let state = get_state()?;
         let pre_restore_backup = ConfigService::restore_from_backup_id(id, &state)?;
 
-        println!("{}", success(&format!("✓ Configuration restored from backup '{}'", id)));
+        println!(
+            "{}",
+            success(&format!("✓ Configuration restored from backup '{}'", id))
+        );
         if !pre_restore_backup.is_empty() {
-            println!("{}", info(&format!("  Pre-restore backup: {}", pre_restore_backup)));
+            println!(
+                "{}",
+                info(&format!("  Pre-restore backup: {}", pre_restore_backup))
+            );
         }
         println!();
-        println!("{}", info("Note: Restart your CLI clients to apply the changes."));
+        println!(
+            "{}",
+            info("Note: Restart your CLI clients to apply the changes.")
+        );
 
         return Ok(());
     }
 
     // 情况2：指定了文件路径
     if let Some(file) = file_path {
-        println!("{}", info(&format!("Restoring configuration from {}...", file.display())));
+        println!(
+            "{}",
+            info(&format!(
+                "Restoring configuration from {}...",
+                file.display()
+            ))
+        );
 
         if !file.exists() {
-            return Err(AppError::Message(format!("File '{}' not found", file.display())));
+            return Err(AppError::Message(format!(
+                "File '{}' not found",
+                file.display()
+            )));
         }
 
         let content = fs::read_to_string(file).map_err(|e| AppError::io(file, e))?;
@@ -282,12 +330,21 @@ fn restore_config(backup_id: Option<&str>, file_path: Option<&Path>) -> Result<(
         let state = get_state()?;
         let _ = ConfigService::import_config_from_path(file, &state)?;
 
-        println!("{}", success(&format!("✓ Configuration restored from {}", file.display())));
+        println!(
+            "{}",
+            success(&format!("✓ Configuration restored from {}", file.display()))
+        );
         if !pre_restore_backup.is_empty() {
-            println!("{}", info(&format!("  Pre-restore backup: {}", pre_restore_backup)));
+            println!(
+                "{}",
+                info(&format!("  Pre-restore backup: {}", pre_restore_backup))
+            );
         }
         println!();
-        println!("{}", info("Note: Restart your CLI clients to apply the changes."));
+        println!(
+            "{}",
+            info("Note: Restart your CLI clients to apply the changes.")
+        );
 
         return Ok(());
     }
@@ -342,12 +399,24 @@ fn restore_config(backup_id: Option<&str>, file_path: Option<&Path>) -> Result<(
     let state = get_state()?;
     let pre_restore_backup = ConfigService::restore_from_backup_id(&selected_backup.id, &state)?;
 
-    println!("{}", success(&format!("✓ Configuration restored from: {}", selected_backup.display_name)));
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Configuration restored from: {}",
+            selected_backup.display_name
+        ))
+    );
     if !pre_restore_backup.is_empty() {
-        println!("{}", info(&format!("  Pre-restore backup: {}", pre_restore_backup)));
+        println!(
+            "{}",
+            info(&format!("  Pre-restore backup: {}", pre_restore_backup))
+        );
     }
     println!();
-    println!("{}", info("Note: Restart your CLI clients to apply the changes."));
+    println!(
+        "{}",
+        info("Note: Restart your CLI clients to apply the changes.")
+    );
 
     Ok(())
 }
@@ -374,9 +443,18 @@ fn validate_config() -> Result<(), AppError> {
             println!("{} Configuration is valid JSON", success("✓"));
 
             // Show some stats
-            let claude_count = config.get_manager(&crate::app_config::AppType::Claude).map(|m| m.providers.len()).unwrap_or(0);
-            let codex_count = config.get_manager(&crate::app_config::AppType::Codex).map(|m| m.providers.len()).unwrap_or(0);
-            let gemini_count = config.get_manager(&crate::app_config::AppType::Gemini).map(|m| m.providers.len()).unwrap_or(0);
+            let claude_count = config
+                .get_manager(&crate::app_config::AppType::Claude)
+                .map(|m| m.providers.len())
+                .unwrap_or(0);
+            let codex_count = config
+                .get_manager(&crate::app_config::AppType::Codex)
+                .map(|m| m.providers.len())
+                .unwrap_or(0);
+            let gemini_count = config
+                .get_manager(&crate::app_config::AppType::Gemini)
+                .map(|m| m.providers.len())
+                .unwrap_or(0);
             let mcp_count = config.mcp.servers.as_ref().map(|s| s.len()).unwrap_or(0);
 
             println!();
@@ -436,7 +514,10 @@ fn reset_config() -> Result<(), AppError> {
     println!("{}", success("✓ Configuration reset to defaults"));
     if !backup_id.is_empty() {
         println!("{}", info(&format!("  Backup created: {}", backup_id)));
-        println!("{}", info("  You can restore it later using: cc-switch config restore"));
+        println!(
+            "{}",
+            info("  You can restore it later using: cc-switch config restore")
+        );
     }
 
     Ok(())

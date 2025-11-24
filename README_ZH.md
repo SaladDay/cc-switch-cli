@@ -112,6 +112,7 @@ cc-switch mcp import --app claude    # 从实时配置导入
 cc-switch prompts list               # 列出提示词预设
 cc-switch prompts current            # 显示当前活动提示词
 cc-switch prompts activate <id>      # 激活提示词
+cc-switch prompts deactivate         # 停用当前激活的提示词
 cc-switch prompts create             # 创建新提示词预设
 cc-switch prompts edit <id>          # 编辑提示词预设
 cc-switch prompts show <id>          # 显示完整内容

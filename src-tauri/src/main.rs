@@ -1,6 +1,6 @@
-use clap::Parser;
 use cc_switch_lib::cli::{Cli, Commands};
 use cc_switch_lib::AppError;
+use clap::Parser;
 use std::process;
 
 fn main() {

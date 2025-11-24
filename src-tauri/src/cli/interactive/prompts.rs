@@ -86,7 +86,10 @@ fn view_current_prompt_interactive(
     let active = prompts.iter().find(|(_, p)| p.enabled);
 
     if let Some((id, prompt)) = active {
-        println!("\n{}", highlight(texts::prompts_view_current().trim_start_matches("📋 ")));
+        println!(
+            "\n{}",
+            highlight(texts::prompts_view_current().trim_start_matches("📋 "))
+        );
         println!("{}", "─".repeat(60));
         println!("ID:          {}", id);
         println!("Name:        {}", prompt.name);

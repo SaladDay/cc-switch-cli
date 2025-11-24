@@ -1,6 +1,6 @@
 use inquire::Select;
 
-use crate::cli::i18n::{texts, Language, current_language, set_language};
+use crate::cli::i18n::{current_language, set_language, texts, Language};
 use crate::cli::ui::{highlight, success};
 use crate::error::AppError;
 
