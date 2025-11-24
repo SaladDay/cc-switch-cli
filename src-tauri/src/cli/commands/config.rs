@@ -119,7 +119,7 @@ fn show_path() -> Result<(), AppError> {
     Ok(())
 }
 
-fn export_config(file: &PathBuf) -> Result<(), AppError> {
+fn export_config(file: &Path) -> Result<(), AppError> {
     println!(
         "{}",
         info(&format!("Exporting configuration to {}...", file.display()))
