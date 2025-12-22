@@ -530,7 +530,7 @@ fn extract_claude_config(settings_config: &serde_json::Value) -> ClaudeConfig {
                 .get("ANTHROPIC_AUTH_TOKEN")
                 .or_else(|| env.get("ANTHROPIC_API_KEY"))
                 .and_then(|v| v.as_str())
-                .map(|s| mask_api_key(s)),
+                .map(mask_api_key),
             base_url: env
                 .get("ANTHROPIC_BASE_URL")
                 .and_then(|v| v.as_str())
@@ -538,19 +538,19 @@ fn extract_claude_config(settings_config: &serde_json::Value) -> ClaudeConfig {
             model: env
                 .get("ANTHROPIC_MODEL")
                 .and_then(|v| v.as_str())
-                .map(|s| simplify_model_name(s)),
+                .map(simplify_model_name),
             haiku_model: env
                 .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
                 .and_then(|v| v.as_str())
-                .map(|s| simplify_model_name(s)),
+                .map(simplify_model_name),
             sonnet_model: env
                 .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
                 .and_then(|v| v.as_str())
-                .map(|s| simplify_model_name(s)),
+                .map(simplify_model_name),
             opus_model: env
                 .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
                 .and_then(|v| v.as_str())
-                .map(|s| simplify_model_name(s)),
+                .map(simplify_model_name),
         }
     } else {
         ClaudeConfig::default()

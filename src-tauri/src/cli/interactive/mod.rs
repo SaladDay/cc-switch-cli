@@ -161,7 +161,7 @@ fn view_current_config(app_type: &AppType) -> Result<(), AppError> {
     if let Some(provider) = providers.get(&current_provider) {
         println!("\n{}", highlight(texts::provider_label()));
         println!("  名称:     {}", provider.name);
-        let api_url = provider::extract_api_url(&provider.settings_config, &app_type)
+        let api_url = provider::extract_api_url(&provider.settings_config, app_type)
             .unwrap_or_else(|| "N/A".to_string());
         println!("  API URL:  {}", api_url);
     }

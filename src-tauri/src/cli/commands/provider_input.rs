@@ -40,8 +40,6 @@ pub fn generate_provider_id(name: &str, existing_ids: &[String]) -> String {
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' {
             c
-        } else if c.is_whitespace() {
-            '-'
         } else {
             '-'
         })

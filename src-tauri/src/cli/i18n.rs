@@ -910,19 +910,11 @@ pub mod texts {
     }
 
     pub fn auth_type_api_key() -> &'static str {
-        if is_chinese() {
-            "API Key"
-        } else {
-            "API Key"
-        }
+        "API Key"
     }
 
     pub fn auth_type_service_account() -> &'static str {
-        if is_chinese() {
-            "Service Account (ADC)"
-        } else {
-            "Service Account (ADC)"
-        }
+        "Service Account (ADC)"
     }
 
     pub fn gemini_api_key_label() -> &'static str {
@@ -990,11 +982,7 @@ pub mod texts {
     }
 
     pub fn packycode_api_key() -> &'static str {
-        if is_chinese() {
-            "PackyCode API Key"
-        } else {
-            "PackyCode API Key"
-        }
+        "PackyCode API Key"
     }
 
     pub fn generic_api_key() -> &'static str {
@@ -1159,11 +1147,7 @@ pub mod texts {
     }
 
     pub fn id_label() -> &'static str {
-        if is_chinese() {
-            "ID"
-        } else {
-            "ID"
-        }
+        "ID"
     }
 
     pub fn website_label() -> &'static str {
@@ -1300,19 +1284,11 @@ pub mod texts {
     }
 
     pub fn api_key_display_label() -> &'static str {
-        if is_chinese() {
-            "API Key"
-        } else {
-            "API Key"
-        }
+        "API Key"
     }
 
     pub fn base_url_display_label() -> &'static str {
-        if is_chinese() {
-            "Base URL"
-        } else {
-            "Base URL"
-        }
+        "Base URL"
     }
 
     pub fn model_config_header() -> &'static str {
@@ -1332,27 +1308,15 @@ pub mod texts {
     }
 
     pub fn haiku_model_display() -> &'static str {
-        if is_chinese() {
-            "Haiku"
-        } else {
-            "Haiku"
-        }
+        "Haiku"
     }
 
     pub fn sonnet_model_display() -> &'static str {
-        if is_chinese() {
-            "Sonnet"
-        } else {
-            "Sonnet"
-        }
+        "Sonnet"
     }
 
     pub fn opus_model_display() -> &'static str {
-        if is_chinese() {
-            "Opus"
-        } else {
-            "Opus"
-        }
+        "Opus"
     }
 
     pub fn auth_type_display_label() -> &'static str {
