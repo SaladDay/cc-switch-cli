@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-4.1.2-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-4.1.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -197,10 +197,10 @@ Download the latest release from [GitHub Releases](https://github.com/saladday/c
 
 ```bash
 # Download Universal Binary (recommended, supports Apple Silicon + Intel)
-curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-v4.1.2-darwin-universal.tar.gz
+curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-v4.1.3-darwin-universal.tar.gz
 
 # Extract
-tar -xzf cc-switch-cli-v4.1.2-darwin-universal.tar.gz
+tar -xzf cc-switch-cli-v4.1.3-darwin-universal.tar.gz
 
 # Add execute permission
 chmod +x cc-switch
@@ -216,10 +216,10 @@ xattr -cr /usr/local/bin/cc-switch
 
 ```bash
 # Download
-curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-v4.1.2-linux-x64-musl.tar.gz
+curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-v4.1.3-linux-x64-musl.tar.gz
 
 # Extract
-tar -xzf cc-switch-cli-v4.1.2-linux-x64-musl.tar.gz
+tar -xzf cc-switch-cli-v4.1.3-linux-x64-musl.tar.gz
 
 # Add execute permission
 chmod +x cc-switch
@@ -232,8 +232,8 @@ sudo mv cc-switch /usr/local/bin/
 
 ```bash
 # For Raspberry Pi or ARM servers
-curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-v4.1.2-linux-arm64-musl.tar.gz
-tar -xzf cc-switch-cli-v4.1.2-linux-arm64-musl.tar.gz
+curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-v4.1.3-linux-arm64-musl.tar.gz
+tar -xzf cc-switch-cli-v4.1.3-linux-arm64-musl.tar.gz
 chmod +x cc-switch
 sudo mv cc-switch /usr/local/bin/
 ```
@@ -242,7 +242,7 @@ sudo mv cc-switch /usr/local/bin/
 
 ```powershell
 # Download the zip file
-# https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-v4.1.2-windows-x64.zip
+# https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-v4.1.3-windows-x64.zip
 
 # After extracting, move cc-switch.exe to a PATH directory, e.g.:
 move cc-switch.exe C:\Windows\System32\
