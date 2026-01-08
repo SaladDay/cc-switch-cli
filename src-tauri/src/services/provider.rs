@@ -1785,7 +1785,7 @@ impl ProviderService {
         let model = stored_config
             .get("model")
             .and_then(|v| v.as_str())
-            .unwrap_or("gpt-4");
+            .unwrap_or("gpt-5.2-codex");
         let wire_api = stored_config
             .get("wire_api")
             .and_then(|v| v.as_str())

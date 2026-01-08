@@ -428,12 +428,12 @@ fn prompt_codex_config(current: Option<&Value>) -> Result<Value, AppError> {
     let model = if let Some(current) = current_model.as_deref() {
         Text::new("Model:")
             .with_initial_value(current)
-            .with_help_message("Model name (e.g., gpt-4, o3)")
+            .with_help_message("Model name (e.g., gpt-5.2-codex, o3)")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     } else {
         Text::new("Model:")
-            .with_placeholder("gpt-4")
+            .with_placeholder("gpt-5.2-codex")
             .with_help_message("Model name")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
@@ -526,7 +526,10 @@ fn prompt_codex_official_config() -> Result<Value, AppError> {
     println!("\n{}", texts::config_codex_header().bright_cyan().bold());
     println!("\n{}", texts::codex_official_provider_tip().yellow());
 
-    Ok(build_codex_official_settings_config("gpt-4", "responses"))
+    Ok(build_codex_official_settings_config(
+        "gpt-5.2-codex",
+        "responses",
+    ))
 }
 
 /// Gemini 配置输入（含认证类型选择）
