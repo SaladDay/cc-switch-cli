@@ -109,6 +109,17 @@ get_readme_version() {
 # Update README File
 # ==============================================================================
 
+sed_in_place() {
+    # Cross-platform in-place sed:
+    # - GNU sed: `sed -i ...`
+    # - BSD/macOS sed: `sed -i '' ...`
+    if sed --version >/dev/null 2>&1; then
+        sed -i "$@"
+    else
+        sed -i '' "$@"
+    fi
+}
+
 update_readme() {
     local readme_file=$1
     local old_version=$2
@@ -127,19 +138,19 @@ update_readme() {
     # Note: Using | as delimiter to avoid conflicts with / in URLs
 
     # 1. Update badge version (version-X.X.X-blue.svg)
-    sed -i '' "s|version-[0-9.]*-blue\.svg|version-${new_version}-blue.svg|g" "$readme_file"
+    sed_in_place "s|version-[0-9.]*-blue\\.svg|version-${new_version}-blue.svg|g" "$readme_file"
 
     # 2. Update macOS download link and tar command
-    sed -i '' "s|cc-switch-cli-v[0-9.]*-darwin-universal\.tar\.gz|cc-switch-cli-v${new_version}-darwin-universal.tar.gz|g" "$readme_file"
+    sed_in_place "s|cc-switch-cli-v[0-9.]*-darwin-universal\\.tar\\.gz|cc-switch-cli-v${new_version}-darwin-universal.tar.gz|g" "$readme_file"
 
     # 3. Update Linux x64 download link and tar command
-    sed -i '' "s|cc-switch-cli-v[0-9.]*-linux-x64-musl\.tar\.gz|cc-switch-cli-v${new_version}-linux-x64-musl.tar.gz|g" "$readme_file"
+    sed_in_place "s|cc-switch-cli-v[0-9.]*-linux-x64-musl\\.tar\\.gz|cc-switch-cli-v${new_version}-linux-x64-musl.tar.gz|g" "$readme_file"
 
     # 4. Update Linux ARM64 download link and tar command
-    sed -i '' "s|cc-switch-cli-v[0-9.]*-linux-arm64-musl\.tar\.gz|cc-switch-cli-v${new_version}-linux-arm64-musl.tar.gz|g" "$readme_file"
+    sed_in_place "s|cc-switch-cli-v[0-9.]*-linux-arm64-musl\\.tar\\.gz|cc-switch-cli-v${new_version}-linux-arm64-musl.tar.gz|g" "$readme_file"
 
     # 5. Update Windows download link
-    sed -i '' "s|cc-switch-cli-v[0-9.]*-windows-x64\.zip|cc-switch-cli-v${new_version}-windows-x64.zip|g" "$readme_file"
+    sed_in_place "s|cc-switch-cli-v[0-9.]*-windows-x64\\.zip|cc-switch-cli-v${new_version}-windows-x64.zip|g" "$readme_file"
 
     # Verify that changes were made
     if diff -q "$readme_file" "${readme_file}.bak" > /dev/null 2>&1; then
