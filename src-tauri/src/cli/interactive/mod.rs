@@ -16,6 +16,9 @@ use crate::services::{McpService, PromptService, ProviderService};
 use utils::{app_switch_direction_from_key, clear_screen, cycle_app_type, pause, prompt_select};
 
 pub fn run(app: Option<AppType>) -> Result<(), AppError> {
+    // Disable bracketed paste mode to work around inquire dropping paste events
+    crate::cli::terminal::disable_bracketed_paste_mode_best_effort();
+
     let mut app_type = app.unwrap_or(AppType::Claude);
     set_tui_theme_app(Some(app_type.clone()));
 

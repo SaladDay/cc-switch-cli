@@ -255,6 +255,9 @@ fn delete_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
 }
 
 fn add_provider(app_type: AppType) -> Result<(), AppError> {
+    // Disable bracketed paste mode to work around inquire dropping paste events
+    crate::cli::terminal::disable_bracketed_paste_mode_best_effort();
+
     println!("{}", highlight("Add New Provider"));
     println!("{}", "=".repeat(50));
 
@@ -376,6 +379,9 @@ mod tests {
 }
 
 fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
+    // Disable bracketed paste mode to work around inquire dropping paste events
+    crate::cli::terminal::disable_bracketed_paste_mode_best_effort();
+
     println!("{}", highlight(&format!("Edit Provider: {}", id)));
     println!("{}", "=".repeat(50));
 
