@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "cc-switch"
-version = "4.2.10"
+version = "4.2.11"
 dependencies = [
  "anyhow",
  "base64",
