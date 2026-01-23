@@ -8,7 +8,8 @@ use crate::services::McpService;
 use crate::store::AppState;
 
 use super::utils::{
-    clear_screen, get_state, pause, prompt_confirm, prompt_multiselect, prompt_select, prompt_text,
+    clear_screen, get_state, pause, prompt_confirm, prompt_multiselect,
+    prompt_multiselect_with_help, prompt_select, prompt_text,
 };
 
 pub fn manage_mcp_menu(_app_type: &AppType) -> Result<(), AppError> {
@@ -103,7 +104,11 @@ fn mcp_enable_server_interactive(state: &AppState) -> Result<(), AppError> {
         .ok_or_else(|| AppError::Message("Invalid selection".to_string()))?;
 
     let app_choices = vec!["Claude", "Codex", "Gemini"];
-    let Some(selected_apps) = prompt_multiselect(texts::select_apps_to_enable(), app_choices)?
+    let Some(selected_apps) = prompt_multiselect_with_help(
+        texts::select_apps_to_enable(),
+        app_choices,
+        texts::mcp_enable_apps_help(),
+    )?
     else {
         return Ok(());
     };
@@ -152,7 +157,11 @@ fn mcp_disable_server_interactive(state: &AppState) -> Result<(), AppError> {
         .ok_or_else(|| AppError::Message("Invalid selection".to_string()))?;
 
     let app_choices = vec!["Claude", "Codex", "Gemini"];
-    let Some(selected_apps) = prompt_multiselect(texts::select_apps_to_disable(), app_choices)?
+    let Some(selected_apps) = prompt_multiselect_with_help(
+        texts::select_apps_to_disable(),
+        app_choices,
+        texts::mcp_enable_apps_help(),
+    )?
     else {
         return Ok(());
     };
