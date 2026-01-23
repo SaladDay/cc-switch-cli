@@ -2337,6 +2337,14 @@ pub mod texts {
         }
     }
 
+    pub fn mcp_enable_apps_help() -> &'static str {
+        if is_chinese() {
+            "空格 选择/取消选择，→ 全选，← 取消全选，Esc 返回；输入可过滤"
+        } else {
+            "Space to toggle, → select all, ← clear all, Esc to go back; type to filter"
+        }
+    }
+
     pub fn select_apps_to_disable() -> &'static str {
         if is_chinese() {
             "选择要禁用的应用："

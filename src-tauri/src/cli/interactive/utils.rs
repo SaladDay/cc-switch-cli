@@ -82,6 +82,21 @@ where
     )
 }
 
+pub fn prompt_multiselect_with_help<T>(
+    message: &str,
+    options: Vec<T>,
+    help_message: &str,
+) -> Result<Option<Vec<T>>, AppError>
+where
+    T: Clone + std::fmt::Display,
+{
+    handle_inquire(
+        MultiSelect::new(message, options)
+            .with_help_message(help_message)
+            .prompt(),
+    )
+}
+
 pub fn prompt_confirm(message: &str, default: bool) -> Result<Option<bool>, AppError> {
     handle_inquire(
         Confirm::new(message)
