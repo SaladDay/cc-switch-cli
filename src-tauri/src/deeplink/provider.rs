@@ -1,6 +1,6 @@
 //! Provider import from deep link.
 
-use super::utils::{decode_base64_param, infer_homepage_from_endpoint};
+use super::utils::{decode_base64_param, infer_homepage_from_endpoint, validate_url};
 use super::DeepLinkImportRequest;
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta, UsageScript};
@@ -50,6 +50,10 @@ pub fn import_provider_from_deeplink(
         .first()
         .ok_or_else(|| AppError::InvalidInput("Endpoint cannot be empty".to_string()))?;
 
+    for (i, endpoint) in all_endpoints.iter().enumerate() {
+        validate_url(endpoint, &format!("endpoint[{i}]"))?;
+    }
+
     if merged_request
         .homepage
         .as_ref()
@@ -75,6 +79,7 @@ pub fn import_provider_from_deeplink(
             "Homepage cannot be empty".to_string(),
         ));
     }
+    validate_url(homepage, "homepage")?;
 
     let name = merged_request
         .name

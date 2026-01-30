@@ -1,5 +1,6 @@
 use std::sync::RwLock;
 
+use base64::prelude::*;
 use cc_switch_lib::{
     import_provider_from_deeplink, parse_deeplink_url, AppState, AppType, MultiAppConfig,
 };
@@ -122,5 +123,35 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
     assert!(
         config_path.exists(),
         "importing provider from deeplink should persist config.json"
+    );
+}
+
+#[test]
+fn deeplink_import_rejects_non_http_endpoints_from_config() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    ensure_test_home();
+
+    let config_json =
+        r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-test","ANTHROPIC_BASE_URL":"ftp://example.com/v1"}}"#;
+    let config_b64 = BASE64_URL_SAFE_NO_PAD.encode(config_json.as_bytes());
+
+    let url = format!(
+        "ccswitch://v1/import?resource=provider&app=claude&name=BadEndpoint&config={config_b64}&configFormat=json"
+    );
+    let request = parse_deeplink_url(&url).expect("parse deeplink url");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+
+    let state = AppState {
+        config: RwLock::new(config),
+    };
+
+    let err = import_provider_from_deeplink(&state, request)
+        .expect_err("non-http endpoints should be rejected");
+    assert!(
+        err.to_string().contains("Invalid URL scheme"),
+        "expected scheme validation error, got {err:?}"
     );
 }
