@@ -165,7 +165,8 @@ struct ProviderTemplateDef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SponsorProviderPreset {
     id: &'static str,
-    label: &'static str,
+    provider_name: &'static str,
+    chip_label: &'static str,
     website_url: &'static str,
     register_url: &'static str,
     promo_code: &'static str,
@@ -180,7 +181,8 @@ struct SponsorProviderPreset {
 // for Claude/Codex/Gemini (appended after the built-in templates).
 const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 1] = [SponsorProviderPreset {
     id: "packycode",
-    label: "PackyCode",
+    provider_name: "PackyCode",
+    chip_label: "★ PackyCode",
     website_url: "https://www.packyapi.com",
     register_url: "https://www.packyapi.com/register?aff=cc-switch-cli",
     promo_code: "cc-switch-cli",
@@ -446,7 +448,11 @@ impl ProviderAddFormState {
             .iter()
             .map(|def| def.label)
             .collect::<Vec<_>>();
-        labels.extend(SPONSOR_PROVIDER_PRESETS.iter().map(|preset| preset.label));
+        labels.extend(
+            SPONSOR_PROVIDER_PRESETS
+                .iter()
+                .map(|preset| preset.chip_label),
+        );
         labels
     }
 
@@ -616,15 +622,9 @@ impl ProviderAddFormState {
                 "partnerPromotionKey": preset.partner_promotion_key,
             }
         });
-        self.name.set(preset.label);
+        self.name.set(preset.provider_name);
         self.website_url.set(preset.website_url);
-        self.notes.set(format!(
-            "Sponsor: {label} — {website} — promo code {promo_code} (10% off). Register: {register_url}",
-            label = preset.label,
-            website = preset.website_url,
-            promo_code = preset.promo_code,
-            register_url = preset.register_url,
-        ));
+        self.notes.set("");
 
         match self.app_type {
             AppType::Claude => {
