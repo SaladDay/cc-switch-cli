@@ -3335,9 +3335,9 @@ pub mod texts {
 
     pub fn website_url_label() -> &'static str {
         if is_chinese() {
-            "官网 URL（可选）："
+            "官网 URL："
         } else {
-            "Website URL (optional):"
+            "Website URL:"
         }
     }
 
@@ -3392,9 +3392,9 @@ pub mod texts {
 
     pub fn configure_optional_fields_prompt() -> &'static str {
         if is_chinese() {
-            "配置可选字段（备注、排序索引）？"
+            "配置可选字段（排序索引）？"
         } else {
-            "Configure optional fields (notes, sort index)?"
+            "Configure optional fields (sort index)?"
         }
     }
 
@@ -3416,9 +3416,9 @@ pub mod texts {
 
     pub fn modify_optional_fields_prompt() -> &'static str {
         if is_chinese() {
-            "修改可选字段（备注、排序索引）？"
+            "修改可选字段（排序索引）？"
         } else {
-            "Modify optional fields (notes, sort index)?"
+            "Modify optional fields (sort index)?"
         }
     }
 
@@ -5321,5 +5321,16 @@ pub mod texts {
         } else {
             "← Back"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::texts;
+
+    #[test]
+    fn website_url_label_is_short() {
+        assert_eq!(texts::website_url_label(), "Website URL:");
+        assert!(!texts::website_url_label().contains("(optional)"));
     }
 }

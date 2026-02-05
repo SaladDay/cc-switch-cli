@@ -694,10 +694,6 @@ fn display_provider_summary(provider: &crate::provider::Provider, app_type: &App
         println!("  {}:      {}", texts::url_label_colon(), url);
     }
 
-    if let Some(notes) = &provider.notes {
-        println!("  {}:  {}", texts::notes_label_colon(), notes);
-    }
-
     if let Some(sort_index) = provider.sort_index {
         println!("  {}:     {}", texts::sort_index_label_colon(), sort_index);
     }

@@ -614,25 +614,7 @@ fn prompt_gemini_config(current: Option<&Value>) -> Result<Value, AppError> {
 pub fn prompt_optional_fields(current: Option<&Provider>) -> Result<OptionalFields, AppError> {
     println!("\n{}", texts::optional_fields_config().bright_cyan().bold());
 
-    let notes = if let Some(provider) = current {
-        let initial = provider.notes.as_deref().unwrap_or("");
-        Text::new(texts::notes_label())
-            .with_initial_value(initial)
-            .with_help_message(texts::notes_help_edit())
-            .prompt()
-            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    } else {
-        Text::new(texts::notes_label())
-            .with_placeholder(texts::notes_example_placeholder())
-            .with_help_message(texts::notes_help_new())
-            .prompt()
-            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    };
-    let notes = if notes.trim().is_empty() {
-        None
-    } else {
-        Some(notes.trim().to_string())
-    };
+    let notes = current.and_then(|provider| provider.notes.clone());
 
     let sort_index_str = if let Some(provider) = current {
         let initial = provider
@@ -744,11 +726,8 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
     }
 
     // 可选字段
-    if provider.notes.is_some() || provider.sort_index.is_some() {
+    if provider.sort_index.is_some() {
         println!("\n{}", texts::optional_fields_label().bright_cyan());
-        if let Some(notes) = &provider.notes {
-            println!("  {}: {}", texts::notes_label_colon(), notes);
-        }
         if let Some(idx) = provider.sort_index {
             println!("  {}: {}", texts::sort_index_label_colon(), idx);
         }

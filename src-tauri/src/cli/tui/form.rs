@@ -461,7 +461,6 @@ impl ProviderAddFormState {
             ProviderAddField::Id,
             ProviderAddField::Name,
             ProviderAddField::WebsiteUrl,
-            ProviderAddField::Notes,
         ];
 
         match self.app_type {
@@ -1159,6 +1158,19 @@ mod tests {
             .position(|preset| preset.id == "packycode")
             .expect("PackyCode sponsor preset should exist");
         builtin_len + sponsor_idx
+    }
+
+    #[test]
+    fn provider_add_form_fields_do_not_include_notes() {
+        for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            let form = ProviderAddFormState::new(app_type.clone());
+            let fields = form.fields();
+            assert!(
+                !fields.contains(&ProviderAddField::Notes),
+                "Notes field should not be shown in Add Provider form for {:?}",
+                app_type
+            );
+        }
     }
 
     #[test]
