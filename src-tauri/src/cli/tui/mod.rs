@@ -705,6 +705,19 @@ fn handle_action(
                 let edited = content.trim().to_string();
                 let (next_snippet, toast) = if edited.is_empty() {
                     (None, texts::common_config_snippet_cleared())
+                } else if matches!(app.app_type, AppType::Codex) {
+                    let doc: toml_edit::DocumentMut = match edited.parse() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            app.push_toast(
+                                texts::common_config_snippet_invalid_toml(&e.to_string()),
+                                ToastKind::Error,
+                            );
+                            return Ok(());
+                        }
+                    };
+                    let canonical = doc.to_string().trim().to_string();
+                    (Some(canonical), texts::common_config_snippet_saved())
                 } else {
                     let value: Value = match serde_json::from_str(&edited) {
                         Ok(v) => v,
@@ -758,7 +771,7 @@ fn handle_action(
 
                 // Bring the user back to the snippet preview overlay.
                 let snippet = if data.config.common_snippet.trim().is_empty() {
-                    texts::tui_default_common_snippet().to_string()
+                    texts::tui_default_common_snippet_for_app(app.app_type.as_str()).to_string()
                 } else {
                     data.config.common_snippet.clone()
                 };
@@ -1122,7 +1135,7 @@ fn refresh_common_snippet_overlay(app: &mut App, data: &UiData) {
     };
 
     let snippet = if data.config.common_snippet.trim().is_empty() {
-        texts::tui_default_common_snippet().to_string()
+        texts::tui_default_common_snippet_for_app(app.app_type.as_str()).to_string()
     } else {
         data.config.common_snippet.clone()
     };

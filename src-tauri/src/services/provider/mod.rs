@@ -2175,16 +2175,11 @@ impl ProviderService {
         crate::config::write_text_file(&config_path, &new_text)?;
 
         // auth.json handling:
-        // - Only write when the provider explicitly carries an auth object (legacy API-key mode).
-        // - When switching to OpenAI auth (credential store) without auth config, remove any existing
-        //   legacy auth.json (back it up first) to avoid confusing Codex auth resolution.
-        if !auth_is_empty {
-            if let Some(auth_value) = auth {
-                let auth_path = get_codex_auth_path();
-                write_json_file(&auth_path, auth_value)?;
-            }
-        } else if requires_openai_auth {
-            let auth_path = get_codex_auth_path();
+        // - OpenAI auth (credential store) mode: never write auth.json; remove any existing legacy
+        //   auth.json (back it up first) to avoid confusing Codex auth resolution.
+        // - Legacy API-key mode: only write when the provider explicitly carries an auth object.
+        let auth_path = get_codex_auth_path();
+        if requires_openai_auth {
             if auth_path.exists() {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -2195,6 +2190,10 @@ impl ProviderService {
                     crate::config::copy_file(&auth_path, &backup_path)?;
                     delete_file(&auth_path)?;
                 }
+            }
+        } else if !auth_is_empty {
+            if let Some(auth_value) = auth {
+                write_json_file(&auth_path, auth_value)?;
             }
         }
 

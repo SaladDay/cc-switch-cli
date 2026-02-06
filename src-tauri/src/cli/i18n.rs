@@ -398,6 +398,13 @@ pub mod texts {
         "{}\n"
     }
 
+    pub fn tui_default_common_snippet_for_app(app: &str) -> &'static str {
+        match app {
+            "codex" => "",
+            _ => "{}\n",
+        }
+    }
+
     pub fn tui_latency_ms(ms: u128) -> String {
         if is_chinese() {
             format!("{ms} ms")
@@ -5165,6 +5172,14 @@ pub mod texts {
             format!("JSON 无效：{err}")
         } else {
             format!("Invalid JSON: {err}")
+        }
+    }
+
+    pub fn common_config_snippet_invalid_toml(err: &str) -> String {
+        if is_chinese() {
+            format!("TOML 无效：{err}")
+        } else {
+            format!("Invalid TOML: {err}")
         }
     }
 

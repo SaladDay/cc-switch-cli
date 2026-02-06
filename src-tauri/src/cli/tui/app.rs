@@ -1377,13 +1377,19 @@ impl App {
                 };
                 if matches!(item, ConfigItem::CommonSnippet) {
                     let snippet = if data.config.common_snippet.trim().is_empty() {
-                        texts::tui_default_common_snippet().to_string()
+                        texts::tui_default_common_snippet_for_app(self.app_type.as_str())
+                            .to_string()
                     } else {
                         data.config.common_snippet.clone()
                     };
+                    let kind = if matches!(self.app_type, AppType::Codex) {
+                        EditorKind::Plain
+                    } else {
+                        EditorKind::Json
+                    };
                     self.open_editor(
                         texts::tui_common_snippet_title(self.app_type.as_str()),
-                        EditorKind::Json,
+                        kind,
                         snippet,
                         EditorSubmit::ConfigCommonSnippet,
                     );
@@ -1449,7 +1455,8 @@ impl App {
                     ConfigItem::Validate => Action::ConfigValidate,
                     ConfigItem::CommonSnippet => {
                         let snippet = if data.config.common_snippet.trim().is_empty() {
-                            texts::tui_default_common_snippet().to_string()
+                            texts::tui_default_common_snippet_for_app(self.app_type.as_str())
+                                .to_string()
                         } else {
                             data.config.common_snippet.clone()
                         };
@@ -1963,14 +1970,19 @@ impl App {
 
     fn open_common_snippet_editor(&mut self, data: &UiData) {
         let snippet = if data.config.common_snippet.trim().is_empty() {
-            texts::tui_default_common_snippet().to_string()
+            texts::tui_default_common_snippet_for_app(self.app_type.as_str()).to_string()
         } else {
             data.config.common_snippet.clone()
         };
 
+        let kind = if matches!(self.app_type, AppType::Codex) {
+            EditorKind::Plain
+        } else {
+            EditorKind::Json
+        };
         self.open_editor(
             texts::tui_common_snippet_title(self.app_type.as_str()),
-            EditorKind::Json,
+            kind,
             snippet,
             EditorSubmit::ConfigCommonSnippet,
         );

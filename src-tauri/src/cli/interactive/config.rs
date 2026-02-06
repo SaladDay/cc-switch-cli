@@ -93,7 +93,7 @@ fn edit_common_config_snippet_interactive(app_type: &AppType) -> Result<(), AppE
     .unwrap_or_default();
 
     let initial = if current.trim().is_empty() {
-        "{}\n".to_string()
+        texts::tui_default_common_snippet_for_app(app_type.as_str()).to_string()
     } else {
         current
     };
@@ -127,6 +127,37 @@ fn edit_common_config_snippet_interactive(app_type: &AppType) -> Result<(), AppE
         let edited = edited.trim().to_string();
         let (next_snippet, action_label) = if edited.is_empty() {
             (None, texts::common_config_snippet_cleared())
+        } else if matches!(*app_type, AppType::Codex) {
+            let doc: toml_edit::DocumentMut = match edited.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    println!(
+                        "\n{}",
+                        error(&texts::common_config_snippet_invalid_toml(&e.to_string()))
+                    );
+                    if !retry_prompt()? {
+                        return Ok(());
+                    }
+                    continue;
+                }
+            };
+
+            let canonical = doc.to_string().trim().to_string();
+
+            println!("\n{}", highlight(texts::config_common_snippet()));
+            println!("{}", texts::tui_rule(60));
+            println!("{}", canonical);
+
+            let Some(confirm) = prompt_confirm(texts::confirm_save_changes(), false)? else {
+                return Ok(());
+            };
+
+            if !confirm {
+                println!("\n{}", info(texts::cancelled()));
+                return Ok(());
+            }
+
+            (Some(canonical), texts::common_config_snippet_saved())
         } else {
             let value: serde_json::Value = match serde_json::from_str(&edited) {
                 Ok(v) => v,

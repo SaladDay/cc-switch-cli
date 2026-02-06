@@ -528,8 +528,8 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::CodexRequiresOpenaiAuth);
                 if !self.codex_requires_openai_auth {
                     fields.push(ProviderAddField::CodexEnvKey);
+                    fields.push(ProviderAddField::CodexApiKey);
                 }
-                fields.push(ProviderAddField::CodexApiKey);
             }
             AppType::Gemini => {
                 fields.push(ProviderAddField::GeminiAuthType);
@@ -835,7 +835,9 @@ impl ProviderAddFormState {
                 );
                 settings_obj.insert("config".to_string(), Value::String(updated));
 
-                if self.codex_api_key.is_blank() {
+                if self.codex_requires_openai_auth {
+                    settings_obj.remove("auth");
+                } else if self.codex_api_key.is_blank() {
                     if let Some(auth) = settings_obj.get_mut("auth") {
                         if let Some(obj) = auth.as_object_mut() {
                             obj.remove("OPENAI_API_KEY");
