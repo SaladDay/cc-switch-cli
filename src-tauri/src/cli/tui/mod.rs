@@ -135,6 +135,23 @@ struct WebDavSystem {
     _handle: std::thread::JoinHandle<()>,
 }
 
+enum UpdateReq {
+    Check,
+    Download,
+}
+
+enum UpdateMsg {
+    CheckFinished(Result<crate::cli::commands::update::UpdateCheckInfo, String>),
+    DownloadProgress { downloaded: u64, total: Option<u64> },
+    DownloadFinished(Result<String, String>),
+}
+
+struct UpdateSystem {
+    req_tx: mpsc::Sender<UpdateReq>,
+    result_rx: mpsc::Receiver<UpdateMsg>,
+    _handle: std::thread::JoinHandle<()>,
+}
+
 pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let _panic_hook = PanicRestoreHookGuard::install();
     let mut terminal = TuiTerminal::new()?;
@@ -200,6 +217,17 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         }
     };
 
+    let update_system = match start_update_system() {
+        Ok(system) => Some(system),
+        Err(err) => {
+            app.push_toast(
+                texts::tui_toast_update_check_failed(&err.to_string()),
+                ToastKind::Warning,
+            );
+            None
+        }
+    };
+
     loop {
         app.last_size = terminal.size()?;
         terminal.draw(|f| ui::render(f, &app, &data))?;
@@ -238,6 +266,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             }
         }
 
+        // Handle async update results (non-blocking).
+        if let Some(us) = update_system.as_ref() {
+            while let Ok(msg) = us.result_rx.try_recv() {
+                handle_update_msg(&mut app, msg);
+            }
+        }
+
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout).map_err(|e| AppError::Message(e.to_string()))? {
             match event::read().map_err(|e| AppError::Message(e.to_string()))? {
@@ -253,6 +288,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         webdav.as_ref().map(|s| &s.req_tx),
                         &mut webdav_request_seq,
                         &mut webdav_loading_request_id,
+                        update_system.as_ref().map(|s| &s.req_tx),
                         action,
                     ) {
                         if matches!(
@@ -546,6 +582,7 @@ fn handle_action(
     webdav_req_tx: Option<&mpsc::Sender<WebDavReq>>,
     webdav_request_seq: &mut u64,
     webdav_loading_request_id: &mut Option<u64>,
+    update_req_tx: Option<&mpsc::Sender<UpdateReq>>,
     action: Action,
 ) -> Result<(), AppError> {
     match action {
@@ -1498,6 +1535,52 @@ fn handle_action(
             app.push_toast(texts::language_changed(), ToastKind::Success);
             Ok(())
         }
+
+        Action::CheckUpdate => {
+            if matches!(app.overlay, Overlay::UpdateDownloading { .. }) {
+                return Ok(());
+            }
+            let Some(tx) = update_req_tx else {
+                app.push_toast(
+                    texts::tui_toast_update_check_failed("update worker unavailable"),
+                    ToastKind::Warning,
+                );
+                return Ok(());
+            };
+            app.overlay = Overlay::Loading {
+                title: texts::tui_update_checking_title().to_string(),
+                message: texts::tui_loading().to_string(),
+            };
+            if let Err(err) = tx.send(UpdateReq::Check) {
+                app.overlay = Overlay::None;
+                app.push_toast(
+                    texts::tui_toast_update_check_failed(&err.to_string()),
+                    ToastKind::Error,
+                );
+            }
+            Ok(())
+        }
+        Action::ConfirmUpdate => {
+            let Some(tx) = update_req_tx else {
+                return Ok(());
+            };
+            app.overlay = Overlay::UpdateDownloading {
+                downloaded: 0,
+                total: None,
+            };
+            if let Err(err) = tx.send(UpdateReq::Download) {
+                app.overlay = Overlay::None;
+                app.push_toast(
+                    texts::tui_toast_update_bg_failed(&err.to_string()),
+                    ToastKind::Error,
+                );
+            }
+            Ok(())
+        }
+        Action::CancelUpdate => {
+            app.overlay = Overlay::None;
+            Ok(())
+        }
     }
 }
 
@@ -1549,6 +1632,148 @@ fn refresh_common_snippet_overlay(app: &mut App, data: &UiData) {
     view.title = texts::tui_common_snippet_title(app.app_type.as_str());
     view.lines = snippet.lines().map(|s| s.to_string()).collect();
     view.scroll = 0;
+}
+
+fn handle_update_msg(app: &mut App, msg: UpdateMsg) {
+    match msg {
+        UpdateMsg::CheckFinished(result) => match result {
+            Ok(info) => {
+                if info.is_already_latest {
+                    app.overlay = Overlay::None;
+                    app.push_toast(
+                        texts::tui_toast_already_latest(&info.current_version),
+                        ToastKind::Success,
+                    );
+                } else if info.is_downgrade {
+                    app.overlay = Overlay::None;
+                    app.push_toast(
+                        texts::tui_toast_update_downgrade(&info.current_version, &info.target_tag),
+                        ToastKind::Info,
+                    );
+                } else {
+                    app.overlay = Overlay::UpdateAvailable {
+                        current: info.current_version,
+                        latest: info.target_tag,
+                        selected: 0,
+                    };
+                }
+            }
+            Err(e) => {
+                app.overlay = Overlay::None;
+                app.push_toast(texts::tui_toast_update_check_failed(&e), ToastKind::Error);
+            }
+        },
+        UpdateMsg::DownloadProgress { downloaded, total } => {
+            if let Overlay::UpdateDownloading {
+                downloaded: ref mut dl,
+                total: ref mut t,
+            } = app.overlay
+            {
+                *dl = downloaded;
+                *t = total;
+            }
+        }
+        UpdateMsg::DownloadFinished(result) => match result {
+            Ok(tag) => {
+                if matches!(app.overlay, Overlay::UpdateDownloading { .. }) {
+                    app.overlay = Overlay::UpdateResult {
+                        success: true,
+                        message: texts::tui_update_success(&tag),
+                    };
+                } else {
+                    app.push_toast(texts::tui_toast_update_bg_success(&tag), ToastKind::Success);
+                    app.should_quit = true;
+                }
+            }
+            Err(e) => {
+                if matches!(app.overlay, Overlay::UpdateDownloading { .. }) {
+                    app.overlay = Overlay::UpdateResult {
+                        success: false,
+                        message: e,
+                    };
+                } else {
+                    app.push_toast(texts::tui_toast_update_bg_failed(&e), ToastKind::Error);
+                }
+            }
+        },
+    }
+}
+
+fn start_update_system() -> Result<UpdateSystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<UpdateMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<UpdateReq>();
+
+    let handle = std::thread::Builder::new()
+        .name("cc-switch-update".to_string())
+        .spawn(move || update_worker_loop(req_rx, result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn update worker thread".to_string(),
+            source: e,
+        })?;
+
+    Ok(UpdateSystem {
+        req_tx,
+        result_rx,
+        _handle: handle,
+    })
+}
+
+fn update_worker_loop(rx: mpsc::Receiver<UpdateReq>, tx: mpsc::Sender<UpdateMsg>) {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let err = e.to_string();
+            while let Ok(req) = rx.recv() {
+                let msg = match req {
+                    UpdateReq::Check => UpdateMsg::CheckFinished(Err(err.clone())),
+                    UpdateReq::Download => UpdateMsg::DownloadFinished(Err(err.clone())),
+                };
+                let _ = tx.send(msg);
+            }
+            return;
+        }
+    };
+
+    let mut last_tag: Option<String> = None;
+
+    while let Ok(req) = rx.recv() {
+        match req {
+            UpdateReq::Check => {
+                let result = rt
+                    .block_on(crate::cli::commands::update::check_for_update())
+                    .map_err(|e| e.to_string());
+                if let Ok(ref info) = result {
+                    last_tag = Some(info.target_tag.clone());
+                }
+                let _ = tx.send(UpdateMsg::CheckFinished(result));
+            }
+            UpdateReq::Download => {
+                let Some(tag) = last_tag.clone() else {
+                    let _ = tx.send(UpdateMsg::DownloadFinished(Err(
+                        "No version checked".to_string(),
+                    )));
+                    continue;
+                };
+                let tx2 = tx.clone();
+                let result = rt
+                    .block_on(crate::cli::commands::update::download_and_apply(
+                        &tag,
+                        move |dl, total| {
+                            let _ = tx2.send(UpdateMsg::DownloadProgress {
+                                downloaded: dl,
+                                total,
+                            });
+                        },
+                    ))
+                    .map(|()| tag)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(UpdateMsg::DownloadFinished(result));
+            }
+        }
+    }
 }
 
 fn start_webdav_system() -> Result<WebDavSystem, AppError> {

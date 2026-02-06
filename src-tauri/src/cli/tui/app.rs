@@ -160,6 +160,19 @@ pub enum Overlay {
         lines: Vec<String>,
         scroll: usize,
     },
+    UpdateAvailable {
+        current: String,
+        latest: String,
+        selected: usize,
+    },
+    UpdateDownloading {
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    UpdateResult {
+        success: bool,
+        message: String,
+    },
 }
 
 impl Overlay {
@@ -572,6 +585,10 @@ pub enum Action {
         enabled: bool,
     },
     SetLanguage(Language),
+
+    CheckUpdate,
+    ConfirmUpdate,
+    CancelUpdate,
 }
 
 #[derive(Debug, Clone)]
@@ -607,10 +624,15 @@ impl ConfigItem {
 pub enum SettingsItem {
     Language,
     SkipClaudeOnboarding,
+    CheckForUpdates,
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 2] = [SettingsItem::Language, SettingsItem::SkipClaudeOnboarding];
+    pub const ALL: [SettingsItem; 3] = [
+        SettingsItem::Language,
+        SettingsItem::SkipClaudeOnboarding,
+        SettingsItem::CheckForUpdates,
+    ];
 }
 
 #[derive(Debug, Clone)]
@@ -1643,6 +1665,7 @@ impl App {
                     });
                     Action::None
                 }
+                Some(SettingsItem::CheckForUpdates) => Action::CheckUpdate,
                 None => Action::None,
             },
             _ => Action::None,
@@ -2138,6 +2161,39 @@ impl App {
                 KeyCode::Down => {
                     if !lines.is_empty() {
                         *scroll = (*scroll + 1).min(lines.len() - 1);
+                    }
+                    Action::None
+                }
+                _ => Action::None,
+            },
+            Overlay::UpdateAvailable { selected, .. } => match key.code {
+                KeyCode::Up | KeyCode::Down => {
+                    *selected = 1 - *selected;
+                    Action::None
+                }
+                KeyCode::Enter => {
+                    if *selected == 0 {
+                        Action::ConfirmUpdate
+                    } else {
+                        Action::CancelUpdate
+                    }
+                }
+                KeyCode::Esc => Action::CancelUpdate,
+                _ => Action::None,
+            },
+            Overlay::UpdateDownloading { .. } => match key.code {
+                KeyCode::Esc => {
+                    self.overlay = Overlay::None;
+                    Action::None
+                }
+                _ => Action::None,
+            },
+            Overlay::UpdateResult { success, .. } => match key.code {
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+                    let should_exit = *success;
+                    self.overlay = Overlay::None;
+                    if should_exit {
+                        self.should_quit = true;
                     }
                     Action::None
                 }

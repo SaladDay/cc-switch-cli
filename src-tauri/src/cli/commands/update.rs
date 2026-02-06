@@ -109,7 +109,7 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
     }
 
     let downloaded_asset =
-        download_release_asset(&client, download_url, release_asset.name.as_str()).await?;
+        download_release_asset(&client, download_url, release_asset.name.as_str(), None).await?;
     verify_asset_checksum(
         &client,
         &downloaded_asset.archive_path,
@@ -314,6 +314,7 @@ async fn download_release_asset(
     client: &reqwest::Client,
     url: &str,
     asset_name: &str,
+    on_progress: Option<&dyn Fn(u64, Option<u64>)>,
 ) -> Result<DownloadedAsset, AppError> {
     let mut response = client
         .get(url)
@@ -323,8 +324,9 @@ async fn download_release_asset(
         .map_err(|e| AppError::Message(format!("Failed to download release asset: {e}")))?
         .error_for_status()
         .map_err(|e| AppError::Message(format!("Release asset request failed: {e}")))?;
-    if let Some(content_length) = response.content_length() {
-        validate_download_size_limit(content_length, asset_name)?;
+    let content_length = response.content_length();
+    if let Some(cl) = content_length {
+        validate_download_size_limit(cl, asset_name)?;
     }
 
     let temp_dir = tempfile::tempdir()
@@ -333,6 +335,7 @@ async fn download_release_asset(
     let archive_path = temp_dir.path().join(file_name);
     let mut output = fs::File::create(&archive_path).map_err(|e| AppError::io(&archive_path, e))?;
     let mut downloaded_bytes = 0_u64;
+    let mut last_reported = 0_u64;
 
     while let Some(chunk) = response
         .chunk()
@@ -344,6 +347,17 @@ async fn download_release_asset(
         output
             .write_all(&chunk)
             .map_err(|e| AppError::io(&archive_path, e))?;
+
+        if let Some(cb) = on_progress {
+            if downloaded_bytes - last_reported >= 64 * 1024 {
+                cb(downloaded_bytes, content_length);
+                last_reported = downloaded_bytes;
+            }
+        }
+    }
+
+    if let Some(cb) = on_progress {
+        cb(downloaded_bytes, content_length);
     }
 
     Ok(DownloadedAsset {
@@ -644,6 +658,56 @@ fn map_update_permission_error(target: &Path, err: std::io::Error) -> AppError {
         ));
     }
     AppError::io(target, err)
+}
+
+pub(crate) struct UpdateCheckInfo {
+    pub current_version: String,
+    pub target_tag: String,
+    pub is_already_latest: bool,
+    pub is_downgrade: bool,
+}
+
+pub(crate) async fn check_for_update() -> Result<UpdateCheckInfo, AppError> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let client = create_http_client()?;
+    let target_tag = resolve_target_tag(&client, None).await?;
+    let target_version = target_tag.trim_start_matches('v');
+
+    let is_already_latest = target_version == current_version;
+    let is_downgrade = should_skip_implicit_downgrade(current_version, target_version, false);
+
+    Ok(UpdateCheckInfo {
+        current_version: current_version.to_string(),
+        target_tag,
+        is_already_latest,
+        is_downgrade,
+    })
+}
+
+pub(crate) async fn download_and_apply(
+    target_tag: &str,
+    on_progress: impl Fn(u64, Option<u64>),
+) -> Result<(), AppError> {
+    let client = create_http_client()?;
+    let expected_asset_name = release_asset_name()?;
+    let release = fetch_release_by_tag(&client, target_tag).await?;
+    let release_asset = select_release_asset(&release.assets, target_tag, &expected_asset_name)
+        .ok_or_else(|| {
+            AppError::Message(format!(
+                "Release {target_tag} does not include expected asset '{expected_asset_name}' (or compatible tagged variant)."
+            ))
+        })?;
+    let download_url = release_asset.browser_download_url.as_str();
+
+    let downloaded_asset =
+        download_release_asset(&client, download_url, &release_asset.name, Some(&on_progress))
+            .await?;
+    verify_asset_checksum(&client, &downloaded_asset.archive_path, target_tag, release_asset)
+        .await?;
+    let extracted_binary = extract_binary(&downloaded_asset.archive_path)?;
+    replace_current_binary(&extracted_binary)?;
+
+    Ok(())
 }
 
 #[cfg(test)]
