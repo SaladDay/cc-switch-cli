@@ -228,6 +228,12 @@ jobs:
               release-assets/cc-switch-cli-linux-arm64.tar.gz
           fi
 
+          # Checksums for all release assets
+          (
+            cd release-assets
+            sha256sum * > checksums.txt
+          )
+
           echo "=== Release assets ==="
           ls -lh release-assets/
 

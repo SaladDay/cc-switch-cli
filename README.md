@@ -249,6 +249,10 @@ cc-switch completions <shell>        # Generate shell completions (bash/zsh/fish
 # Environment management
 cc-switch env check                  # Check for environment conflicts
 cc-switch env list                   # List environment variables
+
+# Self-update
+cc-switch update                     # Update to latest release
+cc-switch update --version v4.6.2    # Update to a specific version
 ```
 
 ---

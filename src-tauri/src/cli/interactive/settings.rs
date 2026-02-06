@@ -2,7 +2,7 @@ use crate::cli::i18n::{current_language, set_language, texts, Language};
 use crate::cli::ui::{highlight, success};
 use crate::error::AppError;
 
-use super::utils::{clear_screen, pause, prompt_select};
+use super::utils::{clear_screen, pause, prompt_confirm, prompt_select};
 
 pub fn settings_menu() -> Result<(), AppError> {
     loop {
@@ -16,9 +16,24 @@ pub fn settings_menu() -> Result<(), AppError> {
             texts::current_language_label(),
             highlight(lang.display_name())
         );
+
+        let skip_claude_onboarding = crate::settings::get_skip_claude_onboarding();
+        println!(
+            "{}: {}",
+            texts::skip_claude_onboarding_label(),
+            highlight(if skip_claude_onboarding {
+                texts::enabled()
+            } else {
+                texts::disabled()
+            })
+        );
         println!();
 
-        let choices = vec![texts::change_language(), texts::back_to_main()];
+        let choices = vec![
+            texts::change_language(),
+            texts::skip_claude_onboarding(),
+            texts::back_to_main(),
+        ];
 
         let Some(choice) = prompt_select(texts::choose_action(), choices)? else {
             break;
@@ -26,6 +41,8 @@ pub fn settings_menu() -> Result<(), AppError> {
 
         if choice == texts::change_language() {
             change_language_interactive()?;
+        } else if choice == texts::skip_claude_onboarding() {
+            toggle_skip_claude_onboarding_interactive()?;
         } else {
             break;
         }
@@ -45,6 +62,33 @@ fn change_language_interactive() -> Result<(), AppError> {
     set_language(selected)?;
 
     println!("\n{}", success(texts::language_changed()));
+    pause();
+
+    Ok(())
+}
+
+fn toggle_skip_claude_onboarding_interactive() -> Result<(), AppError> {
+    clear_screen();
+
+    let current = crate::settings::get_skip_claude_onboarding();
+    let next = !current;
+
+    let path = crate::config::get_claude_mcp_path();
+    let confirm_prompt =
+        texts::skip_claude_onboarding_confirm(next, path.to_string_lossy().as_ref());
+    let Some(confirm) = prompt_confirm(&confirm_prompt, true)? else {
+        return Ok(());
+    };
+    if !confirm {
+        return Ok(());
+    }
+
+    crate::settings::set_skip_claude_onboarding(next)?;
+
+    println!(
+        "\n{}",
+        success(&texts::skip_claude_onboarding_changed(next))
+    );
     pause();
 
     Ok(())

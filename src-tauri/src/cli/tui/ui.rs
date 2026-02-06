@@ -15,7 +15,9 @@ use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 
 use super::{
-    app::{App, ConfigItem, EditorMode, Focus, Overlay, ToastKind, WebDavConfigItem},
+    app::{
+        App, ConfigItem, ConfirmAction, EditorMode, Focus, Overlay, ToastKind, WebDavConfigItem,
+    },
     data::{McpRow, ProviderRow, UiData},
     form::{FormFocus, FormState, GeminiAuthType, McpAddField, ProviderAddField},
     route::{NavItem, Route},
@@ -1107,32 +1109,20 @@ fn render_editor(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
-    let keys = match editor.mode {
-        EditorMode::View => vec![
-            ("Enter", texts::tui_key_edit_mode()),
-            ("↑↓", texts::tui_key_scroll()),
-            ("Ctrl+S", texts::tui_key_save()),
-            ("Esc", texts::tui_key_close()),
-        ],
-        EditorMode::Edit => vec![
-            ("↑↓←→", texts::tui_key_move()),
-            ("Ctrl+S", texts::tui_key_save()),
-            ("Esc", texts::tui_key_exit_edit()),
-        ],
-    };
+    let keys = vec![
+        ("↑↓←→", texts::tui_key_move()),
+        ("Ctrl+S", texts::tui_key_save()),
+        ("Esc", texts::tui_key_close()),
+    ];
     render_key_bar(frame, chunks[0], theme, &keys);
 
     let field_title = match editor.kind {
         super::app::EditorKind::Json => texts::tui_editor_json_field_title(),
         super::app::EditorKind::Plain => texts::tui_editor_text_field_title(),
     };
-    let field_border_style = if matches!(editor.mode, EditorMode::Edit) {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.dim)
-    };
+    let field_border_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
 
     let field = Block::default()
         .borders(Borders::ALL)
@@ -1144,29 +1134,30 @@ fn render_editor(
     let field_inner = field.inner(chunks[1]);
 
     let height = field_inner.height as usize;
-    let start = editor.scroll.min(editor.lines.len());
-    let end = (start + height).min(editor.lines.len());
-    let shown = editor.lines[start..end]
-        .iter()
-        .map(|s| Line::raw(s.clone()))
-        .collect::<Vec<_>>();
+    let width = field_inner.width.max(1);
 
-    frame.render_widget(
-        Paragraph::new(shown).wrap(Wrap { trim: false }),
-        field_inner,
-    );
-
-    if matches!(editor.mode, EditorMode::Edit) {
-        let row_in_view = editor.cursor_row.saturating_sub(editor.scroll);
-        if row_in_view < height {
-            let x =
-                field_inner.x + (editor.cursor_col as u16).min(field_inner.width.saturating_sub(1));
-            let y = field_inner.y + row_in_view as u16;
-            frame.set_cursor_position((x, y));
+    let mut shown = Vec::new();
+    let start = editor.scroll.min(editor.lines.len().saturating_sub(1));
+    for line in editor.lines.iter().skip(start) {
+        for segment in super::app::EditorState::wrap_line_segments(line, width) {
+            if shown.len() >= height {
+                break;
+            }
+            shown.push(Line::raw(segment));
+        }
+        if shown.len() >= height {
+            break;
         }
     }
 
-    // Key bar already shows mode-specific shortcuts.
+    frame.render_widget(Paragraph::new(shown), field_inner);
+
+    let (row_in_view, col_in_view) = editor.cursor_visual_offset_from_scroll(width);
+    if row_in_view < height {
+        let x = field_inner.x + col_in_view.min(field_inner.width.saturating_sub(1));
+        let y = field_inner.y + row_in_view as u16;
+        frame.set_cursor_position((x, y));
+    }
 }
 
 fn focus_block_style(active: bool, theme: &super::theme::Theme) -> Style {
@@ -1484,11 +1475,14 @@ fn render_provider_add_form(
         );
     }
 
-    // JSON Preview
-    let json_value = provider
+    // JSON Preview (settingsConfig only, matching upstream UI)
+    let provider_json_value = provider
         .to_provider_json_value_with_common_config(&data.config.common_snippet)
         .unwrap_or_else(|_| provider.to_provider_json_value());
-    let json_value = super::form::strip_provider_internal_fields(&json_value);
+    let json_value = provider_json_value
+        .get("settingsConfig")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     let json_text = serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| "{}".to_string());
     render_form_json_preview(
         frame,
@@ -2847,17 +2841,29 @@ fn render_config_webdav(
 }
 
 fn render_settings(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::theme::Theme) {
-    let header = Row::new(vec![Cell::from(
-        pad2(texts::tui_settings_header_language()),
-    )])
+    let header = Row::new(vec![
+        Cell::from(pad2(texts::tui_settings_header_setting())),
+        Cell::from(pad2(texts::tui_settings_header_value())),
+    ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
-    let rows = [
-        crate::cli::i18n::Language::English,
-        crate::cli::i18n::Language::Chinese,
-    ]
-    .iter()
-    .map(|lang| Row::new(vec![Cell::from(pad2(lang.display_name()))]));
+    let language = crate::cli::i18n::current_language();
+    let skip_claude_onboarding = crate::settings::get_skip_claude_onboarding();
+
+    let rows = super::app::SettingsItem::ALL.iter().map(|item| match item {
+        super::app::SettingsItem::Language => Row::new(vec![
+            Cell::from(pad2(texts::tui_settings_header_language())),
+            Cell::from(pad2(language.display_name())),
+        ]),
+        super::app::SettingsItem::SkipClaudeOnboarding => Row::new(vec![
+            Cell::from(pad2(texts::skip_claude_onboarding_label())),
+            Cell::from(pad2(if skip_claude_onboarding {
+                texts::enabled()
+            } else {
+                texts::disabled()
+            })),
+        ]),
+    });
 
     let outer = Block::default()
         .borders(Borders::ALL)
@@ -2881,14 +2887,14 @@ fn render_settings(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::
         );
     }
 
-    let table = Table::new(rows, [Constraint::Min(10)])
+    let table = Table::new(rows, [Constraint::Min(24), Constraint::Min(10)])
         .header(header)
         .block(Block::default().borders(Borders::NONE))
         .row_highlight_style(selection_style(theme))
         .highlight_symbol(highlight_symbol(theme));
 
     let mut state = TableState::default();
-    state.select(Some(app.language_idx));
+    state.select(Some(app.settings_idx));
     frame.render_stateful_widget(table, inset_left(chunks[1], 2), &mut state);
 }
 
@@ -2951,10 +2957,12 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::th
 }
 
 fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super::theme::Theme) {
+    let content_area = content_pane_rect(frame.area());
+
     match &app.overlay {
         Overlay::None => {}
         Overlay::Help => {
-            let area = centered_rect(70, 70, frame.area());
+            let area = centered_rect(70, 70, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
@@ -2970,7 +2978,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
                 .split(inner);
 
-            render_key_bar(frame, chunks[0], theme, &[("Esc", texts::tui_key_close())]);
+            render_key_bar_center(frame, chunks[0], theme, &[("Esc", texts::tui_key_close())]);
 
             let lines = texts::tui_help_text()
                 .lines()
@@ -2979,7 +2987,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), chunks[1]);
         }
         Overlay::Confirm(confirm) => {
-            let area = centered_rect(60, 35, frame.area());
+            let area = centered_rect_fixed(60, 7, content_area);
             frame.render_widget(Clear, area);
             let outer = Block::default()
                 .borders(Borders::ALL)
@@ -2994,25 +3002,49 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
                 .split(inner);
 
-            render_key_bar(
-                frame,
-                chunks[0],
-                theme,
-                &[
-                    ("Enter", texts::tui_key_yes()),
-                    ("Esc", texts::tui_key_cancel()),
-                ],
-            );
-
-            frame.render_widget(
-                Paragraph::new(Line::raw(confirm.message.clone()))
-                    .alignment(Alignment::Center)
-                    .wrap(Wrap { trim: false }),
-                chunks[1],
-            );
+            if matches!(confirm.action, ConfirmAction::EditorSaveBeforeClose) {
+                render_key_bar_center(
+                    frame,
+                    chunks[0],
+                    theme,
+                    &[
+                        ("Enter", texts::tui_key_save_and_exit()),
+                        ("N", texts::tui_key_exit_without_save()),
+                        ("Esc", texts::tui_key_cancel()),
+                    ],
+                );
+                frame.render_widget(
+                    Paragraph::new(centered_message_lines(
+                        &confirm.message,
+                        chunks[1].width,
+                        chunks[1].height,
+                    ))
+                    .alignment(Alignment::Center),
+                    chunks[1],
+                );
+            } else {
+                render_key_bar_center(
+                    frame,
+                    chunks[0],
+                    theme,
+                    &[
+                        ("Enter", texts::tui_key_yes()),
+                        ("Esc", texts::tui_key_cancel()),
+                    ],
+                );
+                frame.render_widget(
+                    Paragraph::new(centered_message_lines(
+                        &confirm.message,
+                        chunks[1].width,
+                        chunks[1].height,
+                    ))
+                    .alignment(Alignment::Center),
+                    chunks[1],
+                );
+            }
         }
         Overlay::TextInput(input) => {
-            let area = centered_rect(70, 35, frame.area());
+            let area = centered_rect_fixed(70, 12, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
@@ -3038,7 +3070,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 ])
                 .split(inner);
 
-            render_key_bar(
+            render_key_bar_center(
                 frame,
                 chunks[0],
                 theme,
@@ -3088,7 +3120,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.set_cursor_position((cursor_x, cursor_y));
         }
         Overlay::BackupPicker { selected } => {
-            let area = centered_rect(80, 80, frame.area());
+            let area = centered_rect(80, 80, content_area);
             frame.render_widget(Clear, area);
 
             let block = Block::default()
@@ -3104,7 +3136,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
                 .split(inner);
 
-            render_key_bar(
+            render_key_bar_center(
                 frame,
                 chunks[0],
                 theme,
@@ -3130,7 +3162,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.render_stateful_widget(list, chunks[1], &mut state);
         }
         Overlay::TextView(view) => {
-            let area = centered_rect(90, 90, frame.area());
+            let area = centered_rect(90, 90, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
@@ -3146,7 +3178,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
                 .split(inner);
 
-            render_key_bar(
+            render_key_bar_center(
                 frame,
                 chunks[0],
                 theme,
@@ -3167,7 +3199,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), chunks[1]);
         }
         Overlay::CommonSnippetView(view) => {
-            let area = centered_rect(90, 90, frame.area());
+            let area = centered_rect(90, 90, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
@@ -3183,7 +3215,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
                 .split(inner);
 
-            render_key_bar(
+            render_key_bar_center(
                 frame,
                 chunks[0],
                 theme,
@@ -3207,7 +3239,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), chunks[1]);
         }
         Overlay::ClaudeModelPicker { selected, editing } => {
-            let area = centered_rect(78, 62, frame.area());
+            let area = centered_rect(78, 62, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
@@ -3227,7 +3259,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 ])
                 .split(inner);
 
-            render_key_bar(
+            render_key_bar_center(
                 frame,
                 chunks[0],
                 theme,
@@ -3334,7 +3366,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             apps,
             ..
         } => {
-            let area = centered_rect(60, 45, frame.area());
+            let area = centered_rect_fixed(60, 12, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
@@ -3350,7 +3382,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
                 .split(inner);
 
-            render_key_bar(
+            render_key_bar_center(
                 frame,
                 chunks[0],
                 theme,
@@ -3390,7 +3422,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.render_stateful_widget(list, chunks[1], &mut state);
         }
         Overlay::SkillsSyncMethodPicker { selected } => {
-            let area = centered_rect(60, 45, frame.area());
+            let area = centered_rect_fixed(60, 12, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
@@ -3406,7 +3438,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
                 .split(inner);
 
-            render_key_bar(
+            render_key_bar_center(
                 frame,
                 chunks[0],
                 theme,
@@ -3444,7 +3476,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.render_stateful_widget(list, chunks[1], &mut state);
         }
         Overlay::Loading { title, message } => {
-            let area = centered_rect(60, 30, frame.area());
+            let area = centered_rect_fixed(60, 7, content_area);
             frame.render_widget(Clear, area);
 
             let spinner = match app.tick % 4 {
@@ -3468,14 +3500,14 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
                 .split(inner);
 
-            render_key_bar(frame, chunks[0], theme, &[("Esc", texts::tui_key_cancel())]);
+            render_key_bar_center(frame, chunks[0], theme, &[("Esc", texts::tui_key_cancel())]);
             frame.render_widget(
                 Paragraph::new(Line::raw(message.clone())).wrap(Wrap { trim: false }),
                 chunks[1],
             );
         }
         Overlay::SpeedtestRunning { url } => {
-            let area = centered_rect(70, 30, frame.area());
+            let area = centered_rect_fixed(70, 7, content_area);
             frame.render_widget(Clear, area);
             let outer = Block::default()
                 .borders(Borders::ALL)
@@ -3490,7 +3522,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
                 .split(inner);
 
-            render_key_bar(frame, chunks[0], theme, &[("Esc", texts::tui_key_close())]);
+            render_key_bar_center(frame, chunks[0], theme, &[("Esc", texts::tui_key_close())]);
             frame.render_widget(
                 Paragraph::new(Line::raw(texts::tui_speedtest_running(url)))
                     .wrap(Wrap { trim: false }),
@@ -3498,7 +3530,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             );
         }
         Overlay::SpeedtestResult { url, lines, scroll } => {
-            let area = centered_rect(90, 90, frame.area());
+            let area = centered_rect(90, 90, content_area);
             frame.render_widget(Clear, area);
 
             let title = texts::tui_speedtest_title_with_url(url);
@@ -3515,7 +3547,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
                 .split(inner);
 
-            render_key_bar(
+            render_key_bar_center(
                 frame,
                 chunks[0],
                 theme,
@@ -3538,6 +3570,71 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
     }
 }
 
+fn content_pane_rect(area: Rect) -> Rect {
+    let root = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(30), Constraint::Min(0)])
+        .split(root[1]);
+
+    body[1]
+}
+
+fn centered_message_lines(message: &str, width: u16, height: u16) -> Vec<Line<'static>> {
+    let lines = wrap_message_lines(message, width);
+    let pad = height.saturating_sub(lines.len() as u16) / 2;
+    let mut out = Vec::with_capacity(pad as usize + lines.len());
+    for _ in 0..pad {
+        out.push(Line::raw(""));
+    }
+    out.extend(lines.into_iter().map(Line::raw));
+    out
+}
+
+fn wrap_message_lines(message: &str, width: u16) -> Vec<String> {
+    let width = width as usize;
+    if width == 0 {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+
+    for ch in message.chars() {
+        if ch == '\n' {
+            lines.push(current);
+            current = String::new();
+            current_width = 0;
+            continue;
+        }
+
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        if current_width + ch_width > width && !current.is_empty() {
+            lines.push(current);
+            current = String::new();
+            current_width = 0;
+        }
+
+        current.push(ch);
+        current_width = current_width.saturating_add(ch_width);
+    }
+
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+
+    lines
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -3556,6 +3653,18 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
+    let width = width.min(r.width);
+    let height = height.min(r.height);
+
+    Rect {
+        x: r.x + r.width.saturating_sub(width) / 2,
+        y: r.y + r.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
 }
 
 fn mask_api_key(key: &str) -> String {
@@ -3578,7 +3687,10 @@ mod tests {
         app_config::AppType,
         cli::i18n::texts,
         cli::tui::{
-            app::{App, Focus, Overlay, TextInputState, TextSubmit},
+            app::{
+                App, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit, Focus, Overlay,
+                TextInputState, TextSubmit,
+            },
             data::{
                 ConfigSnapshot, McpSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
                 SkillsSnapshot, UiData,
@@ -3791,6 +3903,66 @@ mod tests {
         // Table is inset by 2 cells inside the content pane.
         let selected_row_cell = &buf[(33, 3 + 1 + 1 + 1)];
         assert_eq!(selected_row_cell.bg, theme.accent);
+    }
+
+    #[test]
+    fn editor_cursor_matches_rendered_target_line() {
+        let _lock = lock_env();
+        let _no_color = EnvGuard::remove("NO_COLOR");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Config;
+        app.focus = Focus::Content;
+
+        let long = "x".repeat(400);
+        let marker = "<<<TARGET>>>";
+        let initial = format!("{long}\n{marker}");
+
+        app.open_editor(
+            "Demo Editor",
+            EditorKind::Json,
+            initial,
+            EditorSubmit::ConfigCommonSnippet,
+        );
+
+        let editor = app.editor.as_mut().expect("editor opened");
+        editor.cursor_row = 1;
+        editor.cursor_col = 0;
+        editor.scroll = 0;
+
+        let data = minimal_data(&app.app_type);
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal created");
+        terminal
+            .draw(|f| super::render(f, &app, &data))
+            .expect("draw ok");
+
+        let cursor = terminal.get_cursor_position().expect("cursor position");
+        let buf = terminal.backend().buffer().clone();
+
+        let wrap_token = "x".repeat(20);
+        let wrapped_rows = (0..buf.area.height)
+            .filter(|y| line_at(&buf, *y).contains(&wrap_token))
+            .count();
+        assert!(
+            wrapped_rows >= 2,
+            "expected long line to wrap onto multiple rows, got {wrapped_rows}"
+        );
+
+        let mut marker_y = None;
+        for y in 0..buf.area.height {
+            let line = line_at(&buf, y);
+            if line.contains(marker) {
+                marker_y = Some(y);
+                break;
+            }
+        }
+
+        let marker_y = marker_y.expect("marker line rendered");
+        assert_eq!(
+            cursor.y, marker_y,
+            "cursor should be on the same row as the rendered marker line"
+        );
     }
 
     #[test]
@@ -4026,12 +4198,13 @@ mod tests {
 
         let buf = render(&app, &data);
 
-        // Overlay area for centered_rect(70,35) in a 120x40 terminal:
-        // width = 84, height = 14, top-left = ((120-84)/2, (40-14)/2) = (18, 13)
-        let area_x = 18;
-        let area_y = 13;
-        let area_w = 84;
-        let area_h = 14;
+        // Overlay area for centered_rect_fixed(70,12) in a 120x40 terminal content pane:
+        // header height = 3, footer height = 1, nav width = 30 => content = (30,3,90,36)
+        // centered => top-left = (30 + (90-70)/2, 3 + (36-12)/2) = (40, 15)
+        let area_x = 40;
+        let area_y = 15;
+        let area_w = 70;
+        let area_h = 12;
 
         // Outer border exists at (18,13). We also expect an inner input field border (another ┌)
         // somewhere inside the overlay.
@@ -4050,6 +4223,58 @@ mod tests {
         assert!(
             inner_top_left_count >= 1,
             "expected an inner input box border in TextInput overlay"
+        );
+    }
+
+    #[test]
+    fn editor_unsaved_changes_confirm_overlay_shows_three_actions_and_is_compact() {
+        let _lock = lock_env();
+
+        let prev = std::env::var("NO_COLOR").ok();
+        std::env::set_var("NO_COLOR", "1");
+        let _restore_no_color = EnvGuard {
+            key: "NO_COLOR",
+            prev,
+        };
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_editor_save_before_close_title().to_string(),
+            message: texts::tui_editor_save_before_close_message().to_string(),
+            action: ConfirmAction::EditorSaveBeforeClose,
+        });
+        let data = minimal_data(&app.app_type);
+
+        let buf = render(&app, &data);
+        let all = all_text(&buf);
+
+        assert!(
+            all.contains("Enter=save & exit"),
+            "expected save action hint in confirm overlay key bar"
+        );
+        assert!(
+            all.contains("N=exit w/o save"),
+            "expected discard action hint in confirm overlay key bar"
+        );
+        assert!(
+            all.contains("Esc=cancel"),
+            "expected cancel action hint in confirm overlay key bar"
+        );
+
+        // Overlay area for centered_rect_fixed(60,7) in a 120x40 terminal content pane:
+        // header height = 3, footer height = 1, nav width = 30 => content = (30,3,90,36)
+        // centered => top-left = (30 + (90-60)/2, 3 + (36-7)/2) = (45, 17)
+        let area_x = 45;
+        let area_y = 17;
+        let area_w = 60;
+        let area_h = 7;
+
+        assert_eq!(buf[(area_x, area_y)].symbol(), "┌");
+        assert_eq!(
+            buf[(area_x + area_w - 1, area_y + area_h - 1)].symbol(),
+            "┘"
         );
     }
 

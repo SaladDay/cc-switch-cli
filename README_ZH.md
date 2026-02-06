@@ -252,6 +252,10 @@ cc-switch completions <shell>        # 生成 shell 补全（bash/zsh/fish/power
 # 环境管理
 cc-switch env check                  # 检查环境冲突
 cc-switch env list                   # 列出环境变量
+
+# 自更新
+cc-switch update                     # 更新到最新版本
+cc-switch update --version v4.6.2    # 更新到指定版本
 ```
 
 ---

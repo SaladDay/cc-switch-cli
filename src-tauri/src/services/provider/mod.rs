@@ -179,6 +179,25 @@ mod tests {
     }
 
     #[test]
+    fn codex_config_snippet_defaults_wire_api_to_responses_for_openai_auth_when_missing() {
+        let config_text = r#"
+model_provider = "openai"
+model = "gpt-5.2-codex"
+
+[model_providers.openai]
+base_url = "https://api.openai.com/v1"
+requires_openai_auth = true
+"#;
+
+        let snippet = ProviderService::codex_config_snippet_from_live_config(config_text)
+            .expect("extract provider config snippet");
+        assert!(
+            snippet.contains("wire_api = \"responses\""),
+            "wire_api should default to responses for OpenAI auth when missing from config"
+        );
+    }
+
+    #[test]
     #[serial]
     fn codex_switch_preserves_base_url_and_wire_api_across_multiple_switches() {
         let temp_home = TempDir::new().expect("create temp home");
@@ -1823,11 +1842,6 @@ impl ProviderService {
             .and_then(|v| v.as_str())
             .or_else(|| root.get("base_url").and_then(|v| v.as_str()))
             .unwrap_or("");
-        let wire_api = provider_table
-            .and_then(|t| t.get("wire_api"))
-            .and_then(|v| v.as_str())
-            .or_else(|| root.get("wire_api").and_then(|v| v.as_str()))
-            .unwrap_or("chat");
 
         let requires_openai_auth = provider_table
             .and_then(|t| t.get("requires_openai_auth"))
@@ -1837,6 +1851,19 @@ impl ProviderService {
             .and_then(|t| t.get("env_key"))
             .and_then(|v| v.as_str())
             .or_else(|| root.get("env_key").and_then(|v| v.as_str()));
+        let wire_api = provider_table
+            .and_then(|t| t.get("wire_api"))
+            .and_then(|v| v.as_str())
+            .or_else(|| root.get("wire_api").and_then(|v| v.as_str()))
+            .unwrap_or_else(|| {
+                if requires_openai_auth == Some(true)
+                    || base_url.trim_start().starts_with("https://api.openai.com")
+                {
+                    "responses"
+                } else {
+                    "chat"
+                }
+            });
 
         let mut lines = Vec::new();
         if !base_url.trim().is_empty() {
@@ -2016,18 +2043,18 @@ impl ProviderService {
             .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("gpt-5.2-codex");
-        let wire_api = provider_table_from_full_config
-            .and_then(|t| t.get("wire_api"))
-            .and_then(|v| v.as_str())
-            .or_else(|| stored_config.get("wire_api").and_then(|v| v.as_str()))
-            .unwrap_or("chat"); // 默认 'chat'
         let env_key = provider_table_from_full_config
             .and_then(|t| t.get("env_key"))
             .and_then(|v| v.as_str())
             .or_else(|| stored_config.get("env_key").and_then(|v| v.as_str()))
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        let inferred_requires_openai_auth = env_key == Some("OPENAI_API_KEY") && !auth_is_empty;
+        // Back-compat: older/partial snippets may omit `requires_openai_auth`. For the official
+        // OpenAI endpoint, default to OpenAI auth mode to avoid forcing users to export
+        // `OPENAI_API_KEY` unless they explicitly opted into env var mode.
+        let inferred_requires_openai_auth =
+            base_url.trim_start().starts_with("https://api.openai.com")
+                && (env_key.is_none() || (env_key == Some("OPENAI_API_KEY") && !auth_is_empty));
         let requires_openai_auth = provider_table_from_full_config
             .and_then(|t| t.get("requires_openai_auth"))
             .and_then(|v| v.as_bool())
@@ -2037,6 +2064,22 @@ impl ProviderService {
                     .and_then(|v| v.as_bool())
             })
             .unwrap_or(inferred_requires_openai_auth);
+        let wire_api = provider_table_from_full_config
+            .and_then(|t| t.get("wire_api"))
+            .and_then(|v| v.as_str())
+            .or_else(|| stored_config.get("wire_api").and_then(|v| v.as_str()))
+            .unwrap_or_else(|| {
+                // Heuristic defaults:
+                // - OpenAI official base_url (or OpenAI auth mode) → responses
+                // - Otherwise → chat
+                if requires_openai_auth
+                    || base_url.trim_start().starts_with("https://api.openai.com")
+                {
+                    "responses"
+                } else {
+                    "chat"
+                }
+            });
 
         // 从供应商名称生成 provider ID
         let provider_id = generate_provider_id_from_name(&provider.name);
@@ -2131,10 +2174,25 @@ impl ProviderService {
         let config_path = get_codex_config_path();
         crate::config::write_text_file(&config_path, &new_text)?;
 
-        // 只在 auth 非空时写入 auth.json（Codex 0.64+ 使用环境变量，不需要 auth.json）
-        if !auth_is_empty {
+        // auth.json handling:
+        // - OpenAI auth (credential store) mode: never write auth.json; remove any existing legacy
+        //   auth.json (back it up first) to avoid confusing Codex auth resolution.
+        // - Legacy API-key mode: only write when the provider explicitly carries an auth object.
+        let auth_path = get_codex_auth_path();
+        if requires_openai_auth {
+            if auth_path.exists() {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let backup_path = auth_path.with_file_name(format!("auth.json.cc-switch.bak.{ts}"));
+                if std::fs::rename(&auth_path, &backup_path).is_err() {
+                    crate::config::copy_file(&auth_path, &backup_path)?;
+                    delete_file(&auth_path)?;
+                }
+            }
+        } else if !auth_is_empty {
             if let Some(auth_value) = auth {
-                let auth_path = get_codex_auth_path();
                 write_json_file(&auth_path, auth_value)?;
             }
         }

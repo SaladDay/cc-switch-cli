@@ -1,16 +1,18 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::Size;
 use std::collections::HashSet;
+use unicode_width::UnicodeWidthChar;
 
 use crate::app_config::AppType;
+use crate::cli::i18n::current_language;
 use crate::cli::i18n::texts;
 use crate::cli::i18n::Language;
 use crate::services::skill::SyncMethod;
 
 use super::data::UiData;
 use super::form::{
-    strip_provider_internal_fields, CodexWireApi, FormFocus, FormMode, FormState, GeminiAuthType,
-    McpAddField, McpAddFormState, ProviderAddField, ProviderAddFormState,
+    CodexWireApi, FormFocus, FormMode, FormState, GeminiAuthType, McpAddField, McpAddFormState,
+    ProviderAddField, ProviderAddFormState,
 };
 use super::route::{NavItem, Route};
 
@@ -81,7 +83,9 @@ pub enum ConfirmAction {
     ConfigImport { path: String },
     ConfigRestoreBackup { id: String },
     ConfigReset,
+    SettingsSetSkipClaudeOnboarding { enabled: bool },
     EditorDiscard,
+    EditorSaveBeforeClose,
 }
 
 #[derive(Debug, Clone)]
@@ -184,7 +188,6 @@ pub enum EditorSubmit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorMode {
-    View,
     Edit,
 }
 
@@ -221,7 +224,7 @@ impl EditorState {
             title: title.into(),
             kind,
             submit,
-            mode: EditorMode::View,
+            mode: EditorMode::Edit,
             lines,
             scroll: 0,
             cursor_row: 0,
@@ -242,25 +245,121 @@ impl EditorState {
         self.lines.get(row).map(|s| s.chars().count()).unwrap_or(0)
     }
 
-    fn ensure_cursor_visible(&mut self, viewport_rows: usize) {
+    pub(super) fn wrap_line_segments(line: &str, width: u16) -> Vec<String> {
+        let width = width as usize;
+        if width == 0 {
+            return vec![String::new()];
+        }
+
+        let mut segments = Vec::new();
+        let mut current = String::new();
+        let mut current_width = 0usize;
+
+        for ch in line.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+            if current_width.saturating_add(ch_width) > width && !current.is_empty() {
+                segments.push(current);
+                current = String::new();
+                current_width = 0;
+            }
+
+            current.push(ch);
+            current_width = current_width.saturating_add(ch_width);
+        }
+
+        if segments.is_empty() {
+            segments.push(current);
+        } else {
+            segments.push(current);
+        }
+
+        segments
+    }
+
+    fn wrapped_line_height(line: &str, width: u16) -> usize {
+        Self::wrap_line_segments(line, width).len().max(1)
+    }
+
+    fn wrapped_cursor_subline_and_x(line: &str, width: u16, cursor_col: usize) -> (usize, u16) {
+        let width = width as usize;
+        if width == 0 {
+            return (0, 0);
+        }
+
+        let mut subline = 0usize;
+        let mut current_width = 0usize;
+        let mut col = 0usize;
+
+        for ch in line.chars() {
+            if col >= cursor_col {
+                break;
+            }
+
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+            if current_width.saturating_add(ch_width) > width && current_width > 0 {
+                subline = subline.saturating_add(1);
+                current_width = 0;
+            }
+
+            current_width = current_width.saturating_add(ch_width);
+            col = col.saturating_add(1);
+        }
+
+        let x = current_width.min(width.saturating_sub(1)) as u16;
+        (subline, x)
+    }
+
+    pub(super) fn cursor_visual_offset_from_scroll(&self, width: u16) -> (usize, u16) {
+        if self.lines.is_empty() {
+            return (0, 0);
+        }
+
+        let cursor_row = self.cursor_row.min(self.lines.len().saturating_sub(1));
+        let scroll = self
+            .scroll
+            .min(self.lines.len().saturating_sub(1))
+            .min(cursor_row);
+
+        let mut y = 0usize;
+        for row in scroll..cursor_row {
+            y = y.saturating_add(Self::wrapped_line_height(&self.lines[row], width));
+        }
+
+        let cursor_col = self.cursor_col.min(self.line_len_chars(cursor_row));
+        let (subline, x) =
+            Self::wrapped_cursor_subline_and_x(&self.lines[cursor_row], width, cursor_col);
+        (y.saturating_add(subline), x)
+    }
+
+    fn ensure_cursor_visible(&mut self, viewport: Size) {
         if self.lines.is_empty() {
             self.lines.push(String::new());
         }
         self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
         self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
 
-        if self.cursor_row < self.scroll {
-            self.scroll = self.cursor_row;
-        } else if viewport_rows > 0 && self.cursor_row >= self.scroll + viewport_rows {
-            self.scroll = self
-                .cursor_row
-                .saturating_sub(viewport_rows.saturating_sub(1));
-        }
-
         if !self.lines.is_empty() {
             self.scroll = self.scroll.min(self.lines.len() - 1);
         } else {
             self.scroll = 0;
+        }
+
+        if self.cursor_row < self.scroll {
+            self.scroll = self.cursor_row;
+        }
+
+        let height = viewport.height as usize;
+        if height == 0 {
+            return;
+        }
+
+        let width = viewport.width.max(1);
+
+        let (mut cursor_y, _) = self.cursor_visual_offset_from_scroll(width);
+        while cursor_y >= height && self.scroll < self.cursor_row {
+            let removed = Self::wrapped_line_height(&self.lines[self.scroll], width);
+            cursor_y = cursor_y.saturating_sub(removed);
+            self.scroll = self.scroll.saturating_add(1);
         }
     }
 
@@ -469,6 +568,9 @@ pub enum Action {
     },
     EditorDiscard,
 
+    SetSkipClaudeOnboarding {
+        enabled: bool,
+    },
     SetLanguage(Language),
 }
 
@@ -499,6 +601,16 @@ impl ConfigItem {
         ConfigItem::WebDavSync,
         ConfigItem::Reset,
     ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsItem {
+    Language,
+    SkipClaudeOnboarding,
+}
+
+impl SettingsItem {
+    pub const ALL: [SettingsItem; 2] = [SettingsItem::Language, SettingsItem::SkipClaudeOnboarding];
 }
 
 #[derive(Debug, Clone)]
@@ -557,6 +669,7 @@ pub struct App {
     pub config_webdav_idx: usize,
     pub webdav_quick_setup_username: Option<String>,
     pub language_idx: usize,
+    pub settings_idx: usize,
 }
 
 impl App {
@@ -593,6 +706,7 @@ impl App {
             config_webdav_idx: 0,
             webdav_quick_setup_username: None,
             language_idx: 0,
+            settings_idx: 0,
         }
     }
 
@@ -1308,13 +1422,19 @@ impl App {
                 };
                 if matches!(item, ConfigItem::CommonSnippet) {
                     let snippet = if data.config.common_snippet.trim().is_empty() {
-                        texts::tui_default_common_snippet().to_string()
+                        texts::tui_default_common_snippet_for_app(self.app_type.as_str())
+                            .to_string()
                     } else {
                         data.config.common_snippet.clone()
                     };
+                    let kind = if matches!(self.app_type, AppType::Codex) {
+                        EditorKind::Plain
+                    } else {
+                        EditorKind::Json
+                    };
                     self.open_editor(
                         texts::tui_common_snippet_title(self.app_type.as_str()),
-                        EditorKind::Json,
+                        kind,
                         snippet,
                         EditorSubmit::ConfigCommonSnippet,
                     );
@@ -1383,7 +1503,8 @@ impl App {
                     ConfigItem::Validate => Action::ConfigValidate,
                     ConfigItem::CommonSnippet => {
                         let snippet = if data.config.common_snippet.trim().is_empty() {
-                            texts::tui_default_common_snippet().to_string()
+                            texts::tui_default_common_snippet_for_app(self.app_type.as_str())
+                                .to_string()
                         } else {
                             data.config.common_snippet.clone()
                         };
@@ -1489,17 +1610,41 @@ impl App {
     }
 
     fn on_settings_key(&mut self, key: KeyEvent) -> Action {
-        let languages = [Language::English, Language::Chinese];
+        let settings_len = SettingsItem::ALL.len();
         match key.code {
             KeyCode::Up => {
-                self.language_idx = self.language_idx.saturating_sub(1);
+                self.settings_idx = self.settings_idx.saturating_sub(1);
                 Action::None
             }
             KeyCode::Down => {
-                self.language_idx = (self.language_idx + 1).min(languages.len() - 1);
+                self.settings_idx = (self.settings_idx + 1).min(settings_len - 1);
                 Action::None
             }
-            KeyCode::Enter => Action::SetLanguage(languages[self.language_idx]),
+            KeyCode::Enter => match SettingsItem::ALL.get(self.settings_idx) {
+                Some(SettingsItem::Language) => {
+                    let next = match current_language() {
+                        Language::English => Language::Chinese,
+                        Language::Chinese => Language::English,
+                    };
+                    Action::SetLanguage(next)
+                }
+                Some(SettingsItem::SkipClaudeOnboarding) => {
+                    let current = crate::settings::get_skip_claude_onboarding();
+                    let next = !current;
+                    let path = crate::config::get_claude_mcp_path();
+
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_confirm_title().to_string(),
+                        message: texts::skip_claude_onboarding_confirm(
+                            next,
+                            path.to_string_lossy().as_ref(),
+                        ),
+                        action: ConfirmAction::SettingsSetSkipClaudeOnboarding { enabled: next },
+                    });
+                    Action::None
+                }
+                None => Action::None,
+            },
             _ => Action::None,
         }
     }
@@ -1554,12 +1699,35 @@ impl App {
                             Action::ConfigRestoreBackup { id: id.clone() }
                         }
                         ConfirmAction::ConfigReset => Action::ConfigReset,
+                        ConfirmAction::SettingsSetSkipClaudeOnboarding { enabled } => {
+                            Action::SetSkipClaudeOnboarding { enabled: *enabled }
+                        }
                         ConfirmAction::EditorDiscard => Action::EditorDiscard,
+                        ConfirmAction::EditorSaveBeforeClose => {
+                            if let Some(editor) = self.editor.as_ref() {
+                                Action::EditorSubmit {
+                                    submit: editor.submit.clone(),
+                                    content: editor.text(),
+                                }
+                            } else {
+                                Action::None
+                            }
+                        }
                     };
                     self.overlay = Overlay::None;
                     action
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    let action = if matches!(confirm.action, ConfirmAction::EditorSaveBeforeClose) {
+                        self.editor = None;
+                        Action::None
+                    } else {
+                        Action::None
+                    };
+                    self.overlay = Overlay::None;
+                    action
+                }
+                KeyCode::Esc => {
                     self.overlay = Overlay::None;
                     Action::None
                 }
@@ -1993,14 +2161,19 @@ impl App {
 
     fn open_common_snippet_editor(&mut self, data: &UiData) {
         let snippet = if data.config.common_snippet.trim().is_empty() {
-            texts::tui_default_common_snippet().to_string()
+            texts::tui_default_common_snippet_for_app(self.app_type.as_str()).to_string()
         } else {
             data.config.common_snippet.clone()
         };
 
+        let kind = if matches!(self.app_type, AppType::Codex) {
+            EditorKind::Plain
+        } else {
+            EditorKind::Json
+        };
         self.open_editor(
             texts::tui_common_snippet_title(self.app_type.as_str()),
-            EditorKind::Json,
+            kind,
             snippet,
             EditorSubmit::ConfigCommonSnippet,
         );
@@ -2290,7 +2463,11 @@ impl App {
                                 return Action::None;
                             }
                             ProviderAddField::IncludeCommonConfig => {
-                                provider.include_common_config = !provider.include_common_config;
+                                if let Err(err) = provider
+                                    .toggle_include_common_config(&data.config.common_snippet)
+                                {
+                                    self.push_toast(err, ToastKind::Warning);
+                                }
                                 return Action::None;
                             }
                             ProviderAddField::GeminiAuthType => {
@@ -2333,8 +2510,11 @@ impl App {
                             }
                         };
 
-                        let display_value = strip_provider_internal_fields(&provider_json);
-                        let content = serde_json::to_string_pretty(&display_value)
+                        let settings_value = provider_json
+                            .get("settingsConfig")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                        let content = serde_json::to_string_pretty(&settings_value)
                             .unwrap_or_else(|_| "{}".to_string());
                         self.open_editor(
                             texts::tui_form_json_title(),
@@ -2342,6 +2522,9 @@ impl App {
                             content,
                             EditorSubmit::ProviderFormApplyJson,
                         );
+                        if let Some(editor) = self.editor.as_mut() {
+                            editor.mode = EditorMode::Edit;
+                        }
                         return Action::None;
                     }
                     KeyCode::Up => {
@@ -2484,7 +2667,7 @@ impl App {
             }
         }
 
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('s')) {
+        if is_save_shortcut(key) {
             match form {
                 FormState::ProviderAdd(provider) => {
                     if !provider.has_required_fields() {
@@ -2556,173 +2739,154 @@ impl App {
     }
 
     fn on_editor_key(&mut self, key: KeyEvent) -> Action {
-        let viewport = self.editor_viewport_rows();
+        let viewport = self.editor_viewport_size();
+        let jump_rows = viewport.height as usize;
 
         let Some(editor) = &mut self.editor else {
             return Action::None;
         };
 
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('s')) {
+        if is_save_shortcut(key) {
             return Action::EditorSubmit {
                 submit: editor.submit.clone(),
                 content: editor.text(),
             };
         }
 
-        match editor.mode {
-            EditorMode::View => match key.code {
-                KeyCode::Enter => {
-                    editor.mode = EditorMode::Edit;
+        match key.code {
+            KeyCode::Esc => {
+                if editor.is_dirty() {
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_editor_save_before_close_title().to_string(),
+                        message: texts::tui_editor_save_before_close_message().to_string(),
+                        action: ConfirmAction::EditorSaveBeforeClose,
+                    });
+                    Action::None
+                } else {
+                    self.editor = None;
                     Action::None
                 }
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    if editor.is_dirty() {
-                        self.overlay = Overlay::Confirm(ConfirmOverlay {
-                            title: texts::tui_editor_discard_title().to_string(),
-                            message: texts::tui_editor_discard_message().to_string(),
-                            action: ConfirmAction::EditorDiscard,
-                        });
-                        Action::None
-                    } else {
-                        self.editor = None;
-                        Action::None
-                    }
+            }
+            KeyCode::Up => {
+                editor.cursor_row = editor.cursor_row.saturating_sub(1);
+                editor.cursor_col = editor
+                    .cursor_col
+                    .min(editor.line_len_chars(editor.cursor_row));
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::Down => {
+                if !editor.lines.is_empty() {
+                    editor.cursor_row = (editor.cursor_row + 1).min(editor.lines.len() - 1);
                 }
-                KeyCode::Up => {
-                    editor.scroll = editor.scroll.saturating_sub(1);
-                    Action::None
-                }
-                KeyCode::Down => {
-                    if !editor.lines.is_empty() {
-                        editor.scroll = (editor.scroll + 1).min(editor.lines.len() - 1);
-                    }
-                    Action::None
-                }
-                KeyCode::PageUp => {
-                    editor.scroll = editor.scroll.saturating_sub(viewport);
-                    Action::None
-                }
-                KeyCode::PageDown => {
-                    if !editor.lines.is_empty() {
-                        editor.scroll = (editor.scroll + viewport).min(editor.lines.len() - 1);
-                    }
-                    Action::None
-                }
-                _ => Action::None,
-            },
-            EditorMode::Edit => match key.code {
-                KeyCode::Esc => {
-                    editor.mode = EditorMode::View;
-                    Action::None
-                }
-                KeyCode::Up => {
-                    editor.cursor_row = editor.cursor_row.saturating_sub(1);
-                    editor.cursor_col = editor
-                        .cursor_col
-                        .min(editor.line_len_chars(editor.cursor_row));
-                    editor.ensure_cursor_visible(viewport);
-                    Action::None
-                }
-                KeyCode::Down => {
-                    if !editor.lines.is_empty() {
-                        editor.cursor_row = (editor.cursor_row + 1).min(editor.lines.len() - 1);
-                    }
-                    editor.cursor_col = editor
-                        .cursor_col
-                        .min(editor.line_len_chars(editor.cursor_row));
-                    editor.ensure_cursor_visible(viewport);
-                    Action::None
-                }
-                KeyCode::Left => {
-                    if editor.cursor_col > 0 {
-                        editor.cursor_col -= 1;
-                    } else if editor.cursor_row > 0 {
-                        editor.cursor_row -= 1;
-                        editor.cursor_col = editor.line_len_chars(editor.cursor_row);
-                    }
-                    editor.ensure_cursor_visible(viewport);
-                    Action::None
-                }
-                KeyCode::Right => {
-                    let line_len = editor.line_len_chars(editor.cursor_row);
-                    if editor.cursor_col < line_len {
-                        editor.cursor_col += 1;
-                    } else if editor.cursor_row + 1 < editor.lines.len() {
-                        editor.cursor_row += 1;
-                        editor.cursor_col = 0;
-                    }
-                    editor.ensure_cursor_visible(viewport);
-                    Action::None
-                }
-                KeyCode::Home => {
-                    editor.cursor_col = 0;
-                    editor.ensure_cursor_visible(viewport);
-                    Action::None
-                }
-                KeyCode::End => {
+                editor.cursor_col = editor
+                    .cursor_col
+                    .min(editor.line_len_chars(editor.cursor_row));
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::Left => {
+                if editor.cursor_col > 0 {
+                    editor.cursor_col -= 1;
+                } else if editor.cursor_row > 0 {
+                    editor.cursor_row -= 1;
                     editor.cursor_col = editor.line_len_chars(editor.cursor_row);
-                    editor.ensure_cursor_visible(viewport);
-                    Action::None
                 }
-                KeyCode::PageUp => {
-                    editor.scroll = editor.scroll.saturating_sub(viewport);
-                    editor.cursor_row = editor.cursor_row.saturating_sub(viewport);
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::Right => {
+                let line_len = editor.line_len_chars(editor.cursor_row);
+                if editor.cursor_col < line_len {
+                    editor.cursor_col += 1;
+                } else if editor.cursor_row + 1 < editor.lines.len() {
+                    editor.cursor_row += 1;
+                    editor.cursor_col = 0;
+                }
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::Home => {
+                editor.cursor_col = 0;
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::End => {
+                editor.cursor_col = editor.line_len_chars(editor.cursor_row);
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::PageUp => {
+                editor.scroll = editor.scroll.saturating_sub(jump_rows);
+                editor.cursor_row = editor.cursor_row.saturating_sub(jump_rows);
+                editor.cursor_col = editor
+                    .cursor_col
+                    .min(editor.line_len_chars(editor.cursor_row));
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::PageDown => {
+                if !editor.lines.is_empty() {
+                    editor.scroll = (editor.scroll + jump_rows).min(editor.lines.len() - 1);
+                    editor.cursor_row = (editor.cursor_row + jump_rows).min(editor.lines.len() - 1);
                     editor.cursor_col = editor
                         .cursor_col
                         .min(editor.line_len_chars(editor.cursor_row));
+                }
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::Backspace => {
+                editor.backspace();
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::Delete => {
+                editor.delete();
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::Enter => {
+                editor.newline();
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::Tab => {
+                editor.insert_str("  ");
+                editor.ensure_cursor_visible(viewport);
+                Action::None
+            }
+            KeyCode::Char(c) => {
+                if !c.is_control() {
+                    editor.insert_char(c);
                     editor.ensure_cursor_visible(viewport);
-                    Action::None
                 }
-                KeyCode::PageDown => {
-                    if !editor.lines.is_empty() {
-                        editor.scroll = (editor.scroll + viewport).min(editor.lines.len() - 1);
-                        editor.cursor_row =
-                            (editor.cursor_row + viewport).min(editor.lines.len() - 1);
-                        editor.cursor_col = editor
-                            .cursor_col
-                            .min(editor.line_len_chars(editor.cursor_row));
-                    }
-                    editor.ensure_cursor_visible(viewport);
-                    Action::None
-                }
-                KeyCode::Backspace => {
-                    editor.backspace();
-                    editor.ensure_cursor_visible(viewport);
-                    Action::None
-                }
-                KeyCode::Delete => {
-                    editor.delete();
-                    editor.ensure_cursor_visible(viewport);
-                    Action::None
-                }
-                KeyCode::Enter => {
-                    editor.newline();
-                    editor.ensure_cursor_visible(viewport);
-                    Action::None
-                }
-                KeyCode::Tab => {
-                    editor.insert_str("  ");
-                    editor.ensure_cursor_visible(viewport);
-                    Action::None
-                }
-                KeyCode::Char(c) => {
-                    if !c.is_control() {
-                        editor.insert_char(c);
-                        editor.ensure_cursor_visible(viewport);
-                    }
-                    Action::None
-                }
-                _ => Action::None,
-            },
+                Action::None
+            }
+            _ => Action::None,
         }
     }
 
-    fn editor_viewport_rows(&self) -> usize {
-        // Approximate rows available for the editor's inner text area. The layout is stable:
-        // header(3) + footer(1) + content block borders(2) + editor outer borders(2)
-        // + editor hint(1) + textarea borders(2) = 11.
-        let h = self.last_size.height as usize;
-        h.saturating_sub(11).max(1)
+    fn editor_viewport_size(&self) -> Size {
+        // Matches `render()` + `render_content()` + `render_editor()` layout math in `ui.rs`.
+        let mut width = self.last_size.width.saturating_sub(30);
+        let mut height = self.last_size.height.saturating_sub(3).saturating_sub(1);
+
+        if self.filter.active || !self.filter.buffer.trim().is_empty() {
+            height = height.saturating_sub(5);
+        }
+
+        // render_editor:
+        // - outer borders (2)
+        // - key bar row (1)
+        // - field borders (2)
+        width = width.saturating_sub(2).saturating_sub(2);
+        height = height.saturating_sub(2).saturating_sub(1).saturating_sub(2);
+
+        Size {
+            width: width.max(1),
+            height: height.max(1),
+        }
     }
 
     fn clamp_selections(&mut self, data: &UiData) {
@@ -3036,6 +3200,14 @@ fn sync_method_for_picker_index(index: usize) -> SyncMethod {
         1 => SyncMethod::Symlink,
         2 => SyncMethod::Copy,
         _ => SyncMethod::Auto,
+    }
+}
+
+fn is_save_shortcut(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('s' | 'S') => key.modifiers.contains(KeyModifiers::CONTROL),
+        KeyCode::Char('\u{13}') => true,
+        _ => false,
     }
 }
 
@@ -3795,6 +3967,182 @@ mod tests {
     }
 
     #[test]
+    fn prompts_editor_ctrl_shift_s_submits() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.prompts.rows.push(super::super::data::PromptRow {
+            id: "pr1".to_string(),
+            prompt: crate::prompt::Prompt {
+                id: "pr1".to_string(),
+                name: "Demo".to_string(),
+                content: "hello".to_string(),
+                description: None,
+                enabled: false,
+                created_at: None,
+                updated_at: None,
+            },
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        let submit = app.on_key(
+            KeyEvent::new(KeyCode::Char('S'), KeyModifiers::CONTROL),
+            &data,
+        );
+        assert!(
+            matches!(
+                submit,
+                Action::EditorSubmit {
+                    submit: EditorSubmit::PromptEdit { .. },
+                    ..
+                }
+            ),
+            "Ctrl+Shift+S should be accepted as save shortcut in editor"
+        );
+    }
+
+    #[test]
+    fn prompts_editor_ctrl_s_control_char_submits() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.prompts.rows.push(super::super::data::PromptRow {
+            id: "pr1".to_string(),
+            prompt: crate::prompt::Prompt {
+                id: "pr1".to_string(),
+                name: "Demo".to_string(),
+                content: "hello".to_string(),
+                description: None,
+                enabled: false,
+                created_at: None,
+                updated_at: None,
+            },
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        let submit = app.on_key(key(KeyCode::Char('\u{13}')), &data);
+        assert!(
+            matches!(
+                submit,
+                Action::EditorSubmit {
+                    submit: EditorSubmit::PromptEdit { .. },
+                    ..
+                }
+            ),
+            "ASCII XOFF control char should be accepted as save shortcut in editor"
+        );
+    }
+
+    #[test]
+    fn prompts_editor_esc_dirty_opens_save_before_close_confirm() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.prompts.rows.push(super::super::data::PromptRow {
+            id: "pr1".to_string(),
+            prompt: crate::prompt::Prompt {
+                id: "pr1".to_string(),
+                name: "Demo".to_string(),
+                content: "hello".to_string(),
+                description: None,
+                enabled: false,
+                created_at: None,
+                updated_at: None,
+            },
+        });
+
+        app.on_key(key(KeyCode::Char('e')), &data);
+        app.on_key(key(KeyCode::Char('x')), &data);
+        let action = app.on_key(key(KeyCode::Esc), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::EditorSaveBeforeClose,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn prompts_editor_save_confirm_yes_submits_changes() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.prompts.rows.push(super::super::data::PromptRow {
+            id: "pr1".to_string(),
+            prompt: crate::prompt::Prompt {
+                id: "pr1".to_string(),
+                name: "Demo".to_string(),
+                content: "hello".to_string(),
+                description: None,
+                enabled: false,
+                created_at: None,
+                updated_at: None,
+            },
+        });
+
+        app.on_key(key(KeyCode::Char('e')), &data);
+        app.on_key(key(KeyCode::Char('x')), &data);
+        app.on_key(key(KeyCode::Esc), &data);
+
+        let action = app.on_key(key(KeyCode::Char('y')), &data);
+        assert!(
+            matches!(
+                action,
+                Action::EditorSubmit {
+                    submit: EditorSubmit::PromptEdit { .. },
+                    content
+                } if content.starts_with("xhello")
+            ),
+            "confirm yes should save current editor content"
+        );
+    }
+
+    #[test]
+    fn prompts_editor_save_confirm_no_discards_and_closes() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.prompts.rows.push(super::super::data::PromptRow {
+            id: "pr1".to_string(),
+            prompt: crate::prompt::Prompt {
+                id: "pr1".to_string(),
+                name: "Demo".to_string(),
+                content: "hello".to_string(),
+                description: None,
+                enabled: false,
+                created_at: None,
+                updated_at: None,
+            },
+        });
+
+        app.on_key(key(KeyCode::Char('e')), &data);
+        app.on_key(key(KeyCode::Char('x')), &data);
+        app.on_key(key(KeyCode::Esc), &data);
+
+        let action = app.on_key(key(KeyCode::Char('n')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(
+            app.editor.is_none(),
+            "confirm no should discard and close editor"
+        );
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
     fn providers_e_opens_edit_form_and_ctrl_s_submits() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
@@ -3976,6 +4324,127 @@ mod tests {
             app.editor.as_ref().map(|editor| &editor.submit),
             Some(EditorSubmit::ProviderFormApplyJson)
         ));
+        assert!(
+            matches!(
+                app.editor.as_ref().map(|editor| editor.mode),
+                Some(EditorMode::Edit)
+            ),
+            "Enter on provider JSON preview should directly enter edit mode"
+        );
+        let content = app
+            .editor
+            .as_ref()
+            .map(|editor| editor.text())
+            .unwrap_or_default();
+        assert!(
+            !content.contains("\"id\""),
+            "provider id should not be exposed in settingsConfig JSON editor"
+        );
+        assert!(
+            !content.contains("\"name\""),
+            "provider name should not be exposed in settingsConfig JSON editor"
+        );
+    }
+
+    #[test]
+    fn provider_json_editor_single_enter_then_ctrl_s_submits_edited_content() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data); // apply template -> fields
+        app.on_key(key(KeyCode::Tab), &data); // fields -> json
+        app.on_key(key(KeyCode::Enter), &data); // json -> editor(edit mode)
+
+        let original = app
+            .editor
+            .as_ref()
+            .map(|editor| editor.text())
+            .expect("editor should be opened");
+        assert!(!original.starts_with(' '));
+
+        // Edit immediately (without pressing Enter again) then submit.
+        app.on_key(key(KeyCode::Char(' ')), &data);
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        let Action::EditorSubmit { submit, content } = submit else {
+            panic!("Ctrl+S in JSON editor should submit edited content");
+        };
+        assert!(
+            matches!(submit, EditorSubmit::ProviderFormApplyJson),
+            "JSON editor submit should apply back to provider form"
+        );
+        assert!(
+            content.starts_with(' '),
+            "submitted content should include the in-editor change made right after opening"
+        );
+    }
+
+    #[test]
+    fn provider_json_editor_ctrl_s_applies_unknown_fields_back_to_form() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data); // apply template -> fields
+        app.on_key(key(KeyCode::Tab), &data); // fields -> json
+        app.on_key(key(KeyCode::Enter), &data); // json -> editor
+
+        // Replace the whole JSON with a value that contains an unknown key inside settingsConfig.
+        let injected = r#"{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://after.example"
+  },
+  "unknownField": "kept"
+}"#;
+        if let Some(editor) = app.editor.as_mut() {
+            editor.lines = injected.lines().map(|s| s.to_string()).collect();
+            editor.cursor_row = 0;
+            editor.cursor_col = 0;
+            editor.scroll = 0;
+        } else {
+            panic!("expected editor to be open");
+        }
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        let Action::EditorSubmit { submit, content } = submit else {
+            panic!("expected EditorSubmit action");
+        };
+        assert!(matches!(submit, EditorSubmit::ProviderFormApplyJson));
+
+        // Simulate main-loop handling of the submit to apply it back to the form.
+        let settings_value: serde_json::Value = serde_json::from_str(&content).expect("valid json");
+        if let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_mut() {
+            let mut provider_value = form.to_provider_json_value();
+            if let Some(obj) = provider_value.as_object_mut() {
+                obj.insert("settingsConfig".to_string(), settings_value);
+            }
+            form.apply_provider_json_value_to_fields(provider_value)
+                .expect("apply should succeed");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+        app.editor = None;
+
+        // Re-open the JSON editor and ensure the unknown field is still present.
+        app.on_key(key(KeyCode::Enter), &data);
+        let reopened = app
+            .editor
+            .as_ref()
+            .map(|editor| editor.text())
+            .unwrap_or_default();
+        assert!(
+            reopened.contains("\"unknownField\""),
+            "unknownField should be preserved after applying JSON back to form"
+        );
+        assert!(
+            reopened.contains("\"kept\""),
+            "unknownField value should be preserved after applying JSON back to form"
+        );
     }
 
     #[test]

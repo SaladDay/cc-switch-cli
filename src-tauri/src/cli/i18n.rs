@@ -350,6 +350,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_json_must_be_object() -> &'static str {
+        if is_chinese() {
+            "JSON 必须是对象（例如：{\"env\":{...}}）"
+        } else {
+            "JSON must be an object (e.g. {\"env\":{...}})"
+        }
+    }
+
     pub fn tui_error_invalid_config_structure(e: &str) -> String {
         if is_chinese() {
             format!("配置结构无效：{e}")
@@ -388,6 +396,13 @@ pub mod texts {
 
     pub fn tui_default_common_snippet() -> &'static str {
         "{}\n"
+    }
+
+    pub fn tui_default_common_snippet_for_app(app: &str) -> &'static str {
+        match app {
+            "codex" => "",
+            _ => "{}\n",
+        }
     }
 
     pub fn tui_latency_ms(ms: u128) -> String {
@@ -638,6 +653,22 @@ pub mod texts {
             "有未保存的修改，确定放弃？"
         } else {
             "You have unsaved changes. Discard them?"
+        }
+    }
+
+    pub fn tui_editor_save_before_close_title() -> &'static str {
+        if is_chinese() {
+            "当前未保存"
+        } else {
+            "Unsaved Changes"
+        }
+    }
+
+    pub fn tui_editor_save_before_close_message() -> &'static str {
+        if is_chinese() {
+            "当前有未保存的修改。"
+        } else {
+            "You have unsaved changes."
         }
     }
 
@@ -1413,6 +1444,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_save_and_exit() -> &'static str {
+        if is_chinese() {
+            "保存并退出"
+        } else {
+            "save & exit"
+        }
+    }
+
+    pub fn tui_key_exit_without_save() -> &'static str {
+        if is_chinese() {
+            "不保存退出"
+        } else {
+            "exit w/o save"
+        }
+    }
+
     pub fn tui_key_edit_mode() -> &'static str {
         if is_chinese() {
             "编辑"
@@ -1540,6 +1587,22 @@ pub mod texts {
             "语言"
         } else {
             "Language"
+        }
+    }
+
+    pub fn tui_settings_header_setting() -> &'static str {
+        if is_chinese() {
+            "设置项"
+        } else {
+            "Setting"
+        }
+    }
+
+    pub fn tui_settings_header_value() -> &'static str {
+        if is_chinese() {
+            "值"
+        } else {
+            "Value"
         }
     }
 
@@ -2657,6 +2720,22 @@ pub mod texts {
                 "Repository enabled.".to_string()
             } else {
                 "Repository disabled.".to_string()
+            }
+        }
+    }
+
+    pub fn tui_toast_skip_claude_onboarding_toggled(enabled: bool) -> String {
+        if is_chinese() {
+            if enabled {
+                "已跳过 Claude Code 初次安装确认。".to_string()
+            } else {
+                "已恢复 Claude Code 初次安装确认。".to_string()
+            }
+        } else {
+            if enabled {
+                "Claude Code onboarding confirmation will be skipped.".to_string()
+            } else {
+                "Claude Code onboarding confirmation restored.".to_string()
             }
         }
     }
@@ -5059,6 +5138,14 @@ pub mod texts {
         }
     }
 
+    pub fn disabled() -> &'static str {
+        if is_chinese() {
+            "禁用"
+        } else {
+            "Disabled"
+        }
+    }
+
     pub fn active() -> &'static str {
         if is_chinese() {
             "活动"
@@ -5113,6 +5200,62 @@ pub mod texts {
             "✓ 语言已更改"
         } else {
             "✓ Language changed"
+        }
+    }
+
+    pub fn skip_claude_onboarding() -> &'static str {
+        if is_chinese() {
+            "🚫 跳过 Claude Code 初次安装确认"
+        } else {
+            "🚫 Skip Claude Code onboarding confirmation"
+        }
+    }
+
+    pub fn skip_claude_onboarding_label() -> &'static str {
+        if is_chinese() {
+            "跳过 Claude Code 初次安装确认"
+        } else {
+            "Skip Claude Code onboarding confirmation"
+        }
+    }
+
+    pub fn skip_claude_onboarding_confirm(enable: bool, path: &str) -> String {
+        if is_chinese() {
+            if enable {
+                format!(
+                    "确认启用跳过 Claude Code 初次安装确认？\n将写入 {path}: hasCompletedOnboarding=true"
+                )
+            } else {
+                format!(
+                    "确认恢复 Claude Code 初次安装确认？\n将从 {path} 删除 hasCompletedOnboarding"
+                )
+            }
+        } else {
+            if enable {
+                format!(
+                    "Enable skipping Claude Code onboarding confirmation?\nWrites hasCompletedOnboarding=true to {path}"
+                )
+            } else {
+                format!(
+                    "Disable skipping Claude Code onboarding confirmation?\nRemoves hasCompletedOnboarding from {path}"
+                )
+            }
+        }
+    }
+
+    pub fn skip_claude_onboarding_changed(enable: bool) -> String {
+        if is_chinese() {
+            if enable {
+                "✓ 已启用：跳过 Claude Code 初次安装确认".to_string()
+            } else {
+                "✓ 已恢复 Claude Code 初次安装确认".to_string()
+            }
+        } else {
+            if enable {
+                "✓ Skip Claude Code onboarding confirmation enabled".to_string()
+            } else {
+                "✓ Claude Code onboarding confirmation restored".to_string()
+            }
         }
     }
 
@@ -5329,10 +5472,19 @@ pub mod texts {
     }
 
     pub fn common_config_snippet_editor_prompt(app: &str) -> String {
+        let is_codex = app == "codex";
         if is_chinese() {
-            format!("编辑 {app} 的通用配置片段（JSON 对象，留空则清除）：")
+            if is_codex {
+                format!("编辑 {app} 的通用配置片段（TOML，留空则清除）：")
+            } else {
+                format!("编辑 {app} 的通用配置片段（JSON 对象，留空则清除）：")
+            }
         } else {
-            format!("Edit common config snippet for {app} (JSON object; empty to clear):")
+            if is_codex {
+                format!("Edit common config snippet for {app} (TOML; empty to clear):")
+            } else {
+                format!("Edit common config snippet for {app} (JSON object; empty to clear):")
+            }
         }
     }
 
@@ -5341,6 +5493,14 @@ pub mod texts {
             format!("JSON 无效：{err}")
         } else {
             format!("Invalid JSON: {err}")
+        }
+    }
+
+    pub fn common_config_snippet_invalid_toml(err: &str) -> String {
+        if is_chinese() {
+            format!("TOML 无效：{err}")
+        } else {
+            format!("Invalid TOML: {err}")
         }
     }
 

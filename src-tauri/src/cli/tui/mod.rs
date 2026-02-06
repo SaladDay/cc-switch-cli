@@ -752,8 +752,8 @@ fn handle_action(
                 Ok(())
             }
             EditorSubmit::ProviderFormApplyJson => {
-                let provider: Provider = match serde_json::from_str(&content) {
-                    Ok(provider) => provider,
+                let settings_value: serde_json::Value = match serde_json::from_str(&content) {
+                    Ok(value) => value,
                     Err(e) => {
                         app.push_toast(
                             texts::tui_toast_invalid_json(&e.to_string()),
@@ -763,8 +763,34 @@ fn handle_action(
                     }
                 };
 
-                if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
-                    form.apply_provider_json_to_fields(&provider);
+                if !settings_value.is_object() {
+                    app.push_toast(texts::tui_toast_json_must_be_object(), ToastKind::Error);
+                    return Ok(());
+                }
+
+                let provider_value = match app.form.as_ref() {
+                    Some(FormState::ProviderAdd(form)) => {
+                        let mut provider_value = form.to_provider_json_value();
+                        if let Some(obj) = provider_value.as_object_mut() {
+                            obj.insert("settingsConfig".to_string(), settings_value);
+                        }
+                        Some(provider_value)
+                    }
+                    _ => None,
+                };
+
+                if let Some(provider_value) = provider_value {
+                    let apply_result = match app.form.as_mut() {
+                        Some(FormState::ProviderAdd(form)) => {
+                            form.apply_provider_json_value_to_fields(provider_value)
+                        }
+                        _ => Ok(()),
+                    };
+
+                    if let Err(err) = apply_result {
+                        app.push_toast(err, ToastKind::Error);
+                        return Ok(());
+                    }
                 }
                 app.editor = None;
                 Ok(())
@@ -907,6 +933,19 @@ fn handle_action(
                 let edited = content.trim().to_string();
                 let (next_snippet, toast) = if edited.is_empty() {
                     (None, texts::common_config_snippet_cleared())
+                } else if matches!(app.app_type, AppType::Codex) {
+                    let doc: toml_edit::DocumentMut = match edited.parse() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            app.push_toast(
+                                texts::common_config_snippet_invalid_toml(&e.to_string()),
+                                ToastKind::Error,
+                            );
+                            return Ok(());
+                        }
+                    };
+                    let canonical = doc.to_string().trim().to_string();
+                    (Some(canonical), texts::common_config_snippet_saved())
                 } else {
                     let value: Value = match serde_json::from_str(&edited) {
                         Ok(v) => v,
@@ -960,7 +999,7 @@ fn handle_action(
 
                 // Bring the user back to the snippet preview overlay.
                 let snippet = if data.config.common_snippet.trim().is_empty() {
-                    texts::tui_default_common_snippet().to_string()
+                    texts::tui_default_common_snippet_for_app(app.app_type.as_str()).to_string()
                 } else {
                     data.config.common_snippet.clone()
                 };
@@ -1445,6 +1484,15 @@ fn handle_action(
             Ok(())
         }
 
+        Action::SetSkipClaudeOnboarding { enabled } => {
+            crate::settings::set_skip_claude_onboarding(enabled)?;
+            app.push_toast(
+                texts::tui_toast_skip_claude_onboarding_toggled(enabled),
+                ToastKind::Success,
+            );
+            Ok(())
+        }
+
         Action::SetLanguage(lang) => {
             set_language(lang)?;
             app.push_toast(texts::language_changed(), ToastKind::Success);
@@ -1493,7 +1541,7 @@ fn refresh_common_snippet_overlay(app: &mut App, data: &UiData) {
     };
 
     let snippet = if data.config.common_snippet.trim().is_empty() {
-        texts::tui_default_common_snippet().to_string()
+        texts::tui_default_common_snippet_for_app(app.app_type.as_str()).to_string()
     } else {
         data.config.common_snippet.clone()
     };

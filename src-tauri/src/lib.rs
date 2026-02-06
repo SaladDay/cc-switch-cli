@@ -46,7 +46,8 @@ pub use services::{
     SpeedtestService, SyncDecision, WebDavSyncService, WebDavSyncSummary,
 };
 pub use settings::{
-    get_webdav_sync_settings, set_webdav_sync_settings, update_settings, webdav_jianguoyun_preset,
-    AppSettings, WebDavSyncSettings, WebDavSyncStatus,
+    get_skip_claude_onboarding, get_webdav_sync_settings, set_skip_claude_onboarding,
+    set_webdav_sync_settings, update_settings, webdav_jianguoyun_preset, AppSettings,
+    WebDavSyncSettings, WebDavSyncStatus,
 };
 pub use store::AppState;

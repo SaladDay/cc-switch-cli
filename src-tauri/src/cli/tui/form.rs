@@ -510,7 +510,6 @@ impl ProviderAddFormState {
 
     pub fn fields(&self) -> Vec<ProviderAddField> {
         let mut fields = vec![
-            ProviderAddField::Id,
             ProviderAddField::Name,
             ProviderAddField::WebsiteUrl,
             ProviderAddField::Notes,
@@ -529,8 +528,8 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::CodexRequiresOpenaiAuth);
                 if !self.codex_requires_openai_auth {
                     fields.push(ProviderAddField::CodexEnvKey);
+                    fields.push(ProviderAddField::CodexApiKey);
                 }
-                fields.push(ProviderAddField::CodexApiKey);
             }
             AppType::Gemini => {
                 fields.push(ProviderAddField::GeminiAuthType);
@@ -836,7 +835,9 @@ impl ProviderAddFormState {
                 );
                 settings_obj.insert("config".to_string(), Value::String(updated));
 
-                if self.codex_api_key.is_blank() {
+                if self.codex_requires_openai_auth {
+                    settings_obj.remove("auth");
+                } else if self.codex_api_key.is_blank() {
                     if let Some(auth) = settings_obj.get_mut("auth") {
                         if let Some(obj) = auth.as_object_mut() {
                             obj.remove("OPENAI_API_KEY");
@@ -995,6 +996,90 @@ impl ProviderAddFormState {
         }
 
         *self = next;
+    }
+
+    pub fn apply_provider_json_value_to_fields(
+        &mut self,
+        mut provider_value: Value,
+    ) -> Result<(), String> {
+        let previous_mode = self.mode.clone();
+        let previous_focus = self.focus;
+        let previous_template_idx = self.template_idx;
+        let previous_field_idx = self.field_idx;
+        let previous_json_scroll = self.json_scroll;
+        let previous_include_common_config = self.include_common_config;
+
+        // Preserve internal provider fields (e.g. meta/applyCommonConfig, partner flags) that are
+        // intentionally hidden from the JSON editor preview, so they don't get dropped on save.
+        let current_value = self.to_provider_json_value();
+        if let (Some(current_obj), Some(edited_obj)) =
+            (current_value.as_object(), provider_value.as_object_mut())
+        {
+            for (key, value) in current_obj {
+                if should_hide_provider_field(key) && !edited_obj.contains_key(key) {
+                    edited_obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        let provider: Provider = serde_json::from_value(provider_value.clone())
+            .map_err(|e| crate::cli::i18n::texts::tui_toast_invalid_json(&e.to_string()))?;
+
+        let mut next = Self::from_provider(self.app_type.clone(), &provider);
+        next.extra = provider_value;
+
+        if provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.apply_common_config)
+            .is_none()
+        {
+            next.include_common_config = previous_include_common_config;
+        }
+
+        next.mode = previous_mode.clone();
+        next.focus = previous_focus;
+        next.template_idx = previous_template_idx;
+        next.json_scroll = previous_json_scroll;
+        next.editing = false;
+
+        let fields_len = next.fields().len();
+        next.field_idx = if fields_len == 0 {
+            0
+        } else {
+            previous_field_idx.min(fields_len - 1)
+        };
+
+        if let FormMode::Edit { id } = previous_mode {
+            next.id.set(id);
+            next.id_is_manual = true;
+        }
+
+        *self = next;
+        Ok(())
+    }
+
+    pub fn toggle_include_common_config(&mut self, common_snippet: &str) -> Result<(), String> {
+        let next_enabled = !self.include_common_config;
+        if self.include_common_config && !next_enabled {
+            let mut provider_value = self.to_provider_json_value();
+            if let Some(settings_value) = provider_value
+                .as_object_mut()
+                .and_then(|obj| obj.get_mut("settingsConfig"))
+            {
+                strip_common_config_from_settings(&self.app_type, settings_value, common_snippet)?;
+            }
+
+            if let Ok(provider) = serde_json::from_value::<Provider>(provider_value) {
+                let stripped_settings = provider.settings_config.clone();
+                self.apply_provider_json_to_fields(&provider);
+                if let Some(extra_obj) = self.extra.as_object_mut() {
+                    extra_obj.insert("settingsConfig".to_string(), stripped_settings);
+                }
+            }
+        }
+        self.include_common_config = next_enabled;
+        Ok(())
     }
 }
 
@@ -1387,6 +1472,165 @@ fn merge_toml_tables(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
                 dst.insert(key, src_item.clone());
             }
         }
+    }
+}
+
+fn strip_common_config_from_settings(
+    app_type: &AppType,
+    settings_value: &mut Value,
+    common_snippet: &str,
+) -> Result<(), String> {
+    let snippet = common_snippet.trim();
+    if snippet.is_empty() {
+        return Ok(());
+    }
+
+    match app_type {
+        AppType::Claude | AppType::Gemini => {
+            let common: Value = serde_json::from_str(snippet).map_err(|e| {
+                crate::cli::i18n::texts::common_config_snippet_invalid_json(&e.to_string())
+            })?;
+            if !common.is_object() {
+                return Err(crate::cli::i18n::texts::common_config_snippet_not_object().to_string());
+            }
+
+            strip_common_json_values(settings_value, &common);
+        }
+        AppType::Codex => {
+            if !settings_value.is_object() {
+                return Ok(());
+            }
+            let settings_obj = settings_value
+                .as_object_mut()
+                .expect("settingsConfig must be a JSON object");
+            let current_config = settings_obj
+                .get("config")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let stripped = strip_codex_common_config_snippet(current_config, snippet)?;
+            settings_obj.insert("config".to_string(), Value::String(stripped));
+        }
+    }
+
+    Ok(())
+}
+
+fn strip_common_json_values(target: &mut Value, common: &Value) {
+    if let (Value::Object(target_obj), Value::Object(common_obj)) = (target, common) {
+        let keys_to_remove = common_obj
+            .iter()
+            .filter_map(|(key, common_value)| {
+                let Some(target_value) = target_obj.get_mut(key) else {
+                    return None;
+                };
+
+                if value_matches_common(target_value, common_value) {
+                    return Some(key.clone());
+                }
+
+                if target_value.is_object() && common_value.is_object() {
+                    strip_common_json_values(target_value, common_value);
+                    if target_value
+                        .as_object()
+                        .map(|obj| obj.is_empty())
+                        .unwrap_or(false)
+                    {
+                        return Some(key.clone());
+                    }
+                }
+                None
+            })
+            .collect::<Vec<_>>();
+
+        for key in keys_to_remove {
+            target_obj.remove(&key);
+        }
+    }
+}
+
+fn value_matches_common(value: &Value, common: &Value) -> bool {
+    match (value, common) {
+        (Value::Object(value_obj), Value::Object(common_obj)) => {
+            value_obj.len() == common_obj.len()
+                && common_obj.iter().all(|(key, common_value)| {
+                    value_obj
+                        .get(key)
+                        .map(|value_item| value_matches_common(value_item, common_value))
+                        .unwrap_or(false)
+                })
+        }
+        (Value::Array(value_arr), Value::Array(common_arr)) => {
+            value_arr.len() == common_arr.len()
+                && value_arr
+                    .iter()
+                    .zip(common_arr.iter())
+                    .all(|(value_item, common_item)| value_matches_common(value_item, common_item))
+        }
+        _ => value == common,
+    }
+}
+
+fn strip_codex_common_config_snippet(
+    config_toml: &str,
+    common_snippet: &str,
+) -> Result<String, String> {
+    use toml_edit::DocumentMut;
+
+    let common_trimmed = common_snippet.trim();
+    if common_trimmed.is_empty() {
+        return Ok(config_toml.to_string());
+    }
+
+    let common_doc: DocumentMut = common_trimmed
+        .parse()
+        .map_err(|e| format!("Invalid common Codex TOML: {e}"))?;
+
+    let config_trimmed = config_toml.trim();
+    if config_trimmed.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut config_doc: DocumentMut = config_trimmed
+        .parse()
+        .map_err(|e| format!("Invalid provider Codex TOML: {e}"))?;
+    strip_toml_tables(config_doc.as_table_mut(), common_doc.as_table());
+    Ok(config_doc.to_string())
+}
+
+fn strip_toml_tables(dst: &mut toml_edit::Table, common: &toml_edit::Table) {
+    let mut keys_to_remove = Vec::new();
+
+    for (key, common_item) in common.iter() {
+        let Some(dst_item) = dst.get_mut(key) else {
+            continue;
+        };
+
+        match (dst_item, common_item) {
+            (toml_edit::Item::Table(dst_table), toml_edit::Item::Table(common_table)) => {
+                strip_toml_tables(dst_table, common_table);
+                if dst_table.is_empty() {
+                    keys_to_remove.push(key.to_string());
+                }
+            }
+            (dst_item, common_item) => {
+                if toml_items_equal(dst_item, common_item) {
+                    keys_to_remove.push(key.to_string());
+                }
+            }
+        }
+    }
+
+    for key in keys_to_remove {
+        dst.remove(&key);
+    }
+}
+
+fn toml_items_equal(left: &toml_edit::Item, right: &toml_edit::Item) -> bool {
+    match (left.as_value(), right.as_value()) {
+        (Some(left_value), Some(right_value)) => {
+            left_value.to_string().trim() == right_value.to_string().trim()
+        }
+        _ => left.to_string().trim() == right.to_string().trim(),
     }
 }
 
@@ -1964,5 +2208,103 @@ mod tests {
         assert_eq!(form.id.value, "locked-id");
         assert_eq!(form.name.value, "Edited Name");
         assert_eq!(form.claude_base_url.value, "https://after.example");
+    }
+
+    #[test]
+    fn provider_add_form_disabling_common_config_strips_common_fields_from_json() {
+        let mut form = ProviderAddFormState::new(AppType::Claude);
+        form.id.set("p1");
+        form.name.set("Provider One");
+        form.include_common_config = true;
+
+        let parsed = Provider::with_id(
+            "p1".to_string(),
+            "Provider One".to_string(),
+            json!({
+                "alwaysThinkingEnabled": false,
+                "statusLine": {
+                    "type": "command",
+                    "command": "~/.claude/statusline.sh",
+                    "padding": 0
+                },
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://provider.example"
+                }
+            }),
+            None,
+        );
+        form.apply_provider_json_to_fields(&parsed);
+
+        let common = r#"{
+            "alwaysThinkingEnabled": false,
+            "statusLine": {
+                "type": "command",
+                "command": "~/.claude/statusline.sh",
+                "padding": 0
+            }
+        }"#;
+        form.toggle_include_common_config(common)
+            .expect("toggle should succeed");
+
+        assert!(
+            !form.include_common_config,
+            "toggle should disable include_common_config"
+        );
+        let provider = form.to_provider_json_value();
+        let settings = provider
+            .get("settingsConfig")
+            .expect("settingsConfig should exist");
+        assert!(
+            settings.get("alwaysThinkingEnabled").is_none(),
+            "common scalar field should be removed after disabling common config"
+        );
+        assert!(
+            settings.get("statusLine").is_none(),
+            "common nested field should be removed after disabling common config"
+        );
+    }
+
+    #[test]
+    fn provider_add_form_disabling_common_config_preserves_provider_specific_env_keys() {
+        let mut form = ProviderAddFormState::new(AppType::Claude);
+        form.id.set("p1");
+        form.name.set("Provider One");
+        form.include_common_config = true;
+
+        let parsed = Provider::with_id(
+            "p1".to_string(),
+            "Provider One".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://common.example",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-provider"
+                }
+            }),
+            None,
+        );
+        form.apply_provider_json_to_fields(&parsed);
+
+        form.toggle_include_common_config(
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://common.example"}}"#,
+        )
+        .expect("toggle should succeed");
+
+        let provider = form.to_provider_json_value();
+        let env = provider
+            .get("settingsConfig")
+            .and_then(|settings| settings.get("env"))
+            .and_then(|value| value.as_object())
+            .expect("env should exist");
+
+        assert!(
+            env.get("ANTHROPIC_BASE_URL").is_none(),
+            "common env keys should be removed"
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_AUTH_TOKEN")
+                .and_then(|value| value.as_str()),
+            Some("sk-provider"),
+            "provider-specific env keys should be preserved"
+        );
     }
 }

@@ -26,10 +26,6 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
-    /// Output in JSON format
-    #[arg(short, long, global = true)]
-    pub json: bool,
-
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -59,6 +55,9 @@ pub enum Commands {
     /// Manage environment variables
     #[command(subcommand)]
     Env(commands::env::EnvCommand),
+
+    /// Update cc-switch binary to latest release
+    Update(commands::update::UpdateCommand),
 
     /// Enter interactive mode
     #[command(alias = "ui")]
