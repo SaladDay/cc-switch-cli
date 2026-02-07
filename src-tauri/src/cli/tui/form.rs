@@ -524,10 +524,7 @@ impl ProviderAddFormState {
             AppType::Codex => {
                 fields.push(ProviderAddField::CodexBaseUrl);
                 fields.push(ProviderAddField::CodexModel);
-                fields.push(ProviderAddField::CodexWireApi);
-                fields.push(ProviderAddField::CodexRequiresOpenaiAuth);
-                if !self.codex_requires_openai_auth {
-                    fields.push(ProviderAddField::CodexEnvKey);
+                if !self.is_codex_official_provider() {
                     fields.push(ProviderAddField::CodexApiKey);
                 }
             }
@@ -690,8 +687,14 @@ impl ProviderAddFormState {
                     self.claude_base_url.set("https://api.anthropic.com");
                 }
                 ProviderTemplateId::OpenAiOfficial => {
+                    self.extra = json!({
+                        "category": "official",
+                        "meta": {
+                            "codexOfficial": true,
+                        }
+                    });
                     self.name.set("OpenAI Official");
-                    self.website_url.set("https://openai.com");
+                    self.website_url.set("https://chatgpt.com/codex");
                     self.codex_base_url.set("https://api.openai.com/v1");
                     self.codex_model.set("gpt-5.2-codex");
                     self.codex_wire_api = CodexWireApi::Responses;
@@ -733,14 +736,45 @@ impl ProviderAddFormState {
                 self.codex_base_url.set(preset.codex_base_url);
                 self.codex_model.set("gpt-5.2-codex");
                 self.codex_wire_api = CodexWireApi::Responses;
-                self.codex_requires_openai_auth = false;
-                self.codex_env_key.set("OPENAI_API_KEY");
             }
             AppType::Gemini => {
                 self.gemini_auth_type = GeminiAuthType::ApiKey;
                 self.gemini_base_url.set(preset.gemini_base_url);
             }
         }
+    }
+
+    pub fn is_codex_official_provider(&self) -> bool {
+        if !matches!(self.app_type, AppType::Codex) {
+            return false;
+        }
+
+        let meta_flag = self
+            .extra
+            .get("meta")
+            .and_then(|meta| meta.get("codexOfficial"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        let category_flag = self
+            .extra
+            .get("category")
+            .and_then(|value| value.as_str())
+            .is_some_and(|category| category.eq_ignore_ascii_case("official"));
+
+        let website_flag = self
+            .website_url
+            .value
+            .trim()
+            .eq_ignore_ascii_case("https://chatgpt.com/codex");
+
+        let name_flag = self
+            .name
+            .value
+            .trim()
+            .eq_ignore_ascii_case("OpenAI Official");
+
+        meta_flag || category_flag || website_flag || name_flag
     }
 
     pub fn to_provider_json_value(&self) -> Value {
@@ -821,33 +855,27 @@ impl ProviderAddFormState {
                 }
             }
             AppType::Codex => {
-                let original = settings_obj
-                    .get("config")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let updated = update_codex_config_snippet(
-                    original,
-                    self.codex_base_url.value.trim(),
-                    self.codex_model.value.trim(),
-                    self.codex_wire_api,
-                    self.codex_requires_openai_auth,
-                    self.codex_env_key.value.trim(),
-                );
-                settings_obj.insert("config".to_string(), Value::String(updated));
+                let provider_key =
+                    clean_codex_provider_key(self.id.value.trim(), self.name.value.trim());
+                let base_url = self.codex_base_url.value.trim().trim_end_matches('/');
+                let model = if self.codex_model.is_blank() {
+                    "gpt-5.2-codex"
+                } else {
+                    self.codex_model.value.trim()
+                };
 
-                if self.codex_requires_openai_auth {
+                let config_toml = build_codex_provider_config_toml(
+                    &provider_key,
+                    base_url,
+                    model,
+                    CodexWireApi::Responses,
+                );
+                settings_obj.insert("config".to_string(), Value::String(config_toml));
+
+                if self.is_codex_official_provider() {
                     settings_obj.remove("auth");
                 } else if self.codex_api_key.is_blank() {
-                    if let Some(auth) = settings_obj.get_mut("auth") {
-                        if let Some(obj) = auth.as_object_mut() {
-                            obj.remove("OPENAI_API_KEY");
-                            if obj.is_empty() {
-                                settings_obj.remove("auth");
-                            }
-                        } else {
-                            settings_obj.remove("auth");
-                        }
-                    }
+                    settings_obj.remove("auth");
                 } else {
                     let auth = settings_obj
                         .entry("auth".to_string())
@@ -1414,6 +1442,72 @@ fn escape_toml_string(value: &str) -> String {
     value.replace('"', "\\\"")
 }
 
+fn clean_codex_provider_key(provider_id: &str, provider_name: &str) -> String {
+    // Follow upstream's style: lowercase + underscores, trimmed.
+    // This key is used for:
+    // - model_provider = "<key>"
+    // - [model_providers.<key>]
+    let raw = if provider_id.trim().is_empty() {
+        provider_name.trim()
+    } else {
+        provider_id.trim()
+    };
+
+    let mut key = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    while key.starts_with('_') {
+        key.remove(0);
+    }
+    while key.ends_with('_') {
+        key.pop();
+    }
+
+    if key.is_empty() {
+        "custom".to_string()
+    } else {
+        key
+    }
+}
+
+fn build_codex_provider_config_toml(
+    provider_key: &str,
+    base_url: &str,
+    model: &str,
+    wire_api: CodexWireApi,
+) -> String {
+    let provider_key = escape_toml_string(provider_key);
+    let model = escape_toml_string(model);
+    let base_url = escape_toml_string(base_url);
+
+    // Keep in sync with `.upstream/cc-switch`:
+    // - uses model_provider + [model_providers.<key>]
+    // - defaults to responses wire API
+    // - requires_openai_auth = true for OpenAI-compatible providers
+    [
+        format!("model_provider = \"{}\"", provider_key),
+        format!("model = \"{}\"", model),
+        "model_reasoning_effort = \"high\"".to_string(),
+        "disable_response_storage = true".to_string(),
+        String::new(),
+        format!("[model_providers.{}]", provider_key),
+        format!("name = \"{}\"", provider_key),
+        format!("base_url = \"{}\"", base_url),
+        format!("wire_api = \"{}\"", wire_api.as_str()),
+        "requires_openai_auth = true".to_string(),
+        String::new(),
+    ]
+    .join("\n")
+}
+
 fn merge_json_values(base: &mut Value, overlay: &Value) {
     match (base, overlay) {
         (Value::Object(base_obj), Value::Object(overlay_obj)) => {
@@ -1772,8 +1866,11 @@ mod tests {
         let cfg = provider["settingsConfig"]["config"]
             .as_str()
             .expect("settingsConfig.config should be string");
+        assert!(cfg.contains("model_provider ="));
+        assert!(cfg.contains("[model_providers."));
         assert!(cfg.contains("base_url = \"https://www.packyapi.com/v1\""));
-        assert!(cfg.contains("requires_openai_auth = false"));
+        assert!(cfg.contains("wire_api = \"responses\""));
+        assert!(cfg.contains("requires_openai_auth = true"));
         assert_eq!(provider["meta"]["isPartner"], true);
         assert_eq!(provider["meta"]["partnerPromotionKey"], "packycode");
     }
@@ -1975,23 +2072,86 @@ mod tests {
     }
 
     #[test]
-    fn provider_add_form_codex_builds_toml_snippet() {
+    fn provider_add_form_codex_builds_full_toml_config() {
         let mut form = ProviderAddFormState::new(AppType::Codex);
         form.id.set("c1");
         form.name.set("Codex Provider");
         form.codex_base_url.set("https://api.openai.com/v1");
         form.codex_model.set("gpt-5.2-codex");
-        form.codex_wire_api = CodexWireApi::Responses;
-        form.codex_requires_openai_auth = true;
+        form.codex_api_key.set("sk-test");
 
         let provider = form.to_provider_json_value();
+        assert_eq!(
+            provider["settingsConfig"]["auth"]["OPENAI_API_KEY"],
+            "sk-test"
+        );
         let cfg = provider["settingsConfig"]["config"]
             .as_str()
             .expect("settingsConfig.config should be string");
+        assert!(cfg.contains("model_provider ="));
+        assert!(cfg.contains("[model_providers."));
         assert!(cfg.contains("base_url = \"https://api.openai.com/v1\""));
         assert!(cfg.contains("model = \"gpt-5.2-codex\""));
         assert!(cfg.contains("wire_api = \"responses\""));
         assert!(cfg.contains("requires_openai_auth = true"));
+        assert!(cfg.contains("disable_response_storage = true"));
+    }
+
+    #[test]
+    fn provider_add_form_codex_custom_includes_api_key_and_hides_advanced_fields() {
+        let form = ProviderAddFormState::new(AppType::Codex);
+        let fields = form.fields();
+
+        assert!(
+            fields.contains(&ProviderAddField::CodexApiKey),
+            "custom Codex provider should include API Key field"
+        );
+        assert!(
+            !fields.contains(&ProviderAddField::CodexWireApi),
+            "Codex wire_api should not be configurable in the UI"
+        );
+        assert!(
+            !fields.contains(&ProviderAddField::CodexRequiresOpenaiAuth),
+            "Codex auth mode should not be configurable in the UI"
+        );
+        assert!(
+            !fields.contains(&ProviderAddField::CodexEnvKey),
+            "Codex env key should not be configurable in the UI"
+        );
+    }
+
+    #[test]
+    fn provider_add_form_codex_openai_official_sets_website_and_hides_api_key_field() {
+        let mut form = ProviderAddFormState::new(AppType::Codex);
+        let existing_ids = Vec::<String>::new();
+
+        form.apply_template(1, &existing_ids);
+
+        assert_eq!(form.website_url.value, "https://chatgpt.com/codex");
+        let fields = form.fields();
+        assert!(
+            !fields.contains(&ProviderAddField::CodexApiKey),
+            "official Codex provider should not require API Key input"
+        );
+    }
+
+    #[test]
+    fn provider_add_form_codex_packycode_hides_env_key_field() {
+        let mut form = ProviderAddFormState::new(AppType::Codex);
+        let existing_ids = Vec::<String>::new();
+
+        let idx = packycode_template_index(AppType::Codex);
+        form.apply_template(idx, &existing_ids);
+
+        let fields = form.fields();
+        assert!(
+            fields.contains(&ProviderAddField::CodexApiKey),
+            "PackyCode Codex provider should include API Key field"
+        );
+        assert!(
+            !fields.contains(&ProviderAddField::CodexEnvKey),
+            "Codex env key should not be configurable for PackyCode"
+        );
     }
 
     #[test]

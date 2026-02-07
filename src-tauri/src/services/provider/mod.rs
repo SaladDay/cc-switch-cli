@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::app_config::{AppType, MultiAppConfig};
 use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 use crate::config::{
-    delete_file, get_claude_settings_path, get_provider_config_path, read_json_file,
+    copy_file, delete_file, get_claude_settings_path, get_provider_config_path, read_json_file,
     write_json_file,
 };
 use crate::error::AppError;
@@ -40,6 +40,23 @@ fn generate_provider_id_from_name(name: &str) -> String {
         .to_lowercase()
 }
 
+fn is_codex_official_provider(provider: &Provider) -> bool {
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.codex_official)
+        .unwrap_or(false)
+        || provider
+            .category
+            .as_deref()
+            .is_some_and(|category| category.eq_ignore_ascii_case("official"))
+        || provider
+            .website_url
+            .as_deref()
+            .is_some_and(|url| url.trim().eq_ignore_ascii_case("https://chatgpt.com/codex"))
+        || provider.name.trim().eq_ignore_ascii_case("OpenAI Official")
+}
+
 #[derive(Clone)]
 struct PostCommitAction {
     app_type: AppType,
@@ -56,7 +73,6 @@ mod tests {
     use serial_test::serial;
     use std::ffi::OsString;
     use std::path::Path;
-    use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
 
     struct EnvGuard {
@@ -92,14 +108,31 @@ mod tests {
 
     #[test]
     fn validate_provider_settings_allows_missing_auth_for_codex() {
-        let provider = Provider::with_id(
+        let mut provider = Provider::with_id(
             "codex".into(),
             "Codex".into(),
             json!({ "config": "base_url = \"https://example.com\"" }),
             None,
         );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_official: Some(true),
+            ..Default::default()
+        });
         ProviderService::validate_provider_settings(&AppType::Codex, &provider)
-            .expect("Codex auth is optional when using OpenAI auth or env_key");
+            .expect("Codex auth is optional for official provider");
+    }
+
+    #[test]
+    fn validate_provider_settings_allows_missing_auth_for_codex_official_by_category() {
+        let mut provider = Provider::with_id(
+            "codex".into(),
+            "Anything".into(),
+            json!({ "config": "base_url = \"https://api.openai.com/v1\"\n" }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        ProviderService::validate_provider_settings(&AppType::Codex, &provider)
+            .expect("Codex auth is optional for official providers (category=official)");
     }
 
     #[test]
@@ -175,6 +208,79 @@ mod tests {
                 .unwrap_or_default(),
             live_config_snippet,
             "provider snapshot should match extracted snippet even without auth.json"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_switch_removes_existing_auth_json_for_openai_official_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+            .expect("create ~/.codex (initialized)");
+
+        // Seed an existing auth.json (simulates `codex login` or prior configuration).
+        let existing_auth = json!({ "OPENAI_API_KEY": "sk-existing" });
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        crate::config::write_json_file(&auth_path, &existing_auth).expect("write auth.json");
+
+        let mut config = MultiAppConfig::default();
+        config.ensure_app(&AppType::Codex);
+        {
+            let manager = config
+                .get_manager_mut(&AppType::Codex)
+                .expect("codex manager");
+            manager.current = "p1".to_string();
+            manager.providers.insert(
+                "p1".to_string(),
+                Provider::with_id(
+                    "p1".to_string(),
+                    "Third Party".to_string(),
+                    json!({
+                        "auth": { "OPENAI_API_KEY": "sk-third-party" },
+                        "config": "base_url = \"https://third-party.example/v1\"\nmodel = \"gpt-5.2-codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+                    }),
+                    None,
+                ),
+            );
+
+            let mut official = Provider::with_id(
+                "p2".to_string(),
+                "OpenAI Official".to_string(),
+                json!({
+                    "config": "base_url = \"https://api.openai.com/v1\"\nmodel = \"gpt-5.2-codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+                }),
+                None,
+            );
+            official.meta = Some(crate::provider::ProviderMeta {
+                codex_official: Some(true),
+                ..Default::default()
+            });
+            manager.providers.insert("p2".to_string(), official);
+        }
+
+        let state = state_from_config(config);
+
+        ProviderService::switch(&state, AppType::Codex, "p2")
+            .expect("switch to official should succeed");
+
+        assert!(
+            !auth_path.exists(),
+            "auth.json should be removed when switching to OpenAI official provider"
+        );
+
+        let backup_exists = std::fs::read_dir(crate::codex_config::get_codex_config_dir())
+            .expect("read codex dir")
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("auth.json.cc-switch.bak.")
+            });
+        assert!(
+            backup_exists,
+            "auth.json should be backed up when removed for OpenAI official provider"
         );
     }
 
@@ -573,7 +679,8 @@ requires_openai_auth = true
             "p1".to_string(),
             "First".to_string(),
             json!({
-                "config": "base_url = \"https://api.example/v1\"\nmodel = \"gpt-5.2-codex\"\nwire_api = \"responses\"\n"
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": "base_url = \"https://api.example/v1\"\nmodel = \"gpt-5.2-codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
             }),
             None,
         );
@@ -1361,6 +1468,8 @@ impl ProviderService {
                             })?;
                             if let Some(auth) = auth {
                                 obj.insert("auth".to_string(), auth);
+                            } else {
+                                obj.remove("auth");
                             }
                             obj.insert("config".to_string(), Value::String(cfg_snippet.clone()));
                         }
@@ -2175,26 +2284,29 @@ impl ProviderService {
         crate::config::write_text_file(&config_path, &new_text)?;
 
         // auth.json handling:
-        // - OpenAI auth (credential store) mode: never write auth.json; remove any existing legacy
-        //   auth.json (back it up first) to avoid confusing Codex auth resolution.
-        // - Legacy API-key mode: only write when the provider explicitly carries an auth object.
+        //
+        // Codex has two auth modes:
+        // - API Key mode (auth.json): third-party/custom providers that explicitly carry auth.
+        // - Credential store / OpenAI official mode: auth.json must be absent, otherwise it
+        //   overrides the credential store.
+        //
+        // Align with upstream UI behavior:
+        // - If provider has no auth (or is explicitly marked as official), remove existing auth.json.
+        // - Otherwise, write auth.json from provider.auth.
         let auth_path = get_codex_auth_path();
-        if requires_openai_auth {
+        let should_remove_auth_json = auth_is_empty || is_codex_official_provider(provider);
+        if should_remove_auth_json {
             if auth_path.exists() {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_nanos();
                 let backup_path = auth_path.with_file_name(format!("auth.json.cc-switch.bak.{ts}"));
-                if std::fs::rename(&auth_path, &backup_path).is_err() {
-                    crate::config::copy_file(&auth_path, &backup_path)?;
-                    delete_file(&auth_path)?;
-                }
+                copy_file(&auth_path, &backup_path)?;
+                delete_file(&auth_path)?;
             }
-        } else if !auth_is_empty {
-            if let Some(auth_value) = auth {
-                write_json_file(&auth_path, auth_value)?;
-            }
+        } else if let Some(auth_value) = auth {
+            write_json_file(&auth_path, auth_value)?;
         }
 
         Ok(())
@@ -2565,31 +2677,65 @@ impl ProviderService {
                     )
                 })?;
 
-                // auth 字段现在是可选的（Codex 0.64+ 使用环境变量）
-                // 如果存在，必须是对象
-                if let Some(auth) = settings.get("auth") {
-                    if !auth.is_object() {
-                        return Err(AppError::localized(
-                            "provider.codex.auth.not_object",
-                            format!("供应商 {} 的 auth 配置必须是 JSON 对象", provider.id),
-                            format!(
-                                "Provider {} auth configuration must be a JSON object",
-                                provider.id
-                            ),
-                        ));
-                    }
+                let is_official = is_codex_official_provider(provider);
+
+                // config 字段必须存在且是字符串
+                let config_value = settings.get("config").ok_or_else(|| {
+                    AppError::localized(
+                        "provider.codex.config.missing",
+                        format!("供应商 {} 缺少 config 配置", provider.id),
+                        format!("Provider {} is missing config configuration", provider.id),
+                    )
+                })?;
+                if !(config_value.is_string() || config_value.is_null()) {
+                    return Err(AppError::localized(
+                        "provider.codex.config.invalid_type",
+                        "Codex config 字段必须是字符串",
+                        "Codex config field must be a string",
+                    ));
+                }
+                if let Some(cfg_text) = config_value.as_str() {
+                    crate::codex_config::validate_config_toml(cfg_text)?;
                 }
 
-                if let Some(config_value) = settings.get("config") {
-                    if !(config_value.is_string() || config_value.is_null()) {
-                        return Err(AppError::localized(
-                            "provider.codex.config.invalid_type",
-                            "Codex config 字段必须是字符串",
-                            "Codex config field must be a string",
-                        ));
+                // auth 规则：
+                // - 官方供应商：auth 可选（使用 codex login 保存的凭证）
+                // - 第三方/自定义：必须提供 auth.OPENAI_API_KEY
+                match settings.get("auth") {
+                    Some(auth) => {
+                        let auth_obj = auth.as_object().ok_or_else(|| {
+                            AppError::localized(
+                                "provider.codex.auth.not_object",
+                                format!("供应商 {} 的 auth 配置必须是 JSON 对象", provider.id),
+                                format!(
+                                    "Provider {} auth configuration must be a JSON object",
+                                    provider.id
+                                ),
+                            )
+                        })?;
+                        if !is_official {
+                            let api_key = auth_obj
+                                .get("OPENAI_API_KEY")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .unwrap_or("");
+                            if api_key.is_empty() {
+                                return Err(AppError::localized(
+                                    "provider.codex.api_key.missing",
+                                    format!("供应商 {} 缺少 OPENAI_API_KEY", provider.id),
+                                    format!("Provider {} is missing OPENAI_API_KEY", provider.id),
+                                ));
+                            }
+                        }
                     }
-                    if let Some(cfg_text) = config_value.as_str() {
-                        crate::codex_config::validate_config_toml(cfg_text)?;
+                    None => {
+                        if !is_official {
+                            return Err(AppError::localized(
+                                "provider.codex.auth.missing",
+                                format!("供应商 {} 缺少 auth 配置", provider.id),
+                                format!("Provider {} is missing auth configuration", provider.id),
+                            ));
+                        }
                     }
                 }
             }
@@ -2696,7 +2842,6 @@ mod codex_openai_auth_tests {
     use serial_test::serial;
     use std::ffi::OsString;
     use std::path::Path;
-    use std::sync::RwLock;
     use tempfile::TempDir;
 
     struct EnvGuard {

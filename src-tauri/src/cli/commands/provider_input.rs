@@ -51,24 +51,52 @@ pub fn prompt_settings_config_for_add(
 ) -> Result<Value, AppError> {
     match (app_type, mode) {
         (AppType::Claude, _) => prompt_claude_config(None),
-        (AppType::Codex, ProviderAddMode::Official) => prompt_codex_official_config(),
+        (AppType::Codex, ProviderAddMode::Official) => prompt_codex_official_config(None),
         (AppType::Codex, ProviderAddMode::ThirdParty) => prompt_codex_config(None),
         (AppType::Gemini, _) => prompt_gemini_config(None),
     }
 }
 
-fn build_codex_official_settings_config(model: &str, _wire_api: &str) -> Value {
+fn build_codex_settings_config(
+    api_key: Option<&str>,
+    base_url: &str,
+    model: &str,
+    wire_api: &str,
+) -> Value {
+    let model = if model.trim().is_empty() {
+        "gpt-5.2-codex"
+    } else {
+        model.trim()
+    };
+    let base_url = if base_url.trim().is_empty() {
+        CODEX_OFFICIAL_BASE_URL
+    } else {
+        base_url.trim()
+    };
+
     let config_toml = [
-        format!("base_url = \"{}\"", CODEX_OFFICIAL_BASE_URL),
-        format!("model = \"{}\"", model.trim()),
-        format!("wire_api = \"{}\"", "responses"),
+        format!("base_url = \"{}\"", base_url),
+        format!("model = \"{}\"", model),
+        "model_reasoning_effort = \"high\"".to_string(),
+        "disable_response_storage = true".to_string(),
+        format!("wire_api = \"{}\"", wire_api),
         "requires_openai_auth = true".to_string(),
     ]
     .join("\n");
 
-    json!({
-        "config": config_toml
-    })
+    match api_key {
+        Some(key) => json!({
+            "auth": { "OPENAI_API_KEY": key.trim() },
+            "config": config_toml
+        }),
+        None => json!({
+            "config": config_toml
+        }),
+    }
+}
+
+fn build_codex_official_settings_config(model: &str, _wire_api: &str) -> Value {
+    build_codex_settings_config(None, CODEX_OFFICIAL_BASE_URL, model, "responses")
 }
 
 /// 可选字段集合
@@ -188,7 +216,49 @@ pub fn prompt_settings_config(
 ) -> Result<Value, AppError> {
     match app_type {
         AppType::Claude => prompt_claude_config(current),
-        AppType::Codex => prompt_codex_config(current),
+        AppType::Codex => {
+            let has_auth = current
+                .and_then(|v| v.get("auth"))
+                .and_then(|v| v.as_object())
+                .map(|obj| !obj.is_empty())
+                .unwrap_or(false);
+            let current_config_str = current
+                .and_then(|v| v.get("config"))
+                .and_then(|c| c.as_str());
+            let mut current_base_url: Option<String> = None;
+            if let Some(cfg) = current_config_str {
+                if let Ok(table) = toml::from_str::<toml::Table>(cfg) {
+                    current_base_url = table
+                        .get("base_url")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    if current_base_url.is_none() {
+                        if let (Some(model_provider), Some(model_providers)) = (
+                            table.get("model_provider").and_then(|v| v.as_str()),
+                            table.get("model_providers").and_then(|v| v.as_table()),
+                        ) {
+                            current_base_url = model_providers
+                                .get(model_provider)
+                                .and_then(|v| v.as_table())
+                                .and_then(|t| t.get("base_url"))
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                        }
+                    }
+                }
+            }
+
+            let is_openai_official_endpoint = current_base_url
+                .as_deref()
+                .map(|url| url.trim_start().starts_with("https://api.openai.com"))
+                .unwrap_or(false);
+
+            if !has_auth && is_openai_official_endpoint {
+                prompt_codex_official_config(current)
+            } else {
+                prompt_codex_config(current)
+            }
+        }
         AppType::Gemini => prompt_gemini_config(current),
     }
 }
@@ -351,7 +421,7 @@ fn prompt_claude_config(current: Option<&Value>) -> Result<Value, AppError> {
     Ok(json!({ "env": env }))
 }
 
-/// Codex 配置输入（双写模式：同时支持旧版本和 0.64+）
+/// Codex 配置输入（第三方/自定义：需要 API Key）
 fn prompt_codex_config(current: Option<&Value>) -> Result<Value, AppError> {
     println!("\n{}", texts::config_codex_header().bright_cyan().bold());
 
@@ -368,29 +438,30 @@ fn prompt_codex_config(current: Option<&Value>) -> Result<Value, AppError> {
 
     let mut current_base_url: Option<String> = None;
     let mut current_model: Option<String> = None;
-    let mut current_env_key: Option<String> = None;
-    let mut current_wire_api: Option<String> = None;
-    let mut current_requires_openai_auth: Option<bool> = None;
     if let Some(cfg) = current_config_str {
         if let Ok(table) = toml::from_str::<toml::Table>(cfg) {
             current_base_url = table
                 .get("base_url")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            if current_base_url.is_none() {
+                // Full upstream-style config: base_url lives under model_providers.<model_provider>.
+                if let (Some(model_provider), Some(model_providers)) = (
+                    table.get("model_provider").and_then(|v| v.as_str()),
+                    table.get("model_providers").and_then(|v| v.as_table()),
+                ) {
+                    current_base_url = model_providers
+                        .get(model_provider)
+                        .and_then(|v| v.as_table())
+                        .and_then(|t| t.get("base_url"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                }
+            }
             current_model = table
                 .get("model")
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            current_env_key = table
-                .get("env_key")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            current_wire_api = table
-                .get("wire_api")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            current_requires_openai_auth =
-                table.get("requires_openai_auth").and_then(|v| v.as_bool());
         }
     }
 
@@ -411,123 +482,117 @@ fn prompt_codex_config(current: Option<&Value>) -> Result<Value, AppError> {
 
     // 2. Base URL
     let base_url = if let Some(current) = current_base_url.as_deref() {
-        Text::new("Base URL:")
+        Text::new(&format!("{}:", texts::tui_label_base_url()))
             .with_initial_value(current)
             .with_help_message("API endpoint (e.g., https://api.openai.com/v1)")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     } else {
-        Text::new("Base URL:")
+        Text::new(&format!("{}:", texts::tui_label_base_url()))
             .with_placeholder("https://api.openai.com/v1")
             .with_help_message("API endpoint")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     };
+    let base_url = base_url.trim().to_string();
+    if base_url.is_empty() {
+        return Err(AppError::InvalidInput(
+            texts::base_url_empty_error().to_string(),
+        ));
+    }
 
     // 3. Model
     let model = if let Some(current) = current_model.as_deref() {
-        Text::new("Model:")
+        Text::new(&format!("{}:", texts::model_label()))
             .with_initial_value(current)
             .with_help_message("Model name (e.g., gpt-5.2-codex, o3)")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     } else {
-        Text::new("Model:")
+        Text::new(&format!("{}:", texts::model_label()))
             .with_placeholder("gpt-5.2-codex")
             .with_help_message("Model name")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     };
 
-    // 4. Wire API format (chat or responses)
-    let wire_api_options = vec!["chat", "responses"];
-    let default_wire_api_index = match current_wire_api.as_deref() {
-        Some("responses") => 1,
-        _ => 0, // default to chat
-    };
-    let wire_api = Select::new(texts::codex_wire_api_label(), wire_api_options)
-        .with_starting_cursor(default_wire_api_index)
-        .with_help_message(texts::codex_wire_api_help())
-        .prompt()
-        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
-
-    // 5. Auth mode (OpenAI auth vs env var)
-    println!("\n{}", texts::codex_auth_mode_info().yellow());
-    let auth_mode_options = vec![
-        texts::codex_auth_mode_openai(),
-        texts::codex_auth_mode_env_var(),
-    ];
-    let default_auth_mode_index = match current_requires_openai_auth {
-        Some(true) => 0,
-        Some(false) => 1,
-        None => 0, // default to OpenAI auth (no env var required)
-    };
-    let auth_mode = Select::new(texts::codex_auth_mode_label(), auth_mode_options.clone())
-        .with_starting_cursor(default_auth_mode_index)
-        .with_help_message(texts::codex_auth_mode_help())
-        .prompt()
-        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
-    let use_openai_auth = auth_mode == texts::codex_auth_mode_openai();
-
-    // 6. Environment Variable Key (only when using env var mode)
-    let env_key = if use_openai_auth {
-        None
-    } else {
-        println!("\n{}", texts::codex_env_key_info().yellow());
-        let env_key = if let Some(current) = current_env_key.as_deref() {
-            Text::new(texts::codex_env_key_label())
-                .with_initial_value(current)
-                .with_help_message(texts::codex_env_key_help())
-                .prompt()
-                .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-        } else {
-            Text::new(texts::codex_env_key_label())
-                .with_placeholder("OPENAI_API_KEY")
-                .with_help_message(texts::codex_env_key_help())
-                .prompt()
-                .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-        };
-        let env_key = if env_key.trim().is_empty() {
-            "OPENAI_API_KEY".to_string()
-        } else {
-            env_key.trim().to_string()
-        };
-        println!("\n{}", texts::codex_env_reminder(&env_key).bright_yellow());
-        Some(env_key)
-    };
-
-    // 构建 TOML 配置（存储所有必要字段）
-    let mut config_lines = vec![
-        format!("base_url = \"{}\"", base_url.trim()),
-        format!("model = \"{}\"", model.trim()),
-        format!("wire_api = \"{}\"", wire_api),
-    ];
-
-    if use_openai_auth {
-        config_lines.push("requires_openai_auth = true".to_string());
-        println!("\n{}", texts::codex_openai_auth_info().bright_yellow());
-    } else {
-        if let Some(env_key) = env_key.as_deref() {
-            config_lines.push(format!("env_key = \"{}\"", env_key));
-        }
-        config_lines.push("requires_openai_auth = false".to_string());
-    }
-
-    let config_toml = config_lines.join("\n");
-
-    // 返回完整配置（auth 用于旧版本，config 用于 0.64+）
-    Ok(json!({
-        "auth": { "OPENAI_API_KEY": api_key.trim() },
-        "config": config_toml
-    }))
+    Ok(build_codex_settings_config(
+        Some(api_key.trim()),
+        &base_url,
+        model.trim(),
+        "responses",
+    ))
 }
 
-fn prompt_codex_official_config() -> Result<Value, AppError> {
+/// Codex 配置输入（官方：不需要 API Key）
+fn prompt_codex_official_config(current: Option<&Value>) -> Result<Value, AppError> {
     println!("\n{}", texts::config_codex_header().bright_cyan().bold());
-    println!("\n{}", texts::codex_official_provider_tip().yellow());
+    println!("\n{}", texts::tui_codex_official_no_api_key_tip().yellow());
 
-    Ok(build_codex_official_settings_config(
-        "gpt-5.2-codex",
+    let current_config_str = current
+        .and_then(|v| v.get("config"))
+        .and_then(|c| c.as_str());
+
+    let mut current_base_url: Option<String> = None;
+    let mut current_model: Option<String> = None;
+    if let Some(cfg) = current_config_str {
+        if let Ok(table) = toml::from_str::<toml::Table>(cfg) {
+            current_base_url = table
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            if current_base_url.is_none() {
+                if let (Some(model_provider), Some(model_providers)) = (
+                    table.get("model_provider").and_then(|v| v.as_str()),
+                    table.get("model_providers").and_then(|v| v.as_table()),
+                ) {
+                    current_base_url = model_providers
+                        .get(model_provider)
+                        .and_then(|v| v.as_table())
+                        .and_then(|t| t.get("base_url"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                }
+            }
+            current_model = table
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+        }
+    }
+
+    let base_url = if let Some(current) = current_base_url.as_deref() {
+        Text::new(&format!("{}:", texts::tui_label_base_url()))
+            .with_initial_value(current)
+            .with_help_message("API endpoint (e.g., https://api.openai.com/v1)")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    } else {
+        Text::new(&format!("{}:", texts::tui_label_base_url()))
+            .with_placeholder(CODEX_OFFICIAL_BASE_URL)
+            .with_help_message("API endpoint")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    };
+
+    let model = if let Some(current) = current_model.as_deref() {
+        Text::new(&format!("{}:", texts::model_label()))
+            .with_initial_value(current)
+            .with_help_message("Model name (e.g., gpt-5.2-codex, o3)")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    } else {
+        Text::new(&format!("{}:", texts::model_label()))
+            .with_placeholder("gpt-5.2-codex")
+            .with_help_message("Model name")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    };
+
+    Ok(build_codex_settings_config(
+        None,
+        base_url.trim(),
+        model.trim(),
         "responses",
     ))
 }

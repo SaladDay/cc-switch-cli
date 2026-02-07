@@ -197,6 +197,9 @@ pub struct ProviderMeta {
     /// 是否在写入 live 配置时合并通用配置片段
     #[serde(rename = "applyCommonConfig", skip_serializing_if = "Option::is_none")]
     pub apply_common_config: Option<bool>,
+    /// Codex 官方供应商标记（官方无需填写 API Key，使用 codex login 凭证）
+    #[serde(rename = "codexOfficial", skip_serializing_if = "Option::is_none")]
+    pub codex_official: Option<bool>,
     /// 自定义端点列表（按 URL 去重存储）
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub custom_endpoints: HashMap<String, crate::settings::CustomEndpoint>,

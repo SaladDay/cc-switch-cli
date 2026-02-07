@@ -9,7 +9,7 @@ use crate::cli::commands::provider_input::{
 use crate::cli::i18n::texts;
 use crate::cli::ui::{create_table, error, highlight, info, success, warning};
 use crate::error::AppError;
-use crate::provider::Provider;
+use crate::provider::{Provider, ProviderMeta};
 use crate::services::{ProviderService, SpeedtestService};
 use crate::store::AppState;
 use inquire::{Confirm, Select, Text};
@@ -295,6 +295,10 @@ fn add_provider(app_type: AppType) -> Result<(), AppError> {
     drop(config);
 
     // 2. 收集基本字段
+    let is_codex_official = matches!(
+        (app_type.clone(), add_mode),
+        (AppType::Codex, ProviderAddMode::Official)
+    );
     let (name, website_url) = match (app_type.clone(), add_mode) {
         (AppType::Codex, ProviderAddMode::Official) => {
             let name = Text::new(texts::provider_name_label())
@@ -308,7 +312,7 @@ fn add_provider(app_type: AppType) -> Result<(), AppError> {
                     texts::provider_name_empty_error().to_string(),
                 ));
             }
-            (name, Some("https://openai.com".to_string()))
+            (name, Some("https://chatgpt.com/codex".to_string()))
         }
         _ => prompt_basic_fields(None)?,
     };
@@ -341,7 +345,14 @@ fn add_provider(app_type: AppType) -> Result<(), AppError> {
         notes: optional.notes,
         icon: None,
         icon_color: None,
-        meta: None,
+        meta: if is_codex_official {
+            Some(ProviderMeta {
+                codex_official: Some(true),
+                ..Default::default()
+            })
+        } else {
+            None
+        },
         in_failover_queue: false,
     };
 

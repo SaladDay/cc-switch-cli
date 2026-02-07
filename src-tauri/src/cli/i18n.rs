@@ -946,7 +946,7 @@ pub mod texts {
 
     pub fn tui_label_base_url() -> &'static str {
         if is_chinese() {
-            "Base URL"
+            "API 请求地址"
         } else {
             "Base URL"
         }
@@ -1153,6 +1153,14 @@ pub mod texts {
             "新增供应商"
         } else {
             "Add Provider"
+        }
+    }
+
+    pub fn tui_codex_official_no_api_key_tip() -> &'static str {
+        if is_chinese() {
+            "官方无需填写 API Key，直接保存即可。"
+        } else {
+            "Official provider doesn't require an API key. Just save."
         }
     }
 
@@ -3944,6 +3952,14 @@ pub mod texts {
             "Base URL："
         } else {
             "Base URL:"
+        }
+    }
+
+    pub fn base_url_empty_error() -> &'static str {
+        if is_chinese() {
+            "API 请求地址不能为空"
+        } else {
+            "API URL cannot be empty"
         }
     }
 
