@@ -7,6 +7,23 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.7.1] - 2026-02-07
+
+### Added
+
+- **Providers (TUI)**: Add RightCode provider template.
+
+### Changed
+
+- **TUI**: Tighten layout spacing and reduce list left padding.
+- **Codex (TUI)**: Split auth/config previews for clearer navigation.
+- **Docs**: Update home screenshots (EN/ZH).
+
+### Fixed
+
+- **Codex**: Align provider config and auth handling with upstream.
+- **TUI**: Add left padding between nav border and icons.
+
 ## [4.7.0] - 2026-02-07
 
 ### Added
