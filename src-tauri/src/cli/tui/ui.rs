@@ -4,8 +4,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table,
-        TableState, Wrap,
+        Block, BorderType, Borders, Cell, Clear, Gauge, List, ListItem, ListState, Paragraph, Row,
+        Table, TableState, Wrap,
     },
     Frame,
 };
@@ -16,7 +16,7 @@ use crate::cli::i18n::texts;
 use serde_json::Value;
 
 use super::{
-    app::{App, ConfigItem, ConfirmAction, Focus, Overlay, ToastKind, WebDavConfigItem},
+    app::{App, ConfigItem, ConfirmAction, Focus, LoadingKind, Overlay, ToastKind, WebDavConfigItem},
     data::{McpRow, ProviderRow, UiData},
     form::{
         CodexPreviewSection, FormFocus, FormState, GeminiAuthType, McpAddField, ProviderAddField,
@@ -3098,6 +3098,10 @@ fn render_settings(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::
                     texts::disabled().to_string()
                 },
             ),
+            super::app::SettingsItem::CheckForUpdates => (
+                texts::tui_settings_check_for_updates().to_string(),
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+            ),
         })
         .collect::<Vec<_>>();
 
@@ -3753,6 +3757,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 chunks[0],
                 theme,
                 &[
+                    ("←→", texts::tui_key_select()),
                     ("Enter", texts::tui_key_apply()),
                     ("Esc", texts::tui_key_cancel()),
                 ],
@@ -3785,8 +3790,12 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             state.select(Some(*selected));
             frame.render_stateful_widget(list, chunks[1], &mut state);
         }
-        Overlay::Loading { title, message } => {
-            let area = centered_rect_fixed(60, 7, content_area);
+        Overlay::Loading {
+            kind,
+            title,
+            message,
+        } => {
+            let area = centered_rect_fixed(60, 9, content_area);
             frame.render_widget(Clear, area);
 
             let spinner = match app.tick % 4 {
@@ -3810,9 +3819,19 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
                 .split(inner);
 
-            render_key_bar_center(frame, chunks[0], theme, &[("Esc", texts::tui_key_cancel())]);
+            let esc_label = match kind {
+                LoadingKind::UpdateCheck => texts::tui_key_cancel(),
+                _ => texts::tui_key_close(),
+            };
+            render_key_bar_center(frame, chunks[0], theme, &[("Esc", esc_label)]);
             frame.render_widget(
-                Paragraph::new(Line::raw(message.clone())).wrap(Wrap { trim: false }),
+                Paragraph::new(centered_message_lines(
+                    message,
+                    chunks[1].width,
+                    chunks[1].height,
+                ))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: false }),
                 chunks[1],
             );
         }
@@ -3876,6 +3895,166 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 .collect::<Vec<_>>();
 
             frame.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), chunks[1]);
+        }
+        Overlay::UpdateAvailable {
+            current,
+            latest,
+            selected,
+        } => {
+            let area = centered_rect_fixed(50, 8, content_area);
+            frame.render_widget(Clear, area);
+
+            let outer = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(theme.accent))
+                .title(texts::tui_update_available_title());
+            frame.render_widget(outer.clone(), area);
+            let inner = outer.inner(area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(2),
+                    Constraint::Length(1),
+                    Constraint::Min(0),
+                ])
+                .split(inner);
+
+            render_key_bar_center(
+                frame,
+                chunks[0],
+                theme,
+                &[
+                    ("←→", texts::tui_key_select()),
+                    ("Enter", texts::tui_key_apply()),
+                    ("Esc", texts::tui_key_cancel()),
+                ],
+            );
+
+            let version_line = texts::tui_update_version_info(current, latest);
+            frame.render_widget(
+                Paragraph::new(Line::raw(version_line)).alignment(Alignment::Center),
+                chunks[1],
+            );
+
+            let update_label = format!("[ {} ]", texts::tui_update_btn_update());
+            let cancel_label = format!("[ {} ]", texts::tui_update_btn_cancel());
+            let update_style = if *selected == 0 {
+                Style::default()
+                    .fg(theme.ok)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(theme.dim)
+            };
+            let cancel_style = if *selected == 1 {
+                Style::default()
+                    .fg(theme.warn)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(theme.dim)
+            };
+
+            let buttons = Line::from(vec![
+                Span::styled(update_label, update_style),
+                Span::raw("  "),
+                Span::styled(cancel_label, cancel_style),
+            ]);
+            frame.render_widget(
+                Paragraph::new(buttons).alignment(Alignment::Center),
+                chunks[2],
+            );
+        }
+        Overlay::UpdateDownloading { downloaded, total } => {
+            let area = centered_rect_fixed(50, 6, content_area);
+            frame.render_widget(Clear, area);
+
+            let outer = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(theme.accent))
+                .title(texts::tui_update_downloading_title());
+            frame.render_widget(outer.clone(), area);
+            let inner = outer.inner(area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(0)])
+                .split(inner);
+
+            render_key_bar_center(frame, chunks[0], theme, &[("Esc", texts::tui_key_hide())]);
+
+            let progress_text = if let Some(t) = total {
+                if *t > 0 {
+                    let pct = ((downloaded.saturating_mul(100) / *t).min(100)) as u64;
+                    texts::tui_update_downloading_progress(pct, downloaded / 1024, t / 1024)
+                } else {
+                    texts::tui_update_downloading_kb(*downloaded / 1024)
+                }
+            } else {
+                texts::tui_update_downloading_kb(*downloaded / 1024)
+            };
+
+            let gauge_ratio = if let Some(t) = total {
+                if *t > 0 {
+                    (*downloaded as f64 / *t as f64).min(1.0)
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+
+            frame.render_widget(
+                Gauge::default()
+                    .block(Block::default())
+                    .gauge_style(Style::default().fg(theme.accent))
+                    .ratio(gauge_ratio)
+                    .label(progress_text),
+                chunks[1],
+            );
+        }
+        Overlay::UpdateResult { success, message } => {
+            let area = centered_rect_fixed(50, 6, content_area);
+            frame.render_widget(Clear, area);
+
+            let border_color = if *success { theme.ok } else { theme.err };
+            let outer = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(border_color))
+                .title(texts::tui_update_result_title());
+            frame.render_widget(outer.clone(), area);
+            let inner = outer.inner(area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(0)])
+                .split(inner);
+
+            let keys = if *success {
+                [
+                    ("Enter", texts::tui_key_exit()),
+                    ("Esc", texts::tui_key_hide()),
+                ]
+            } else {
+                [
+                    ("Enter", texts::tui_key_close()),
+                    ("Esc", texts::tui_key_close()),
+                ]
+            };
+            render_key_bar_center(frame, chunks[0], theme, &keys);
+
+            frame.render_widget(
+                Paragraph::new(centered_message_lines(
+                    message,
+                    chunks[1].width,
+                    chunks[1].height,
+                ))
+                .alignment(Alignment::Center),
+                chunks[1],
+            );
         }
     }
 }

@@ -27,7 +27,7 @@ use crate::settings::{
     WebDavSyncSettings,
 };
 
-use app::{Action, App, EditorSubmit, Overlay, TextViewState, ToastKind};
+use app::{Action, App, EditorSubmit, LoadingKind, Overlay, TextViewState, ToastKind};
 use data::{load_state, UiData};
 use form::FormState;
 use terminal::{PanicRestoreHookGuard, TuiTerminal};
@@ -136,6 +136,60 @@ struct WebDavSystem {
     _handle: std::thread::JoinHandle<()>,
 }
 
+enum UpdateReq {
+    Check { request_id: u64 },
+    Download,
+}
+
+enum UpdateMsg {
+    CheckFinished {
+        request_id: u64,
+        result: Result<crate::cli::commands::update::UpdateCheckInfo, String>,
+    },
+    DownloadProgress {
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    DownloadFinished(Result<String, String>),
+}
+
+struct UpdateSystem {
+    req_tx: mpsc::Sender<UpdateReq>,
+    result_rx: mpsc::Receiver<UpdateMsg>,
+    _handle: std::thread::JoinHandle<()>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RequestTracker {
+    seq: u64,
+    active: Option<u64>,
+}
+
+impl RequestTracker {
+    fn start(&mut self) -> u64 {
+        self.seq = self.seq.wrapping_add(1);
+        self.active = Some(self.seq);
+        self.seq
+    }
+
+    fn cancel(&mut self) {
+        self.active = None;
+    }
+
+    fn is_stale(&self, request_id: u64) -> bool {
+        matches!(self.active, Some(active_request_id) if active_request_id != request_id)
+    }
+
+    fn finish_if_active(&mut self, request_id: u64) -> bool {
+        if self.active == Some(request_id) {
+            self.active = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let _panic_hook = PanicRestoreHookGuard::install();
     let mut terminal = TuiTerminal::new()?;
@@ -144,8 +198,8 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
 
     let tick_rate = Duration::from_millis(200);
     let mut last_tick = Instant::now();
-    let mut webdav_request_seq: u64 = 0;
-    let mut webdav_loading_request_id: Option<u64> = None;
+    let mut webdav_loading = RequestTracker::default();
+    let mut update_check = RequestTracker::default();
 
     let speedtest = match start_speedtest_system() {
         Ok(system) => Some(system),
@@ -201,6 +255,17 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         }
     };
 
+    let update_system = match start_update_system() {
+        Ok(system) => Some(system),
+        Err(err) => {
+            app.push_toast(
+                texts::tui_toast_update_check_failed(&err.to_string()),
+                ToastKind::Warning,
+            );
+            None
+        }
+    };
+
     loop {
         app.last_size = terminal.size()?;
         terminal.draw(|f| ui::render(f, &app, &data))?;
@@ -231,11 +296,16 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         // Handle async WebDAV results (non-blocking).
         if let Some(webdav) = webdav.as_ref() {
             while let Ok(msg) = webdav.result_rx.try_recv() {
-                if let Err(err) =
-                    handle_webdav_msg(&mut app, &mut data, &mut webdav_loading_request_id, msg)
-                {
+                if let Err(err) = handle_webdav_msg(&mut app, &mut data, &mut webdav_loading, msg) {
                     app.push_toast(err.to_string(), ToastKind::Error);
                 }
+            }
+        }
+
+        // Handle async update results (non-blocking).
+        if let Some(us) = update_system.as_ref() {
+            while let Ok(msg) = us.result_rx.try_recv() {
+                handle_update_msg(&mut app, &mut update_check, msg);
             }
         }
 
@@ -252,8 +322,9 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         skills.as_ref().map(|s| &s.req_tx),
                         local_env.as_ref().map(|s| &s.req_tx),
                         webdav.as_ref().map(|s| &s.req_tx),
-                        &mut webdav_request_seq,
-                        &mut webdav_loading_request_id,
+                        &mut webdav_loading,
+                        update_system.as_ref().map(|s| &s.req_tx),
+                        &mut update_check,
                         action,
                     ) {
                         if matches!(
@@ -393,21 +464,19 @@ fn handle_skills_msg(app: &mut App, data: &mut UiData, msg: SkillsMsg) -> Result
 }
 
 fn is_webdav_loading_overlay(app: &App) -> bool {
-    match &app.overlay {
-        Overlay::Loading { title, .. } => {
-            title == texts::tui_webdav_loading_title_check_connection()
-                || title == texts::tui_webdav_loading_title_upload()
-                || title == texts::tui_webdav_loading_title_download()
-                || title == texts::tui_webdav_loading_title_quick_setup()
+    matches!(
+        &app.overlay,
+        Overlay::Loading {
+            kind: LoadingKind::WebDav,
+            ..
         }
-        _ => false,
-    }
+    )
 }
 
 fn handle_webdav_msg(
     app: &mut App,
     data: &mut UiData,
-    webdav_loading_request_id: &mut Option<u64>,
+    webdav_loading: &mut RequestTracker,
     msg: WebDavMsg,
 ) -> Result<(), AppError> {
     match msg {
@@ -417,19 +486,12 @@ fn handle_webdav_msg(
             result,
         } => match result {
             Ok(done) => {
-                let is_stale = matches!(
-                    *webdav_loading_request_id,
-                    Some(active_request_id) if active_request_id != request_id
-                );
-                if is_stale {
+                if webdav_loading.is_stale(request_id) {
                     return Ok(());
                 }
 
-                if *webdav_loading_request_id == Some(request_id) {
-                    *webdav_loading_request_id = None;
-                    if is_webdav_loading_overlay(app) {
-                        app.overlay = Overlay::None;
-                    }
+                if webdav_loading.finish_if_active(request_id) && is_webdav_loading_overlay(app) {
+                    app.overlay = Overlay::None;
                 }
 
                 match done {
@@ -463,19 +525,12 @@ fn handle_webdav_msg(
                 *data = UiData::load(&app.app_type)?;
             }
             Err(err) => {
-                let is_stale = matches!(
-                    *webdav_loading_request_id,
-                    Some(active_request_id) if active_request_id != request_id
-                );
-                if is_stale {
+                if webdav_loading.is_stale(request_id) {
                     return Ok(());
                 }
 
-                if *webdav_loading_request_id == Some(request_id) {
-                    *webdav_loading_request_id = None;
-                    if is_webdav_loading_overlay(app) {
-                        app.overlay = Overlay::None;
-                    }
+                if webdav_loading.finish_if_active(request_id) && is_webdav_loading_overlay(app) {
+                    app.overlay = Overlay::None;
                 }
                 let error_detail = match &err {
                     WebDavErr::Generic(e)
@@ -545,8 +600,9 @@ fn handle_action(
     skills_req_tx: Option<&mpsc::Sender<SkillsReq>>,
     local_env_req_tx: Option<&mpsc::Sender<LocalEnvReq>>,
     webdav_req_tx: Option<&mpsc::Sender<WebDavReq>>,
-    webdav_request_seq: &mut u64,
-    webdav_loading_request_id: &mut Option<u64>,
+    webdav_loading: &mut RequestTracker,
+    update_req_tx: Option<&mpsc::Sender<UpdateReq>>,
+    update_check: &mut RequestTracker,
     action: Action,
 ) -> Result<(), AppError> {
     match action {
@@ -610,6 +666,7 @@ fn handle_action(
                 ));
             };
             app.overlay = Overlay::Loading {
+                kind: LoadingKind::Generic,
                 title: texts::tui_skills_install_title().to_string(),
                 message: texts::tui_loading().to_string(),
             };
@@ -659,6 +716,7 @@ fn handle_action(
                 ));
             };
             app.overlay = Overlay::Loading {
+                kind: LoadingKind::Generic,
                 title: texts::tui_skills_discover_title().to_string(),
                 message: texts::tui_loading().to_string(),
             };
@@ -1459,10 +1517,9 @@ fn handle_action(
                 );
                 return Ok(());
             };
-            *webdav_request_seq += 1;
-            let request_id = *webdav_request_seq;
-            *webdav_loading_request_id = Some(request_id);
+            let request_id = webdav_loading.start();
             app.overlay = Overlay::Loading {
+                kind: LoadingKind::WebDav,
                 title: texts::tui_webdav_loading_title_check_connection().to_string(),
                 message: texts::tui_webdav_loading_message().to_string(),
             };
@@ -1470,7 +1527,7 @@ fn handle_action(
                 request_id,
                 kind: WebDavReqKind::CheckConnection,
             }) {
-                *webdav_loading_request_id = None;
+                webdav_loading.cancel();
                 app.overlay = Overlay::None;
                 app.push_toast(
                     texts::tui_toast_webdav_request_failed(&err.to_string()),
@@ -1487,10 +1544,9 @@ fn handle_action(
                 );
                 return Ok(());
             };
-            *webdav_request_seq += 1;
-            let request_id = *webdav_request_seq;
-            *webdav_loading_request_id = Some(request_id);
+            let request_id = webdav_loading.start();
             app.overlay = Overlay::Loading {
+                kind: LoadingKind::WebDav,
                 title: texts::tui_webdav_loading_title_upload().to_string(),
                 message: texts::tui_webdav_loading_message().to_string(),
             };
@@ -1498,7 +1554,7 @@ fn handle_action(
                 request_id,
                 kind: WebDavReqKind::Upload,
             }) {
-                *webdav_loading_request_id = None;
+                webdav_loading.cancel();
                 app.overlay = Overlay::None;
                 app.push_toast(
                     texts::tui_toast_webdav_request_failed(&err.to_string()),
@@ -1515,10 +1571,9 @@ fn handle_action(
                 );
                 return Ok(());
             };
-            *webdav_request_seq += 1;
-            let request_id = *webdav_request_seq;
-            *webdav_loading_request_id = Some(request_id);
+            let request_id = webdav_loading.start();
             app.overlay = Overlay::Loading {
+                kind: LoadingKind::WebDav,
                 title: texts::tui_webdav_loading_title_download().to_string(),
                 message: texts::tui_webdav_loading_message().to_string(),
             };
@@ -1526,7 +1581,7 @@ fn handle_action(
                 request_id,
                 kind: WebDavReqKind::Download,
             }) {
-                *webdav_loading_request_id = None;
+                webdav_loading.cancel();
                 app.overlay = Overlay::None;
                 app.push_toast(
                     texts::tui_toast_webdav_request_failed(&err.to_string()),
@@ -1552,10 +1607,9 @@ fn handle_action(
                 );
                 return Ok(());
             };
-            *webdav_request_seq += 1;
-            let request_id = *webdav_request_seq;
-            *webdav_loading_request_id = Some(request_id);
+            let request_id = webdav_loading.start();
             app.overlay = Overlay::Loading {
+                kind: LoadingKind::WebDav,
                 title: texts::tui_webdav_loading_title_quick_setup().to_string(),
                 message: texts::tui_webdav_loading_message().to_string(),
             };
@@ -1563,7 +1617,7 @@ fn handle_action(
                 request_id,
                 kind: WebDavReqKind::JianguoyunQuickSetup { username, password },
             }) {
-                *webdav_loading_request_id = None;
+                webdav_loading.cancel();
                 app.overlay = Overlay::None;
                 app.push_toast(
                     texts::tui_toast_webdav_request_failed(&err.to_string()),
@@ -1608,6 +1662,59 @@ fn handle_action(
         Action::SetLanguage(lang) => {
             set_language(lang)?;
             app.push_toast(texts::language_changed(), ToastKind::Success);
+            Ok(())
+        }
+
+        Action::CheckUpdate => {
+            if matches!(app.overlay, Overlay::UpdateDownloading { .. }) {
+                return Ok(());
+            }
+            let Some(tx) = update_req_tx else {
+                app.push_toast(
+                    texts::tui_toast_update_check_failed(texts::tui_update_err_worker_unavailable()),
+                    ToastKind::Warning,
+                );
+                return Ok(());
+            };
+            let request_id = update_check.start();
+            app.overlay = Overlay::Loading {
+                kind: LoadingKind::UpdateCheck,
+                title: texts::tui_update_checking_title().to_string(),
+                message: texts::tui_loading().to_string(),
+            };
+            if let Err(err) = tx.send(UpdateReq::Check { request_id }) {
+                update_check.cancel();
+                app.overlay = Overlay::None;
+                app.push_toast(
+                    texts::tui_toast_update_check_failed(&err.to_string()),
+                    ToastKind::Error,
+                );
+            }
+            Ok(())
+        }
+        Action::ConfirmUpdate => {
+            let Some(tx) = update_req_tx else {
+                return Ok(());
+            };
+            app.overlay = Overlay::UpdateDownloading {
+                downloaded: 0,
+                total: None,
+            };
+            if let Err(err) = tx.send(UpdateReq::Download) {
+                app.overlay = Overlay::None;
+                app.push_toast(
+                    texts::tui_toast_update_bg_failed(&err.to_string()),
+                    ToastKind::Error,
+                );
+            }
+            Ok(())
+        }
+        Action::CancelUpdate => {
+            app.overlay = Overlay::None;
+            Ok(())
+        }
+        Action::CancelUpdateCheck => {
+            update_check.cancel();
             Ok(())
         }
     }
@@ -1670,6 +1777,151 @@ fn refresh_common_snippet_overlay(app: &mut App, data: &UiData) {
     view.title = texts::tui_common_snippet_title(app_type.as_str());
     view.lines = snippet.lines().map(|s| s.to_string()).collect();
     view.scroll = 0;
+}
+
+fn handle_update_msg(app: &mut App, update_check: &mut RequestTracker, msg: UpdateMsg) {
+    match msg {
+        UpdateMsg::CheckFinished { request_id, result } => {
+            if !update_check.finish_if_active(request_id) {
+                return;
+            }
+
+            match result {
+                Ok(info) => {
+                    if info.is_already_latest {
+                        app.overlay = Overlay::None;
+                        app.push_toast(
+                            texts::tui_toast_already_latest(&info.current_version),
+                            ToastKind::Success,
+                        );
+                    } else if info.is_downgrade {
+                        app.overlay = Overlay::None;
+                        app.push_toast(
+                            texts::tui_toast_update_downgrade(
+                                &info.current_version,
+                                &info.target_tag,
+                            ),
+                            ToastKind::Info,
+                        );
+                    } else {
+                        app.overlay = Overlay::UpdateAvailable {
+                            current: info.current_version,
+                            latest: info.target_tag,
+                            selected: 0,
+                        };
+                    }
+                }
+                Err(e) => {
+                    app.overlay = Overlay::None;
+                    app.push_toast(texts::tui_toast_update_check_failed(&e), ToastKind::Error);
+                }
+            }
+        }
+        UpdateMsg::DownloadProgress { downloaded, total } => {
+            if let Overlay::UpdateDownloading {
+                downloaded: ref mut dl,
+                total: ref mut t,
+            } = app.overlay
+            {
+                *dl = downloaded;
+                *t = total;
+            }
+        }
+        UpdateMsg::DownloadFinished(result) => match result {
+            Ok(tag) => {
+                app.overlay = Overlay::UpdateResult {
+                    success: true,
+                    message: texts::tui_update_success(&tag),
+                };
+            }
+            Err(e) => {
+                app.overlay = Overlay::UpdateResult {
+                    success: false,
+                    message: e,
+                };
+            }
+        },
+    }
+}
+
+fn start_update_system() -> Result<UpdateSystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<UpdateMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<UpdateReq>();
+
+    let handle = std::thread::Builder::new()
+        .name("cc-switch-update".to_string())
+        .spawn(move || update_worker_loop(req_rx, result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn update worker thread".to_string(),
+            source: e,
+        })?;
+
+    Ok(UpdateSystem {
+        req_tx,
+        result_rx,
+        _handle: handle,
+    })
+}
+
+fn update_worker_loop(rx: mpsc::Receiver<UpdateReq>, tx: mpsc::Sender<UpdateMsg>) {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let err = e.to_string();
+            while let Ok(req) = rx.recv() {
+                let msg = match req {
+                    UpdateReq::Check { request_id } => UpdateMsg::CheckFinished {
+                        request_id,
+                        result: Err(err.clone()),
+                    },
+                    UpdateReq::Download => UpdateMsg::DownloadFinished(Err(err.clone())),
+                };
+                let _ = tx.send(msg);
+            }
+            return;
+        }
+    };
+
+    let mut last_tag: Option<String> = None;
+
+    while let Ok(req) = rx.recv() {
+        match req {
+            UpdateReq::Check { request_id } => {
+                let result = rt
+                    .block_on(crate::cli::commands::update::check_for_update())
+                    .map_err(|e| e.to_string());
+                if let Ok(ref info) = result {
+                    last_tag = Some(info.target_tag.clone());
+                }
+                let _ = tx.send(UpdateMsg::CheckFinished { request_id, result });
+            }
+            UpdateReq::Download => {
+                let Some(tag) = last_tag.clone() else {
+                    let _ = tx.send(UpdateMsg::DownloadFinished(Err(
+                        texts::tui_update_err_check_first().to_string(),
+                    )));
+                    continue;
+                };
+                let tx2 = tx.clone();
+                let result = rt
+                    .block_on(crate::cli::commands::update::download_and_apply(
+                        &tag,
+                        move |dl, total| {
+                            let _ = tx2.send(UpdateMsg::DownloadProgress {
+                                downloaded: dl,
+                                total,
+                            });
+                        },
+                    ))
+                    .map(|()| tag)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(UpdateMsg::DownloadFinished(result));
+            }
+        }
+    }
 }
 
 fn start_webdav_system() -> Result<WebDavSystem, AppError> {
@@ -1969,6 +2221,8 @@ fn parse_repo_spec(raw: &str) -> Result<SkillRepo, AppError> {
 mod tests {
     use std::sync::mpsc;
 
+    use super::app::{App, LoadingKind, Overlay};
+    use crate::cli::i18n::texts;
     use crate::AppError;
 
     #[test]
@@ -2095,5 +2349,137 @@ mod tests {
             !saved,
             "set callback should not run when webdav settings are missing"
         );
+    }
+
+    #[test]
+    fn update_success_does_not_force_exit_when_overlay_hidden() {
+        let mut app = App::new(None);
+        app.overlay = Overlay::None;
+        let mut update_check = super::RequestTracker::default();
+
+        super::handle_update_msg(
+            &mut app,
+            &mut update_check,
+            super::UpdateMsg::DownloadFinished(Ok("v9.9.9".to_string())),
+        );
+
+        assert!(
+            !app.should_quit,
+            "successful update should not force exit without user confirmation"
+        );
+        assert!(
+            matches!(app.overlay, Overlay::UpdateResult { success: true, .. }),
+            "successful update should show result overlay even when progress overlay was hidden"
+        );
+    }
+
+    #[test]
+    fn update_check_finished_is_ignored_when_canceled() {
+        let mut app = App::new(None);
+        app.overlay = Overlay::None;
+        let mut update_check = super::RequestTracker::default();
+
+        let info = crate::cli::commands::update::UpdateCheckInfo {
+            current_version: "4.7.0".to_string(),
+            target_tag: "v9.9.9".to_string(),
+            is_already_latest: false,
+            is_downgrade: false,
+        };
+
+        super::handle_update_msg(
+            &mut app,
+            &mut update_check,
+            super::UpdateMsg::CheckFinished {
+                request_id: 1,
+                result: Ok(info),
+            },
+        );
+
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "update check result should be ignored after cancel/hide"
+        );
+    }
+
+    #[test]
+    fn update_check_finished_is_processed_when_request_id_matches() {
+        let mut app = App::new(None);
+        app.overlay = Overlay::Loading {
+            kind: LoadingKind::UpdateCheck,
+            title: texts::tui_update_checking_title().to_string(),
+            message: texts::tui_loading().to_string(),
+        };
+        let mut update_check = super::RequestTracker::default();
+        update_check.active = Some(7);
+
+        let info = crate::cli::commands::update::UpdateCheckInfo {
+            current_version: "4.7.0".to_string(),
+            target_tag: "v9.9.9".to_string(),
+            is_already_latest: false,
+            is_downgrade: false,
+        };
+
+        super::handle_update_msg(
+            &mut app,
+            &mut update_check,
+            super::UpdateMsg::CheckFinished {
+                request_id: 7,
+                result: Ok(info),
+            },
+        );
+
+        assert_eq!(update_check.active, None);
+        assert!(matches!(
+            app.overlay,
+            Overlay::UpdateAvailable {
+                latest,
+                selected: 0,
+                ..
+            } if latest == "v9.9.9"
+        ));
+    }
+
+    #[test]
+    fn update_check_finished_is_ignored_when_request_id_mismatch() {
+        let mut app = App::new(None);
+        app.overlay = Overlay::None;
+        let mut update_check = super::RequestTracker::default();
+        update_check.active = Some(2);
+
+        let stale = crate::cli::commands::update::UpdateCheckInfo {
+            current_version: "4.7.0".to_string(),
+            target_tag: "v1.0.0".to_string(),
+            is_already_latest: false,
+            is_downgrade: false,
+        };
+        super::handle_update_msg(
+            &mut app,
+            &mut update_check,
+            super::UpdateMsg::CheckFinished {
+                request_id: 1,
+                result: Ok(stale),
+            },
+        );
+
+        assert_eq!(update_check.active, Some(2));
+        assert!(matches!(app.overlay, Overlay::None));
+
+        let latest = crate::cli::commands::update::UpdateCheckInfo {
+            current_version: "4.7.0".to_string(),
+            target_tag: "v9.9.9".to_string(),
+            is_already_latest: false,
+            is_downgrade: false,
+        };
+        super::handle_update_msg(
+            &mut app,
+            &mut update_check,
+            super::UpdateMsg::CheckFinished {
+                request_id: 2,
+                result: Ok(latest),
+            },
+        );
+
+        assert_eq!(update_check.active, None);
+        assert!(matches!(app.overlay, Overlay::UpdateAvailable { .. }));
     }
 }
