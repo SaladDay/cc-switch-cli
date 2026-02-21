@@ -452,7 +452,8 @@ fn nav_pane_width(theme: &super::theme::Theme) -> u16 {
 fn render_nav(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::theme::Theme) {
     let rows = NavItem::ALL.iter().map(|item| {
         let (icon, text) = split_nav_label(nav_label(*item));
-        Row::new(vec![Cell::from(pad1(icon)), Cell::from(text)])
+        let icon_clean = pad1(icon).replace('\u{FE0F}', "");
+        Row::new(vec![Cell::from(icon_clean), Cell::from(text)])
     });
 
     let table = Table::new(rows, [Constraint::Length(3), Constraint::Min(10)])
