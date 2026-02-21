@@ -404,7 +404,9 @@ fn execute_hooks(cmd: HooksCommand) -> Result<(), AppError> {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    // Log error but don't fail the hook
+                    // Write to stderr so the user can see hook failures
+                    // without interfering with stdout used by Claude
+                    eprintln!("[cc-switch memory] hook ingest error: {}", e);
                     log::warn!("Hook ingest error: {}", e);
                 }
             }

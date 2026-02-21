@@ -1,5 +1,6 @@
 use crate::cli::ui::{create_table, error, highlight, info, success, warning};
 use crate::error::AppError;
+use crate::t;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,11 +44,11 @@ enum VersionStatus {
 impl VersionStatus {
     fn display(&self) -> &'static str {
         match self {
-            VersionStatus::Latest => "最新",
-            VersionStatus::Upgradable => "可升级",
-            VersionStatus::NotInstalled => "未安装",
-            VersionStatus::Unknown => "未知",
-            VersionStatus::FetchFailed => "获取失败",
+            VersionStatus::Latest => t!("Up to date", "最新"),
+            VersionStatus::Upgradable => t!("Upgradable", "可升级"),
+            VersionStatus::NotInstalled => t!("Not installed", "未安装"),
+            VersionStatus::Unknown => t!("Unknown", "未知"),
+            VersionStatus::FetchFailed => t!("Fetch failed", "获取失败"),
         }
     }
 }
@@ -57,6 +58,9 @@ pub enum CheckCommand {
     /// Check for CLI tool updates (Claude Code, Codex, Gemini, etc.)
     #[command(alias = "update")]
     Updates {
+        /// Tool ID to check (e.g., claude, codex, gemini). If not specified, checks all.
+        tool: Option<String>,
+
         /// Skip fetching latest versions (offline mode)
         #[arg(long)]
         offline: bool,
@@ -79,7 +83,7 @@ pub enum CheckCommand {
 
 pub fn execute(cmd: CheckCommand, _app: Option<crate::app_config::AppType>) -> Result<(), AppError> {
     match cmd {
-        CheckCommand::Updates { offline, json } => check_updates(offline, json),
+        CheckCommand::Updates { tool, offline, json } => check_updates(tool, offline, json),
         CheckCommand::Upgrade { tool, yes } => upgrade_tools(tool, yes),
     }
 }
@@ -186,16 +190,23 @@ fn get_npm_latest_version(package: &str) -> Result<String, String> {
 
 /// Compare two semver versions
 /// Returns: -1 if a < b, 0 if a == b, 1 if a > b
+/// Handles pre-release suffixes: 1.0.0-beta.1 < 1.0.0
 fn compare_versions(a: &str, b: &str) -> i32 {
+    let a = a.trim_start_matches('v');
+    let b = b.trim_start_matches('v');
+
+    // Split into version and pre-release parts
+    let (a_ver, a_pre) = a.split_once('-').map(|(v, p)| (v, Some(p))).unwrap_or((a, None));
+    let (b_ver, b_pre) = b.split_once('-').map(|(v, p)| (v, Some(p))).unwrap_or((b, None));
+
     let parse = |v: &str| -> Vec<u32> {
-        v.trim_start_matches('v')
-            .split('.')
+        v.split('.')
             .filter_map(|s| s.parse::<u32>().ok())
             .collect()
     };
 
-    let a_parts = parse(a);
-    let b_parts = parse(b);
+    let a_parts = parse(a_ver);
+    let b_parts = parse(b_ver);
 
     for i in 0..3 {
         let a_val = a_parts.get(i).copied().unwrap_or(0);
@@ -207,11 +218,38 @@ fn compare_versions(a: &str, b: &str) -> i32 {
             return 1;
         }
     }
-    0
+
+    // Same version numbers: pre-release < release (1.0.0-beta < 1.0.0)
+    match (a_pre, b_pre) {
+        (Some(_), None) => -1,
+        (None, Some(_)) => 1,
+        (Some(a_p), Some(b_p)) => a_p.cmp(b_p) as i32,
+        (None, None) => 0,
+    }
 }
 
-fn check_updates(offline: bool, json_output: bool) -> Result<(), AppError> {
-    let tools = get_cli_tools();
+fn check_updates(tool_id: Option<String>, offline: bool, json_output: bool) -> Result<(), AppError> {
+    let all_tools = get_cli_tools();
+    let tools: Vec<CliTool> = if let Some(ref id) = tool_id {
+        all_tools
+            .into_iter()
+            .filter(|t| t.id == *id || t.label.to_lowercase() == id.to_lowercase())
+            .collect()
+    } else {
+        all_tools
+    };
+
+    if tools.is_empty() {
+        println!(
+            "{}",
+            error(&format!(
+                "Tool '{}' not found. Available: claude, codex, gemini, opencode, qwen",
+                tool_id.unwrap_or_default()
+            ))
+        );
+        return Ok(());
+    }
+
     let npm_globals = get_npm_globals();
 
     let mut results: Vec<VersionCheckResult> = Vec::new();
@@ -225,11 +263,11 @@ fn check_updates(offline: bool, json_output: bool) -> Result<(), AppError> {
     // Use indicatif for progress if not JSON output
     let pb = if !json_output && !offline {
         let pb = indicatif::ProgressBar::new(tools.len() as u64);
-        pb.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template("{spinner:.cyan} [{pos}/{len}] Checking {msg}...")
-                .unwrap(),
-        );
+        if let Ok(style) = indicatif::ProgressStyle::default_bar()
+            .template("{spinner:.cyan} [{pos}/{len}] Checking {msg}...")
+        {
+            pb.set_style(style);
+        }
         Some(pb)
     } else {
         None
