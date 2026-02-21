@@ -12,7 +12,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app_config::AppType;
-use crate::cli::i18n::texts;
+use crate::cli::i18n::{self, texts};
 use serde_json::Value;
 
 use super::{
@@ -452,7 +452,8 @@ fn nav_pane_width(theme: &super::theme::Theme) -> u16 {
 fn render_nav(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::theme::Theme) {
     let rows = NavItem::ALL.iter().map(|item| {
         let (icon, text) = split_nav_label(nav_label(*item));
-        Row::new(vec![Cell::from(pad1(icon)), Cell::from(text)])
+        let icon_clean = pad1(icon).replace('\u{FE0F}', "");
+        Row::new(vec![Cell::from(icon_clean), Cell::from(text)])
     });
 
     let table = Table::new(rows, [Constraint::Length(3), Constraint::Min(10)])
@@ -3180,27 +3181,25 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::th
                 Style::default(),
             )]
         } else {
-            let nav_bg = Color::DarkGray;
-            let act_bg = Color::Gray;
+            let key_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+            let desc_style = Style::default().fg(theme.dim);
+            let sep = Span::styled("  ", desc_style);
 
-            let nav_style = Style::default().fg(Color::White).bg(nav_bg);
-            let nav_label_style = nav_style.add_modifier(Modifier::BOLD);
-            let act_style = Style::default().fg(Color::White).bg(act_bg);
-            let act_label_style = act_style.add_modifier(Modifier::BOLD);
+            let items: &[(&str, &str)] = if i18n::is_chinese() {
+                &[("←→", "菜单/内容"), ("↑↓", "移动"), ("[ ]", "切换应用"),
+                  ("/", "过滤"), ("Esc", "返回"), ("?", "帮助")]
+            } else {
+                &[("←→", "menu/content"), ("↑↓", "move"), ("[ ]", "switch app"),
+                  ("/", "filter"), ("Esc", "back"), ("?", "help")]
+            };
 
-            vec![
-                Span::styled(" ", nav_style),
-                Span::styled(texts::tui_footer_group_nav(), nav_label_style),
-                Span::styled(" ", nav_style),
-                Span::styled(texts::tui_footer_nav_keys(), nav_style),
-                Span::styled(" ", nav_style),
-                Span::raw(" "),
-                Span::styled(" ", act_style),
-                Span::styled(texts::tui_footer_group_actions(), act_label_style),
-                Span::styled(" ", act_style),
-                Span::styled(texts::tui_footer_action_keys_global(), act_style),
-                Span::styled(" ", act_style),
-            ]
+            let mut v = Vec::new();
+            for (i, (key, desc)) in items.iter().enumerate() {
+                if i > 0 { v.push(sep.clone()); }
+                v.push(Span::styled(format!(" {} ", key), key_style));
+                v.push(Span::styled(format!(" {}", desc), desc_style));
+            }
+            v
         }
     };
 

@@ -3215,7 +3215,7 @@ pub mod texts {
     }
 
     pub fn menu_manage_providers_variants() -> (&'static str, &'static str) {
-        ("🔌 Providers", "🔌 供应商")
+        ("🔑 Providers", "🔑 供应商")
     }
 
     pub fn menu_manage_mcp() -> &'static str {
@@ -3228,7 +3228,7 @@ pub mod texts {
     }
 
     pub fn menu_manage_mcp_variants() -> (&'static str, &'static str) {
-        ("🛠️ MCP Servers", "🛠️ MCP 服务器")
+        ("🔌 MCP Servers", "🔌 MCP服务器")
     }
 
     pub fn menu_manage_prompts() -> &'static str {
@@ -3254,7 +3254,7 @@ pub mod texts {
     }
 
     pub fn menu_manage_config_variants() -> (&'static str, &'static str) {
-        ("⚙️ Configuration", "⚙️ 配置")
+        ("📋 Configuration", "📋 配置")
     }
 
     pub fn menu_manage_skills() -> &'static str {
@@ -3297,7 +3297,7 @@ pub mod texts {
     }
 
     pub fn menu_settings_variants() -> (&'static str, &'static str) {
-        ("⚙️ Settings", "⚙️ 设置")
+        ("🔧 Settings", "🔧 设置")
     }
 
     pub fn menu_exit() -> &'static str {
