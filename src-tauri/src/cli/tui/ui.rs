@@ -2717,10 +2717,7 @@ fn render_provider_detail(
             .get("env")
             .and_then(|v| v.as_object())
         {
-            let api_key = env
-                .get("ANTHROPIC_AUTH_TOKEN")
-                .or_else(|| env.get("ANTHROPIC_API_KEY"))
-                .and_then(|v| v.as_str())
+            let api_key = crate::services::provider::get_claude_token_from_env(env)
                 .map(mask_api_key)
                 .unwrap_or_else(|| texts::tui_na().to_string());
             let base_url = env

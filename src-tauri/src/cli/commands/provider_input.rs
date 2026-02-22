@@ -324,8 +324,8 @@ fn prompt_claude_config(current: Option<&Value>) -> Result<Value, AppError> {
 
     let api_key = if let Some(current_key) = current
         .and_then(|v| v.get("env"))
-        .and_then(|e| e.get("ANTHROPIC_AUTH_TOKEN"))
-        .and_then(|k| k.as_str())
+        .and_then(|v| v.as_object())
+        .and_then(crate::services::provider::get_claude_token_from_env)
         .filter(|s| !s.is_empty())
     {
         // 编辑模式：显示完整 API Key 供编辑
@@ -369,8 +369,9 @@ fn prompt_claude_config(current: Option<&Value>) -> Result<Value, AppError> {
         .prompt()
         .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
 
+    let (key, _) = crate::services::provider::claude_auth_env_keys(api_key.trim());
     let mut env = serde_json::Map::new();
-    env.insert("ANTHROPIC_AUTH_TOKEN".to_string(), json!(api_key.trim()));
+    env.insert(key.to_string(), json!(api_key.trim()));
     env.insert("ANTHROPIC_BASE_URL".to_string(), json!(base_url.trim()));
 
     if config_models {
@@ -754,8 +755,8 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
     println!("\n{}", texts::core_config_label().bright_cyan());
     match app_type {
         AppType::Claude => {
-            if let Some(env) = provider.settings_config.get("env") {
-                if let Some(api_key) = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) {
+            if let Some(env) = provider.settings_config.get("env").and_then(|v| v.as_object()) {
+                if let Some(api_key) = crate::services::provider::get_claude_token_from_env(env) {
                     println!(
                         "  {}: {}",
                         texts::api_key_display_label(),

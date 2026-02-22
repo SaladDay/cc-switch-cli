@@ -20,6 +20,25 @@ use crate::store::AppState;
 use gemini_auth::GeminiAuthType;
 use live::LiveSnapshot;
 
+/// 根据 token 前缀判断 Claude 认证环境变量名。
+/// OAuth token (`sk-ant-oat...`) → `ANTHROPIC_AUTH_TOKEN`（Bearer header），
+/// 标准 API key → `ANTHROPIC_API_KEY`（x-api-key header）。
+/// 返回 `(应使用的 key, 应清除的旧 key)`。
+pub fn claude_auth_env_keys(token: &str) -> (&'static str, &'static str) {
+    if token.trim().starts_with("sk-ant-oat") {
+        ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+    } else {
+        ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+    }
+}
+
+/// 从 env 对象中读取 Claude API key，兼容两种 key 名。
+pub fn get_claude_token_from_env(env: &serde_json::Map<String, Value>) -> Option<&str> {
+    env.get("ANTHROPIC_AUTH_TOKEN")
+        .or_else(|| env.get("ANTHROPIC_API_KEY"))
+        .and_then(|v| v.as_str())
+}
+
 /// 供应商相关业务逻辑
 pub struct ProviderService;
 
