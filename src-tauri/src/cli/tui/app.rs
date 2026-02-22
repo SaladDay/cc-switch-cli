@@ -861,6 +861,15 @@ impl App {
             return self.on_filter_key(key);
         }
 
+        // Vim-style hjkl navigation
+        let key = match key.code {
+            KeyCode::Char('h') => KeyEvent::new(KeyCode::Left, key.modifiers),
+            KeyCode::Char('j') => KeyEvent::new(KeyCode::Down, key.modifiers),
+            KeyCode::Char('k') => KeyEvent::new(KeyCode::Up, key.modifiers),
+            KeyCode::Char('l') => KeyEvent::new(KeyCode::Right, key.modifiers),
+            _ => key,
+        };
+
         // Global actions.
         match key.code {
             KeyCode::Char('?') => {
