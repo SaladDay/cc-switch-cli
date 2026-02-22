@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, KeyEventKind};
+use crossterm::event::{self, KeyEventKind, MouseEventKind};
 use serde_json::json;
 use serde_json::Value;
 
@@ -334,6 +334,38 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                             return Err(err);
                         }
                         app.push_toast(err.to_string(), ToastKind::Error);
+                    }
+                }
+                event::Event::Mouse(mouse) => {
+                    if let MouseEventKind::ScrollUp | MouseEventKind::ScrollDown = mouse.kind {
+                        let code = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                            event::KeyCode::Up
+                        } else {
+                            event::KeyCode::Down
+                        };
+                        let key = event::KeyEvent::new(code, event::KeyModifiers::NONE);
+                        let action = app.on_key(key, &data);
+                        if let Err(err) = handle_action(
+                            &mut terminal,
+                            &mut app,
+                            &mut data,
+                            speedtest.as_ref().map(|s| &s.req_tx),
+                            skills.as_ref().map(|s| &s.req_tx),
+                            local_env.as_ref().map(|s| &s.req_tx),
+                            webdav.as_ref().map(|s| &s.req_tx),
+                            &mut webdav_loading,
+                            update_system.as_ref().map(|s| &s.req_tx),
+                            &mut update_check,
+                            action,
+                        ) {
+                            if matches!(
+                                &err,
+                                AppError::Localized { key, .. } if *key == "tui_terminal_error"
+                            ) {
+                                return Err(err);
+                            }
+                            app.push_toast(err.to_string(), ToastKind::Error);
+                        }
                     }
                 }
                 event::Event::Resize(_, _) => {}
