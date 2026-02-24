@@ -43,6 +43,20 @@
       注册，并在充值时填写优惠码 <code>cc-switch-cli</code>，即可享受 <b>9 折优惠</b>。
     </td>
   </tr>
+  <tr>
+    <td width="180">
+      <a href="https://www.right.codes/register?aff=cc-switch-cli">
+        <img src="assets/partners/logos/rightcode.jpg" alt="RightCode" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>RightCode</b> 赞助本项目！<br/>
+      RightCode 为 Claude Code、Codex、Gemini 等模型提供稳定的路由服务，拥有高性价比的 Codex 月付方案，且<b>支持额度滚存——当天未用完的额度可顺延至次日使用。</b><br/>
+      CC-Switch CLI 专属优惠：通过
+      <a href="https://www.right.codes/register?aff=cc-switch-cli">此链接</a>
+      注册，并在充值时填写优惠码 <code>cc-switch-cli</code>，即可享受专属优惠。
+    </td>
+  </tr>
 </table>
 
 ---

@@ -40,6 +40,17 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
       PackyCode provides special discounts for our software users: register via <a href="https://www.packyapi.com/register?aff=cc-switch-cli">this link</a> and use promo code <code>cc-switch-cli</code> when recharging to get <b>10% off</b>.
     </td>
   </tr>
+  <tr>
+    <td width="180">
+      <a href="https://www.right.codes/register?aff=cc-switch-cli">
+        <img src="assets/partners/logos/rightcode.jpg" alt="RightCode" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>RightCode</b> for sponsoring this project! RightCode reliably provides routing services for models such as Claude Code, Codex, and Gemini. It features a highly cost-effective Codex monthly subscription plan and <b>supports quota rollovers—unused quota from one day can be carried over and used the next day.</b> <br/>
+      CC-Switch CLI exclusive: register via <a href="https://www.right.codes/register?aff=cc-switch-cli">this link</a> and use promo code <code>cc-switch-cli</code> when recharging to enjoy special discounts.
+    </td>
+  </tr>
 </table>
 
 ---
