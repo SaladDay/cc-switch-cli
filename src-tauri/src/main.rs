@@ -37,6 +37,8 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Some(Commands::Config(cmd)) => cc_switch_lib::cli::commands::config::execute(cmd, cli.app),
         Some(Commands::Env(cmd)) => cc_switch_lib::cli::commands::env::execute(cmd, cli.app),
         Some(Commands::Update(cmd)) => cc_switch_lib::cli::commands::update::execute(cmd),
+        Some(Commands::Memory(cmd)) => cc_switch_lib::cli::commands::memory::execute(cmd, cli.app),
+        Some(Commands::Check(cmd)) => cc_switch_lib::cli::commands::check::execute(cmd, cli.app),
         Some(Commands::Completions { shell }) => {
             cc_switch_lib::cli::generate_completions(shell);
             Ok(())

@@ -37,6 +37,10 @@ pub enum SkillsCommand {
         /// Skill directory or id
         spec: String,
     },
+    /// Enable all installed skills for the selected app
+    EnableAll,
+    /// Disable all skills for the selected app
+    DisableAll,
     /// Sync enabled skills to app skills dirs
     Sync,
     /// Scan unmanaged skills in app skills dirs
@@ -88,6 +92,8 @@ pub fn execute(cmd: SkillsCommand, app: Option<AppType>) -> Result<(), AppError>
         SkillsCommand::Uninstall { spec } => uninstall_skill(&spec),
         SkillsCommand::Enable { spec } => toggle_skill(&app_type, &spec, true),
         SkillsCommand::Disable { spec } => toggle_skill(&app_type, &spec, false),
+        SkillsCommand::EnableAll => enable_all(&app_type),
+        SkillsCommand::DisableAll => disable_all(&app_type),
         SkillsCommand::Sync => sync_skills(app.as_ref()),
         SkillsCommand::ScanUnmanaged => scan_unmanaged(),
         SkillsCommand::ImportFromApps { directories } => import_from_apps(directories),
@@ -186,6 +192,58 @@ fn toggle_skill(app_type: &AppType, spec: &str, enabled: bool) -> Result<(), App
             "✓ {} '{}' for {}",
             if enabled { "Enabled" } else { "Disabled" },
             spec,
+            app_type.as_str()
+        ))
+    );
+    Ok(())
+}
+
+fn enable_all(app_type: &AppType) -> Result<(), AppError> {
+    let skills = SkillService::list_installed()?;
+    if skills.is_empty() {
+        println!("{}", info("No installed skills found."));
+        return Ok(());
+    }
+
+    let mut count = 0;
+    for skill in &skills {
+        if !skill.apps.is_enabled_for(app_type) {
+            SkillService::toggle_app(&skill.directory, app_type, true)?;
+            count += 1;
+        }
+    }
+
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Enabled {} skill(s) for {}",
+            count,
+            app_type.as_str()
+        ))
+    );
+    Ok(())
+}
+
+fn disable_all(app_type: &AppType) -> Result<(), AppError> {
+    let skills = SkillService::list_installed()?;
+    if skills.is_empty() {
+        println!("{}", info("No installed skills found."));
+        return Ok(());
+    }
+
+    let mut count = 0;
+    for skill in &skills {
+        if skill.apps.is_enabled_for(app_type) {
+            SkillService::toggle_app(&skill.directory, app_type, false)?;
+            count += 1;
+        }
+    }
+
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Disabled {} skill(s) for {}",
+            count,
             app_type.as_str()
         ))
     );

@@ -1,6 +1,8 @@
+pub mod check;
 pub mod config;
 pub mod env;
 pub mod mcp;
+pub mod memory;
 pub mod prompts;
 pub mod provider;
 pub mod provider_input;

@@ -15,6 +15,7 @@ use zip::{write::SimpleFileOptions, DateTime};
 use crate::config::atomic_write;
 use crate::database::Database;
 use crate::error::AppError;
+use crate::services::memory::MemoryService;
 use crate::services::skill::SkillService;
 use crate::settings::{
     get_settings, get_webdav_sync_settings, set_webdav_sync_settings, update_settings,
@@ -27,6 +28,21 @@ const REMOTE_DB_SQL: &str = "db.sql";
 const REMOTE_SKILLS_ZIP: &str = "skills.zip";
 const REMOTE_SETTINGS_SYNC: &str = "settings.sync.json";
 const REMOTE_MANIFEST: &str = "manifest.json";
+const REMOTE_CLAUDE_ZIP: &str = "claude.zip";
+const REMOTE_CODEX_ZIP: &str = "codex.zip";
+const REMOTE_GEMINI_ZIP: &str = "gemini.zip";
+const REMOTE_MEMORY_SQL: &str = "memory.sql";
+
+const CLAUDE_EXCLUDES: &[&str] = &[
+    "debug", "cache", "paste-cache", "telemetry", "statsig",
+    "session-env", "shell-snapshots", "tasks", "plugins",
+    "usage-data", "stats-cache.json", "statusline-command.sh",
+];
+const CODEX_EXCLUDES: &[&str] = &["log", "tmp"];
+const GEMINI_EXCLUDES: &[&str] = &[
+    "antigravity", "antigravity-browser-profile",
+    "oauth_creds.json", "google_accounts.json", "tmp",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncDecision {
@@ -64,6 +80,14 @@ struct ManifestArtifacts {
     db_sql: ManifestArtifact,
     skills_zip: ManifestArtifact,
     settings_sync: ManifestArtifact,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claude_zip: Option<ManifestArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_zip: Option<ManifestArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gemini_zip: Option<ManifestArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_sql: Option<ManifestArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +108,10 @@ struct LocalSnapshot {
     db_sql: Vec<u8>,
     skills_zip: Vec<u8>,
     settings_sync: Vec<u8>,
+    claude_zip: Option<Vec<u8>>,
+    codex_zip: Option<Vec<u8>>,
+    gemini_zip: Option<Vec<u8>>,
+    memory_sql: Option<Vec<u8>>,
     manifest: WebDavManifest,
     manifest_bytes: Vec<u8>,
     manifest_hash: String,
@@ -137,7 +165,44 @@ impl WebDavSyncService {
         let settings_sync =
             download_and_verify_artifact(&settings, &remote.manifest.artifacts.settings_sync)?;
 
-        apply_downloaded_snapshot(&db_sql, &skills_zip, &settings_sync)?;
+        let claude_zip = remote
+            .manifest
+            .artifacts
+            .claude_zip
+            .as_ref()
+            .map(|a| download_and_verify_artifact(&settings, a))
+            .transpose()?;
+        let codex_zip = remote
+            .manifest
+            .artifacts
+            .codex_zip
+            .as_ref()
+            .map(|a| download_and_verify_artifact(&settings, a))
+            .transpose()?;
+        let gemini_zip = remote
+            .manifest
+            .artifacts
+            .gemini_zip
+            .as_ref()
+            .map(|a| download_and_verify_artifact(&settings, a))
+            .transpose()?;
+        let memory_sql = remote
+            .manifest
+            .artifacts
+            .memory_sql
+            .as_ref()
+            .map(|a| download_and_verify_artifact(&settings, a))
+            .transpose()?;
+
+        apply_downloaded_snapshot(
+            &db_sql,
+            &skills_zip,
+            &settings_sync,
+            claude_zip.as_deref(),
+            codex_zip.as_deref(),
+            gemini_zip.as_deref(),
+            memory_sql.as_deref(),
+        )?;
 
         settings.status.last_sync_at = Some(Utc::now().timestamp());
         settings.status.last_error = None;
@@ -183,9 +248,21 @@ fn build_local_snapshot(settings: &WebDavSyncSettings) -> Result<LocalSnapshot, 
     zip_skills_ssot(&skills_zip_path)?;
     let skills_zip = fs::read(&skills_zip_path).map_err(|e| AppError::io(&skills_zip_path, e))?;
 
+    // CLI directories
+    let claude_zip = zip_cli_dir(&crate::config::get_claude_config_dir(), CLAUDE_EXCLUDES)?;
+    let codex_zip = zip_cli_dir(&crate::codex_config::get_codex_config_dir(), CODEX_EXCLUDES)?;
+    let gemini_zip = zip_cli_dir(&crate::gemini_config::get_gemini_dir(), GEMINI_EXCLUDES)?;
+
+    // Memory database
+    let memory_sql = MemoryService::export_sql_bytes()?;
+
     let db_sql_hash = sha256_hex(&db_sql);
     let skills_zip_hash = sha256_hex(&skills_zip);
     let settings_sync_hash = sha256_hex(&settings_sync);
+    let claude_zip_hash = claude_zip.as_ref().map(|b| sha256_hex(b));
+    let codex_zip_hash = codex_zip.as_ref().map(|b| sha256_hex(b));
+    let gemini_zip_hash = gemini_zip.as_ref().map(|b| sha256_hex(b));
+    let memory_sql_hash = memory_sql.as_ref().map(|b| sha256_hex(b));
 
     let manifest = WebDavManifest {
         format: PROTOCOL_FORMAT.to_string(),
@@ -208,17 +285,48 @@ fn build_local_snapshot(settings: &WebDavSyncSettings) -> Result<LocalSnapshot, 
                 sha256: settings_sync_hash.clone(),
                 size: settings_sync.len() as u64,
             },
+            claude_zip: claude_zip.as_ref().map(|b| ManifestArtifact {
+                path: REMOTE_CLAUDE_ZIP.to_string(),
+                sha256: claude_zip_hash.clone().unwrap(),
+                size: b.len() as u64,
+            }),
+            codex_zip: codex_zip.as_ref().map(|b| ManifestArtifact {
+                path: REMOTE_CODEX_ZIP.to_string(),
+                sha256: codex_zip_hash.clone().unwrap(),
+                size: b.len() as u64,
+            }),
+            gemini_zip: gemini_zip.as_ref().map(|b| ManifestArtifact {
+                path: REMOTE_GEMINI_ZIP.to_string(),
+                sha256: gemini_zip_hash.clone().unwrap(),
+                size: b.len() as u64,
+            }),
+            memory_sql: memory_sql.as_ref().map(|b| ManifestArtifact {
+                path: REMOTE_MEMORY_SQL.to_string(),
+                sha256: memory_sql_hash.clone().unwrap(),
+                size: b.len() as u64,
+            }),
         },
     };
     let manifest_bytes =
         serde_json::to_vec_pretty(&manifest).map_err(|e| AppError::JsonSerialize { source: e })?;
-    let manifest_hash =
-        snapshot_identity_from_hashes(&db_sql_hash, &skills_zip_hash, &settings_sync_hash);
+    let manifest_hash = snapshot_identity_from_hashes(
+        &db_sql_hash,
+        &skills_zip_hash,
+        &settings_sync_hash,
+        claude_zip_hash.as_deref(),
+        codex_zip_hash.as_deref(),
+        gemini_zip_hash.as_deref(),
+        memory_sql_hash.as_deref(),
+    );
 
     Ok(LocalSnapshot {
         db_sql,
         skills_zip,
         settings_sync,
+        claude_zip,
+        codex_zip,
+        gemini_zip,
+        memory_sql,
         manifest,
         manifest_bytes,
         manifest_hash,
@@ -240,6 +348,10 @@ fn apply_downloaded_snapshot(
     db_sql: &[u8],
     skills_zip: &[u8],
     settings_sync: &[u8],
+    claude_zip: Option<&[u8]>,
+    codex_zip: Option<&[u8]>,
+    gemini_zip: Option<&[u8]>,
+    memory_sql: Option<&[u8]>,
 ) -> Result<(), AppError> {
     let tmp = tempdir().map_err(|e| AppError::IoContext {
         context: "创建 WebDAV 下载临时目录失败".to_string(),
@@ -252,6 +364,23 @@ fn apply_downloaded_snapshot(
 
     apply_syncable_settings(settings_sync)?;
     restore_skills_zip(skills_zip)?;
+
+    // Restore CLI directories (merge mode)
+    if let Some(bytes) = claude_zip {
+        restore_cli_zip(bytes, &crate::config::get_claude_config_dir())?;
+    }
+    if let Some(bytes) = codex_zip {
+        restore_cli_zip(bytes, &crate::codex_config::get_codex_config_dir())?;
+    }
+    if let Some(bytes) = gemini_zip {
+        restore_cli_zip(bytes, &crate::gemini_config::get_gemini_dir())?;
+    }
+
+    // Restore memory
+    if let Some(bytes) = memory_sql {
+        MemoryService::import_sql_bytes(bytes)?;
+    }
+
     Ok(())
 }
 
@@ -331,6 +460,20 @@ fn upload_snapshot(
         &snapshot.skills_zip,
         "application/zip",
     )?;
+
+    if let Some(ref bytes) = snapshot.claude_zip {
+        put_remote_bytes(settings, REMOTE_CLAUDE_ZIP, bytes, "application/zip")?;
+    }
+    if let Some(ref bytes) = snapshot.codex_zip {
+        put_remote_bytes(settings, REMOTE_CODEX_ZIP, bytes, "application/zip")?;
+    }
+    if let Some(ref bytes) = snapshot.gemini_zip {
+        put_remote_bytes(settings, REMOTE_GEMINI_ZIP, bytes, "application/zip")?;
+    }
+    if let Some(ref bytes) = snapshot.memory_sql {
+        put_remote_bytes(settings, REMOTE_MEMORY_SQL, bytes, "application/sql")?;
+    }
+
     let _ = &snapshot.manifest;
     put_remote_bytes(
         settings,
@@ -385,11 +528,39 @@ fn snapshot_identity_from_manifest(manifest: &WebDavManifest) -> String {
         &manifest.artifacts.db_sql.sha256,
         &manifest.artifacts.skills_zip.sha256,
         &manifest.artifacts.settings_sync.sha256,
+        manifest.artifacts.claude_zip.as_ref().map(|a| a.sha256.as_str()),
+        manifest.artifacts.codex_zip.as_ref().map(|a| a.sha256.as_str()),
+        manifest.artifacts.gemini_zip.as_ref().map(|a| a.sha256.as_str()),
+        manifest.artifacts.memory_sql.as_ref().map(|a| a.sha256.as_str()),
     )
 }
 
-fn snapshot_identity_from_hashes(db_hash: &str, skills_hash: &str, settings_hash: &str) -> String {
-    let combined = format!("{db_hash}:{skills_hash}:{settings_hash}");
+fn snapshot_identity_from_hashes(
+    db_hash: &str,
+    skills_hash: &str,
+    settings_hash: &str,
+    claude_hash: Option<&str>,
+    codex_hash: Option<&str>,
+    gemini_hash: Option<&str>,
+    memory_hash: Option<&str>,
+) -> String {
+    let mut combined = format!("{db_hash}:{skills_hash}:{settings_hash}");
+    if let Some(h) = claude_hash {
+        combined.push(':');
+        combined.push_str(h);
+    }
+    if let Some(h) = codex_hash {
+        combined.push(':');
+        combined.push_str(h);
+    }
+    if let Some(h) = gemini_hash {
+        combined.push(':');
+        combined.push_str(h);
+    }
+    if let Some(h) = memory_hash {
+        combined.push(':');
+        combined.push_str(h);
+    }
     sha256_hex(combined.as_bytes())
 }
 
@@ -753,6 +924,128 @@ fn zip_file_options() -> SimpleFileOptions {
         .last_modified_time(DateTime::default())
 }
 
+/// Zip a CLI config directory, skipping entries whose name matches any exclude pattern.
+/// Returns `Ok(None)` if the directory does not exist or is empty.
+fn zip_cli_dir(dir: &Path, excludes: &[&str]) -> Result<Option<Vec<u8>>, AppError> {
+    if !dir.exists() {
+        return Ok(None);
+    }
+
+    let tmp = tempdir().map_err(|e| AppError::IoContext {
+        context: format!("创建 CLI zip 临时目录失败: {}", dir.display()),
+        source: e,
+    })?;
+    let zip_path = tmp.path().join("cli.zip");
+
+    let file = fs::File::create(&zip_path).map_err(|e| AppError::io(&zip_path, e))?;
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip_file_options();
+
+    zip_dir_recursive_filtered(dir, dir, &mut writer, options, excludes)?;
+
+    writer
+        .finish()
+        .map_err(|e| AppError::Message(format!("写入 CLI zip 失败: {e}")))?;
+
+    let bytes = fs::read(&zip_path).map_err(|e| AppError::io(&zip_path, e))?;
+    // An empty zip with no entries is ~22 bytes; treat as None
+    if bytes.len() <= 22 {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+fn zip_dir_recursive_filtered(
+    root: &Path,
+    current: &Path,
+    writer: &mut zip::ZipWriter<fs::File>,
+    options: SimpleFileOptions,
+    excludes: &[&str],
+) -> Result<(), AppError> {
+    let mut entries = fs::read_dir(current)
+        .map_err(|e| AppError::io(current, e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| AppError::io(current, e))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Check excludes against the file/dir name
+        if excludes.iter().any(|ex| name_str == *ex) {
+            continue;
+        }
+
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|e| AppError::Message(format!("生成 ZIP 相对路径失败: {e}")))?;
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+
+        if path.is_dir() {
+            writer
+                .add_directory(format!("{rel_str}/"), options)
+                .map_err(|e| AppError::Message(format!("写入 ZIP 目录失败: {e}")))?;
+            zip_dir_recursive_filtered(root, &path, writer, options, excludes)?;
+        } else {
+            writer
+                .start_file(&*rel_str, options)
+                .map_err(|e| AppError::Message(format!("写入 ZIP 文件头失败: {e}")))?;
+            let mut file = fs::File::open(&path).map_err(|e| AppError::io(&path, e))?;
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf)
+                .map_err(|e| AppError::io(&path, e))?;
+            writer
+                .write_all(&buf)
+                .map_err(|e| AppError::Message(format!("写入 ZIP 文件内容失败: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
+/// Restore a CLI zip in merge mode: extract into temp dir, then copy over target dir
+/// without deleting files that are not in the zip (preserves excluded / local-only files).
+fn restore_cli_zip(raw: &[u8], target_dir: &Path) -> Result<(), AppError> {
+    let tmp = tempdir().map_err(|e| AppError::IoContext {
+        context: "创建 CLI zip 解压临时目录失败".to_string(),
+        source: e,
+    })?;
+    let zip_path = tmp.path().join("cli.zip");
+    atomic_write(&zip_path, raw)?;
+
+    let file = fs::File::open(&zip_path).map_err(|e| AppError::io(&zip_path, e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| AppError::Message(format!("解析 CLI zip 失败: {e}")))?;
+
+    let extracted = tmp.path().join("extracted");
+    fs::create_dir_all(&extracted).map_err(|e| AppError::io(&extracted, e))?;
+
+    for idx in 0..archive.len() {
+        let mut entry = archive
+            .by_index(idx)
+            .map_err(|e| AppError::Message(format!("读取 ZIP 项失败: {e}")))?;
+        let Some(safe_name) = entry.enclosed_name() else {
+            continue;
+        };
+        let out_path = extracted.join(safe_name);
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path).map_err(|e| AppError::io(&out_path, e))?;
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+        }
+        let mut out = fs::File::create(&out_path).map_err(|e| AppError::io(&out_path, e))?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| AppError::io(&out_path, e))?;
+    }
+
+    // Merge: copy extracted files over target, creating dirs as needed
+    fs::create_dir_all(target_dir).map_err(|e| AppError::io(target_dir, e))?;
+    copy_dir_recursive(&extracted, target_dir)?;
+    Ok(())
+}
+
 fn zip_dir_recursive(
     root: &Path,
     current: &Path,
@@ -906,6 +1199,10 @@ mod tests {
                     sha256: "settings-hash".to_string(),
                     size: 3,
                 },
+                claude_zip: None,
+                codex_zip: None,
+                gemini_zip: None,
+                memory_sql: None,
             },
         };
         let manifest_b = WebDavManifest {

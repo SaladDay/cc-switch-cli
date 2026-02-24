@@ -42,8 +42,8 @@ pub use mcp::{
 };
 pub use provider::{Provider, ProviderMeta};
 pub use services::{
-    ConfigService, EndpointLatency, McpService, PromptService, ProviderService, SkillService,
-    SpeedtestService, SyncDecision, WebDavSyncService, WebDavSyncSummary,
+    ConfigService, EndpointLatency, McpService, MemoryService, PromptService, ProviderService,
+    SkillService, SpeedtestService, SyncDecision, WebDavSyncService, WebDavSyncSummary,
 };
 pub use settings::{
     get_skip_claude_onboarding, get_webdav_sync_settings, set_skip_claude_onboarding,

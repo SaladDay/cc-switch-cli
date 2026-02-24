@@ -3,6 +3,7 @@ pub mod env_checker;
 pub mod env_manager;
 pub mod local_env_check;
 pub mod mcp;
+pub mod memory;
 pub mod prompt;
 pub mod provider;
 pub mod skill;
@@ -11,6 +12,7 @@ pub mod webdav_sync;
 
 pub use config::ConfigService;
 pub use mcp::McpService;
+pub use memory::MemoryService;
 pub use prompt::PromptService;
 pub use provider::ProviderService;
 pub use skill::SkillService;

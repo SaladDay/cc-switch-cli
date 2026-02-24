@@ -59,6 +59,14 @@ pub enum Commands {
     /// Update cc-switch binary to latest release
     Update(commands::update::UpdateCommand),
 
+    /// Manage memory (observations, context, hooks)
+    #[command(subcommand)]
+    Memory(commands::memory::MemoryCommand),
+
+    /// Check for CLI tool updates (Claude Code, Codex, Gemini)
+    #[command(subcommand)]
+    Check(commands::check::CheckCommand),
+
     /// Enter interactive mode
     #[command(alias = "ui")]
     Interactive,
