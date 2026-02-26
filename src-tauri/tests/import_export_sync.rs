@@ -152,6 +152,12 @@ fn sync_enabled_to_codex_writes_enabled_servers() {
     let _guard = lock_test_mutex();
     reset_test_fs();
 
+    // Ensure ~/.codex dir exists (simulates Codex being installed)
+    let codex_dir = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = codex_dir.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+
     let mut config = MultiAppConfig::default();
     config.mcp.codex.servers.insert(
         "stdio-enabled".into(),
@@ -593,6 +599,11 @@ command = "echo"
 fn sync_claude_enabled_mcp_projects_to_user_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();
+
+    // Seed an empty .claude.json so should_sync_live detects Claude as initialized
+    let claude_path = cc_switch_lib::get_claude_mcp_path();
+    fs::write(&claude_path, "{}").expect("seed .claude.json");
+
     let mut config = MultiAppConfig::default();
 
     config.mcp.claude.servers.insert(
