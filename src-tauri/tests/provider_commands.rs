@@ -49,10 +49,7 @@ command = "echo"
                 "Latest".to_string(),
                 json!({
                     "auth": {"OPENAI_API_KEY": "fresh-key"},
-                    "config": r#"[mcp_servers.latest]
-type = "stdio"
-command = "say"
-"#
+                    "config": "model_provider = \"latest\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.latest]\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
                 }),
                 None,
             ),
@@ -197,30 +194,32 @@ requires_openai_auth = true
 
     assert_eq!(
         live_value.get("model_provider").and_then(|v| v.as_str()),
-        Some("duckcoding"),
-        "model_provider should be normalized from provider name"
+        Some("azure"),
+        "model_provider should be preserved from stored config"
     );
 
     let providers = live_value
         .get("model_providers")
         .and_then(|v| v.as_table())
         .expect("model_providers should exist");
-    let duck = providers
-        .get("duckcoding")
+    let provider_table = providers
+        .get("azure")
         .and_then(|v| v.as_table())
-        .expect("duckcoding provider table should exist");
+        .expect("azure provider table should exist");
     assert_eq!(
-        duck.get("base_url").and_then(|v| v.as_str()),
+        provider_table.get("base_url").and_then(|v| v.as_str()),
         Some("https://old.example/v1"),
         "base_url should be carried over from stored config"
     );
     assert_eq!(
-        duck.get("wire_api").and_then(|v| v.as_str()),
+        provider_table.get("wire_api").and_then(|v| v.as_str()),
         Some("responses"),
         "wire_api should be carried over from stored config"
     );
     assert_eq!(
-        duck.get("requires_openai_auth").and_then(|v| v.as_bool()),
+        provider_table
+            .get("requires_openai_auth")
+            .and_then(|v| v.as_bool()),
         Some(true),
         "requires_openai_auth should be carried over from stored config"
     );

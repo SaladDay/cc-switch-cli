@@ -31,6 +31,140 @@ fn state_from_config(config: MultiAppConfig) -> AppState {
     }
 }
 
+/// Migrate legacy flat Codex config to the upstream `model_provider + [model_providers.<key>]` format.
+///
+/// Legacy configs (pre-v4.7.3) stored fields like `base_url`, `wire_api` at the TOML root level.
+/// Codex requires them under `[model_providers.<key>]`. This function detects the old format
+/// (no `model_provider` key) and rebuilds the config in the correct structure.
+///
+/// Returns `None` if no migration is needed, `Some(new_text)` if migrated.
+pub fn migrate_legacy_codex_config(cfg_text: &str, provider: &Provider) -> Option<String> {
+    let trimmed = cfg_text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let table: toml::Table = match toml::from_str(trimmed) {
+        Ok(t) => t,
+        Err(_) => return None, // unparseable → leave as-is
+    };
+
+    // Already in new format
+    if table.contains_key("model_provider") {
+        return None;
+    }
+
+    // Detect legacy: root-level base_url or wire_api without model_provider
+    let has_legacy_keys = table.contains_key("base_url") || table.contains_key("wire_api");
+    if !has_legacy_keys {
+        return None;
+    }
+
+    // Extract fields from legacy flat format
+    let base_url = table
+        .get("base_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let model = table
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("gpt-5.2-codex")
+        .trim();
+    let wire_api = table
+        .get("wire_api")
+        .and_then(|v| v.as_str())
+        .unwrap_or("responses")
+        .trim();
+    let requires_openai_auth = table
+        .get("requires_openai_auth")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let env_key = table.get("env_key").and_then(|v| v.as_str());
+
+    // Generate provider key from provider id/name
+    // (mirrors clean_codex_provider_key in form.rs / provider_input.rs)
+    let raw_key = if provider.id.trim().is_empty() {
+        &provider.name
+    } else {
+        &provider.id
+    };
+    let provider_key = {
+        let mut key: String = raw_key
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        while key.starts_with('_') {
+            key.remove(0);
+        }
+        while key.ends_with('_') {
+            key.pop();
+        }
+        if key.is_empty() {
+            "custom".to_string()
+        } else {
+            key
+        }
+    };
+
+    // Preserve non-provider-specific root keys (model_reasoning_effort, disable_response_storage, etc.)
+    let mut extra_root_lines = Vec::new();
+    for (key, val) in &table {
+        match key.as_str() {
+            "base_url" | "model" | "wire_api" | "requires_openai_auth" | "env_key" | "name" => {
+                continue
+            }
+            _ => {
+                // Re-serialize the value as a TOML line
+                if let Ok(s) = toml::to_string(&toml::Value::Table({
+                    let mut t = toml::Table::new();
+                    t.insert(key.clone(), val.clone());
+                    t
+                })) {
+                    extra_root_lines.push(s.trim().to_string());
+                }
+            }
+        }
+    }
+
+    // Build new format
+    let mut lines = Vec::new();
+    lines.push(format!("model_provider = \"{}\"", provider_key));
+    lines.push(format!("model = \"{}\"", model));
+    lines.extend(extra_root_lines);
+    lines.push(String::new());
+    lines.push(format!("[model_providers.{}]", provider_key));
+    lines.push(format!("name = \"{}\"", provider_key));
+    if !base_url.is_empty() {
+        lines.push(format!("base_url = \"{}\"", base_url));
+    }
+    lines.push(format!("wire_api = \"{}\"", wire_api));
+    if requires_openai_auth {
+        lines.push("requires_openai_auth = true".to_string());
+    } else {
+        lines.push("requires_openai_auth = false".to_string());
+        if let Some(ek) = env_key {
+            let ek = ek.trim();
+            if !ek.is_empty() {
+                lines.push(format!("env_key = \"{}\"", ek));
+            }
+        }
+    }
+    lines.push(String::new());
+
+    log::info!(
+        "Migrated legacy Codex config for provider '{}' to model_provider format",
+        provider.id
+    );
+    Some(lines.join("\n"))
+}
+
 /// Strip common config snippet keys from a full Codex config.toml text.
 ///
 /// When storing a provider snapshot, we remove keys that belong to the common
@@ -55,10 +189,9 @@ fn strip_codex_common_config_from_full_text(
 
     for (key, _) in &common_table {
         // Only strip root-level scalar keys that are NOT provider-specific.
-        // Never strip model, model_provider, model_providers, base_url, etc.
+        // Never strip keys that define the provider identity or its model_providers section.
         match key.as_str() {
-            "model" | "model_provider" | "model_providers" | "base_url" | "wire_api"
-            | "env_key" | "requires_openai_auth" | "name" => continue,
+            "model" | "model_provider" | "model_providers" => continue,
             _ => {
                 doc.as_table_mut().remove(key);
             }
@@ -2110,6 +2243,45 @@ impl ProviderService {
         // 获取存储的 config TOML 文本
         let cfg_text = settings.get("config").and_then(Value::as_str).unwrap_or("");
 
+        // For official OpenAI providers, ensure wire_api and requires_openai_auth
+        // have sensible defaults in the model_providers section.
+        let cfg_text_owned;
+        let cfg_text = if is_codex_official_provider(provider) && !cfg_text.trim().is_empty() {
+            if let Ok(mut doc) = cfg_text.parse::<toml_edit::DocumentMut>() {
+                let mp_key = doc
+                    .get("model_provider")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(key) = mp_key {
+                    if let Some(section) = doc
+                        .get_mut("model_providers")
+                        .and_then(|v| v.as_table_like_mut())
+                        .and_then(|t| t.get_mut(&key))
+                        .and_then(|v| v.as_table_like_mut())
+                    {
+                        if section.get("wire_api").is_none() {
+                            section.insert(
+                                "wire_api",
+                                toml_edit::value("responses"),
+                            );
+                        }
+                        if section.get("requires_openai_auth").is_none() {
+                            section.insert(
+                                "requires_openai_auth",
+                                toml_edit::value(true),
+                            );
+                        }
+                    }
+                }
+                cfg_text_owned = doc.to_string();
+                &cfg_text_owned
+            } else {
+                cfg_text
+            }
+        } else {
+            cfg_text
+        };
+
         // Validate TOML before writing
         if !cfg_text.trim().is_empty() {
             crate::codex_config::validate_config_toml(cfg_text)?;
@@ -2771,6 +2943,134 @@ mod codex_openai_auth_tests {
         assert!(
             config_text.contains("model = \"gpt-4o\""),
             "config.toml should contain model from stored config"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn switch_codex_provider_migrates_legacy_flat_config() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+            .expect("create ~/.codex (initialized)");
+
+        // Start with legacy flat format
+        let legacy_config = "base_url = \"https://jp.duckcoding.com/v1\"\nmodel = \"gpt-5.1-codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true";
+        let mut provider = Provider::with_id(
+            "custom1".to_string(),
+            "DuckCoding".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-duck" },
+                "config": legacy_config
+            }),
+            None,
+        );
+
+        // Simulate startup migration (normally done in AppState::try_new)
+        if let Some(migrated) = super::migrate_legacy_codex_config(legacy_config, &provider) {
+            provider
+                .settings_config
+                .as_object_mut()
+                .unwrap()
+                .insert("config".to_string(), Value::String(migrated));
+        }
+
+        let mut config = MultiAppConfig::default();
+        config.ensure_app(&AppType::Codex);
+        config
+            .get_manager_mut(&AppType::Codex)
+            .unwrap()
+            .providers
+            .insert("custom1".to_string(), provider);
+
+        let state = state_from_config(config);
+        ProviderService::switch(&state, AppType::Codex, "custom1")
+            .expect("switch should succeed");
+
+        let config_text =
+            std::fs::read_to_string(get_codex_config_path()).expect("read codex config.toml");
+        assert!(
+            config_text.contains("model_provider = "),
+            "config.toml should have model_provider after migration: {config_text}"
+        );
+        assert!(
+            config_text.contains("[model_providers."),
+            "config.toml should have [model_providers.xxx] section after migration: {config_text}"
+        );
+        assert!(
+            config_text.contains("base_url = \"https://jp.duckcoding.com/v1\""),
+            "config.toml should preserve base_url after migration: {config_text}"
+        );
+        assert!(
+            config_text.contains("model = \"gpt-5.1-codex\""),
+            "config.toml should preserve model after migration: {config_text}"
+        );
+        assert!(
+            config_text.contains("wire_api = \"responses\""),
+            "config.toml should preserve wire_api after migration: {config_text}"
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_codex_config_noop_for_new_format() {
+        let new_format = "model_provider = \"openai\"\nmodel = \"gpt-4o\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"chat\"\n";
+        let provider = Provider::with_id(
+            "p1".to_string(),
+            "OpenAI".to_string(),
+            json!({}),
+            None,
+        );
+        let result = super::migrate_legacy_codex_config(new_format, &provider);
+        assert!(result.is_none(), "new format should not trigger migration");
+    }
+
+    #[test]
+    fn migrate_legacy_codex_config_converts_flat_format() {
+        let legacy = "base_url = \"https://custom.com/v1\"\nmodel = \"gpt-5.1-codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true";
+        let provider = Provider::with_id(
+            "my_provider".to_string(),
+            "My Provider".to_string(),
+            json!({}),
+            None,
+        );
+        let result = super::migrate_legacy_codex_config(legacy, &provider)
+            .expect("legacy format should trigger migration");
+        assert!(
+            result.contains("model_provider = \"my_provider\""),
+            "should set model_provider from provider id: {result}"
+        );
+        assert!(
+            result.contains("[model_providers.my_provider]"),
+            "should create model_providers section: {result}"
+        );
+        assert!(
+            result.contains("base_url = \"https://custom.com/v1\""),
+            "should preserve base_url: {result}"
+        );
+        assert!(
+            result.contains("wire_api = \"responses\""),
+            "should preserve wire_api: {result}"
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_codex_config_preserves_extra_keys() {
+        let legacy = "base_url = \"https://custom.com/v1\"\nmodel = \"gpt-5.1-codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true";
+        let provider = Provider::with_id(
+            "test".to_string(),
+            "Test".to_string(),
+            json!({}),
+            None,
+        );
+        let result = super::migrate_legacy_codex_config(legacy, &provider)
+            .expect("legacy format should trigger migration");
+        assert!(
+            result.contains("model_reasoning_effort = \"high\""),
+            "should preserve model_reasoning_effort: {result}"
+        );
+        assert!(
+            result.contains("disable_response_storage = true"),
+            "should preserve disable_response_storage: {result}"
         );
     }
 }

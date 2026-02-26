@@ -1401,37 +1401,39 @@ struct ParsedCodexConfigSnippet {
 
 fn parse_codex_config_snippet(cfg: &str) -> ParsedCodexConfigSnippet {
     let mut out = ParsedCodexConfigSnippet::default();
-    for line in cfg.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        let raw = value.trim().trim_matches('"').trim_matches('\'');
-        match key {
-            "base_url" => out.base_url = Some(raw.to_string()),
-            "model" => out.model = Some(raw.to_string()),
-            "wire_api" => {
-                out.wire_api = match raw {
-                    "chat" => Some(CodexWireApi::Chat),
-                    "responses" => Some(CodexWireApi::Responses),
-                    _ => None,
-                }
-            }
-            "requires_openai_auth" => {
-                out.requires_openai_auth = match raw {
-                    "true" => Some(true),
-                    "false" => Some(false),
-                    _ => None,
-                }
-            }
-            "env_key" => out.env_key = Some(raw.to_string()),
-            _ => {}
-        }
+    let table: toml::Table = match toml::from_str(cfg.trim()) {
+        Ok(t) => t,
+        Err(_) => return out,
+    };
+
+    // Root-level keys
+    out.model = table.get("model").and_then(|v| v.as_str()).map(String::from);
+
+    // Provider-specific keys live under [model_providers.<key>]
+    let section = table
+        .get("model_provider")
+        .and_then(|v| v.as_str())
+        .and_then(|key| {
+            table
+                .get("model_providers")
+                .and_then(|v| v.as_table())
+                .and_then(|t| t.get(key))
+                .and_then(|v| v.as_table())
+        });
+
+    if let Some(section) = section {
+        out.base_url = section.get("base_url").and_then(|v| v.as_str()).map(String::from);
+        out.wire_api = section.get("wire_api").and_then(|v| v.as_str()).and_then(|s| match s {
+            "chat" => Some(CodexWireApi::Chat),
+            "responses" => Some(CodexWireApi::Responses),
+            _ => None,
+        });
+        out.requires_openai_auth = section
+            .get("requires_openai_auth")
+            .and_then(|v| v.as_bool());
+        out.env_key = section.get("env_key").and_then(|v| v.as_str()).map(String::from);
     }
+
     out
 }
 
@@ -1443,34 +1445,67 @@ fn update_codex_config_snippet(
     requires_openai_auth: bool,
     env_key: &str,
 ) -> String {
-    let mut lines = original.lines().map(|s| s.to_string()).collect::<Vec<_>>();
+    let mut doc = match original.trim().parse::<toml_edit::DocumentMut>() {
+        Ok(d) => d,
+        Err(_) => return original.to_string(),
+    };
 
-    toml_set_string(&mut lines, "base_url", non_empty(base_url));
-    toml_set_string(&mut lines, "model", non_empty(model));
-    toml_set_string(&mut lines, "wire_api", Some(wire_api.as_str()));
-    toml_set_bool(
-        &mut lines,
-        "requires_openai_auth",
-        Some(requires_openai_auth),
-    );
-
-    if requires_openai_auth {
-        toml_set_string(&mut lines, "env_key", None);
+    // Root-level: model
+    if let Some(m) = non_empty(model) {
+        doc["model"] = toml_edit::value(m);
     } else {
-        let env_key = non_empty(env_key).unwrap_or("OPENAI_API_KEY");
-        toml_set_string(&mut lines, "env_key", Some(env_key));
+        doc.remove("model");
     }
 
-    // Keep user formatting/comments; only trim leading/trailing empty lines after updates.
-    let mut start = 0;
-    while start < lines.len() && lines[start].trim().is_empty() {
-        start += 1;
+    // Provider-specific keys live under [model_providers.<key>]
+    let mp_key = doc
+        .get("model_provider")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if let Some(key) = mp_key {
+        // Ensure [model_providers.<key>] exists
+        if doc.get("model_providers").is_none() {
+            doc["model_providers"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let providers = doc["model_providers"]
+            .as_table_like_mut()
+            .expect("model_providers should be a table");
+        if providers.get(&key).is_none() {
+            providers.insert(&key, toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        if let Some(section) = providers.get_mut(&key).and_then(|v| v.as_table_like_mut()) {
+            // base_url
+            if let Some(url) = non_empty(base_url) {
+                section.insert("base_url", toml_edit::value(url));
+            } else {
+                section.remove("base_url");
+            }
+
+            // wire_api
+            section.insert("wire_api", toml_edit::value(wire_api.as_str()));
+
+            // requires_openai_auth
+            section.insert("requires_openai_auth", toml_edit::value(requires_openai_auth));
+
+            // env_key
+            if requires_openai_auth {
+                section.remove("env_key");
+            } else {
+                let ek = non_empty(env_key).unwrap_or("OPENAI_API_KEY");
+                section.insert("env_key", toml_edit::value(ek));
+            }
+        }
     }
-    let mut end = lines.len();
-    while end > start && lines[end - 1].trim().is_empty() {
-        end -= 1;
+
+    let result = doc.to_string();
+    // Trim leading/trailing blank lines
+    let trimmed = result.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        trimmed.to_string()
     }
-    lines[start..end].join("\n")
 }
 
 fn non_empty(value: &str) -> Option<&str> {
@@ -1479,50 +1514,6 @@ fn non_empty(value: &str) -> Option<&str> {
         None
     } else {
         Some(trimmed)
-    }
-}
-
-fn is_toml_key_line(line: &str, key: &str) -> bool {
-    if !line.starts_with(key) {
-        return false;
-    }
-    let rest = &line[key.len()..];
-    rest.starts_with(|c: char| c.is_whitespace() || c == '=')
-}
-
-fn toml_set_string(lines: &mut Vec<String>, key: &str, value: Option<&str>) {
-    if let Some(idx) = lines
-        .iter()
-        .position(|line| is_toml_key_line(line.trim_start(), key))
-    {
-        if let Some(value) = value {
-            lines[idx] = format!("{key} = \"{}\"", escape_toml_string(value));
-        } else {
-            lines.remove(idx);
-        }
-        return;
-    }
-
-    if let Some(value) = value {
-        lines.push(format!("{key} = \"{}\"", escape_toml_string(value)));
-    }
-}
-
-fn toml_set_bool(lines: &mut Vec<String>, key: &str, value: Option<bool>) {
-    if let Some(idx) = lines
-        .iter()
-        .position(|line| is_toml_key_line(line.trim_start(), key))
-    {
-        if let Some(value) = value {
-            lines[idx] = format!("{key} = {value}");
-        } else {
-            lines.remove(idx);
-        }
-        return;
-    }
-
-    if let Some(value) = value {
-        lines.push(format!("{key} = {value}"));
     }
 }
 

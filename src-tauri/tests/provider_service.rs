@@ -59,10 +59,7 @@ command = "echo"
                 "Latest".to_string(),
                 json!({
                     "auth": {"OPENAI_API_KEY": "fresh-key"},
-                    "config": r#"[mcp_servers.latest]
-type = "stdio"
-command = "say"
-"#
+                    "config": "model_provider = \"latest\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.latest]\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
                 }),
                 None,
             ),
@@ -812,7 +809,7 @@ fn provider_service_switch_codex_defaults_wire_api_for_openai_official_when_miss
                 "OpenAI Official".to_string(),
                 json!({
                     // Intentionally omit wire_api to simulate older/partial configs.
-                    "config": "base_url = \"https://api.openai.com/v1\"\nmodel = \"gpt-5.2-codex\"\nrequires_openai_auth = true\n"
+                    "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\nrequires_openai_auth = true\n"
                 }),
                 None,
             ),
@@ -869,7 +866,7 @@ fn provider_service_switch_codex_defaults_requires_openai_auth_for_openai_offici
                 "OpenAI Official".to_string(),
                 json!({
                     // Intentionally omit requires_openai_auth (and wire_api) to simulate older/partial configs.
-                    "config": "base_url = \"https://api.openai.com/v1\"\nmodel = \"gpt-5.2-codex\"\n"
+                    "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\n"
                 }),
                 None,
             ),

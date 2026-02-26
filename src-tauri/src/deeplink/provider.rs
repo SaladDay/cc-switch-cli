@@ -265,9 +265,41 @@ fn build_codex_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
         .trim_end_matches('/')
         .to_string();
 
-    // CLI edition stores a *provider snippet* (not full `~/.codex/config.toml`).
+    // Generate a provider key from the name (same logic as clean_codex_provider_key)
+    let provider_key = {
+        let raw = request.name.as_deref().unwrap_or("custom").trim();
+        let mut key: String = raw
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        while key.starts_with('_') {
+            key.remove(0);
+        }
+        while key.ends_with('_') {
+            key.pop();
+        }
+        if key.is_empty() {
+            "custom".to_string()
+        } else {
+            key
+        }
+    };
+
+    // Use upstream model_provider + [model_providers.<key>] format
     let config_snippet = format!(
-        "base_url = \"{endpoint}\"\nmodel = \"{model_name}\"\nwire_api = \"responses\"\nenv_key = \"OPENAI_API_KEY\""
+        "model_provider = \"{provider_key}\"\n\
+         model = \"{model_name}\"\n\
+         \n\
+         [model_providers.{provider_key}]\n\
+         base_url = \"{endpoint}\"\n\
+         wire_api = \"responses\"\n\
+         env_key = \"OPENAI_API_KEY\""
     );
 
     json!({

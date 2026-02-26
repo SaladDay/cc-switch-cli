@@ -109,6 +109,14 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
         config_text.contains("model = \"gpt-4o\""),
         "config.toml content should contain model setting"
     );
+    assert!(
+        config_text.contains("model_provider = "),
+        "config.toml should use upstream model_provider format"
+    );
+    assert!(
+        config_text.contains("[model_providers."),
+        "config.toml should have [model_providers.xxx] section"
+    );
     drop(guard);
 
     let persisted = state
