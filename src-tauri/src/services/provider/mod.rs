@@ -1884,6 +1884,60 @@ impl ProviderService {
         Ok(true)
     }
 
+    /// 将所有应用的当前供应商配置同步到 live 文件。
+    ///
+    /// 用于 WebDAV 下载、备份恢复等场景：数据库已更新，但 live 配置文件
+    /// （`~/.codex/config.toml`、Claude `settings.json` 等）尚未同步。
+    /// 对齐上游 `sync_current_to_live` 行为。
+    pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
+        use crate::services::mcp::McpService;
+
+        // 在读锁下收集所有需要的数据，避免持锁写文件
+        let snapshots: Vec<(AppType, Provider, Option<String>)> = {
+            let guard = state.config.read().map_err(AppError::from)?;
+            let mut result = Vec::new();
+            for app_type in &[AppType::Claude, AppType::Codex, AppType::Gemini] {
+                if let Some(manager) = guard.get_manager(app_type) {
+                    if manager.current.is_empty() {
+                        continue;
+                    }
+                    match manager.providers.get(&manager.current) {
+                        Some(provider) => {
+                            let snippet =
+                                guard.common_config_snippets.get(app_type).cloned();
+                            result.push((app_type.clone(), provider.clone(), snippet));
+                        }
+                        None => {
+                            log::warn!(
+                                "sync_current_to_live: {app_type} 当前供应商 {} 不存在，跳过",
+                                manager.current
+                            );
+                        }
+                    }
+                }
+            }
+            result
+        };
+
+        for (app_type, provider, snippet) in &snapshots {
+            if let Err(e) =
+                Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)
+            {
+                log::warn!("sync_current_to_live: 写入 {app_type} live 配置失败: {e}");
+            }
+        }
+
+        if let Err(e) = McpService::sync_all_enabled(state) {
+            log::warn!("sync_current_to_live: MCP 同步失败: {e}");
+        }
+
+        if let Err(e) = crate::services::skill::SkillService::sync_all_enabled_best_effort() {
+            log::warn!("sync_current_to_live: Skills 同步失败: {e}");
+        }
+
+        Ok(())
+    }
+
     /// 切换指定应用的供应商
     pub fn switch(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
         let app_type_clone = app_type.clone();

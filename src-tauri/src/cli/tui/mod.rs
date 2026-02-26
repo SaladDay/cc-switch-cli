@@ -546,6 +546,17 @@ fn handle_webdav_msg(
                             }
                             _ => message,
                         };
+                        // Post-download: 将数据库中的当前供应商配置同步到 live 文件，
+                        // 对齐上游 run_post_import_sync 行为。Best-effort，不阻塞 UI。
+                        if let Ok(state) = load_state() {
+                            if let Err(e) =
+                                crate::services::provider::ProviderService::sync_current_to_live(
+                                    &state,
+                                )
+                            {
+                                log::warn!("WebDAV 下载后同步 live 配置失败: {e}");
+                            }
+                        }
                         app.push_toast(msg, ToastKind::Success);
                     }
                     WebDavDone::JianguoyunConfigured => {
@@ -1445,6 +1456,12 @@ fn handle_action(
             }
             let state = load_state()?;
             let backup_id = ConfigService::import_config_from_path(&source, &state)?;
+            // 导入后同步 live 配置
+            if let Err(e) =
+                crate::services::provider::ProviderService::sync_current_to_live(&state)
+            {
+                log::warn!("配置导入后同步 live 配置失败: {e}");
+            }
             if backup_id.is_empty() {
                 app.push_toast(texts::tui_toast_imported_config(), ToastKind::Success);
             } else {
@@ -1470,6 +1487,12 @@ fn handle_action(
         Action::ConfigRestoreBackup { id } => {
             let state = load_state()?;
             let pre_backup = ConfigService::restore_from_backup_id(&id, &state)?;
+            // 备份恢复后同步 live 配置，与 WebDAV 下载后同理
+            if let Err(e) =
+                crate::services::provider::ProviderService::sync_current_to_live(&state)
+            {
+                log::warn!("备份恢复后同步 live 配置失败: {e}");
+            }
             if pre_backup.is_empty() {
                 app.push_toast(texts::tui_toast_restored_from_backup(), ToastKind::Success);
             } else {
