@@ -83,35 +83,12 @@ pub fn migrate_legacy_codex_config(cfg_text: &str, provider: &Provider) -> Optio
     let env_key = table.get("env_key").and_then(|v| v.as_str());
 
     // Generate provider key from provider id/name
-    // (mirrors clean_codex_provider_key in form.rs / provider_input.rs)
     let raw_key = if provider.id.trim().is_empty() {
         &provider.name
     } else {
         &provider.id
     };
-    let provider_key = {
-        let mut key: String = raw_key
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        while key.starts_with('_') {
-            key.remove(0);
-        }
-        while key.ends_with('_') {
-            key.pop();
-        }
-        if key.is_empty() {
-            "custom".to_string()
-        } else {
-            key
-        }
-    };
+    let provider_key = crate::codex_config::clean_codex_provider_key(raw_key);
 
     // Preserve non-provider-specific root keys (model_reasoning_effort, disable_response_storage, etc.)
     let mut extra_root_lines = Vec::new();
@@ -188,21 +165,12 @@ fn strip_codex_common_config_from_full_text(
         .map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
 
     for (key, _) in &common_table {
-        // Only strip root-level scalar keys that are NOT provider-specific.
-        // Never strip keys that define the provider identity or its model_providers section.
+        // Strip all common keys EXCEPT provider-identity keys.
         match key.as_str() {
             "model" | "model_provider" | "model_providers" => continue,
             _ => {
                 doc.as_table_mut().remove(key);
             }
-        }
-    }
-
-    // Also strip common sub-tables (e.g. mcp_servers) if they appear in the common snippet.
-    // But only if the common snippet has them as tables.
-    for (key, val) in &common_table {
-        if val.is_table() {
-            doc.as_table_mut().remove(key);
         }
     }
 

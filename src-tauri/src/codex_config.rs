@@ -132,3 +132,33 @@ pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
     validate_config_toml(&s)?;
     Ok(s)
 }
+
+/// Generate a clean TOML key from a raw string for use as `model_provider` and `[model_providers.<key>]`.
+///
+/// Lowercases ASCII alphanumerics, replaces everything else with `_`, trims leading/trailing `_`.
+/// Falls back to `"custom"` if the result is empty.
+pub fn clean_codex_provider_key(raw: &str) -> String {
+    let mut key: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    while key.starts_with('_') {
+        key.remove(0);
+    }
+    while key.ends_with('_') {
+        key.pop();
+    }
+
+    if key.is_empty() {
+        "custom".to_string()
+    } else {
+        key
+    }
+}

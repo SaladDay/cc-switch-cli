@@ -59,29 +59,7 @@ pub fn prompt_settings_config_for_add(
 
 /// Generate a clean TOML key from a provider name/id for use in model_provider and [model_providers.<key>].
 fn clean_codex_provider_key(raw: &str) -> String {
-    let mut key: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-
-    while key.starts_with('_') {
-        key.remove(0);
-    }
-    while key.ends_with('_') {
-        key.pop();
-    }
-
-    if key.is_empty() {
-        "custom".to_string()
-    } else {
-        key
-    }
+    crate::codex_config::clean_codex_provider_key(raw)
 }
 
 fn build_codex_settings_config(

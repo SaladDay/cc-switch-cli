@@ -266,30 +266,8 @@ fn build_codex_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
         .to_string();
 
     // Generate a provider key from the name (same logic as clean_codex_provider_key)
-    let provider_key = {
-        let raw = request.name.as_deref().unwrap_or("custom").trim();
-        let mut key: String = raw
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        while key.starts_with('_') {
-            key.remove(0);
-        }
-        while key.ends_with('_') {
-            key.pop();
-        }
-        if key.is_empty() {
-            "custom".to_string()
-        } else {
-            key
-        }
-    };
+    let provider_key =
+        crate::codex_config::clean_codex_provider_key(request.name.as_deref().unwrap_or("custom"));
 
     // Use upstream model_provider + [model_providers.<key>] format
     let config_snippet = format!(
@@ -299,6 +277,7 @@ fn build_codex_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
          [model_providers.{provider_key}]\n\
          base_url = \"{endpoint}\"\n\
          wire_api = \"responses\"\n\
+         requires_openai_auth = false\n\
          env_key = \"OPENAI_API_KEY\""
     );
 

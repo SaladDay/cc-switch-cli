@@ -603,7 +603,7 @@ fn provider_service_switch_codex_missing_auth_is_allowed() {
                 "invalid".to_string(),
                 "Broken Codex".to_string(),
                 json!({
-                    "config": "base_url = \"https://api.example.com/v1\"\nmodel = \"gpt-4o\"\nenv_key = \"OPENAI_API_KEY\"\nwire_api = \"chat\""
+                    "config": "model_provider = \"invalid\"\nmodel = \"gpt-4o\"\n\n[model_providers.invalid]\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"chat\"\nrequires_openai_auth = false\nenv_key = \"OPENAI_API_KEY\"\n"
                 }),
                 None,
             ),
@@ -653,7 +653,7 @@ fn provider_service_switch_codex_openai_auth_removes_existing_auth_json() {
                 "p1".to_string(),
                 "OpenAI Official".to_string(),
                 json!({
-                    "config": "base_url = \"https://api.openai.com/v1\"\nmodel = \"gpt-5.2-codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                    "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
                 }),
                 None,
             ),
@@ -667,7 +667,7 @@ fn provider_service_switch_codex_openai_auth_removes_existing_auth_json() {
                 "Other".to_string(),
                 json!({
                     "auth": { "OPENAI_API_KEY": "sk-other" },
-                    "config": "base_url = \"https://api.other.example/v1\"\nmodel = \"gpt-5.2-codex\"\nwire_api = \"chat\"\nenv_key = \"OPENAI_API_KEY\"\nrequires_openai_auth = false\n"
+                    "config": "model_provider = \"p2\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p2]\nbase_url = \"https://api.other.example/v1\"\nwire_api = \"chat\"\nrequires_openai_auth = false\nenv_key = \"OPENAI_API_KEY\"\n"
                 }),
                 None,
             ),
@@ -730,7 +730,7 @@ fn provider_service_switch_codex_openai_auth_removes_existing_auth_json_even_if_
                 "OpenAI Official".to_string(),
                 json!({
                     "auth": { "OPENAI_API_KEY": "sk-should-not-write" },
-                    "config": "base_url = \"https://api.openai.com/v1\"\nmodel = \"gpt-5.2-codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                    "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
                 }),
                 None,
             ),
@@ -744,7 +744,7 @@ fn provider_service_switch_codex_openai_auth_removes_existing_auth_json_even_if_
                 "Other".to_string(),
                 json!({
                     "auth": { "OPENAI_API_KEY": "sk-other" },
-                    "config": "base_url = \"https://api.other.example/v1\"\nmodel = \"gpt-5.2-codex\"\nwire_api = \"chat\"\nenv_key = \"OPENAI_API_KEY\"\nrequires_openai_auth = false\n"
+                    "config": "model_provider = \"p2\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p2]\nbase_url = \"https://api.other.example/v1\"\nwire_api = \"chat\"\nrequires_openai_auth = false\nenv_key = \"OPENAI_API_KEY\"\n"
                 }),
                 None,
             ),

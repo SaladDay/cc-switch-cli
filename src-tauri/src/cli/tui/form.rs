@@ -1522,39 +1522,12 @@ fn escape_toml_string(value: &str) -> String {
 }
 
 fn clean_codex_provider_key(provider_id: &str, provider_name: &str) -> String {
-    // Follow upstream's style: lowercase + underscores, trimmed.
-    // This key is used for:
-    // - model_provider = "<key>"
-    // - [model_providers.<key>]
     let raw = if provider_id.trim().is_empty() {
         provider_name.trim()
     } else {
         provider_id.trim()
     };
-
-    let mut key = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-
-    while key.starts_with('_') {
-        key.remove(0);
-    }
-    while key.ends_with('_') {
-        key.pop();
-    }
-
-    if key.is_empty() {
-        "custom".to_string()
-    } else {
-        key
-    }
+    crate::codex_config::clean_codex_provider_key(raw)
 }
 
 fn build_codex_provider_config_toml(
