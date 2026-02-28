@@ -2232,7 +2232,6 @@ impl App {
                         let selected_model = input.trim().to_string();
 
                         if selected_model.is_empty() {
-                            self.overlay = Overlay::None;
                             return Action::None;
                         }
 

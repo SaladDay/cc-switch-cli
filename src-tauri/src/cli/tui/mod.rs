@@ -1440,15 +1440,7 @@ fn handle_action(
             field,
             claude_idx,
         } => {
-            let Some(tx) = model_fetch_req_tx else {
-                app.push_toast(
-                    texts::tui_toast_model_fetch_worker_disabled(),
-                    ToastKind::Warning,
-                );
-                return Ok(());
-            };
             let request_id = next_model_fetch_request_id();
-
             app.overlay = Overlay::ModelFetchPicker {
                 request_id,
                 field: field.clone(),
@@ -1459,6 +1451,21 @@ fn handle_action(
                 models: Vec::new(),
                 error: None,
                 selected_idx: 0,
+            };
+
+            let Some(tx) = model_fetch_req_tx else {
+                app.push_toast(
+                    texts::tui_toast_model_fetch_worker_disabled(),
+                    ToastKind::Warning,
+                );
+                if let Overlay::ModelFetchPicker {
+                    fetching, error, ..
+                } = &mut app.overlay
+                {
+                    *fetching = false;
+                    *error = Some(texts::tui_toast_model_fetch_worker_disabled().to_string());
+                }
+                return Ok(());
             };
 
             if let Err(err) = tx.send(ModelFetchReq::Fetch {
