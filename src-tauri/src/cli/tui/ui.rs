@@ -1225,7 +1225,7 @@ fn focus_block_style(active: bool, theme: &super::theme::Theme) -> Style {
 fn add_form_key_items(
     focus: FormFocus,
     editing: bool,
-    _codex_split_preview: bool,
+    selected_field: Option<ProviderAddField>,
 ) -> Vec<(&'static str, &'static str)> {
     let mut keys = vec![
         ("Tab", texts::tui_key_focus()),
@@ -1245,9 +1245,18 @@ fn add_form_key_items(
                     ("Enter", texts::tui_key_exit_edit()),
                 ]);
             } else {
+                let enter_action = match selected_field {
+                    Some(ProviderAddField::CodexModel | ProviderAddField::GeminiModel) => {
+                        texts::tui_key_fetch_model()
+                    }
+                    Some(ProviderAddField::ClaudeModelConfig | ProviderAddField::CommonSnippet) => {
+                        texts::tui_key_open()
+                    }
+                    _ => texts::tui_key_edit_mode(),
+                };
                 keys.extend([
                     ("↑↓", texts::tui_key_select()),
-                    ("Enter", texts::tui_key_edit_mode()),
+                    ("Enter", enter_action),
                     ("Space", texts::tui_key_toggle()),
                 ]);
             }
@@ -1457,15 +1466,20 @@ fn render_provider_add_form(
         ])
         .split(inner);
 
+    let selected_field_for_keys = provider
+        .fields()
+        .get(
+            provider
+                .field_idx
+                .min(provider.fields().len().saturating_sub(1)),
+        )
+        .copied();
+
     render_key_bar(
         frame,
         chunks[0],
         theme,
-        &add_form_key_items(
-            provider.focus,
-            provider.editing,
-            matches!(provider.app_type, AppType::Codex),
-        ),
+        &add_form_key_items(provider.focus, provider.editing, selected_field_for_keys),
     );
 
     if matches!(provider.mode, super::form::FormMode::Add) {
@@ -1865,7 +1879,7 @@ fn render_mcp_add_form(
         frame,
         chunks[0],
         theme,
-        &add_form_key_items(mcp.focus, mcp.editing, false),
+        &add_form_key_items(mcp.focus, mcp.editing, None),
     );
 
     if matches!(mcp.mode, super::form::FormMode::Add) {
@@ -4321,6 +4335,7 @@ mod tests {
                 ConfigSnapshot, McpSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
                 SkillsSnapshot, UiData,
             },
+            form::{FormFocus, ProviderAddField},
             route::Route,
             theme::theme_for,
         },
@@ -5053,6 +5068,17 @@ mod tests {
                 && (all.contains("restore") || all.contains("恢复")),
             "expected BackupPicker to show Enter/Esc restore hint"
         );
+    }
+
+    #[test]
+    fn provider_form_model_field_enter_hint_uses_fetch_model() {
+        let keys =
+            super::add_form_key_items(FormFocus::Fields, false, Some(ProviderAddField::CodexModel));
+        let enter_label = keys
+            .iter()
+            .find(|(key, _label)| *key == "Enter")
+            .map(|(_key, label)| *label);
+        assert_eq!(enter_label, Some(texts::tui_key_fetch_model()));
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod terminal;
 mod theme;
 mod ui;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -195,6 +196,154 @@ struct ModelFetchSystem {
     req_tx: mpsc::Sender<ModelFetchReq>,
     result_rx: mpsc::Receiver<ModelFetchMsg>,
     _handle: std::thread::JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelFetchStrategy {
+    Bearer,
+    Anthropic,
+    GoogleApiKey,
+}
+
+fn model_fetch_strategy_for_field(field: ProviderAddField) -> ModelFetchStrategy {
+    match field {
+        ProviderAddField::GeminiModel => ModelFetchStrategy::GoogleApiKey,
+        ProviderAddField::ClaudeModelConfig => ModelFetchStrategy::Anthropic,
+        _ => ModelFetchStrategy::Bearer,
+    }
+}
+
+fn build_model_fetch_candidate_urls(base_url: &str, strategy: ModelFetchStrategy) -> Vec<String> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Vec::new();
+    }
+    if base.ends_with("/models") {
+        return vec![base.to_string()];
+    }
+
+    let append_models = format!("{base}/models");
+    let append_v1_models = if base.ends_with("/v1") || base.ends_with("/v1beta") {
+        None
+    } else {
+        Some(format!("{base}/v1/models"))
+    };
+
+    let mut urls: Vec<String> = Vec::new();
+    match strategy {
+        ModelFetchStrategy::Anthropic => {
+            if let Some(v1) = append_v1_models.as_ref() {
+                urls.push(v1.clone());
+            }
+            urls.push(append_models);
+        }
+        ModelFetchStrategy::Bearer | ModelFetchStrategy::GoogleApiKey => {
+            urls.push(append_models);
+            if let Some(v1) = append_v1_models.as_ref() {
+                urls.push(v1.clone());
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    urls.retain(|url| seen.insert(url.clone()));
+    urls
+}
+
+fn parse_model_ids_from_response(payload: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+
+    if let Some(data) = payload.get("data").and_then(|v| v.as_array()) {
+        for item in data {
+            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                out.push(id.to_string());
+            }
+        }
+    }
+
+    if out.is_empty() {
+        if let Some(models) = payload.get("models").and_then(|v| v.as_array()) {
+            for item in models {
+                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                    out.push(name.strip_prefix("models/").unwrap_or(name).to_string());
+                }
+            }
+        }
+    }
+
+    if out.is_empty() {
+        if let Some(arr) = payload.as_array() {
+            for item in arr {
+                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                    out.push(id.to_string());
+                }
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    out.retain(|model| seen.insert(model.clone()));
+    out
+}
+
+async fn fetch_provider_models_for_tui(
+    base_url: &str,
+    api_key: Option<&str>,
+    strategy: ModelFetchStrategy,
+) -> Result<Vec<String>, String> {
+    let candidate_urls = build_model_fetch_candidate_urls(base_url, strategy);
+    if candidate_urls.is_empty() {
+        return Err("URL cannot be empty".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("build http client failed: {e}"))?;
+
+    let key = api_key.map(str::trim).filter(|k| !k.is_empty());
+    let mut last_err = String::from("unknown error");
+
+    for url in candidate_urls {
+        let mut req = client.get(&url);
+        if let Some(key) = key {
+            req = match strategy {
+                ModelFetchStrategy::Bearer => req.header("Authorization", format!("Bearer {key}")),
+                ModelFetchStrategy::Anthropic => req
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("x-api-key", key)
+                    .header("anthropic-version", "2023-06-01"),
+                ModelFetchStrategy::GoogleApiKey => req.header("x-goog-api-key", key),
+            };
+        }
+
+        match req.send().await {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    last_err = format!("HTTP {} ({url})", resp.status());
+                    continue;
+                }
+                match resp.json::<Value>().await {
+                    Ok(payload) => {
+                        let models = parse_model_ids_from_response(&payload);
+                        if models.is_empty() {
+                            last_err = format!("No model list found in response ({url})");
+                        } else {
+                            return Ok(models);
+                        }
+                    }
+                    Err(err) => {
+                        last_err = format!("Invalid JSON response ({url}): {err}");
+                    }
+                }
+            }
+            Err(err) => {
+                last_err = err.to_string();
+            }
+        }
+    }
+
+    Err(last_err)
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -2365,13 +2514,10 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             field,
             claude_idx,
         } = req;
+        let strategy = model_fetch_strategy_for_field(field);
         let result = rt
             .block_on(async {
-                crate::services::ProviderService::fetch_provider_models(
-                    &base_url,
-                    api_key.as_deref(),
-                )
-                .await
+                fetch_provider_models_for_tui(&base_url, api_key.as_deref(), strategy).await
             })
             .map_err(|e| e.to_string());
 
@@ -2577,9 +2723,11 @@ mod tests {
     use std::sync::mpsc;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use serde_json::json;
 
     use super::app::{App, LoadingKind, Overlay};
     use crate::cli::i18n::texts;
+    use crate::cli::tui::form::ProviderAddField;
     use crate::AppError;
 
     #[test]
@@ -2867,5 +3015,75 @@ mod tests {
 
         assert_eq!(update_check.active, None);
         assert!(matches!(app.overlay, Overlay::UpdateAvailable { .. }));
+    }
+
+    #[test]
+    fn model_fetch_strategy_matches_provider_field() {
+        assert_eq!(
+            super::model_fetch_strategy_for_field(ProviderAddField::CodexModel),
+            super::ModelFetchStrategy::Bearer
+        );
+        assert_eq!(
+            super::model_fetch_strategy_for_field(ProviderAddField::GeminiModel),
+            super::ModelFetchStrategy::GoogleApiKey
+        );
+        assert_eq!(
+            super::model_fetch_strategy_for_field(ProviderAddField::ClaudeModelConfig),
+            super::ModelFetchStrategy::Anthropic
+        );
+    }
+
+    #[test]
+    fn model_fetch_candidate_urls_prefers_v1_for_anthropic_base() {
+        let urls = super::build_model_fetch_candidate_urls(
+            "https://api.anthropic.com",
+            super::ModelFetchStrategy::Anthropic,
+        );
+        assert_eq!(
+            urls,
+            vec![
+                "https://api.anthropic.com/v1/models".to_string(),
+                "https://api.anthropic.com/models".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn model_fetch_candidate_urls_for_gemini_v1beta_keeps_models_endpoint() {
+        let urls = super::build_model_fetch_candidate_urls(
+            "https://generativelanguage.googleapis.com/v1beta",
+            super::ModelFetchStrategy::GoogleApiKey,
+        );
+        assert_eq!(
+            urls,
+            vec!["https://generativelanguage.googleapis.com/v1beta/models".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_model_ids_supports_multiple_shapes_and_dedups_stably() {
+        let data_payload = json!({
+            "data": [
+                {"id": "gpt-4o"},
+                {"id": "gpt-4o-mini"},
+                {"id": "gpt-4o"},
+                {"id": "o3"}
+            ]
+        });
+        assert_eq!(
+            super::parse_model_ids_from_response(&data_payload),
+            vec!["gpt-4o", "gpt-4o-mini", "o3"]
+        );
+
+        let gemini_payload = json!({
+            "models": [
+                {"name": "models/gemini-2.0-pro"},
+                {"name": "models/gemini-2.0-flash"}
+            ]
+        });
+        assert_eq!(
+            super::parse_model_ids_from_response(&gemini_payload),
+            vec!["gemini-2.0-pro", "gemini-2.0-flash"]
+        );
     }
 }
