@@ -153,6 +153,17 @@ pub enum Overlay {
         selected: usize,
         editing: bool,
     },
+    ModelFetchPicker {
+        request_id: u64,
+        field: ProviderAddField,
+        claude_idx: Option<usize>,
+        input: String,
+        query: String,
+        fetching: bool,
+        models: Vec<String>,
+        error: Option<String>,
+        selected_idx: usize,
+    },
     McpAppsPicker {
         id: String,
         name: String,
@@ -538,6 +549,12 @@ pub enum Action {
     },
     ProviderSpeedtest {
         url: String,
+    },
+    ProviderModelFetch {
+        base_url: String,
+        api_key: Option<String>,
+        field: ProviderAddField,
+        claude_idx: Option<usize>,
     },
 
     McpToggle {
@@ -1750,9 +1767,7 @@ impl App {
                                 Action::None
                             }
                         }
-                        ConfirmAction::WebDavMigrateV1ToV2 => {
-                            Action::ConfigWebDavMigrateV1ToV2
-                        }
+                        ConfirmAction::WebDavMigrateV1ToV2 => Action::ConfigWebDavMigrateV1ToV2,
                     };
                     self.overlay = Overlay::None;
                     action
@@ -2127,12 +2142,120 @@ impl App {
                             *selected = (*selected + 1).min(4);
                             Action::None
                         }
-                        KeyCode::Char(' ') | KeyCode::Enter => {
+                        KeyCode::Enter => {
+                            if let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() {
+                                return Action::ProviderModelFetch {
+                                    base_url: provider.claude_base_url.value.clone(),
+                                    api_key: if provider.claude_api_key.value.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(provider.claude_api_key.value.clone())
+                                    },
+                                    field: ProviderAddField::ClaudeModelConfig,
+                                    claude_idx: Some(*selected),
+                                };
+                            }
+                            Action::None
+                        }
+                        KeyCode::Char(' ') => {
                             *editing = true;
                             Action::None
                         }
                         _ => Action::None,
                     }
+                }
+            }
+            Overlay::ModelFetchPicker {
+                field,
+                claude_idx,
+                input,
+                query,
+                fetching: _,
+                models,
+                selected_idx,
+                ..
+            } => {
+                let filtered: Vec<&String> = if query.trim().is_empty() {
+                    models.iter().collect()
+                } else {
+                    let q = query.trim().to_lowercase();
+                    models
+                        .iter()
+                        .filter(|m| m.to_lowercase().contains(&q))
+                        .collect()
+                };
+
+                match key.code {
+                    KeyCode::Esc => {
+                        self.overlay = Overlay::None;
+                        Action::None
+                    }
+                    KeyCode::Up => {
+                        *selected_idx = selected_idx.saturating_sub(1);
+                        if let Some(m) = filtered.get(*selected_idx) {
+                            *input = (*m).to_string();
+                        }
+                        Action::None
+                    }
+                    KeyCode::Down => {
+                        if !filtered.is_empty() {
+                            *selected_idx = (*selected_idx + 1).min(filtered.len() - 1);
+                            if let Some(m) = filtered.get(*selected_idx) {
+                                *input = (*m).to_string();
+                            }
+                        }
+                        Action::None
+                    }
+                    KeyCode::Tab => {
+                        if let Some(m) = filtered.get(*selected_idx) {
+                            *input = (*m).to_string();
+                            *query = (*m).to_string();
+                            *selected_idx = 0;
+                        }
+                        Action::None
+                    }
+                    KeyCode::Backspace => {
+                        if !input.is_empty() {
+                            input.pop();
+                            *query = input.clone();
+                            *selected_idx = 0;
+                        }
+                        Action::None
+                    }
+                    KeyCode::Char(c) if !c.is_control() => {
+                        input.push(c);
+                        *query = input.clone();
+                        *selected_idx = 0;
+                        Action::None
+                    }
+                    KeyCode::Enter => {
+                        let selected_model = input.trim().to_string();
+
+                        if selected_model.is_empty() {
+                            self.overlay = Overlay::None;
+                            return Action::None;
+                        }
+
+                        let field = *field;
+                        let claude_idx = *claude_idx;
+                        self.overlay = Overlay::None;
+
+                        if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                            if field == ProviderAddField::ClaudeModelConfig {
+                                if let Some(idx) = claude_idx {
+                                    if let Some(input_field) = provider.claude_model_input_mut(idx)
+                                    {
+                                        input_field.set(selected_model);
+                                        provider.mark_claude_model_config_touched();
+                                    }
+                                }
+                            } else if let Some(input_field) = provider.input_mut(field) {
+                                input_field.set(selected_model);
+                            }
+                        }
+                        Action::None
+                    }
+                    _ => Action::None,
                 }
             }
             Overlay::Loading { kind, .. } => match key.code {
@@ -2723,6 +2846,45 @@ impl App {
                                     self.open_common_snippet_editor(app_type, data, None);
                                 }
                                 return Action::None;
+                            }
+                            ProviderAddField::CodexModel | ProviderAddField::GeminiModel => {
+                                if matches!(key.code, KeyCode::Enter) {
+                                    let api_key = match selected {
+                                        ProviderAddField::CodexModel => {
+                                            if provider.codex_api_key.value.trim().is_empty() {
+                                                None
+                                            } else {
+                                                Some(provider.codex_api_key.value.clone())
+                                            }
+                                        }
+                                        ProviderAddField::GeminiModel => {
+                                            if provider.gemini_api_key.value.trim().is_empty() {
+                                                None
+                                            } else {
+                                                Some(provider.gemini_api_key.value.clone())
+                                            }
+                                        }
+                                        _ => None,
+                                    };
+                                    let base_url = match selected {
+                                        ProviderAddField::CodexModel => {
+                                            provider.codex_base_url.value.clone()
+                                        }
+                                        ProviderAddField::GeminiModel => {
+                                            provider.gemini_base_url.value.clone()
+                                        }
+                                        _ => String::new(),
+                                    };
+                                    return Action::ProviderModelFetch {
+                                        base_url,
+                                        api_key,
+                                        field: selected,
+                                        claude_idx: None,
+                                    };
+                                } else {
+                                    provider.editing = true;
+                                    return Action::None;
+                                }
                             }
                             _ => {
                                 if selected == ProviderAddField::Id && !provider.is_id_editable() {
@@ -5222,7 +5384,7 @@ mod tests {
         }
 
         app.on_key(key(KeyCode::Enter), &data);
-        app.on_key(key(KeyCode::Enter), &data); // enter editing mode in overlay
+        app.on_key(key(KeyCode::Char(' ')), &data); // enter editing mode in overlay
         app.on_key(key(KeyCode::Char('m')), &data);
         app.on_key(key(KeyCode::Char('1')), &data);
 

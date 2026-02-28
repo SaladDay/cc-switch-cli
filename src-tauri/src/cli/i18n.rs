@@ -1140,6 +1140,78 @@ pub mod texts {
         }
     }
 
+    pub fn tui_hint_press() -> &'static str {
+        if is_chinese() {
+            "按 "
+        } else {
+            "Press "
+        }
+    }
+
+    pub fn tui_hint_auto_fetch_models_from_api() -> &'static str {
+        if is_chinese() {
+            " 从 API 自动获取模型。"
+        } else {
+            " to auto-fetch models from API."
+        }
+    }
+
+    pub fn tui_model_fetch_popup_title(fetching: bool) -> String {
+        if is_chinese() {
+            if fetching {
+                "选择模型 (获取中...)".to_string()
+            } else {
+                "选择模型".to_string()
+            }
+        } else {
+            if fetching {
+                "Select Model (Fetching...)".to_string()
+            } else {
+                "Select Model".to_string()
+            }
+        }
+    }
+
+    pub fn tui_model_fetch_search_placeholder() -> &'static str {
+        if is_chinese() {
+            "输入过滤 或 直接回车使用输入值..."
+        } else {
+            "Type to filter, or press Enter to use input..."
+        }
+    }
+
+    pub fn tui_model_fetch_search_title() -> &'static str {
+        if is_chinese() {
+            "模型搜索"
+        } else {
+            "Model Search"
+        }
+    }
+
+    pub fn tui_model_fetch_no_models() -> &'static str {
+        if is_chinese() {
+            "没有获取到模型 (可直接输入并在此回车)"
+        } else {
+            "No models found (type custom and press Enter)"
+        }
+    }
+
+    pub fn tui_model_fetch_no_matches() -> &'static str {
+        if is_chinese() {
+            "没有匹配结果 (可直接输入并在此回车)"
+        } else {
+            "No matching models (press Enter to use input)"
+        }
+    }
+
+    pub fn tui_model_fetch_error_hint(err: &str) -> String {
+        if is_chinese() {
+            format!("获取失败: {}", err)
+        } else {
+            format!("Fetch failed: {}", err)
+        }
+    }
+
     pub fn tui_provider_not_found() -> &'static str {
         if is_chinese() {
             "未找到该供应商。"
@@ -1540,6 +1612,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_fetch_model() -> &'static str {
+        if is_chinese() {
+            "获取模型"
+        } else {
+            "fetch model"
+        }
+    }
+
     pub fn tui_key_deactivate_active() -> &'static str {
         if is_chinese() {
             "取消激活(当前)"
@@ -1558,9 +1638,9 @@ pub mod texts {
 
     pub fn tui_home_ascii_logo() -> &'static str {
         // Same ASCII art across languages.
-        r#"                                  _  _         _     
-   ___  ___        ___ __      __(_)| |_  ___ | |__  
-  / __|/ __|_____ / __|\ \ /\ / /| || __|/ __|| '_ \ 
+        r#"                                  _  _         _
+   ___  ___        ___ __      __(_)| |_  ___ | |__
+  / __|/ __|_____ / __|\ \ /\ / /| || __|/ __|| '_ \
  | (__| (__|_____|\__ \ \ V  V / | || |_| (__ | | | |
   \___|\___|      |___/  \_/\_/  |_| \__|\___||_| |_|
                                                       "#
@@ -2606,6 +2686,22 @@ pub mod texts {
             format!("WebDAV 后台任务不可用: {err}")
         } else {
             format!("WebDAV worker unavailable: {err}")
+        }
+    }
+
+    pub fn tui_toast_model_fetch_worker_unavailable(err: &str) -> String {
+        if is_chinese() {
+            format!("模型获取后台任务不可用: {err}")
+        } else {
+            format!("Model fetch worker unavailable: {err}")
+        }
+    }
+
+    pub fn tui_toast_model_fetch_worker_disabled() -> &'static str {
+        if is_chinese() {
+            "本次会话模型获取后台任务不可用。"
+        } else {
+            "Model fetch worker is disabled for this session."
         }
     }
 

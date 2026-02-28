@@ -6,7 +6,9 @@ mod terminal;
 mod theme;
 mod ui;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -27,13 +29,21 @@ use crate::settings::{
     WebDavSyncSettings,
 };
 
-use app::{Action, App, ConfirmAction, ConfirmOverlay, EditorSubmit, LoadingKind, Overlay, TextViewState, ToastKind};
+use app::{
+    Action, App, ConfirmAction, ConfirmOverlay, EditorSubmit, LoadingKind, Overlay, TextViewState,
+    ToastKind,
+};
 use data::{load_state, UiData};
-use form::FormState;
+use form::{FormState, ProviderAddField};
 use terminal::{PanicRestoreHookGuard, TuiTerminal};
 
 fn command_lookup_name(raw: &str) -> Option<&str> {
     raw.split_whitespace().next()
+}
+
+fn next_model_fetch_request_id() -> u64 {
+    static NEXT_MODEL_FETCH_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_MODEL_FETCH_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 enum SpeedtestMsg {
@@ -163,6 +173,179 @@ struct UpdateSystem {
     _handle: std::thread::JoinHandle<()>,
 }
 
+pub enum ModelFetchReq {
+    Fetch {
+        request_id: u64,
+        base_url: String,
+        api_key: Option<String>,
+        field: ProviderAddField,
+        claude_idx: Option<usize>,
+    },
+}
+
+pub enum ModelFetchMsg {
+    Finished {
+        request_id: u64,
+        field: ProviderAddField,
+        claude_idx: Option<usize>,
+        result: Result<Vec<String>, String>,
+    },
+}
+
+struct ModelFetchSystem {
+    req_tx: mpsc::Sender<ModelFetchReq>,
+    result_rx: mpsc::Receiver<ModelFetchMsg>,
+    _handle: std::thread::JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelFetchStrategy {
+    Bearer,
+    Anthropic,
+    GoogleApiKey,
+}
+
+fn model_fetch_strategy_for_field(field: ProviderAddField) -> ModelFetchStrategy {
+    match field {
+        ProviderAddField::GeminiModel => ModelFetchStrategy::GoogleApiKey,
+        ProviderAddField::ClaudeModelConfig => ModelFetchStrategy::Anthropic,
+        _ => ModelFetchStrategy::Bearer,
+    }
+}
+
+fn build_model_fetch_candidate_urls(base_url: &str, strategy: ModelFetchStrategy) -> Vec<String> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Vec::new();
+    }
+    if base.ends_with("/models") {
+        return vec![base.to_string()];
+    }
+
+    let append_models = format!("{base}/models");
+    let append_v1_models = if base.ends_with("/v1") || base.ends_with("/v1beta") {
+        None
+    } else {
+        Some(format!("{base}/v1/models"))
+    };
+
+    let mut urls: Vec<String> = Vec::new();
+    match strategy {
+        ModelFetchStrategy::Anthropic => {
+            if let Some(v1) = append_v1_models.as_ref() {
+                urls.push(v1.clone());
+            }
+            urls.push(append_models);
+        }
+        ModelFetchStrategy::Bearer | ModelFetchStrategy::GoogleApiKey => {
+            urls.push(append_models);
+            if let Some(v1) = append_v1_models.as_ref() {
+                urls.push(v1.clone());
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    urls.retain(|url| seen.insert(url.clone()));
+    urls
+}
+
+fn parse_model_ids_from_response(payload: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+
+    if let Some(data) = payload.get("data").and_then(|v| v.as_array()) {
+        for item in data {
+            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                out.push(id.to_string());
+            }
+        }
+    }
+
+    if out.is_empty() {
+        if let Some(models) = payload.get("models").and_then(|v| v.as_array()) {
+            for item in models {
+                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                    out.push(name.strip_prefix("models/").unwrap_or(name).to_string());
+                }
+            }
+        }
+    }
+
+    if out.is_empty() {
+        if let Some(arr) = payload.as_array() {
+            for item in arr {
+                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                    out.push(id.to_string());
+                }
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    out.retain(|model| seen.insert(model.clone()));
+    out
+}
+
+async fn fetch_provider_models_for_tui(
+    base_url: &str,
+    api_key: Option<&str>,
+    strategy: ModelFetchStrategy,
+) -> Result<Vec<String>, String> {
+    let candidate_urls = build_model_fetch_candidate_urls(base_url, strategy);
+    if candidate_urls.is_empty() {
+        return Err("URL cannot be empty".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("build http client failed: {e}"))?;
+
+    let key = api_key.map(str::trim).filter(|k| !k.is_empty());
+    let mut last_err = String::from("unknown error");
+
+    for url in candidate_urls {
+        let mut req = client.get(&url);
+        if let Some(key) = key {
+            req = match strategy {
+                ModelFetchStrategy::Bearer => req.header("Authorization", format!("Bearer {key}")),
+                ModelFetchStrategy::Anthropic => req
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("x-api-key", key)
+                    .header("anthropic-version", "2023-06-01"),
+                ModelFetchStrategy::GoogleApiKey => req.header("x-goog-api-key", key),
+            };
+        }
+
+        match req.send().await {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    last_err = format!("HTTP {} ({url})", resp.status());
+                    continue;
+                }
+                match resp.json::<Value>().await {
+                    Ok(payload) => {
+                        let models = parse_model_ids_from_response(&payload);
+                        if models.is_empty() {
+                            last_err = format!("No model list found in response ({url})");
+                        } else {
+                            return Ok(models);
+                        }
+                    }
+                    Err(err) => {
+                        last_err = format!("Invalid JSON response ({url}): {err}");
+                    }
+                }
+            }
+            Err(err) => {
+                last_err = err.to_string();
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct RequestTracker {
     seq: u64,
@@ -270,6 +453,17 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         }
     };
 
+    let model_fetch = match start_model_fetch_system() {
+        Ok(system) => Some(system),
+        Err(err) => {
+            app.push_toast(
+                texts::tui_toast_model_fetch_worker_unavailable(&err.to_string()),
+                ToastKind::Warning,
+            );
+            None
+        }
+    };
+
     loop {
         app.last_size = terminal.size()?;
         terminal.draw(|f| ui::render(f, &app, &data))?;
@@ -313,6 +507,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             }
         }
 
+        // Handle async model fetch results
+        if let Some(mf) = model_fetch.as_ref() {
+            while let Ok(msg) = mf.result_rx.try_recv() {
+                handle_model_fetch_msg(&mut app, msg);
+            }
+        }
+
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout).map_err(|e| AppError::Message(e.to_string()))? {
             match event::read().map_err(|e| AppError::Message(e.to_string()))? {
@@ -330,6 +531,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         &mut webdav_loading,
                         update_system.as_ref().map(|s| &s.req_tx),
                         &mut update_check,
+                        model_fetch.as_ref().map(|s| &s.req_tx),
                         action,
                     ) {
                         if matches!(
@@ -361,6 +563,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                             &mut webdav_loading,
                             update_system.as_ref().map(|s| &s.req_tx),
                             &mut update_check,
+                            model_fetch.as_ref().map(|s| &s.req_tx),
                             action,
                         ) {
                             if matches!(
@@ -444,6 +647,48 @@ fn handle_local_env_msg(app: &mut App, msg: LocalEnvMsg) {
         LocalEnvMsg::Finished { result } => {
             app.local_env_results = result;
             app.local_env_loading = false;
+        }
+    }
+}
+
+fn handle_model_fetch_msg(app: &mut App, msg: ModelFetchMsg) {
+    match msg {
+        ModelFetchMsg::Finished {
+            request_id,
+            field,
+            claude_idx,
+            result,
+        } => {
+            if let Overlay::ModelFetchPicker {
+                request_id: current_request_id,
+                fetching: ref mut f,
+                models: ref mut m,
+                error: ref mut e,
+                field: ref current_field,
+                claude_idx: ref current_claude_idx,
+                ..
+            } = app.overlay
+            {
+                if current_request_id != request_id {
+                    return;
+                }
+                if current_field == &field && current_claude_idx == &claude_idx {
+                    *f = false;
+                    match result {
+                        Ok(fetched_models) => {
+                            if fetched_models.is_empty() {
+                                *e = Some(texts::tui_model_fetch_no_models().to_string());
+                            } else {
+                                *m = fetched_models;
+                                *e = None;
+                            }
+                        }
+                        Err(err) => {
+                            *e = Some(texts::tui_model_fetch_error_hint(&err));
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -690,6 +935,7 @@ fn handle_action(
     webdav_loading: &mut RequestTracker,
     update_req_tx: Option<&mpsc::Sender<UpdateReq>>,
     update_check: &mut RequestTracker,
+    model_fetch_req_tx: Option<&mpsc::Sender<ModelFetchReq>>,
     action: Action,
 ) -> Result<(), AppError> {
     match action {
@@ -1337,7 +1583,50 @@ fn handle_action(
             }
             Ok(())
         }
+        Action::ProviderModelFetch {
+            base_url,
+            api_key,
+            field,
+            claude_idx,
+        } => {
+            let Some(tx) = model_fetch_req_tx else {
+                app.push_toast(
+                    texts::tui_toast_model_fetch_worker_disabled(),
+                    ToastKind::Warning,
+                );
+                return Ok(());
+            };
+            let request_id = next_model_fetch_request_id();
 
+            app.overlay = Overlay::ModelFetchPicker {
+                request_id,
+                field: field.clone(),
+                claude_idx,
+                input: String::new(),
+                query: String::new(),
+                fetching: true,
+                models: Vec::new(),
+                error: None,
+                selected_idx: 0,
+            };
+
+            if let Err(err) = tx.send(ModelFetchReq::Fetch {
+                request_id,
+                base_url,
+                api_key,
+                field,
+                claude_idx,
+            }) {
+                if let Overlay::ModelFetchPicker {
+                    fetching, error, ..
+                } = &mut app.overlay
+                {
+                    *fetching = false;
+                    *error = Some(texts::tui_model_fetch_error_hint(&err.to_string()));
+                }
+            }
+            Ok(())
+        }
         Action::McpToggle { id, enabled } => {
             let state = load_state()?;
             McpService::toggle_app(&state, &id, app.app_type.clone(), enabled)?;
@@ -1500,8 +1789,7 @@ fn handle_action(
             let state = load_state()?;
             let backup_id = ConfigService::import_config_from_path(&source, &state)?;
             // 导入后同步 live 配置
-            if let Err(e) =
-                crate::services::provider::ProviderService::sync_current_to_live(&state)
+            if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state)
             {
                 log::warn!("配置导入后同步 live 配置失败: {e}");
             }
@@ -1531,8 +1819,7 @@ fn handle_action(
             let state = load_state()?;
             let pre_backup = ConfigService::restore_from_backup_id(&id, &state)?;
             // 备份恢复后同步 live 配置，与 WebDAV 下载后同理
-            if let Err(e) =
-                crate::services::provider::ProviderService::sync_current_to_live(&state)
+            if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state)
             {
                 log::warn!("备份恢复后同步 live 配置失败: {e}");
             }
@@ -2174,6 +2461,75 @@ fn speedtest_worker_loop(rx: mpsc::Receiver<String>, tx: mpsc::Sender<SpeedtestM
     }
 }
 
+fn start_model_fetch_system() -> Result<ModelFetchSystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<ModelFetchMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<ModelFetchReq>();
+
+    let handle = std::thread::Builder::new()
+        .name("cc-switch-modelfetch".to_string())
+        .spawn(move || model_fetch_worker_loop(req_rx, result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn model fetch worker thread".to_string(),
+            source: e,
+        })?;
+
+    Ok(ModelFetchSystem {
+        req_tx,
+        result_rx,
+        _handle: handle,
+    })
+}
+
+fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<ModelFetchMsg>) {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let err = e.to_string();
+            while let Ok(req) = rx.recv() {
+                let ModelFetchReq::Fetch {
+                    request_id,
+                    field,
+                    claude_idx,
+                    ..
+                } = req;
+                let _ = tx.send(ModelFetchMsg::Finished {
+                    request_id,
+                    field,
+                    claude_idx,
+                    result: Err(err.clone()),
+                });
+            }
+            return;
+        }
+    };
+
+    while let Ok(req) = rx.recv() {
+        let ModelFetchReq::Fetch {
+            request_id,
+            base_url,
+            api_key,
+            field,
+            claude_idx,
+        } = req;
+        let strategy = model_fetch_strategy_for_field(field);
+        let result = rt
+            .block_on(async {
+                fetch_provider_models_for_tui(&base_url, api_key.as_deref(), strategy).await
+            })
+            .map_err(|e| e.to_string());
+
+        let _ = tx.send(ModelFetchMsg::Finished {
+            request_id,
+            field,
+            claude_idx,
+            result,
+        });
+    }
+}
+
 fn start_local_env_system() -> Result<LocalEnvSystem, AppError> {
     let (result_tx, result_rx) = mpsc::channel::<LocalEnvMsg>();
     let (req_tx, req_rx) = mpsc::channel::<LocalEnvReq>();
@@ -2367,9 +2723,11 @@ mod tests {
     use std::sync::mpsc;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use serde_json::json;
 
     use super::app::{App, LoadingKind, Overlay};
     use crate::cli::i18n::texts;
+    use crate::cli::tui::form::ProviderAddField;
     use crate::AppError;
 
     #[test]
@@ -2657,5 +3015,75 @@ mod tests {
 
         assert_eq!(update_check.active, None);
         assert!(matches!(app.overlay, Overlay::UpdateAvailable { .. }));
+    }
+
+    #[test]
+    fn model_fetch_strategy_matches_provider_field() {
+        assert_eq!(
+            super::model_fetch_strategy_for_field(ProviderAddField::CodexModel),
+            super::ModelFetchStrategy::Bearer
+        );
+        assert_eq!(
+            super::model_fetch_strategy_for_field(ProviderAddField::GeminiModel),
+            super::ModelFetchStrategy::GoogleApiKey
+        );
+        assert_eq!(
+            super::model_fetch_strategy_for_field(ProviderAddField::ClaudeModelConfig),
+            super::ModelFetchStrategy::Anthropic
+        );
+    }
+
+    #[test]
+    fn model_fetch_candidate_urls_prefers_v1_for_anthropic_base() {
+        let urls = super::build_model_fetch_candidate_urls(
+            "https://api.anthropic.com",
+            super::ModelFetchStrategy::Anthropic,
+        );
+        assert_eq!(
+            urls,
+            vec![
+                "https://api.anthropic.com/v1/models".to_string(),
+                "https://api.anthropic.com/models".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn model_fetch_candidate_urls_for_gemini_v1beta_keeps_models_endpoint() {
+        let urls = super::build_model_fetch_candidate_urls(
+            "https://generativelanguage.googleapis.com/v1beta",
+            super::ModelFetchStrategy::GoogleApiKey,
+        );
+        assert_eq!(
+            urls,
+            vec!["https://generativelanguage.googleapis.com/v1beta/models".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_model_ids_supports_multiple_shapes_and_dedups_stably() {
+        let data_payload = json!({
+            "data": [
+                {"id": "gpt-4o"},
+                {"id": "gpt-4o-mini"},
+                {"id": "gpt-4o"},
+                {"id": "o3"}
+            ]
+        });
+        assert_eq!(
+            super::parse_model_ids_from_response(&data_payload),
+            vec!["gpt-4o", "gpt-4o-mini", "o3"]
+        );
+
+        let gemini_payload = json!({
+            "models": [
+                {"name": "models/gemini-2.0-pro"},
+                {"name": "models/gemini-2.0-flash"}
+            ]
+        });
+        assert_eq!(
+            super::parse_model_ids_from_response(&gemini_payload),
+            vec!["gemini-2.0-pro", "gemini-2.0-flash"]
+        );
     }
 }

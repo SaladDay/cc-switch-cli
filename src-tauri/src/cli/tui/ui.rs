@@ -1225,7 +1225,7 @@ fn focus_block_style(active: bool, theme: &super::theme::Theme) -> Style {
 fn add_form_key_items(
     focus: FormFocus,
     editing: bool,
-    _codex_split_preview: bool,
+    selected_field: Option<ProviderAddField>,
 ) -> Vec<(&'static str, &'static str)> {
     let mut keys = vec![
         ("Tab", texts::tui_key_focus()),
@@ -1245,9 +1245,18 @@ fn add_form_key_items(
                     ("Enter", texts::tui_key_exit_edit()),
                 ]);
             } else {
+                let enter_action = match selected_field {
+                    Some(ProviderAddField::CodexModel | ProviderAddField::GeminiModel) => {
+                        texts::tui_key_fetch_model()
+                    }
+                    Some(ProviderAddField::ClaudeModelConfig | ProviderAddField::CommonSnippet) => {
+                        texts::tui_key_open()
+                    }
+                    _ => texts::tui_key_edit_mode(),
+                };
                 keys.extend([
                     ("↑↓", texts::tui_key_select()),
-                    ("Enter", texts::tui_key_edit_mode()),
+                    ("Enter", enter_action),
                     ("Space", texts::tui_key_toggle()),
                 ]);
             }
@@ -1457,15 +1466,20 @@ fn render_provider_add_form(
         ])
         .split(inner);
 
+    let selected_field_for_keys = provider
+        .fields()
+        .get(
+            provider
+                .field_idx
+                .min(provider.fields().len().saturating_sub(1)),
+        )
+        .copied();
+
     render_key_bar(
         frame,
         chunks[0],
         theme,
-        &add_form_key_items(
-            provider.focus,
-            provider.editing,
-            matches!(provider.app_type, AppType::Codex),
-        ),
+        &add_form_key_items(provider.focus, provider.editing, selected_field_for_keys),
     );
 
     if matches!(provider.mode, super::form::FormMode::Add) {
@@ -1865,7 +1879,7 @@ fn render_mcp_add_form(
         frame,
         chunks[0],
         theme,
-        &add_form_key_items(mcp.focus, mcp.editing, false),
+        &add_form_key_items(mcp.focus, mcp.editing, None),
     );
 
     if matches!(mcp.mode, super::form::FormMode::Add) {
@@ -3181,21 +3195,37 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::th
                 Style::default(),
             )]
         } else {
-            let key_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+            let key_style = Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD);
             let desc_style = Style::default().fg(theme.dim);
             let sep = Span::styled("  ", desc_style);
 
             let items: &[(&str, &str)] = if i18n::is_chinese() {
-                &[("←→", "菜单/内容"), ("↑↓", "移动"), ("[ ]", "切换应用"),
-                  ("/", "过滤"), ("Esc", "返回"), ("?", "帮助")]
+                &[
+                    ("←→", "菜单/内容"),
+                    ("↑↓", "移动"),
+                    ("[ ]", "切换应用"),
+                    ("/", "过滤"),
+                    ("Esc", "返回"),
+                    ("?", "帮助"),
+                ]
             } else {
-                &[("←→", "menu/content"), ("↑↓", "move"), ("[ ]", "switch app"),
-                  ("/", "filter"), ("Esc", "back"), ("?", "help")]
+                &[
+                    ("←→", "menu/content"),
+                    ("↑↓", "move"),
+                    ("[ ]", "switch app"),
+                    ("/", "filter"),
+                    ("Esc", "back"),
+                    ("?", "help"),
+                ]
             };
 
             let mut v = Vec::new();
             for (i, (key, desc)) in items.iter().enumerate() {
-                if i > 0 { v.push(sep.clone()); }
+                if i > 0 {
+                    v.push(sep.clone());
+                }
                 v.push(Span::styled(format!(" {} ", key), key_style));
                 v.push(Span::styled(format!(" {}", desc), desc_style));
             }
@@ -3563,30 +3593,20 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 ])
                 .split(inner);
 
-            render_key_bar_center(
-                frame,
-                chunks[0],
-                theme,
-                &[
+            let key_items: Vec<(&str, &str)> = if *editing {
+                vec![
+                    ("←→/Home/End", texts::tui_key_move()),
+                    ("Esc/Enter", texts::tui_key_exit_edit()),
+                ]
+            } else {
+                vec![
                     ("↑↓", texts::tui_key_select()),
-                    (
-                        "Enter",
-                        if *editing {
-                            texts::tui_key_exit_edit()
-                        } else {
-                            texts::tui_key_edit_mode()
-                        },
-                    ),
-                    (
-                        "Esc",
-                        if *editing {
-                            texts::tui_key_exit_edit()
-                        } else {
-                            texts::tui_key_close()
-                        },
-                    ),
-                ],
-            );
+                    ("Space", texts::tui_key_edit()),
+                    ("Enter", texts::tui_key_fetch_model()),
+                    ("Esc", texts::tui_key_close()),
+                ]
+            };
+            render_key_bar_center(frame, chunks[0], theme, &key_items);
 
             if let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() {
                 let labels = [
@@ -3637,7 +3657,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 state.select(Some((*selected).min(labels.len().saturating_sub(1))));
                 frame.render_stateful_widget(table, chunks[1], &mut state);
 
-                let input_block = Block::default()
+                let hint_block = Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Plain)
                     .border_style(if *editing {
@@ -3652,27 +3672,154 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                     } else {
                         texts::tui_form_input_title()
                     });
-                frame.render_widget(input_block.clone(), chunks[2]);
-                let input_inner = input_block.inner(chunks[2]);
+                frame.render_widget(hint_block.clone(), chunks[2]);
+                let hint_inner = hint_block.inner(chunks[2]);
 
-                if let Some(input) = provider.claude_model_input(*selected) {
-                    let (visible, cursor_x) =
-                        visible_text_window(&input.value, input.cursor, input_inner.width as usize);
-                    frame.render_widget(
-                        Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
-                        input_inner,
-                    );
-                    if *editing {
-                        let x = input_inner.x + cursor_x.min(input_inner.width.saturating_sub(1));
-                        let y = input_inner.y;
+                if *editing {
+                    if let Some(input) = provider.claude_model_input(*selected) {
+                        let (visible, cursor_x) = visible_text_window(
+                            &input.value,
+                            input.cursor,
+                            hint_inner.width as usize,
+                        );
+                        frame.render_widget(
+                            Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
+                            hint_inner,
+                        );
+                        let x = hint_inner.x + cursor_x.min(hint_inner.width.saturating_sub(1));
+                        let y = hint_inner.y;
                         frame.set_cursor_position((x, y));
                     }
+                } else {
+                    frame.render_widget(
+                        Paragraph::new(Line::from(vec![
+                            Span::styled(texts::tui_hint_press(), Style::default().fg(theme.dim)),
+                            Span::styled(
+                                "Enter",
+                                Style::default()
+                                    .fg(theme.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                texts::tui_hint_auto_fetch_models_from_api(),
+                                Style::default().fg(theme.dim),
+                            ),
+                        ]))
+                        .alignment(Alignment::Center),
+                        hint_inner,
+                    );
                 }
             } else {
                 frame.render_widget(
                     Paragraph::new(Line::raw(texts::tui_provider_not_found())),
                     chunks[1],
                 );
+            }
+        }
+        Overlay::ModelFetchPicker {
+            input,
+            query,
+            fetching,
+            models,
+            error,
+            selected_idx,
+            ..
+        } => {
+            let area = centered_rect_fixed(60, 20, content_area);
+            frame.render_widget(Clear, area);
+
+            let outer = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(theme.dim))
+                .title(texts::tui_model_fetch_popup_title(*fetching));
+            frame.render_widget(outer.clone(), area);
+            let inner = outer.inner(area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(3), Constraint::Min(0)])
+                .split(inner);
+
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .title(texts::tui_model_fetch_search_title());
+
+            frame.render_widget(input_block.clone(), chunks[0]);
+            let input_inner = input_block.inner(chunks[0]);
+            let (visible, cursor_x) =
+                visible_text_window(input, input.chars().count(), input_inner.width as usize);
+            let (input_text, input_style) = if input.is_empty() {
+                (
+                    texts::tui_model_fetch_search_placeholder().to_string(),
+                    Style::default().fg(theme.dim),
+                )
+            } else {
+                (visible, Style::default())
+            };
+
+            frame.render_widget(
+                Paragraph::new(Line::styled(input_text, input_style)).wrap(Wrap { trim: false }),
+                input_inner,
+            );
+
+            let x = input_inner.x + cursor_x.min(input_inner.width.saturating_sub(1));
+            let y = input_inner.y;
+            frame.set_cursor_position((x, y));
+
+            let list_area = chunks[1];
+
+            if *fetching {
+                let text = texts::tui_loading().to_string();
+                let p = Paragraph::new(Line::styled(text, Style::default().fg(theme.accent)))
+                    .alignment(Alignment::Center);
+                frame.render_widget(p, list_area);
+            } else if let Some(err) = error {
+                let p = Paragraph::new(Line::styled(err, Style::default().fg(theme.err)))
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true });
+                frame.render_widget(p, list_area);
+            } else {
+                let filtered: Vec<&String> = if query.trim().is_empty() {
+                    models.iter().collect()
+                } else {
+                    let q = query.trim().to_lowercase();
+                    models
+                        .iter()
+                        .filter(|m| m.to_lowercase().contains(&q))
+                        .collect()
+                };
+
+                if filtered.is_empty() {
+                    let hint = if models.is_empty() {
+                        texts::tui_model_fetch_no_models().to_string()
+                    } else {
+                        texts::tui_model_fetch_no_matches().to_string()
+                    };
+                    let p = Paragraph::new(Line::styled(hint, Style::default().fg(theme.dim)))
+                        .alignment(Alignment::Center);
+                    frame.render_widget(p, list_area);
+                } else {
+                    let items: Vec<ListItem> = filtered
+                        .iter()
+                        .map(|m| ListItem::new(Line::raw(*m)))
+                        .collect();
+
+                    let list = List::new(items)
+                        .block(Block::default().borders(Borders::NONE))
+                        .highlight_style(selection_style(theme))
+                        .highlight_symbol(highlight_symbol(theme));
+
+                    let mut state = ratatui::widgets::ListState::default();
+                    state.select(Some(*selected_idx));
+
+                    frame.render_stateful_widget(list, list_area, &mut state);
+                }
             }
         }
         Overlay::McpAppsPicker {
@@ -4188,6 +4335,7 @@ mod tests {
                 ConfigSnapshot, McpSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
                 SkillsSnapshot, UiData,
             },
+            form::{FormFocus, ProviderAddField},
             route::Route,
             theme::theme_for,
         },
@@ -4920,6 +5068,17 @@ mod tests {
                 && (all.contains("restore") || all.contains("恢复")),
             "expected BackupPicker to show Enter/Esc restore hint"
         );
+    }
+
+    #[test]
+    fn provider_form_model_field_enter_hint_uses_fetch_model() {
+        let keys =
+            super::add_form_key_items(FormFocus::Fields, false, Some(ProviderAddField::CodexModel));
+        let enter_label = keys
+            .iter()
+            .find(|(key, _label)| *key == "Enter")
+            .map(|(_key, label)| *label);
+        assert_eq!(enter_label, Some(texts::tui_key_fetch_model()));
     }
 
     #[test]
