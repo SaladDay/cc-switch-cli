@@ -441,6 +441,19 @@ pub fn get_skip_claude_onboarding() -> bool {
         .unwrap_or(false)
 }
 
+pub fn get_enable_claude_plugin_integration() -> bool {
+    settings_store()
+        .read()
+        .map(|s| s.enable_claude_plugin_integration)
+        .unwrap_or(false)
+}
+
+pub fn set_enable_claude_plugin_integration(enabled: bool) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.enable_claude_plugin_integration = enabled;
+    update_settings(settings)
+}
+
 pub fn set_skip_claude_onboarding(enabled: bool) -> Result<(), AppError> {
     if enabled {
         crate::claude_mcp::set_has_completed_onboarding()?;

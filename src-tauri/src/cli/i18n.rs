@@ -2876,6 +2876,30 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_claude_plugin_integration_toggled(enabled: bool) -> String {
+        if is_chinese() {
+            if enabled {
+                "已启用 Claude Code for VSCode 插件联动。".to_string()
+            } else {
+                "已关闭 Claude Code for VSCode 插件联动。".to_string()
+            }
+        } else {
+            if enabled {
+                "Claude Code for VSCode integration enabled.".to_string()
+            } else {
+                "Claude Code for VSCode integration disabled.".to_string()
+            }
+        }
+    }
+
+    pub fn tui_toast_claude_plugin_sync_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("同步 Claude Code for VSCode 插件失败: {err}")
+        } else {
+            format!("Failed to sync Claude Code for VSCode integration: {err}")
+        }
+    }
+
     pub fn tui_toast_unmanaged_scanned(count: usize) -> String {
         if is_chinese() {
             format!("扫描完成：发现 {count} 个未管理技能。")
@@ -5472,6 +5496,68 @@ pub mod texts {
             } else {
                 "✓ Claude Code onboarding confirmation restored".to_string()
             }
+        }
+    }
+
+    pub fn enable_claude_plugin_integration() -> &'static str {
+        if is_chinese() {
+            "🔌 接管 Claude Code for VSCode 插件"
+        } else {
+            "🔌 Apply to Claude Code for VSCode"
+        }
+    }
+
+    pub fn enable_claude_plugin_integration_label() -> &'static str {
+        if is_chinese() {
+            "接管 Claude Code for VSCode 插件"
+        } else {
+            "Apply to Claude Code for VSCode"
+        }
+    }
+
+    pub fn enable_claude_plugin_integration_confirm(enable: bool, path: &str) -> String {
+        if is_chinese() {
+            if enable {
+                format!(
+                    "确认启用 Claude Code for VSCode 插件联动？\n将写入 {path}: primaryApiKey=\"any\""
+                )
+            } else {
+                "确认关闭 Claude Code for VSCode 插件联动？".to_string()
+            }
+        } else {
+            if enable {
+                format!(
+                    "Enable Claude Code for VSCode integration?\nWrites primaryApiKey=\"any\" to {path}"
+                )
+            } else {
+                format!(
+                    "Disable Claude Code for VSCode integration?\nRemoves primaryApiKey from {path}"
+                )
+            }
+        }
+    }
+
+    pub fn enable_claude_plugin_integration_changed(enable: bool) -> String {
+        if is_chinese() {
+            if enable {
+                "✓ 已启用 Claude Code for VSCode 插件联动".to_string()
+            } else {
+                "✓ 已关闭 Claude Code for VSCode 插件联动".to_string()
+            }
+        } else {
+            if enable {
+                "✓ Claude Code for VSCode integration enabled".to_string()
+            } else {
+                "✓ Claude Code for VSCode integration disabled".to_string()
+            }
+        }
+    }
+
+    pub fn claude_plugin_sync_failed_warning(err: &str) -> String {
+        if is_chinese() {
+            format!("⚠ Claude Code for VSCode 插件联动失败: {err}")
+        } else {
+            format!("⚠ Claude Code for VSCode integration failed: {err}")
         }
     }
 

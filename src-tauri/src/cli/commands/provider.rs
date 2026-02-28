@@ -200,12 +200,20 @@ fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
 
     // 检查 provider 是否存在
     let providers = ProviderService::list(&state, app_type.clone())?;
-    if !providers.contains_key(id) {
+    let Some(provider) = providers.get(id).cloned() else {
         return Err(AppError::Message(format!("Provider '{}' not found", id)));
-    }
+    };
 
     // 执行切换
-    ProviderService::switch(&state, app_type, id)?;
+    ProviderService::switch(&state, app_type.clone(), id)?;
+    if let Err(err) =
+        crate::claude_plugin::sync_claude_plugin_on_provider_switch(&app_type, &provider)
+    {
+        println!(
+            "{}",
+            warning(&texts::claude_plugin_sync_failed_warning(&err.to_string()))
+        );
+    }
 
     println!("{}", success(&format!("✓ Switched to provider '{}'", id)));
     println!("{}", info(&format!("  Application: {}", app_str)));

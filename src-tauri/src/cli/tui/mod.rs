@@ -1540,7 +1540,24 @@ fn handle_action(
 
         Action::ProviderSwitch { id } => {
             let state = load_state()?;
+            let provider = data
+                .providers
+                .rows
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.provider.clone());
             ProviderService::switch(&state, app.app_type.clone(), &id)?;
+            if let Some(provider) = provider {
+                if let Err(err) = crate::claude_plugin::sync_claude_plugin_on_provider_switch(
+                    &app.app_type,
+                    &provider,
+                ) {
+                    app.push_toast(
+                        texts::tui_toast_claude_plugin_sync_failed(&err.to_string()),
+                        ToastKind::Warning,
+                    );
+                }
+            }
             if !crate::sync_policy::should_sync_live(&app.app_type) {
                 let mut message =
                     texts::tui_toast_live_sync_skipped_uninitialized(app.app_type.as_str());
@@ -2067,6 +2084,21 @@ fn handle_action(
             crate::settings::set_skip_claude_onboarding(enabled)?;
             app.push_toast(
                 texts::tui_toast_skip_claude_onboarding_toggled(enabled),
+                ToastKind::Success,
+            );
+            Ok(())
+        }
+
+        Action::SetClaudePluginIntegration { enabled } => {
+            crate::settings::set_enable_claude_plugin_integration(enabled)?;
+            if let Err(err) = crate::claude_plugin::sync_claude_plugin_on_settings_toggle(enabled) {
+                app.push_toast(
+                    texts::tui_toast_claude_plugin_sync_failed(&err.to_string()),
+                    ToastKind::Warning,
+                );
+            }
+            app.push_toast(
+                texts::tui_toast_claude_plugin_integration_toggled(enabled),
                 ToastKind::Success,
             );
             Ok(())

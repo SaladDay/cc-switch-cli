@@ -84,6 +84,7 @@ pub enum ConfirmAction {
     ConfigRestoreBackup { id: String },
     ConfigReset,
     SettingsSetSkipClaudeOnboarding { enabled: bool },
+    SettingsSetClaudePluginIntegration { enabled: bool },
     EditorDiscard,
     EditorSaveBeforeClose,
     WebDavMigrateV1ToV2,
@@ -623,6 +624,9 @@ pub enum Action {
     SetSkipClaudeOnboarding {
         enabled: bool,
     },
+    SetClaudePluginIntegration {
+        enabled: bool,
+    },
     SetLanguage(Language),
 
     CheckUpdate,
@@ -664,13 +668,15 @@ impl ConfigItem {
 pub enum SettingsItem {
     Language,
     SkipClaudeOnboarding,
+    ClaudePluginIntegration,
     CheckForUpdates,
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 3] = [
+    pub const ALL: [SettingsItem; 4] = [
         SettingsItem::Language,
         SettingsItem::SkipClaudeOnboarding,
+        SettingsItem::ClaudePluginIntegration,
         SettingsItem::CheckForUpdates,
     ];
 }
@@ -1692,6 +1698,24 @@ impl App {
                     });
                     Action::None
                 }
+                Some(SettingsItem::ClaudePluginIntegration) => {
+                    let current = crate::settings::get_enable_claude_plugin_integration();
+                    let next = !current;
+                    let path = match crate::claude_plugin::claude_config_path() {
+                        Ok(path) => path,
+                        Err(_) => std::path::PathBuf::from("~/.claude/config.json"),
+                    };
+
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_confirm_title().to_string(),
+                        message: texts::enable_claude_plugin_integration_confirm(
+                            next,
+                            path.to_string_lossy().as_ref(),
+                        ),
+                        action: ConfirmAction::SettingsSetClaudePluginIntegration { enabled: next },
+                    });
+                    Action::None
+                }
                 Some(SettingsItem::CheckForUpdates) => Action::CheckUpdate,
                 None => Action::None,
             },
@@ -1755,6 +1779,9 @@ impl App {
                         ConfirmAction::ConfigReset => Action::ConfigReset,
                         ConfirmAction::SettingsSetSkipClaudeOnboarding { enabled } => {
                             Action::SetSkipClaudeOnboarding { enabled: *enabled }
+                        }
+                        ConfirmAction::SettingsSetClaudePluginIntegration { enabled } => {
+                            Action::SetClaudePluginIntegration { enabled: *enabled }
                         }
                         ConfirmAction::EditorDiscard => Action::EditorDiscard,
                         ConfirmAction::EditorSaveBeforeClose => {
