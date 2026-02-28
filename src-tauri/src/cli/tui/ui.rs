@@ -52,7 +52,7 @@ fn inactive_chip_style(theme: &super::theme::Theme) -> Style {
     if theme.no_color {
         Style::default()
     } else {
-        Style::default().fg(Color::White).bg(Color::DarkGray)
+        Style::default().fg(Color::White).bg(theme.surface)
     }
 }
 
@@ -67,32 +67,20 @@ fn active_chip_style(theme: &super::theme::Theme) -> Style {
     }
 }
 
-fn pad1(s: &str) -> String {
+/// Border style for overlay dialogs.
+/// `attention = true` for overlays that require user action (Confirm, Update prompts).
+/// `attention = false` for informational overlays (Help, TextView, pickers).
+fn overlay_border_style(theme: &super::theme::Theme, attention: bool) -> Style {
+    if attention {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.dim)
+    }
+}
+
+/// Left-pad a cell value with one space for visual inset inside table rows.
+fn cell_pad(s: &str) -> String {
     format!(" {s}")
-}
-
-fn dracula_comment(theme: &super::theme::Theme) -> Style {
-    if theme.no_color {
-        Style::default().fg(theme.dim)
-    } else {
-        Style::default().fg(Color::Rgb(98, 114, 164)) // #6272a4
-    }
-}
-
-fn dracula_cyan(theme: &super::theme::Theme) -> Style {
-    if theme.no_color {
-        Style::default()
-    } else {
-        Style::default().fg(Color::Rgb(139, 233, 253)) // #8be9fd
-    }
-}
-
-fn dracula_dark(theme: &super::theme::Theme) -> Style {
-    if theme.no_color {
-        Style::default().fg(theme.dim)
-    } else {
-        Style::default().fg(Color::Rgb(68, 71, 90)) // #44475a
-    }
 }
 
 fn strip_trailing_colon(label: &str) -> &str {
@@ -154,7 +142,7 @@ fn kv_line<'a>(
         Span::raw(" "), // internal padding: keep content away from │
         Span::styled(
             pad_to_display_width(label, label_width),
-            dracula_comment(theme).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.comment).add_modifier(Modifier::BOLD),
         ),
         Span::raw(": "),
     ];
@@ -171,6 +159,14 @@ fn highlight_symbol(theme: &super::theme::Theme) -> &'static str {
 }
 
 const CONTENT_INSET_LEFT: u16 = 1;
+
+// Overlay size tiers — percentage-based (large content)
+const OVERLAY_LG: (u16, u16) = (90, 90);
+const OVERLAY_MD: (u16, u16) = (78, 62);
+// Overlay size tiers — fixed character dimensions (dialogs)
+const OVERLAY_FIXED_LG: (u16, u16) = (70, 20);
+const OVERLAY_FIXED_MD: (u16, u16) = (60, 9);
+const OVERLAY_FIXED_SM: (u16, u16) = (50, 6);
 
 fn key_bar_line(theme: &super::theme::Theme, items: &[(&str, &str)]) -> Line<'static> {
     if theme.no_color {
@@ -197,6 +193,8 @@ fn key_bar_line(theme: &super::theme::Theme, items: &[(&str, &str)]) -> Line<'st
     Line::from(spans)
 }
 
+/// Render a left-aligned key bar. Used for main-screen footers where keys
+/// are read left-to-right in priority order.
 fn render_key_bar(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -211,6 +209,8 @@ fn render_key_bar(
     );
 }
 
+/// Render a center-aligned key bar. Used inside overlay dialogs where the
+/// available actions are few and visually centered looks balanced.
 fn render_key_bar_center(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -368,19 +368,10 @@ fn render_header(
         height: 1,
     };
 
-    let badge_style = if theme.no_color {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-            .fg(Color::Black)
-            .bg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    };
-
     frame.render_widget(
         Paragraph::new(Line::from(Span::raw(badge_content)))
             .alignment(Alignment::Center)
-            .style(badge_style)
+            .style(selection_style(theme))
             .block(Block::default().borders(Borders::NONE)),
         badge_area,
     );
@@ -452,7 +443,7 @@ fn nav_pane_width(theme: &super::theme::Theme) -> u16 {
 fn render_nav(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::theme::Theme) {
     let rows = NavItem::ALL.iter().map(|item| {
         let (icon, text) = split_nav_label(nav_label(*item));
-        let icon_clean = pad1(icon).replace('\u{FE0F}', "");
+        let icon_clean = cell_pad(icon).replace('\u{FE0F}', "");
         Row::new(vec![Cell::from(icon_clean), Cell::from(text)])
     });
 
@@ -662,9 +653,9 @@ fn render_skills_installed(
         Row::new(vec![
             Cell::from(skill.directory.clone()),
             Cell::from(skill.name.clone()),
-            Cell::from(if skill.apps.claude { "✓" } else { " " }),
-            Cell::from(if skill.apps.codex { "✓" } else { " " }),
-            Cell::from(if skill.apps.gemini { "✓" } else { " " }),
+            Cell::from(if skill.apps.claude { texts::tui_marker_active() } else { texts::tui_marker_inactive() }),
+            Cell::from(if skill.apps.codex { texts::tui_marker_active() } else { texts::tui_marker_inactive() }),
+            Cell::from(if skill.apps.gemini { texts::tui_marker_active() } else { texts::tui_marker_inactive() }),
         ])
     });
 
@@ -770,7 +761,7 @@ fn render_skills_discover(
             _ => "-".to_string(),
         };
         Row::new(vec![
-            Cell::from(if skill.installed { "✓" } else { " " }),
+            Cell::from(if skill.installed { texts::tui_marker_active() } else { texts::tui_marker_inactive() }),
             Cell::from(skill.directory.clone()),
             Cell::from(skill.name.clone()),
             Cell::from(repo),
@@ -876,7 +867,7 @@ fn render_skills_repos(
     let rows = visible.iter().map(|repo| {
         let repo_name = format!("{}/{}", repo.owner, repo.name);
         Row::new(vec![
-            Cell::from(if repo.enabled { "✓" } else { " " }),
+            Cell::from(if repo.enabled { texts::tui_marker_active() } else { texts::tui_marker_inactive() }),
             Cell::from(repo_name),
             Cell::from(repo.branch.clone()),
         ])
@@ -987,9 +978,9 @@ fn render_skills_unmanaged(
         Row::new(vec![
             Cell::from(
                 if app.skills_unmanaged_selected.contains(&skill.directory) {
-                    "✓"
+                    texts::tui_marker_active()
                 } else {
-                    " "
+                    texts::tui_marker_inactive()
                 },
             ),
             Cell::from(skill.directory.clone()),
@@ -1544,7 +1535,7 @@ fn render_provider_add_form(
     );
 
     let header = Row::new(vec![
-        Cell::from(pad1(texts::tui_header_field())),
+        Cell::from(cell_pad(texts::tui_header_field())),
         Cell::from(texts::tui_header_value()),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
@@ -1557,12 +1548,12 @@ fn render_provider_add_form(
                 let dashes_left = "┄".repeat(40);
                 let dashes_right = "┄".repeat(200);
                 Row::new(vec![
-                    Cell::from(pad1(&dashes_left)),
+                    Cell::from(cell_pad(&dashes_left)),
                     Cell::from(dashes_right),
                 ])
                 .style(Style::default().fg(theme.dim))
             } else {
-                Row::new(vec![Cell::from(pad1(label)), Cell::from(value.clone())])
+                Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value.clone())])
             }
         });
 
@@ -1932,14 +1923,14 @@ fn render_mcp_add_form(
     );
 
     let header = Row::new(vec![
-        Cell::from(pad1(texts::tui_header_field())),
+        Cell::from(cell_pad(texts::tui_header_field())),
         Cell::from(texts::tui_header_value()),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     let rows = rows_data
         .iter()
-        .map(|(label, value)| Row::new(vec![Cell::from(pad1(label)), Cell::from(value.clone())]));
+        .map(|(label, value)| Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value.clone())]));
 
     let table = Table::new(
         rows,
@@ -2205,7 +2196,7 @@ fn render_main(
     };
 
     let label_width = 14;
-    let value_style = dracula_cyan(theme);
+    let value_style = Style::default().fg(theme.cyan);
     let provider_name_style = if theme.no_color {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
@@ -2296,7 +2287,7 @@ fn render_main(
     } else if is_ok {
         Style::default().fg(theme.ok)
     } else {
-        dracula_dark(theme)
+        Style::default().fg(theme.surface)
     };
 
     let last_sync_at = webdav_status.and_then(|status| status.last_sync_at);
@@ -2306,7 +2297,7 @@ fn render_main(
     let webdav_last_sync_style = if last_sync_at.is_some() {
         value_style
     } else {
-        dracula_dark(theme)
+        Style::default().fg(theme.surface)
     };
 
     let webdav_lines = vec![
@@ -2384,9 +2375,9 @@ fn render_main(
     render_local_env_check_card(frame, app, top_chunks[5], theme, card_border);
 
     let logo_style = if theme.no_color {
-        dracula_dark(theme)
+        Style::default().fg(theme.surface)
     } else {
-        dracula_dark(theme)
+        Style::default().fg(theme.surface)
     };
     let logo_lines = texts::tui_home_ascii_logo()
         .lines()
@@ -2413,7 +2404,7 @@ fn render_main(
     frame.render_widget(
         Paragraph::new(Line::raw(texts::tui_main_hint()))
             .alignment(Alignment::Center)
-            .style(dracula_dark(theme).add_modifier(Modifier::ITALIC)),
+            .style(Style::default().fg(theme.surface).add_modifier(Modifier::ITALIC)),
         logo_chunks[2],
     );
 }
@@ -2467,7 +2458,7 @@ fn render_local_env_check_card(
         };
 
         let (icon, icon_style) = if app.local_env_loading {
-            ("…", dracula_dark(theme))
+            ("…", Style::default().fg(theme.surface))
         } else {
             match status {
                 Some(ToolCheckStatus::Ok { .. }) => (
@@ -2508,10 +2499,10 @@ fn render_local_env_check_card(
         let detail_style = if theme.no_color {
             Style::default()
         } else {
-            dracula_dark(theme)
+            Style::default().fg(theme.surface)
         };
 
-        let value_style = dracula_cyan(theme);
+        let value_style = Style::default().fg(theme.cyan);
         let (detail_text, detail_line_style) = if app.local_env_loading {
             ("".to_string(), detail_style)
         } else {
@@ -2531,7 +2522,7 @@ fn render_local_env_check_card(
         let lines = vec![
             Line::from(vec![
                 Span::raw(" "),
-                Span::styled(">_ ", dracula_dark(theme)),
+                Span::styled(">_ ", Style::default().fg(theme.surface)),
                 Span::styled(display_name.to_string(), name_style),
                 Span::raw(" "),
                 Span::styled(icon.to_string(), icon_style),
@@ -2569,15 +2560,6 @@ fn render_providers(
 ) {
     let header_style = Style::default().fg(theme.dim).add_modifier(Modifier::BOLD);
     let table_style = Style::default();
-
-    let selected_style = if theme.no_color {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-            .fg(Color::Black)
-            .bg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    };
 
     let outer = Block::default()
         .borders(Borders::ALL)
@@ -2642,7 +2624,7 @@ fn render_providers(
     .header(header)
     .style(table_style)
     .block(Block::default().borders(Borders::NONE))
-    .row_highlight_style(selected_style)
+    .row_highlight_style(selection_style(theme))
     .highlight_symbol(highlight_symbol(theme));
 
     let mut state = TableState::default();
@@ -3263,13 +3245,13 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
     match &app.overlay {
         Overlay::None => {}
         Overlay::Help => {
-            let area = centered_rect(70, 70, content_area);
+            let area = centered_rect(OVERLAY_LG.0, OVERLAY_LG.1, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(texts::tui_help_title());
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -3288,12 +3270,12 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), chunks[1]);
         }
         Overlay::Confirm(confirm) => {
-            let area = centered_rect_fixed(60, 7, content_area);
+            let area = centered_rect_fixed(OVERLAY_FIXED_MD.0, OVERLAY_FIXED_MD.1, content_area);
             frame.render_widget(Clear, area);
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, true))
                 .title(confirm.title.clone());
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -3345,13 +3327,13 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             }
         }
         Overlay::TextInput(input) => {
-            let area = centered_rect_fixed(70, 12, content_area);
+            let area = centered_rect_fixed(OVERLAY_FIXED_LG.0, 12, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(input.title.clone())
                 .style(if theme.no_color {
                     Style::default()
@@ -3421,13 +3403,13 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.set_cursor_position((cursor_x, cursor_y));
         }
         Overlay::BackupPicker { selected } => {
-            let area = centered_rect(80, 80, content_area);
+            let area = centered_rect(OVERLAY_LG.0, OVERLAY_LG.1, content_area);
             frame.render_widget(Clear, area);
 
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(texts::tui_backup_picker_title());
             let inner = block.inner(area);
             frame.render_widget(block, area);
@@ -3463,13 +3445,13 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.render_stateful_widget(list, chunks[1], &mut state);
         }
         Overlay::TextView(view) => {
-            let area = centered_rect(90, 90, content_area);
+            let area = centered_rect(OVERLAY_LG.0, OVERLAY_LG.1, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(view.title.clone());
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -3506,7 +3488,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(texts::tui_config_item_common_snippet());
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -3542,13 +3524,13 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.render_stateful_widget(list, chunks[1], &mut state);
         }
         Overlay::CommonSnippetView { view, .. } => {
-            let area = centered_rect(90, 90, content_area);
+            let area = centered_rect(OVERLAY_LG.0, OVERLAY_LG.1, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(view.title.clone());
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -3582,13 +3564,13 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), chunks[1]);
         }
         Overlay::ClaudeModelPicker { selected, editing } => {
-            let area = centered_rect(78, 62, content_area);
+            let area = centered_rect(OVERLAY_MD.0, OVERLAY_MD.1, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(texts::tui_claude_model_config_popup_title());
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -3635,7 +3617,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                 );
 
                 let header = Row::new(vec![
-                    Cell::from(pad1(texts::tui_header_field())),
+                    Cell::from(cell_pad(texts::tui_header_field())),
                     Cell::from(texts::tui_header_value()),
                 ])
                 .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
@@ -3646,7 +3628,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
                         .map(|input| input.value.trim().to_string())
                         .filter(|value| !value.is_empty())
                         .unwrap_or_else(|| texts::tui_na().to_string());
-                    Row::new(vec![Cell::from(pad1(label)), Cell::from(value)])
+                    Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value)])
                 });
 
                 let table = Table::new(
@@ -3734,13 +3716,13 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             selected_idx,
             ..
         } => {
-            let area = centered_rect_fixed(60, 20, content_area);
+            let area = centered_rect_fixed(OVERLAY_FIXED_LG.0, OVERLAY_FIXED_LG.1, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(texts::tui_model_fetch_popup_title(*fetching));
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -3837,13 +3819,13 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             apps,
             ..
         } => {
-            let area = centered_rect_fixed(60, 12, content_area);
+            let area = centered_rect_fixed(OVERLAY_FIXED_LG.0, 12, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(texts::tui_mcp_apps_title(name));
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -3893,13 +3875,13 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             frame.render_stateful_widget(list, chunks[1], &mut state);
         }
         Overlay::SkillsSyncMethodPicker { selected } => {
-            let area = centered_rect_fixed(60, 12, content_area);
+            let area = centered_rect_fixed(OVERLAY_FIXED_LG.0, 12, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(texts::tui_skills_sync_method_title());
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -3952,7 +3934,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             title,
             message,
         } => {
-            let area = centered_rect_fixed(60, 9, content_area);
+            let area = centered_rect_fixed(OVERLAY_FIXED_MD.0, OVERLAY_FIXED_MD.1, content_area);
             frame.render_widget(Clear, area);
 
             let spinner = match app.tick % 4 {
@@ -3966,7 +3948,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(full_title);
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -3993,12 +3975,12 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             );
         }
         Overlay::SpeedtestRunning { url } => {
-            let area = centered_rect_fixed(70, 7, content_area);
+            let area = centered_rect_fixed(OVERLAY_FIXED_MD.0, OVERLAY_FIXED_MD.1, content_area);
             frame.render_widget(Clear, area);
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(texts::tui_speedtest_title());
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -4016,14 +3998,14 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             );
         }
         Overlay::SpeedtestResult { url, lines, scroll } => {
-            let area = centered_rect(90, 90, content_area);
+            let area = centered_rect(OVERLAY_LG.0, OVERLAY_LG.1, content_area);
             frame.render_widget(Clear, area);
 
             let title = texts::tui_speedtest_title_with_url(url);
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.dim))
+                .border_style(overlay_border_style(theme, false))
                 .title(title);
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -4058,13 +4040,13 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             latest,
             selected,
         } => {
-            let area = centered_rect_fixed(50, 8, content_area);
+            let area = centered_rect_fixed(OVERLAY_FIXED_MD.0, OVERLAY_FIXED_MD.1, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.accent))
+                .border_style(overlay_border_style(theme, true))
                 .title(texts::tui_update_available_title());
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -4124,13 +4106,13 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             );
         }
         Overlay::UpdateDownloading { downloaded, total } => {
-            let area = centered_rect_fixed(50, 6, content_area);
+            let area = centered_rect_fixed(OVERLAY_FIXED_SM.0, OVERLAY_FIXED_SM.1, content_area);
             frame.render_widget(Clear, area);
 
             let outer = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .border_style(Style::default().fg(theme.accent))
+                .border_style(overlay_border_style(theme, true))
                 .title(texts::tui_update_downloading_title());
             frame.render_widget(outer.clone(), area);
             let inner = outer.inner(area);
@@ -4173,7 +4155,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, data: &UiData, theme: &super
             );
         }
         Overlay::UpdateResult { success, message } => {
-            let area = centered_rect_fixed(50, 6, content_area);
+            let area = centered_rect_fixed(OVERLAY_FIXED_SM.0, OVERLAY_FIXED_SM.1, content_area);
             frame.render_widget(Clear, area);
 
             let border_color = if *success { theme.ok } else { theme.err };
@@ -4928,7 +4910,7 @@ mod tests {
 
         let theme = theme_for(&app.app_type);
         let content = super::content_pane_rect(buf.area, &theme);
-        let area = super::centered_rect_fixed(70, 12, content);
+        let area = super::centered_rect_fixed(super::OVERLAY_FIXED_LG.0, 12, content);
         let area_x = area.x;
         let area_y = area.y;
         let area_w = area.width;
@@ -4993,7 +4975,7 @@ mod tests {
 
         let theme = theme_for(&app.app_type);
         let content = super::content_pane_rect(buf.area, &theme);
-        let area = super::centered_rect_fixed(60, 7, content);
+        let area = super::centered_rect_fixed(super::OVERLAY_FIXED_MD.0, super::OVERLAY_FIXED_MD.1, content);
 
         assert_eq!(buf[(area.x, area.y)].symbol(), "┌");
         assert_eq!(
