@@ -232,17 +232,6 @@ cc-switch provider delete <id>       # Delete provider
 cc-switch provider speedtest <id>    # Test API latency
 ```
 
-#### PackyCode preset (Sponsor)
-
-In the TUI "Add Provider" form, choose the `★ PackyCode` template to prefill endpoints:
-
-- Website: `https://www.packyapi.com`
-- Register: `https://www.packyapi.com/register?aff=cc-switch-cli`
-- Promo code: `cc-switch-cli` (10% off)
-- Claude (Anthropic): `https://www.packyapi.com`
-- Codex (OpenAI): `https://www.packyapi.com/v1`
-- Gemini: `https://www.packyapi.com`
-
 ### 🛠️ MCP Server Management
 
 Manage Model Context Protocol servers across Claude/Codex/Gemini.

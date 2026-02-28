@@ -234,17 +234,6 @@ cc-switch provider delete <id>       # 删除供应商
 cc-switch provider speedtest <id>    # 测试 API 延迟
 ```
 
-#### PackyCode 预设（赞助商）
-
-在新版 TUI 的「添加供应商」表单中，可选择 `★ PackyCode` 模板自动填充端点：
-
-- 官网：`https://www.packyapi.com`
-- 注册链接：`https://www.packyapi.com/register?aff=cc-switch-cli`
-- 优惠码：`cc-switch-cli`（9 折）
-- Claude（Anthropic）：`https://www.packyapi.com`
-- Codex（OpenAI）：`https://www.packyapi.com/v1`
-- Gemini：`https://www.packyapi.com`
-
 ### 🛠️ MCP 服务器管理
 
 跨 Claude/Codex/Gemini 管理模型上下文协议服务器。
