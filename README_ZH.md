@@ -128,9 +128,18 @@ cc-switch --app gemini prompts list     # 列出 Gemini 提示词
 
 ## 📥 安装
 
-### 方法 1：下载预编译二进制（推荐）
+### 方法 1：快速安装（macOS / Linux）
 
-从 [GitHub Releases](https://github.com/saladday/cc-switch-cli/releases) 下载最新版本。
+> Windows 用户请参考下方手动安装。
+
+```bash
+curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
+```
+
+默认安装到 `~/.local/bin`。设置 `CC_SWITCH_INSTALL_DIR` 可自定义安装目录。
+
+<details>
+<summary>手动安装</summary>
 
 #### macOS
 
@@ -189,6 +198,8 @@ move cc-switch.exe C:\Windows\System32\
 # 或者直接运行
 .\cc-switch.exe
 ```
+
+</details>
 
 ### 方法 2：从源码构建
 

@@ -148,6 +148,9 @@ jobs:
     runs-on: ubuntu-22.04
     needs: [build, universal-macos]
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -234,6 +237,9 @@ jobs:
             sha256sum * > checksums.txt
           )
 
+          # Include install script
+          cp install.sh release-assets/install.sh
+
           echo "=== Release assets ==="
           ls -lh release-assets/
 
@@ -260,21 +266,19 @@ jobs:
             | **Linux** (ARM64 musl) | `cc-switch-cli-${{ github.ref_name }}-linux-arm64-musl.tar.gz` |
             | **Linux** (ARM64 glibc) | `cc-switch-cli-${{ github.ref_name }}-linux-arm64.tar.gz` |
 
-            ### 🚀 快速安装
+            ### 🚀 快速安装 / Quick Install
 
-            **macOS / Linux:**
+            **macOS / Linux (one-liner):**
             ```bash
-            tar -xzf cc-switch-cli-*.tar.gz
-            chmod +x cc-switch
-            sudo mv cc-switch /usr/local/bin/
+            curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
             ```
 
             **Windows:**
             ```powershell
-            # 解压 zip 后将 cc-switch.exe 移动到 PATH 目录或直接运行
+            # 下载 zip 后将 cc-switch.exe 移动到 PATH 目录或直接运行
             ```
 
-            💡 **macOS 提示**: 如遇 "无法验证开发者"，执行：`xattr -cr /usr/local/bin/cc-switch`
+            💡 **macOS 提示**: 如遇 "无法验证开发者"，执行：`xattr -cr ~/.local/bin/cc-switch`
 
             💡 **Linux 用户建议优先使用 `-musl` 版本（静态链接，无系统库依赖，兼容所有发行版）**
           files: release-assets/*

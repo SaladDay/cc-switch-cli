@@ -126,9 +126,18 @@ See the "Features" section for full command list.
 
 ## 📥 Installation
 
-### Method 1: Download Pre-built Binaries (Recommended)
+### Method 1: Quick Install (macOS / Linux)
 
-Download the latest release from [GitHub Releases](https://github.com/saladday/cc-switch-cli/releases).
+> Windows users: see Manual Installation below.
+
+```bash
+curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
+```
+
+This installs `cc-switch` to `~/.local/bin`. Set `CC_SWITCH_INSTALL_DIR` to change the target directory.
+
+<details>
+<summary>Manual Installation</summary>
 
 #### macOS
 
@@ -187,6 +196,8 @@ move cc-switch.exe C:\Windows\System32\
 # Or run directly
 .\cc-switch.exe
 ```
+
+</details>
 
 ### Method 2: Build from Source
 
