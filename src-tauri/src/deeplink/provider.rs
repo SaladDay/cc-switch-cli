@@ -219,10 +219,9 @@ fn build_provider_meta(request: &DeepLinkImportRequest) -> Result<Option<Provide
 
 fn build_claude_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
     let mut env = serde_json::Map::new();
-    env.insert(
-        "ANTHROPIC_AUTH_TOKEN".to_string(),
-        json!(request.api_key.clone().unwrap_or_default()),
-    );
+    let token = request.api_key.clone().unwrap_or_default();
+    let (key, _) = crate::services::provider::claude_auth_env_keys(&token);
+    env.insert(key.to_string(), json!(token));
     env.insert(
         "ANTHROPIC_BASE_URL".to_string(),
         json!(get_primary_endpoint(request)),
@@ -369,7 +368,7 @@ fn merge_claude_config(
         })?;
 
     if request.api_key.as_ref().is_none_or(|s| s.is_empty()) {
-        if let Some(token) = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) {
+        if let Some(token) = crate::services::provider::get_claude_token_from_env(env) {
             request.api_key = Some(token.to_string());
         }
     }

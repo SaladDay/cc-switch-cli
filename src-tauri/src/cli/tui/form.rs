@@ -407,7 +407,7 @@ impl ProviderAddFormState {
                     .get("env")
                     .and_then(|v| v.as_object())
                 {
-                    if let Some(token) = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) {
+                    if let Some(token) = crate::services::provider::get_claude_token_from_env(env) {
                         form.claude_api_key.set(token);
                     }
                     if let Some(url) = env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) {
@@ -873,7 +873,9 @@ impl ProviderAddFormState {
                 let env_obj = env_value
                     .as_object_mut()
                     .expect("env must be a JSON object");
-                set_or_remove_trimmed(env_obj, "ANTHROPIC_AUTH_TOKEN", &self.claude_api_key.value);
+                let (key, old_key) = crate::services::provider::claude_auth_env_keys(&self.claude_api_key.value);
+                set_or_remove_trimmed(env_obj, key, &self.claude_api_key.value);
+                env_obj.remove(old_key);
                 set_or_remove_trimmed(env_obj, "ANTHROPIC_BASE_URL", &self.claude_base_url.value);
                 if self.claude_model_config_touched {
                     set_or_remove_trimmed(env_obj, "ANTHROPIC_MODEL", &self.claude_model.value);
@@ -2050,7 +2052,7 @@ mod tests {
         assert_eq!(provider["id"], "p1");
         assert_eq!(provider["name"], "Provider One");
         assert_eq!(
-            provider["settingsConfig"]["env"]["ANTHROPIC_AUTH_TOKEN"],
+            provider["settingsConfig"]["env"]["ANTHROPIC_API_KEY"],
             "token"
         );
         assert_eq!(
@@ -2486,7 +2488,7 @@ requires_openai_auth = true
             settings["env"]["ANTHROPIC_BASE_URL"], "https://provider.example",
             "provider field should override common snippet value"
         );
-        assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-provider");
+        assert_eq!(settings["env"]["ANTHROPIC_API_KEY"], "sk-provider");
     }
 
     #[test]
@@ -2646,7 +2648,7 @@ requires_openai_auth = true
             "common env keys should be removed"
         );
         assert_eq!(
-            env.get("ANTHROPIC_AUTH_TOKEN")
+            env.get("ANTHROPIC_API_KEY")
                 .and_then(|value| value.as_str()),
             Some("sk-provider"),
             "provider-specific env keys should be preserved"
