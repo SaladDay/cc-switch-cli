@@ -5384,7 +5384,7 @@ mod tests {
         }
 
         app.on_key(key(KeyCode::Enter), &data);
-        app.on_key(key(KeyCode::Enter), &data); // enter editing mode in overlay
+        app.on_key(key(KeyCode::Char(' ')), &data); // enter editing mode in overlay
         app.on_key(key(KeyCode::Char('m')), &data);
         app.on_key(key(KeyCode::Char('1')), &data);
 
