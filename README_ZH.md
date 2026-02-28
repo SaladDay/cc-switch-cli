@@ -288,7 +288,7 @@ cc-switch prompts delete <id>        # 删除提示词
 
 ```bash
 cc-switch skills list                # 列出已安装技能
-cc-switch skills search <query>      # 搜索可用技能
+cc-switch skills discover <query>      # 发现可用技能（别名：search）
 cc-switch skills install <name>      # 安装技能
 cc-switch skills uninstall <name>    # 卸载技能
 cc-switch skills enable <name>       # 为当前应用启用（配合 --app）
@@ -479,12 +479,14 @@ cargo test                           # 运行测试
 ```
 src-tauri/src/
 ├── cli/
-│   ├── commands/          # CLI 子命令（provider, mcp, prompts, config）
-│   ├── interactive/       # 交互式 TUI 模式
-│   └── ui.rs              # UI 实用工具（表格、颜色）
-├── services/              # 业务逻辑
+│   ├── commands/          # CLI 子命令（provider, mcp, prompts, env, skills, ...）
+│   ├── tui/               # 交互式 TUI 模式（ratatui）
+│   ├── interactive/       # 旧版交互模式
+│   └── ui/                # UI 实用工具（表格、颜色）
+├── services/              # 业务逻辑（provider, mcp, prompt, webdav, ...）
+├── database/              # SQLite 存储、迁移、备份
 ├── main.rs                # CLI 入口点
-└── ...
+└── ...                    # 各应用配置、代理、错误处理
 ```
 
 

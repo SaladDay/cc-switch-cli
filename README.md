@@ -286,7 +286,7 @@ Manage and extend Claude Code/Codex/Gemini capabilities with community skills.
 
 ```bash
 cc-switch skills list                # List installed skills
-cc-switch skills search <query>      # Search available skills
+cc-switch skills discover <query>      # Discover available skills (alias: search)
 cc-switch skills install <name>      # Install a skill
 cc-switch skills uninstall <name>    # Uninstall a skill
 cc-switch skills enable <name>       # Enable for current app (--app)
@@ -477,12 +477,14 @@ cargo test                           # Run tests
 ```
 src-tauri/src/
 ├── cli/
-│   ├── commands/          # CLI subcommands (provider, mcp, prompts, config)
-│   ├── interactive/       # Interactive TUI mode
-│   └── ui.rs              # UI utilities (tables, colors)
-├── services/              # Business logic
+│   ├── commands/          # CLI subcommands (provider, mcp, prompts, env, skills, ...)
+│   ├── tui/               # Interactive TUI mode (ratatui)
+│   ├── interactive/       # Legacy interactive mode
+│   └── ui/                # UI utilities (tables, colors)
+├── services/              # Business logic (provider, mcp, prompt, webdav, ...)
+├── database/              # SQLite storage, migrations, backup
 ├── main.rs                # CLI entry point
-└── ...
+└── ...                    # App-specific configs, proxy, error handling
 ```
 
 
