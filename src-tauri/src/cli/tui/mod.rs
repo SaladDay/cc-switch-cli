@@ -27,7 +27,10 @@ use crate::settings::{
     WebDavSyncSettings,
 };
 
-use app::{Action, App, ConfirmAction, ConfirmOverlay, EditorSubmit, LoadingKind, Overlay, TextViewState, ToastKind};
+use app::{
+    Action, App, ConfirmAction, ConfirmOverlay, EditorSubmit, LoadingKind, Overlay, TextViewState,
+    ToastKind,
+};
 use data::{load_state, UiData};
 use form::FormState;
 use terminal::{PanicRestoreHookGuard, TuiTerminal};
@@ -1294,7 +1297,24 @@ fn handle_action(
 
         Action::ProviderSwitch { id } => {
             let state = load_state()?;
+            let provider = data
+                .providers
+                .rows
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.provider.clone());
             ProviderService::switch(&state, app.app_type.clone(), &id)?;
+            if let Some(provider) = provider {
+                if let Err(err) = crate::claude_plugin::sync_claude_plugin_on_provider_switch(
+                    &app.app_type,
+                    &provider,
+                ) {
+                    app.push_toast(
+                        texts::tui_toast_claude_plugin_sync_failed(&err.to_string()),
+                        ToastKind::Warning,
+                    );
+                }
+            }
             if !crate::sync_policy::should_sync_live(&app.app_type) {
                 let mut message =
                     texts::tui_toast_live_sync_skipped_uninitialized(app.app_type.as_str());
@@ -1500,8 +1520,7 @@ fn handle_action(
             let state = load_state()?;
             let backup_id = ConfigService::import_config_from_path(&source, &state)?;
             // 导入后同步 live 配置
-            if let Err(e) =
-                crate::services::provider::ProviderService::sync_current_to_live(&state)
+            if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state)
             {
                 log::warn!("配置导入后同步 live 配置失败: {e}");
             }
@@ -1531,8 +1550,7 @@ fn handle_action(
             let state = load_state()?;
             let pre_backup = ConfigService::restore_from_backup_id(&id, &state)?;
             // 备份恢复后同步 live 配置，与 WebDAV 下载后同理
-            if let Err(e) =
-                crate::services::provider::ProviderService::sync_current_to_live(&state)
+            if let Err(e) = crate::services::provider::ProviderService::sync_current_to_live(&state)
             {
                 log::warn!("备份恢复后同步 live 配置失败: {e}");
             }
@@ -1780,6 +1798,21 @@ fn handle_action(
             crate::settings::set_skip_claude_onboarding(enabled)?;
             app.push_toast(
                 texts::tui_toast_skip_claude_onboarding_toggled(enabled),
+                ToastKind::Success,
+            );
+            Ok(())
+        }
+
+        Action::SetClaudePluginIntegration { enabled } => {
+            crate::settings::set_enable_claude_plugin_integration(enabled)?;
+            if let Err(err) = crate::claude_plugin::sync_claude_plugin_on_settings_toggle(enabled) {
+                app.push_toast(
+                    texts::tui_toast_claude_plugin_sync_failed(&err.to_string()),
+                    ToastKind::Warning,
+                );
+            }
+            app.push_toast(
+                texts::tui_toast_claude_plugin_integration_toggled(enabled),
                 ToastKind::Success,
             );
             Ok(())

@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::app_config::AppType;
 use crate::error::AppError;
+use crate::provider::Provider;
 
 const CLAUDE_DIR: &str = ".claude";
 const CLAUDE_CONFIG_FILE: &str = "config.json";
@@ -128,4 +130,35 @@ pub fn is_claude_config_applied() -> Result<bool, AppError> {
         Some(content) => Ok(is_managed_config(&content)),
         None => Ok(false),
     }
+}
+
+pub fn sync_claude_plugin_on_settings_toggle(enabled: bool) -> Result<(), AppError> {
+    if enabled {
+        let _ = write_claude_config()?;
+    } else {
+        let _ = clear_claude_config()?;
+    }
+    Ok(())
+}
+
+pub fn sync_claude_plugin_on_provider_switch(
+    app_type: &AppType,
+    provider: &Provider,
+) -> Result<(), AppError> {
+    if !matches!(app_type, AppType::Claude) {
+        return Ok(());
+    }
+
+    if !crate::settings::get_enable_claude_plugin_integration() {
+        return Ok(());
+    }
+
+    let is_official = provider.category.as_deref() == Some("official");
+    if is_official {
+        let _ = clear_claude_config()?;
+    } else {
+        let _ = write_claude_config()?;
+    }
+
+    Ok(())
 }

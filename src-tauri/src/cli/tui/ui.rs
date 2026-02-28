@@ -3085,6 +3085,7 @@ fn render_config_webdav(
 fn render_settings(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::theme::Theme) {
     let language = crate::cli::i18n::current_language();
     let skip_claude_onboarding = crate::settings::get_skip_claude_onboarding();
+    let claude_plugin_integration = crate::settings::get_enable_claude_plugin_integration();
 
     let rows_data = super::app::SettingsItem::ALL
         .iter()
@@ -3096,6 +3097,14 @@ fn render_settings(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::
             super::app::SettingsItem::SkipClaudeOnboarding => (
                 texts::skip_claude_onboarding_label().to_string(),
                 if skip_claude_onboarding {
+                    texts::enabled().to_string()
+                } else {
+                    texts::disabled().to_string()
+                },
+            ),
+            super::app::SettingsItem::ClaudePluginIntegration => (
+                texts::enable_claude_plugin_integration_label().to_string(),
+                if claude_plugin_integration {
                     texts::enabled().to_string()
                 } else {
                     texts::disabled().to_string()
@@ -3181,21 +3190,37 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::th
                 Style::default(),
             )]
         } else {
-            let key_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+            let key_style = Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD);
             let desc_style = Style::default().fg(theme.dim);
             let sep = Span::styled("  ", desc_style);
 
             let items: &[(&str, &str)] = if i18n::is_chinese() {
-                &[("←→", "菜单/内容"), ("↑↓", "移动"), ("[ ]", "切换应用"),
-                  ("/", "过滤"), ("Esc", "返回"), ("?", "帮助")]
+                &[
+                    ("←→", "菜单/内容"),
+                    ("↑↓", "移动"),
+                    ("[ ]", "切换应用"),
+                    ("/", "过滤"),
+                    ("Esc", "返回"),
+                    ("?", "帮助"),
+                ]
             } else {
-                &[("←→", "menu/content"), ("↑↓", "move"), ("[ ]", "switch app"),
-                  ("/", "filter"), ("Esc", "back"), ("?", "help")]
+                &[
+                    ("←→", "menu/content"),
+                    ("↑↓", "move"),
+                    ("[ ]", "switch app"),
+                    ("/", "filter"),
+                    ("Esc", "back"),
+                    ("?", "help"),
+                ]
             };
 
             let mut v = Vec::new();
             for (i, (key, desc)) in items.iter().enumerate() {
-                if i > 0 { v.push(sep.clone()); }
+                if i > 0 {
+                    v.push(sep.clone());
+                }
                 v.push(Span::styled(format!(" {} ", key), key_style));
                 v.push(Span::styled(format!(" {}", desc), desc_style));
             }
