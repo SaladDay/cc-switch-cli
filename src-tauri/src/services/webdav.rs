@@ -383,12 +383,7 @@ pub async fn delete_collection(url: &str, auth: &WebDavAuth) -> Result<bool, App
     match status {
         s if s.is_success() => Ok(true),
         StatusCode::NOT_FOUND | StatusCode::GONE => Ok(false),
-        _ => Err(webdav_status_error(
-            "DELETE",
-            url,
-            status,
-            &resp.text().await.unwrap_or_default(),
-        )),
+        _ => Err(webdav_status_error(url, "DELETE", status, url)),
     }
 }
 
