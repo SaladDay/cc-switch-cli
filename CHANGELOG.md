@@ -7,6 +7,28 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.8.0] - 2026-02-28
+
+### Added
+
+- **Install Script**: One-liner `curl | sh` installation for macOS and Linux. (#41)
+- **TUI**: Claude VSCode plugin takeover toggle and sync. (#47)
+- **TUI**: Model auto-fetch picker with search filtering. (#45)
+
+### Changed
+
+- **Docs**: Revamp installation section with quick install as primary method, manual install in collapsible details.
+- **Docs**: Update code structure to reflect current architecture (tui, database, ui directory).
+- **Docs**: Fix `skills search` → `skills discover` command name.
+
+### Commits (since v4.7.4)
+
+- bedd43e docs: fix skills search -> discover in README
+- a5ce614 feat: add install.sh for one-liner curl | sh installation (#41)
+- 3249c29 merge: issue #47 Claude VSCode plugin takeover
+- 83212f0 feat(tui): add Claude VSCode plugin takeover toggle and sync
+- 20e81a7 feat(tui): add model auto-fetch picker with search filtering (#45)
+
 ## [4.7.4] - 2026-02-28
 
 ### Added
