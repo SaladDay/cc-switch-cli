@@ -925,7 +925,7 @@ fn handle_webdav_msg(
 }
 
 fn handle_action(
-    _terminal: &mut TuiTerminal,
+    terminal: &mut TuiTerminal,
     app: &mut App,
     data: &mut UiData,
     speedtest_req_tx: Option<&mpsc::Sender<String>>,
@@ -1115,6 +1115,9 @@ fn handle_action(
             app.editor = None;
             Ok(())
         }
+        Action::EditorOpenExternal => terminal.with_terminal_restored(|| {
+            run_external_editor_for_current_editor(app, crate::cli::editor::open_external_editor)
+        }),
         Action::EditorSubmit { submit, content } => match submit {
             EditorSubmit::PromptEdit { id } => {
                 let state = load_state()?;
@@ -2736,6 +2739,22 @@ fn parse_repo_spec(raw: &str) -> Result<SkillRepo, AppError> {
     })
 }
 
+fn run_external_editor_for_current_editor(
+    app: &mut App,
+    open_external_editor: impl FnOnce(&str) -> Result<String, AppError>,
+) -> Result<(), AppError> {
+    let Some(current_text) = app.editor.as_ref().map(|editor| editor.text()) else {
+        return Ok(());
+    };
+
+    let edited_text = open_external_editor(&current_text)?;
+    if let Some(editor) = app.editor.as_mut() {
+        editor.replace_text(edited_text);
+    }
+
+    Ok(())
+}
+
 /// Normalize terminal-specific key event quirks before dispatching.
 ///
 /// Some terminals (e.g. Xshell over SSH) send Backspace as `\x08` (Ctrl+H).
@@ -2848,6 +2867,57 @@ mod tests {
 
         assert!(err.to_string().contains("save failed"));
         assert!(!checked, "connection check should not run when save fails");
+    }
+
+    #[test]
+    fn external_editor_helper_replaces_editor_buffer_and_keeps_initial_text() {
+        let mut app = App::new(Some(crate::AppType::Claude));
+        app.open_editor(
+            "Prompt",
+            super::app::EditorKind::Plain,
+            "hello",
+            super::app::EditorSubmit::PromptEdit {
+                id: "pr1".to_string(),
+            },
+        );
+
+        super::run_external_editor_for_current_editor(&mut app, |current| {
+            assert_eq!(current, "hello");
+            Ok("hello from external\neditor".to_string())
+        })
+        .expect("external editor helper should succeed");
+
+        let editor = app.editor.as_ref().expect("editor should stay open");
+        assert_eq!(editor.text(), "hello from external\neditor");
+        assert_eq!(editor.initial_text, "hello");
+        assert!(editor.is_dirty(), "updated buffer should remain unsaved");
+    }
+
+    #[test]
+    fn external_editor_helper_preserves_buffer_on_error() {
+        let mut app = App::new(Some(crate::AppType::Claude));
+        app.open_editor(
+            "Prompt",
+            super::app::EditorKind::Plain,
+            "hello",
+            super::app::EditorSubmit::PromptEdit {
+                id: "pr1".to_string(),
+            },
+        );
+
+        let err = super::run_external_editor_for_current_editor(&mut app, |_current| {
+            Err(AppError::Message("boom".to_string()))
+        })
+        .expect_err("external editor helper should surface the edit error");
+
+        assert!(err.to_string().contains("boom"));
+        let editor = app.editor.as_ref().expect("editor should stay open");
+        assert_eq!(editor.text(), "hello");
+        assert_eq!(editor.initial_text, "hello");
+        assert!(
+            !editor.is_dirty(),
+            "failed external edit must not dirty the buffer"
+        );
     }
 
     #[test]

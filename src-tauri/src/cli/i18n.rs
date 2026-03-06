@@ -1556,6 +1556,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_external_editor() -> &'static str {
+        if is_chinese() {
+            "外部编辑器"
+        } else {
+            "external editor"
+        }
+    }
+
     pub fn tui_key_save_and_exit() -> &'static str {
         if is_chinese() {
             "保存并退出"

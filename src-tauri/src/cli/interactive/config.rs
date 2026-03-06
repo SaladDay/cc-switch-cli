@@ -242,8 +242,7 @@ fn retry_prompt() -> Result<bool, AppError> {
 }
 
 fn open_external_editor(initial_content: &str) -> Result<String, AppError> {
-    edit::edit(initial_content)
-        .map_err(|e| AppError::Message(format!("{}: {}", texts::editor_failed(), e)))
+    crate::cli::editor::open_external_editor(initial_content)
 }
 
 fn show_config_path_interactive() -> Result<(), AppError> {

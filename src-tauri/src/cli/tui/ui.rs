@@ -142,7 +142,9 @@ fn kv_line<'a>(
         Span::raw(" "), // internal padding: keep content away from │
         Span::styled(
             pad_to_display_width(label, label_width),
-            Style::default().fg(theme.comment).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.comment)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(": "),
     ];
@@ -653,9 +655,21 @@ fn render_skills_installed(
         Row::new(vec![
             Cell::from(skill.directory.clone()),
             Cell::from(skill.name.clone()),
-            Cell::from(if skill.apps.claude { texts::tui_marker_active() } else { texts::tui_marker_inactive() }),
-            Cell::from(if skill.apps.codex { texts::tui_marker_active() } else { texts::tui_marker_inactive() }),
-            Cell::from(if skill.apps.gemini { texts::tui_marker_active() } else { texts::tui_marker_inactive() }),
+            Cell::from(if skill.apps.claude {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            }),
+            Cell::from(if skill.apps.codex {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            }),
+            Cell::from(if skill.apps.gemini {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            }),
         ])
     });
 
@@ -761,7 +775,11 @@ fn render_skills_discover(
             _ => "-".to_string(),
         };
         Row::new(vec![
-            Cell::from(if skill.installed { texts::tui_marker_active() } else { texts::tui_marker_inactive() }),
+            Cell::from(if skill.installed {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            }),
             Cell::from(skill.directory.clone()),
             Cell::from(skill.name.clone()),
             Cell::from(repo),
@@ -867,7 +885,11 @@ fn render_skills_repos(
     let rows = visible.iter().map(|repo| {
         let repo_name = format!("{}/{}", repo.owner, repo.name);
         Row::new(vec![
-            Cell::from(if repo.enabled { texts::tui_marker_active() } else { texts::tui_marker_inactive() }),
+            Cell::from(if repo.enabled {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            }),
             Cell::from(repo_name),
             Cell::from(repo.branch.clone()),
         ])
@@ -1154,6 +1176,7 @@ fn render_editor(
 
     let keys = vec![
         ("↑↓←→", texts::tui_key_move()),
+        ("Ctrl+O", texts::tui_key_external_editor()),
         ("Ctrl+S", texts::tui_key_save()),
         ("Esc", texts::tui_key_close()),
     ];
@@ -1928,9 +1951,9 @@ fn render_mcp_add_form(
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
-    let rows = rows_data
-        .iter()
-        .map(|(label, value)| Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value.clone())]));
+    let rows = rows_data.iter().map(|(label, value)| {
+        Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value.clone())])
+    });
 
     let table = Table::new(
         rows,
@@ -2404,7 +2427,11 @@ fn render_main(
     frame.render_widget(
         Paragraph::new(Line::raw(texts::tui_main_hint()))
             .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.surface).add_modifier(Modifier::ITALIC)),
+            .style(
+                Style::default()
+                    .fg(theme.surface)
+                    .add_modifier(Modifier::ITALIC),
+            ),
         logo_chunks[2],
     );
 }
@@ -4676,6 +4703,30 @@ mod tests {
     }
 
     #[test]
+    fn editor_key_bar_shows_ctrl_o_external_editor_hint() {
+        let _lock = lock_env();
+        let _no_color = EnvGuard::remove("NO_COLOR");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Config;
+        app.focus = Focus::Content;
+        app.open_editor(
+            "Demo Editor",
+            EditorKind::Json,
+            "{\n  \"demo\": true\n}",
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: app.app_type.clone(),
+            },
+        );
+
+        let data = minimal_data(&app.app_type);
+        let buf = render(&app, &data);
+
+        let has_ctrl_o = (0..buf.area.height).any(|y| line_at(&buf, y).contains("Ctrl+O"));
+        assert!(has_ctrl_o, "editor key bar should show the Ctrl+O hint");
+    }
+
+    #[test]
     fn home_renders_ascii_logo() {
         let _lock = lock_env();
         let _no_color = EnvGuard::remove("NO_COLOR");
@@ -4975,7 +5026,11 @@ mod tests {
 
         let theme = theme_for(&app.app_type);
         let content = super::content_pane_rect(buf.area, &theme);
-        let area = super::centered_rect_fixed(super::OVERLAY_FIXED_MD.0, super::OVERLAY_FIXED_MD.1, content);
+        let area = super::centered_rect_fixed(
+            super::OVERLAY_FIXED_MD.0,
+            super::OVERLAY_FIXED_MD.1,
+            content,
+        );
 
         assert_eq!(buf[(area.x, area.y)].symbol(), "┌");
         assert_eq!(

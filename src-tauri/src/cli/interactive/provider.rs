@@ -677,8 +677,7 @@ fn retry_prompt() -> Result<bool, AppError> {
 
 /// Open external editor for content editing
 fn open_external_editor(initial_content: &str) -> Result<String, AppError> {
-    edit::edit(initial_content)
-        .map_err(|e| AppError::Message(format!("{}: {}", texts::editor_failed(), e)))
+    crate::cli::editor::open_external_editor(initial_content)
 }
 
 /// Display provider summary (used by JSON editor)

@@ -283,6 +283,19 @@ impl EditorState {
         self.lines.join("\n")
     }
 
+    pub(crate) fn replace_text(&mut self, updated: impl Into<String>) {
+        let updated = updated.into();
+        let mut lines = updated.lines().map(|s| s.to_string()).collect::<Vec<_>>();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+
+        self.lines = lines;
+        self.cursor_row = self.cursor_row.min(self.lines.len().saturating_sub(1));
+        self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+        self.scroll = self.scroll.min(self.cursor_row);
+    }
+
     fn line_len_chars(&self, row: usize) -> usize {
         self.lines.get(row).map(|s| s.chars().count()).unwrap_or(0)
     }
@@ -620,6 +633,7 @@ pub enum Action {
         content: String,
     },
     EditorDiscard,
+    EditorOpenExternal,
 
     SetSkipClaudeOnboarding {
         enabled: bool,
@@ -3299,6 +3313,10 @@ impl App {
             };
         }
 
+        if is_open_external_editor_shortcut(key) {
+            return Action::EditorOpenExternal;
+        }
+
         match key.code {
             KeyCode::Esc => {
                 if editor.is_dirty() {
@@ -3761,6 +3779,13 @@ fn is_save_shortcut(key: KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('s' | 'S') => key.modifiers.contains(KeyModifiers::CONTROL),
         KeyCode::Char('\u{13}') => true,
+        _ => false,
+    }
+}
+
+fn is_open_external_editor_shortcut(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('o' | 'O') => key.modifiers.contains(KeyModifiers::CONTROL),
         _ => false,
     }
 }
@@ -4876,6 +4901,38 @@ mod tests {
                 }
             ),
             "ASCII XOFF control char should be accepted as save shortcut in editor"
+        );
+    }
+
+    #[test]
+    fn prompts_editor_ctrl_o_requests_external_editor() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.prompts.rows.push(super::super::data::PromptRow {
+            id: "pr1".to_string(),
+            prompt: crate::prompt::Prompt {
+                id: "pr1".to_string(),
+                name: "Demo".to_string(),
+                content: "hello".to_string(),
+                description: None,
+                enabled: false,
+                created_at: None,
+                updated_at: None,
+            },
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(app.editor.is_some(), "prompt editor should be opened first");
+
+        let action = app.on_key(ctrl(KeyCode::Char('o')), &data);
+        assert_eq!(format!("{action:?}"), "EditorOpenExternal");
+        assert!(
+            app.editor.is_some(),
+            "Ctrl+O should keep the editor session open"
         );
     }
 

@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
 pub mod commands;
+pub mod editor;
 pub mod i18n;
 pub mod interactive;
 pub mod terminal;

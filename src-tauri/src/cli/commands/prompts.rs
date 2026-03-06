@@ -310,8 +310,7 @@ fn create_prompt(_app_type: AppType) -> Result<(), AppError> {
     println!("{}", highlight("Create New Prompt Preset"));
     println!("{}", info("Opening external editor..."));
 
-    let edited =
-        edit::edit(initial).map_err(|e| AppError::Message(format!("editor failed: {e}")))?;
+    let edited = crate::cli::editor::open_external_editor(initial)?;
 
     let content = edited.trim_end().to_string();
     let prompt = Prompt {
@@ -381,8 +380,7 @@ fn edit_prompt(_app_type: AppType, id: &str) -> Result<(), AppError> {
     println!("{}", info(&format!("Editing prompt preset '{}'...", id)));
     println!("{}", info("Opening external editor..."));
 
-    let edited = edit::edit(&prompt.content)
-        .map_err(|e| AppError::Message(format!("editor failed: {e}")))?;
+    let edited = crate::cli::editor::open_external_editor(&prompt.content)?;
 
     if edited.trim_end() == prompt.content.trim_end() {
         println!("{}", info("No changes detected."));
