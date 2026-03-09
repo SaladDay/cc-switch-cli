@@ -39,7 +39,7 @@ fn deeplink_import_claude_provider_persists_to_config() {
     assert_eq!(provider.website_url.as_deref(), request.homepage.as_deref());
     let auth_token = provider
         .settings_config
-        .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+        .pointer("/env/ANTHROPIC_API_KEY")
         .and_then(|v| v.as_str());
     let base_url = provider
         .settings_config
