@@ -104,6 +104,16 @@ impl SkillApps {
         apps
     }
 
+    pub fn from_labels(labels: &[String]) -> Self {
+        let mut apps = Self::default();
+        for label in labels {
+            if let Ok(app) = label.parse::<AppType>() {
+                apps.set_enabled_for(&app, true);
+            }
+        }
+        apps
+    }
+
     pub fn merge_enabled(&mut self, other: &SkillApps) {
         self.claude |= other.claude;
         self.codex |= other.codex;

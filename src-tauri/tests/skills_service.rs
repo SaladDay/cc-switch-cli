@@ -64,6 +64,97 @@ fn list_installed_triggers_initial_ssot_migration() {
 }
 
 #[test]
+fn import_from_apps_imports_agents_skill_with_lock_metadata() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let agents_skill_dir = home.join(".agents").join("skills").join("hello-skill");
+    write_skill_md(&agents_skill_dir, "Hello Skill", "From agents");
+
+    let agents_dir = home.join(".agents");
+    std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+    std::fs::write(
+        agents_dir.join(".skill-lock.json"),
+        r#"{
+  "skills": {
+    "hello-skill": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "hello-skill/SKILL.md",
+      "branch": "main"
+    }
+  }
+}"#,
+    )
+    .expect("write agents lock file");
+
+    let imported = SkillService::import_from_apps(vec!["hello-skill".to_string()])
+        .expect("import agents skill");
+
+    assert_eq!(imported.len(), 1, "agents skill should be imported");
+
+    let skill = &imported[0];
+    assert_eq!(skill.directory, "hello-skill");
+    assert_eq!(skill.name, "Hello Skill");
+    assert_eq!(skill.id, "anthropics/skills:hello-skill");
+    assert_eq!(skill.repo_owner.as_deref(), Some("anthropics"));
+    assert_eq!(skill.repo_name.as_deref(), Some("skills"));
+    assert_eq!(skill.repo_branch.as_deref(), Some("main"));
+    assert_eq!(
+        skill.readme_url.as_deref(),
+        Some("https://github.com/anthropics/skills/blob/main/hello-skill/SKILL.md")
+    );
+    assert!(
+        skill.apps.is_empty(),
+        "agents source should not enable app flags"
+    );
+
+    let ssot_skill_dir = home.join(".cc-switch").join("skills").join("hello-skill");
+    assert!(ssot_skill_dir.exists(), "skill should be copied into SSOT");
+}
+
+#[test]
+fn scan_unmanaged_includes_agents_and_ssot_sources() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    write_skill_md(
+        &home.join(".agents").join("skills").join("agents-skill"),
+        "Agents Skill",
+        "Found in agents",
+    );
+    write_skill_md(
+        &home.join(".cc-switch").join("skills").join("ssot-skill"),
+        "SSOT Skill",
+        "Found in ssot",
+    );
+
+    let unmanaged = SkillService::scan_unmanaged().expect("scan unmanaged skills");
+
+    let agents_skill = unmanaged
+        .iter()
+        .find(|skill| skill.directory == "agents-skill")
+        .expect("agents skill should be visible");
+    assert_eq!(agents_skill.name, "Agents Skill");
+    assert!(agents_skill
+        .found_in
+        .iter()
+        .any(|source| source == "agents"));
+
+    let ssot_skill = unmanaged
+        .iter()
+        .find(|skill| skill.directory == "ssot-skill")
+        .expect("ssot skill should be visible");
+    assert_eq!(ssot_skill.name, "SSOT Skill");
+    assert!(ssot_skill
+        .found_in
+        .iter()
+        .any(|source| source == "cc-switch"));
+}
+
+#[test]
 fn pending_migration_with_existing_managed_list_does_not_claim_unmanaged_skills() {
     let _guard = lock_test_mutex();
     reset_test_fs();
