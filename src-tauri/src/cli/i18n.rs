@@ -1336,9 +1336,17 @@ pub mod texts {
     pub fn tui_claude_api_format_requires_proxy_message(api_format: &str) -> String {
         let label = tui_claude_api_format_value(api_format);
         if is_chinese() {
-            format!("已切换为 {label}。\n该格式需开启本地代理使用。\n按 Enter 打开代理帮助。")
+            format!("已切换为 {label}。\n该格式需开启本地代理使用。\n请在主页按 P 打开本地代理。")
         } else {
-            format!("Switched to {label}.\nThis format requires the local proxy.\nPress Enter to open proxy help.")
+            format!("Switched to {label}.\nThis format requires the local proxy.\nPress P on the home page to open local proxy.")
+        }
+    }
+
+    pub fn tui_claude_api_format_popup_title() -> &'static str {
+        if is_chinese() {
+            "API 格式"
+        } else {
+            "API Format"
         }
     }
 

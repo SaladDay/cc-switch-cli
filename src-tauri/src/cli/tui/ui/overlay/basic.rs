@@ -61,16 +61,13 @@ pub(super) fn render_confirm_overlay(
                 ("Esc", texts::tui_key_cancel()),
             ],
         );
-    } else if matches!(
-        confirm.action,
-        ConfirmAction::ProviderApiFormatRequiresProxy
-    ) {
+    } else if matches!(confirm.action, ConfirmAction::ProviderApiFormatProxyNotice) {
         render_key_bar_center(
             frame,
             chunks[0],
             theme,
             &[
-                ("Enter", texts::tui_key_open()),
+                ("Enter", texts::tui_key_close()),
                 ("Esc", texts::tui_key_close()),
             ],
         );

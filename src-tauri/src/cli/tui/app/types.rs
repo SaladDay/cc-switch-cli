@@ -67,7 +67,7 @@ pub enum ConfirmAction {
     ConfigReset,
     SettingsSetSkipClaudeOnboarding { enabled: bool },
     SettingsSetClaudePluginIntegration { enabled: bool },
-    ProviderApiFormatRequiresProxy,
+    ProviderApiFormatProxyNotice,
     EditorDiscard,
     EditorSaveBeforeClose,
     WebDavMigrateV1ToV2,
@@ -151,6 +151,9 @@ pub enum Overlay {
     ClaudeModelPicker {
         selected: usize,
         editing: bool,
+    },
+    ClaudeApiFormatPicker {
+        selected: usize,
     },
     ModelFetchPicker {
         request_id: u64,

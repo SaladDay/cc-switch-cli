@@ -52,7 +52,7 @@ impl App {
                     ConfirmAction::SettingsSetClaudePluginIntegration { enabled } => {
                         Action::SetClaudePluginIntegration { enabled: *enabled }
                     }
-                    ConfirmAction::ProviderApiFormatRequiresProxy => Action::ConfigOpenProxyHelp,
+                    ConfirmAction::ProviderApiFormatProxyNotice => Action::None,
                     ConfirmAction::EditorDiscard => Action::EditorDiscard,
                     ConfirmAction::EditorSaveBeforeClose => {
                         if let Some(editor) = self.editor.as_ref() {

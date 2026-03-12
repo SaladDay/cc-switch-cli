@@ -127,6 +127,12 @@ pub enum ClaudeApiFormat {
 }
 
 impl ClaudeApiFormat {
+    pub const ALL: [Self; 3] = [
+        ClaudeApiFormat::Anthropic,
+        ClaudeApiFormat::OpenAiChat,
+        ClaudeApiFormat::OpenAiResponses,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             ClaudeApiFormat::Anthropic => "anthropic",
@@ -143,12 +149,19 @@ impl ClaudeApiFormat {
         }
     }
 
-    pub fn next(self) -> Self {
+    pub fn picker_index(self) -> usize {
         match self {
-            ClaudeApiFormat::Anthropic => ClaudeApiFormat::OpenAiChat,
-            ClaudeApiFormat::OpenAiChat => ClaudeApiFormat::OpenAiResponses,
-            ClaudeApiFormat::OpenAiResponses => ClaudeApiFormat::Anthropic,
+            ClaudeApiFormat::Anthropic => 0,
+            ClaudeApiFormat::OpenAiChat => 1,
+            ClaudeApiFormat::OpenAiResponses => 2,
         }
+    }
+
+    pub fn from_picker_index(index: usize) -> Self {
+        Self::ALL
+            .get(index)
+            .copied()
+            .unwrap_or(ClaudeApiFormat::Anthropic)
     }
 
     pub fn requires_proxy(self) -> bool {

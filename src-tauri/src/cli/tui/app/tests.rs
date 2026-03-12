@@ -2264,7 +2264,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_claude_api_format_warns_when_proxy_not_enabled() {
+    fn provider_claude_api_format_field_enter_opens_overlay() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -2289,21 +2289,18 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(
             app.overlay,
-            Overlay::Confirm(ConfirmOverlay {
-                action: ConfirmAction::ProviderApiFormatRequiresProxy,
-                ..
-            })
+            Overlay::ClaudeApiFormatPicker { selected: 0 }
         ));
 
         let format = match app.form.as_ref() {
             Some(super::super::form::FormState::ProviderAdd(form)) => form.claude_api_format,
             other => panic!("expected ProviderAdd form, got: {other:?}"),
         };
-        assert_eq!(format, super::super::form::ClaudeApiFormat::OpenAiChat);
+        assert_eq!(format, super::super::form::ClaudeApiFormat::Anthropic);
     }
 
     #[test]
-    fn provider_claude_api_format_proxy_warning_enter_opens_proxy_help() {
+    fn provider_claude_api_format_warns_when_proxy_not_enabled() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -2325,8 +2322,53 @@ mod tests {
         }
 
         app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(key(KeyCode::Down), &data);
+        assert!(matches!(action, Action::None));
         let action = app.on_key(key(KeyCode::Enter), &data);
-        assert!(matches!(action, Action::ConfigOpenProxyHelp));
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ProviderApiFormatProxyNotice,
+                ..
+            })
+        ));
+
+        let format = match app.form.as_ref() {
+            Some(super::super::form::FormState::ProviderAdd(form)) => form.claude_api_format,
+            other => panic!("expected ProviderAdd form, got: {other:?}"),
+        };
+        assert_eq!(format, super::super::form::ClaudeApiFormat::OpenAiChat);
+    }
+
+    #[test]
+    fn provider_claude_api_format_proxy_notice_enter_dismisses_popup() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        if let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = super::super::form::FormFocus::Fields;
+            form.editing = false;
+            form.field_idx = form
+                .fields()
+                .iter()
+                .position(|field| *field == ProviderAddField::ClaudeApiFormat)
+                .expect("ClaudeApiFormat field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        app.on_key(key(KeyCode::Enter), &data);
+        app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     #[test]
@@ -2354,6 +2396,8 @@ mod tests {
             panic!("expected ProviderAdd form");
         }
 
+        app.on_key(key(KeyCode::Enter), &data);
+        app.on_key(key(KeyCode::Down), &data);
         let action = app.on_key(key(KeyCode::Enter), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(app.overlay, Overlay::None));

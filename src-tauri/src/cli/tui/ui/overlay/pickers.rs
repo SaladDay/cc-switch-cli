@@ -152,6 +152,84 @@ pub(super) fn render_claude_model_picker_overlay(
     }
 }
 
+pub(super) fn render_claude_api_format_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+) {
+    let area = centered_rect_fixed(58, 10, content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(texts::tui_claude_api_format_popup_title());
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_close()),
+        ],
+    );
+
+    let body_area = Rect {
+        x: chunks[1].x.saturating_add(2),
+        y: chunks[1].y.saturating_add(1),
+        width: chunks[1].width.saturating_sub(4),
+        height: chunks[1].height.saturating_sub(2),
+    };
+    let current = app
+        .form
+        .as_ref()
+        .and_then(|form| match form {
+            FormState::ProviderAdd(provider) => Some(provider.claude_api_format),
+            _ => None,
+        })
+        .unwrap_or(crate::cli::tui::form::ClaudeApiFormat::Anthropic);
+
+    let items = crate::cli::tui::form::ClaudeApiFormat::ALL
+        .into_iter()
+        .map(|api_format| {
+            let marker = if api_format == current {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            };
+            ListItem::new(Line::from(Span::raw(format!(
+                "{marker}  {}",
+                texts::tui_claude_api_format_value(api_format.as_str())
+            ))))
+        });
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = ListState::default();
+    state.select(Some(
+        selected.min(
+            crate::cli::tui::form::ClaudeApiFormat::ALL
+                .len()
+                .saturating_sub(1),
+        ),
+    ));
+    frame.render_stateful_widget(list, body_area, &mut state);
+}
+
 pub(super) fn render_model_fetch_picker_overlay(
     frame: &mut Frame<'_>,
     content_area: Rect,

@@ -9,6 +9,9 @@ impl App {
         if let Some(action) = self.handle_sync_method_picker_key(key, data) {
             return Some(action);
         }
+        if let Some(action) = self.handle_claude_api_format_picker_key(key, data) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_claude_model_picker_key(key) {
             return Some(action);
         }
@@ -54,6 +57,64 @@ impl App {
                 } else {
                     Action::SkillsSetSyncMethod { method }
                 }
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_claude_api_format_picker_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Option<Action> {
+        let Overlay::ClaudeApiFormatPicker { selected } = &mut self.overlay else {
+            return None;
+        };
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(
+                    crate::cli::tui::form::ClaudeApiFormat::ALL
+                        .len()
+                        .saturating_sub(1),
+                );
+                Action::None
+            }
+            KeyCode::Enter => {
+                let next_format =
+                    crate::cli::tui::form::ClaudeApiFormat::from_picker_index(*selected);
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    self.overlay = Overlay::None;
+                    return Some(Action::None);
+                };
+
+                let changed = provider.claude_api_format != next_format;
+                provider.claude_api_format = next_format;
+                self.overlay = Overlay::None;
+
+                let proxy_ready = data
+                    .proxy
+                    .routes_current_app_through_proxy(&provider.app_type)
+                    .unwrap_or(false);
+                if changed && next_format.requires_proxy() && !proxy_ready {
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+                        message: texts::tui_claude_api_format_requires_proxy_message(
+                            next_format.as_str(),
+                        ),
+                        action: ConfirmAction::ProviderApiFormatProxyNotice,
+                    });
+                }
+
+                Action::None
             }
             _ => Action::None,
         })

@@ -58,6 +58,15 @@ pub(crate) fn render_overlay(
                 *editing,
             )
         }
+        Overlay::ClaudeApiFormatPicker { selected } => {
+            super::pickers::render_claude_api_format_picker_overlay(
+                frame,
+                app,
+                content_area,
+                theme,
+                *selected,
+            )
+        }
         Overlay::ModelFetchPicker {
             input,
             query,

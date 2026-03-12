@@ -1659,6 +1659,101 @@ fn editor_unsaved_changes_confirm_overlay_shows_three_actions_and_is_compact() {
 }
 
 #[test]
+fn claude_api_format_picker_overlay_is_compact_and_padded() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.form = Some(crate::cli::tui::form::FormState::ProviderAdd(
+        crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude),
+    ));
+    app.overlay = Overlay::ClaudeApiFormatPicker { selected: 1 };
+
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+
+    let theme = theme_for(&app.app_type);
+    let content = super::content_pane_rect(buf.area, &theme);
+    let area = super::centered_rect_fixed(58, 10, content);
+
+    assert_eq!(buf[(area.x, area.y)].symbol(), "┌");
+    assert_eq!(
+        buf[(
+            area.x.saturating_add(area.width.saturating_sub(1)),
+            area.y.saturating_add(area.height.saturating_sub(1))
+        )]
+            .symbol(),
+        "┘"
+    );
+
+    let message = "OpenAI Chat Completions";
+    let row_index = (0..buf.area.height)
+        .find(|&y| line_at(&buf, y).contains(message))
+        .expect("API format option should be rendered");
+    let row = line_at(&buf, row_index);
+    let msg_start = row.find(message).expect("message should be present");
+    let left_border = row[..msg_start]
+        .rfind('│')
+        .expect("message row should have left border");
+    let right_border_offset = row[msg_start + message.len()..]
+        .find('│')
+        .expect("message row should have right border");
+    let right_border = msg_start + message.len() + right_border_offset;
+
+    assert!(
+        msg_start.saturating_sub(left_border) >= 4,
+        "option should keep comfortable left padding: {row:?}"
+    );
+    assert!(
+        right_border.saturating_sub(msg_start + message.len()) >= 3,
+        "option should keep comfortable right padding: {row:?}"
+    );
+    assert!(
+        row_index > area.y.saturating_add(1),
+        "options should not hug the top border"
+    );
+    assert!(
+        area.y.saturating_add(area.height).saturating_sub(row_index) >= 4,
+        "options should keep visible bottom margin"
+    );
+}
+
+#[test]
+fn provider_api_format_proxy_notice_overlay_uses_close_actions() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::Confirm(ConfirmOverlay {
+        title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+        message: texts::tui_claude_api_format_requires_proxy_message("openai_chat"),
+        action: ConfirmAction::ProviderApiFormatProxyNotice,
+    });
+
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(
+        all.contains("Enter close"),
+        "expected Enter close hint: {all}"
+    );
+    assert!(all.contains("Esc close"), "expected Esc close hint: {all}");
+    assert!(
+        !all.contains("Enter confirm"),
+        "should not show confirm hint: {all}"
+    );
+    assert!(
+        !all.contains("Esc cancel"),
+        "should not show cancel hint: {all}"
+    );
+}
+
+#[test]
 fn footer_shows_only_global_actions() {
     let _lock = lock_env();
 
