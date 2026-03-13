@@ -165,6 +165,12 @@ struct EnvGuard {
 }
 
 impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, prev }
+    }
+
     fn remove(key: &'static str) -> Self {
         let prev = std::env::var(key).ok();
         std::env::remove_var(key);
@@ -466,6 +472,66 @@ fn providers_pane_has_border_and_selected_row_is_accent() {
         content.y.saturating_add(1 + 1 + 1),
     )];
     assert_eq!(selected_row_cell.bg, theme.accent);
+}
+
+#[test]
+fn focused_pane_border_keeps_v500_bold_style_in_ansi256_mode() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _colorterm = EnvGuard::remove("COLORTERM");
+    let _color_mode = EnvGuard::set("CC_SWITCH_COLOR_MODE", "ansi256");
+    let _term = EnvGuard::remove("TERM");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.focus = Focus::Content;
+    let theme = theme_for(&app.app_type);
+
+    let style = super::pane_border_style(&app, Focus::Content, &theme);
+    assert!(style.add_modifier.contains(ratatui::style::Modifier::BOLD));
+}
+
+#[test]
+fn inactive_pane_border_keeps_v500_dim_color_in_ansi256_mode() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _colorterm = EnvGuard::remove("COLORTERM");
+    let _color_mode = EnvGuard::set("CC_SWITCH_COLOR_MODE", "ansi256");
+    let _term = EnvGuard::remove("TERM");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.focus = Focus::Nav;
+    let theme = theme_for(&app.app_type);
+
+    let style = super::pane_border_style(&app, Focus::Content, &theme);
+    assert_eq!(style.fg, Some(theme.dim));
+}
+
+#[test]
+fn informational_overlay_border_keeps_v500_dim_color_in_ansi256_mode() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _colorterm = EnvGuard::remove("COLORTERM");
+    let _color_mode = EnvGuard::set("CC_SWITCH_COLOR_MODE", "ansi256");
+    let _term = EnvGuard::remove("TERM");
+
+    let theme = theme_for(&AppType::Claude);
+
+    let style = super::overlay_border_style(&theme, false);
+    assert_eq!(style.fg, Some(theme.dim));
+}
+
+#[test]
+fn focused_form_border_keeps_v500_bold_style_in_ansi256_mode() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _colorterm = EnvGuard::remove("COLORTERM");
+    let _color_mode = EnvGuard::set("CC_SWITCH_COLOR_MODE", "ansi256");
+    let _term = EnvGuard::remove("TERM");
+
+    let theme = theme_for(&AppType::Claude);
+
+    let style = super::focus_block_style(true, &theme);
+    assert!(style.add_modifier.contains(ratatui::style::Modifier::BOLD));
 }
 
 #[test]
@@ -1834,6 +1900,41 @@ fn footer_shows_only_global_actions() {
     assert!(
         !footer.contains("clear") && !footer.contains("apply"),
         "expected footer to not show overlay/page actions; got: {footer:?}"
+    );
+}
+
+#[test]
+fn footer_uses_terminal_palette_in_ansi256_mode() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let _colorterm = EnvGuard::remove("COLORTERM");
+    let _color_mode = EnvGuard::set("CC_SWITCH_COLOR_MODE", "ansi256");
+    let _term = EnvGuard::remove("TERM");
+
+    let app = App::new(Some(AppType::Claude));
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+    let footer_y = buf.area.height - 1;
+
+    let mut saw_indexed_bg = false;
+    for x in 0..buf.area.width {
+        let cell = &buf[(x, footer_y)];
+        assert!(
+            !matches!(cell.fg, ratatui::style::Color::Rgb(_, _, _)),
+            "footer should not emit RGB foregrounds in ansi256 mode: {:?}",
+            cell.fg
+        );
+        assert!(
+            !matches!(cell.bg, ratatui::style::Color::Rgb(_, _, _)),
+            "footer should not emit RGB backgrounds in ansi256 mode: {:?}",
+            cell.bg
+        );
+        saw_indexed_bg |= matches!(cell.bg, ratatui::style::Color::Indexed(_));
+    }
+
+    assert!(
+        saw_indexed_bg,
+        "footer should render indexed background cells"
     );
 }
 

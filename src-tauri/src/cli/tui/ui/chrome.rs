@@ -264,26 +264,28 @@ pub(super) fn render_footer(
                 Style::default(),
             )]
         } else {
-            let nav_bg = Color::Rgb(101, 113, 160); // #6571A0
-            let act_bg = Color::Rgb(248, 248, 248); // #F8F8F8
+            let nav_bg = super::theme::terminal_palette_color((101, 113, 160)); // #6571A0
+            let act_bg = super::theme::terminal_palette_color((248, 248, 248)); // #F8F8F8
+            let nav_fg = super::theme::terminal_palette_color((255, 255, 255));
+            let act_fg = super::theme::terminal_palette_color((108, 108, 108));
             let nav_label_style = Style::default()
-                .fg(Color::Rgb(255, 255, 255))
+                .fg(nav_fg)
                 .bg(nav_bg)
                 .add_modifier(Modifier::BOLD);
             let act_label_style = Style::default()
-                .fg(Color::Rgb(108, 108, 108))
+                .fg(act_fg)
                 .bg(act_bg)
                 .add_modifier(Modifier::BOLD);
             let nav_key_style = Style::default()
-                .fg(Color::Rgb(255, 255, 255))
+                .fg(nav_fg)
                 .bg(nav_bg)
                 .add_modifier(Modifier::BOLD);
-            let nav_desc_style = Style::default().fg(Color::Rgb(255, 255, 255)).bg(nav_bg);
+            let nav_desc_style = Style::default().fg(nav_fg).bg(nav_bg);
             let act_key_style = Style::default()
-                .fg(Color::Rgb(108, 108, 108))
+                .fg(act_fg)
                 .bg(act_bg)
                 .add_modifier(Modifier::BOLD);
-            let act_desc_style = Style::default().fg(Color::Rgb(108, 108, 108)).bg(act_bg);
+            let act_desc_style = Style::default().fg(act_fg).bg(act_bg);
             let nav_sep = Span::styled("  ", nav_desc_style);
             let act_sep = Span::styled("  ", act_desc_style);
 
