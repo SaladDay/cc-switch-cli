@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.0.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -23,6 +23,14 @@
 
 
 **致谢：** 原始架构和核心功能来自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)
+
+---
+
+## 🆕 5.0.1 更新内容
+
+- 自更新流程进一步对齐 GitHub Release 元数据，签名升级和安装脚本升级路径更稳妥。
+- v5 TUI 配色在 Apple Terminal 和 ansi256 兼容模式下保持可读且一致。
+- Claude 与 Codex 在第一次切换可能覆盖现有 live 配置时会先提示，并在第一次真实切换后显示一次性“通用配置”提示。
 
 ---
 

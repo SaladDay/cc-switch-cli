@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.0.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -25,6 +25,14 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 
 **Credits:** Original architecture and core functionality from [farion1231/cc-switch](https://github.com/farion1231/cc-switch)
+
+---
+
+## 🆕 What's New in 5.0.1
+
+- Self-update now follows GitHub release metadata more closely and has a safer signed upgrade path.
+- The v5 TUI palette now stays readable across Apple Terminal and ansi256 compatibility modes.
+- Claude and Codex now warn before a first switch would overwrite an existing live config, and show a one-time common-config tip after the first real provider change.
 
 ---
 

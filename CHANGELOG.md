@@ -7,6 +7,34 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.1] - 2026-03-15
+
+### Added
+
+- **Claude / Codex (TUI)**: Add first-switch safety prompts that detect existing live configs, offer import-before-overwrite, and show a one-time common-config tip after the first real provider switch.
+
+### Fixed
+
+- **Update**: Align self-update target resolution with upstream release metadata, harden signed self-update and installer upgrades, and avoid noisy archive extraction locale issues in the install script.
+- **TUI**: Preserve the v5 palette across terminal capabilities, including ansi256 fallback paths such as Apple Terminal compatibility mode.
+- **Codex**: Allow importing the current live config when `config.toml` exists without `auth.json`, while still avoiding first-use prompts for auth-only states.
+
+### Docs
+
+- **README**: Refresh the version badges and add a short 5.0.1 highlights section in both English and Chinese docs.
+
+### Commits (since v5.0.0)
+
+- 3ee87c4 fix: align update flow with upstream release resolution
+- a0ebe7f fix(tui): preserve v5 colors across terminal capabilities
+- 060cd7a fix(update): harden signed self-update and installer upgrades
+- d3ff0a7 feat(tui): add Claude provider switch safety prompts
+- 5a8d227 feat(tui): add Codex provider switch safety prompts
+
+### Thanks
+
+- Thanks `@saladday` for the 5.0.1 self-update hardening, terminal color compatibility work, and Claude/Codex switch safety UX.
+
 ## [5.0.0] - 2026-03-13
 
 ### Added

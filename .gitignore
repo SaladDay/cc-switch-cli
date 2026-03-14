@@ -24,7 +24,8 @@ vitest-report.json
 /blog
 *.bak
 skill.md
-scripts/
+scripts/*
+!scripts/generate_latest_json.py
 
 .agent/
 .agents/

@@ -161,9 +161,27 @@ jobs:
           ls -R artifacts/
 
       - name: Install minisign
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends minisign
+          set -euxo pipefail
+          MINISIGN_VERSION="0.12"
+          case "$(uname -m)" in
+            x86_64|amd64) MINISIGN_ARCH="x86_64" ;;
+            aarch64|arm64) MINISIGN_ARCH="aarch64" ;;
+            *)
+              echo "Unsupported minisign architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          curl -fsSL \
+            "https://github.com/jedisct1/minisign/releases/download/${MINISIGN_VERSION}/minisign-${MINISIGN_VERSION}-linux.tar.gz" \
+            -o /tmp/minisign.tar.gz
+          tar -xzf /tmp/minisign.tar.gz -C /tmp
+          sudo install -m 0755 \
+            "/tmp/minisign-linux/${MINISIGN_ARCH}/minisign" \
+            /usr/local/bin/minisign
+          minisign -v
 
       - name: Prepare release assets
         run: |
