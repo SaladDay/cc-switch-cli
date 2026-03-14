@@ -1875,7 +1875,8 @@ fn provider_switch_first_use_overlay_renders_three_actions_with_padding() {
     app.focus = Focus::Content;
     app.overlay = Overlay::ProviderSwitchFirstUseConfirm {
         provider_id: "p1".to_string(),
-        live_config_path: "~/.claude/settings.json".to_string(),
+        title: texts::tui_provider_switch_first_use_title().to_string(),
+        message: texts::tui_provider_switch_first_use_message("~/.claude/settings.json"),
         selected: 0,
     };
 

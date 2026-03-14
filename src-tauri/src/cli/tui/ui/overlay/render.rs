@@ -16,14 +16,16 @@ pub(crate) fn render_overlay(
             super::basic::render_confirm_overlay(frame, content_area, theme, confirm)
         }
         Overlay::ProviderSwitchFirstUseConfirm {
-            live_config_path,
+            title,
+            message,
             selected,
             ..
         } => super::basic::render_provider_switch_first_use_overlay(
             frame,
             content_area,
             theme,
-            live_config_path,
+            title,
+            message,
             *selected,
         ),
         Overlay::TextInput(input) => {

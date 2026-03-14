@@ -1362,6 +1362,26 @@ pub mod texts {
         }
     }
 
+    pub fn tui_codex_provider_switch_first_use_title() -> &'static str {
+        if is_chinese() {
+            "已有 Codex 配置"
+        } else {
+            "Existing Codex Config"
+        }
+    }
+
+    pub fn tui_codex_provider_switch_first_use_message(paths: &str) -> String {
+        if is_chinese() {
+            format!(
+                "⚠ 检测到已有 Codex 配置文件 ({paths})。\n切换供应商将覆盖此文件。\n建议先将当前配置导入为供应商。"
+            )
+        } else {
+            format!(
+                "WARNING: An existing Codex config file was found at {paths}.\nSwitching providers will overwrite this file.\nImport the current config as a provider first if you want to keep it."
+            )
+        }
+    }
+
     pub fn tui_provider_switch_first_use_import_button() -> &'static str {
         if is_chinese() {
             "导入为供应商"
@@ -1402,11 +1422,28 @@ pub mod texts {
         }
     }
 
+    pub fn tui_codex_provider_switch_shared_config_tip_message() -> String {
+        if is_chinese() {
+            "如果有些 Codex 配置需要所有供应商共享，\n可在“通用配置”中设置，切换时会自动合并。"
+                .to_string()
+        } else {
+            "If some Codex settings should be shared by every provider,\nset them in Common Config and they will be merged automatically when switching.".to_string()
+        }
+    }
+
     pub fn tui_provider_imported_live_config_name() -> &'static str {
         if is_chinese() {
             "已导入的当前配置"
         } else {
             "Imported Current Config"
+        }
+    }
+
+    pub fn tui_codex_imported_live_config_name() -> &'static str {
+        if is_chinese() {
+            "已导入的当前 Codex 配置"
+        } else {
+            "Imported Current Codex Config"
         }
     }
 
@@ -3765,6 +3802,14 @@ pub mod texts {
             "已将当前 Claude 配置导入为供应商。"
         } else {
             "Imported the current Claude config as a provider."
+        }
+    }
+
+    pub fn tui_toast_codex_live_config_imported() -> &'static str {
+        if is_chinese() {
+            "已将当前 Codex 配置导入为供应商。"
+        } else {
+            "Imported the current Codex config as a provider."
         }
     }
 

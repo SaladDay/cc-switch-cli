@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::cli::i18n::texts;
 use crate::cli::tui::form::ClaudeApiFormat;
+use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 use crate::config::get_claude_settings_path;
 use crate::error::AppError;
 use crate::proxy::providers::get_claude_api_format;
@@ -14,11 +15,12 @@ use super::super::runtime_systems::{next_model_fetch_request_id, ModelFetchReq, 
 use super::RuntimeActionContext;
 
 pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
-    if should_show_claude_first_use_guard(ctx) {
+    if let Some((title, message)) = provider_switch_first_use_guard_content(ctx) {
         ctx.app.pending_overlay = None;
         ctx.app.overlay = Overlay::ProviderSwitchFirstUseConfirm {
             provider_id: id,
-            live_config_path: display_path_with_tilde(&get_claude_settings_path()),
+            title,
+            message,
             selected: 0,
         };
         return Ok(());
@@ -35,24 +37,47 @@ pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(
     let state = load_state()?;
     let settings_config = ProviderService::read_live_settings(ctx.app.app_type.clone())?;
     let provider_id = next_imported_live_provider_id(&ctx.data.providers.rows);
+    let provider_name = match ctx.app.app_type {
+        crate::app_config::AppType::Codex => texts::tui_codex_imported_live_config_name(),
+        _ => texts::tui_provider_imported_live_config_name(),
+    };
     let mut provider = crate::provider::Provider::with_id(
         provider_id.clone(),
-        texts::tui_provider_imported_live_config_name().to_string(),
+        provider_name.to_string(),
         settings_config,
         None,
     );
     provider.category = Some("custom".to_string());
     provider.created_at = Some(current_timestamp());
 
-    ProviderService::add(&state, ctx.app.app_type.clone(), provider)?;
-    ProviderService::switch(&state, ctx.app.app_type.clone(), &provider_id)?;
+    match ctx.app.app_type {
+        crate::app_config::AppType::Codex => {
+            let mut config = state.config.write().map_err(AppError::from)?;
+            let manager = config.get_manager_mut(&ctx.app.app_type).ok_or_else(|| {
+                AppError::localized(
+                    "app.not_found",
+                    format!("应用未初始化: {}", ctx.app.app_type.as_str()),
+                    format!("App not initialized: {}", ctx.app.app_type.as_str()),
+                )
+            })?;
+            manager.providers.insert(provider.id.clone(), provider);
+            manager.current = provider_id;
+            drop(config);
+            state.save()?;
+        }
+        _ => {
+            ProviderService::add(&state, ctx.app.app_type.clone(), provider)?;
+            ProviderService::switch(&state, ctx.app.app_type.clone(), &provider_id)?;
+        }
+    }
 
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app.pending_overlay = None;
-    ctx.app.push_toast(
-        texts::tui_toast_provider_live_config_imported(),
-        ToastKind::Success,
-    );
+    let toast_message = match ctx.app.app_type {
+        crate::app_config::AppType::Codex => texts::tui_toast_codex_live_config_imported(),
+        _ => texts::tui_toast_provider_live_config_imported(),
+    };
+    ctx.app.push_toast(toast_message, ToastKind::Success);
     Ok(())
 }
 
@@ -110,10 +135,44 @@ fn do_switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppEr
     Ok(())
 }
 
-fn should_show_claude_first_use_guard(ctx: &RuntimeActionContext<'_>) -> bool {
-    matches!(ctx.app.app_type, crate::app_config::AppType::Claude)
-        && ctx.data.providers.current_id.trim().is_empty()
-        && get_claude_settings_path().exists()
+fn provider_switch_first_use_guard_content(
+    ctx: &RuntimeActionContext<'_>,
+) -> Option<(String, String)> {
+    if !ctx.data.providers.current_id.trim().is_empty() {
+        return None;
+    }
+
+    match ctx.app.app_type {
+        crate::app_config::AppType::Claude => {
+            let path = get_claude_settings_path();
+            path.exists().then(|| {
+                let display = display_path_with_tilde(&path);
+                (
+                    texts::tui_provider_switch_first_use_title().to_string(),
+                    texts::tui_provider_switch_first_use_message(&display),
+                )
+            })
+        }
+        crate::app_config::AppType::Codex => {
+            let config_path = get_codex_config_path();
+            if !config_path.exists() {
+                return None;
+            }
+
+            let auth_path = get_codex_auth_path();
+            let mut paths = vec![display_path_with_tilde(&config_path)];
+            if auth_path.exists() {
+                paths.push(display_path_with_tilde(&auth_path));
+            }
+
+            let joined = paths.join(", ");
+            Some((
+                texts::tui_codex_provider_switch_first_use_title().to_string(),
+                texts::tui_codex_provider_switch_first_use_message(&joined),
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn provider_switch_proxy_notice_overlay(
@@ -135,7 +194,10 @@ fn maybe_provider_switch_shared_config_notice(
     previous_current_id: &str,
     next_provider_id: &str,
 ) -> Result<Option<Overlay>, AppError> {
-    if !matches!(app_type, crate::app_config::AppType::Claude) {
+    if !matches!(
+        app_type,
+        crate::app_config::AppType::Claude | crate::app_config::AppType::Codex
+    ) {
         return Ok(None);
     }
 
@@ -143,14 +205,38 @@ fn maybe_provider_switch_shared_config_notice(
         return Ok(None);
     }
 
-    if crate::settings::get_provider_switch_common_config_tip_shown() {
+    let already_shown = match app_type {
+        crate::app_config::AppType::Claude => {
+            crate::settings::get_provider_switch_common_config_tip_shown()
+        }
+        crate::app_config::AppType::Codex => {
+            crate::settings::get_provider_switch_common_config_tip_shown_codex()
+        }
+        _ => false,
+    };
+    if already_shown {
         return Ok(None);
     }
 
-    crate::settings::set_provider_switch_common_config_tip_shown(true)?;
+    match app_type {
+        crate::app_config::AppType::Claude => {
+            crate::settings::set_provider_switch_common_config_tip_shown(true)?;
+        }
+        crate::app_config::AppType::Codex => {
+            crate::settings::set_provider_switch_common_config_tip_shown_codex(true)?;
+        }
+        _ => {}
+    }
+
+    let message = match app_type {
+        crate::app_config::AppType::Codex => {
+            texts::tui_codex_provider_switch_shared_config_tip_message()
+        }
+        _ => texts::tui_provider_switch_shared_config_tip_message(),
+    };
     Ok(Some(Overlay::Confirm(ConfirmOverlay {
         title: texts::tui_provider_switch_shared_config_tip_title().to_string(),
-        message: texts::tui_provider_switch_shared_config_tip_message(),
+        message,
         action: ConfirmAction::ProviderSwitchSharedConfigNotice,
     })))
 }
@@ -344,7 +430,7 @@ mod tests {
     use crate::cli::tui::runtime_systems::RequestTracker;
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::provider::Provider;
-    use crate::{write_codex_live_atomic, AppType, MultiAppConfig};
+    use crate::{AppType, MultiAppConfig};
 
     struct EnvGuard {
         old_home: Option<OsString>,
@@ -377,12 +463,12 @@ mod tests {
         }
     }
 
-    fn codex_test_config() -> MultiAppConfig {
+    fn codex_test_config(current_id: &str) -> MultiAppConfig {
         let mut config = MultiAppConfig::default();
         let manager = config
             .get_manager_mut(&AppType::Codex)
             .expect("codex manager");
-        manager.current = "old-provider".to_string();
+        manager.current = current_id.to_string();
         manager.providers.insert(
             "old-provider".to_string(),
             Provider::with_id(
@@ -408,6 +494,33 @@ mod tests {
             ),
         );
         config
+    }
+
+    fn seed_codex_live_files(
+        config_text: Option<&str>,
+        auth: Option<serde_json::Value>,
+    ) -> Result<(), AppError> {
+        let config_path = crate::codex_config::get_codex_config_path();
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| AppError::io(parent, err))?;
+        }
+        if let Some(text) = config_text {
+            std::fs::write(&config_path, text).map_err(|err| AppError::io(&config_path, err))?;
+        }
+
+        if let Some(auth) = auth {
+            let auth_path = crate::codex_config::get_codex_auth_path();
+            if let Some(parent) = auth_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| AppError::io(parent, err))?;
+            }
+            std::fs::write(
+                &auth_path,
+                serde_json::to_string_pretty(&auth).expect("serialize codex auth"),
+            )
+            .map_err(|err| AppError::io(&auth_path, err))?;
+        }
+
+        Ok(())
     }
 
     fn claude_test_config(current_id: &str, api_format: &str) -> MultiAppConfig {
@@ -464,18 +577,22 @@ mod tests {
         )
     }
 
-    fn run_codex_switch(initialized: bool) -> Result<(Option<String>, String), AppError> {
+    fn run_codex_switch(
+        current_id: &str,
+        config_text: Option<&str>,
+        auth: Option<serde_json::Value>,
+        shared_tip_shown: bool,
+    ) -> Result<(App, UiData), AppError> {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
 
-        if initialized {
-            write_codex_live_atomic(
-                &json!({"OPENAI_API_KEY": "legacy-key"}),
-                Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
-            )?;
-        }
+        let mut settings = crate::settings::get_settings();
+        settings.provider_switch_common_config_tip_shown_codex = shared_tip_shown;
+        crate::settings::update_settings(settings)?;
 
-        codex_test_config().save()?;
+        seed_codex_live_files(config_text, auth)?;
+
+        codex_test_config(current_id).save()?;
 
         let mut terminal = TuiTerminal::new_for_test()?;
         let mut app = App::new(Some(AppType::Codex));
@@ -502,10 +619,7 @@ mod tests {
 
         switch(&mut ctx, "new-provider".to_string())?;
 
-        Ok((
-            app.toast.as_ref().map(|toast| toast.message.clone()),
-            data.providers.current_id,
-        ))
+        Ok((app, data))
     }
 
     fn seed_claude_live_settings(value: serde_json::Value) -> Result<(), AppError> {
@@ -578,11 +692,17 @@ mod tests {
     #[test]
     #[serial]
     fn provider_switch_does_not_show_restart_toast_when_live_sync_succeeds() {
-        let (toast, current_id) = run_codex_switch(true).expect("switch should succeed");
+        let (app, data) = run_codex_switch(
+            "old-provider",
+            Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
+            Some(json!({"OPENAI_API_KEY": "legacy-key"})),
+            true,
+        )
+        .expect("switch should succeed");
 
-        assert_eq!(current_id, "new-provider");
+        assert_eq!(data.providers.current_id, "new-provider");
         assert!(
-            toast.is_none(),
+            app.toast.is_none(),
             "provider switch should not show restart toast"
         );
     }
@@ -590,13 +710,155 @@ mod tests {
     #[test]
     #[serial]
     fn provider_switch_does_not_show_restart_toast_when_live_sync_is_skipped() {
-        let (toast, current_id) = run_codex_switch(false).expect("switch should succeed");
+        let (app, data) =
+            run_codex_switch("old-provider", None, None, true).expect("switch should succeed");
 
-        assert_eq!(current_id, "new-provider");
+        assert_eq!(data.providers.current_id, "new-provider");
         assert!(
-            toast.is_none(),
+            app.toast.is_none(),
             "provider switch should not show restart toast"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn provider_switch_shows_first_use_guard_before_overwriting_existing_codex_settings() {
+        let (app, data) = run_codex_switch(
+            "",
+            Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
+            None,
+            false,
+        )
+        .expect("guarded switch should succeed");
+
+        assert_eq!(data.providers.current_id, "");
+        assert!(matches!(
+            app.overlay,
+            Overlay::ProviderSwitchFirstUseConfirm {
+                provider_id,
+                title,
+                message,
+                selected,
+            } if provider_id == "new-provider"
+                && title == texts::tui_codex_provider_switch_first_use_title()
+                && message == texts::tui_codex_provider_switch_first_use_message("~/.codex/config.toml")
+                && selected == 0
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn provider_switch_first_use_without_existing_codex_settings_switches_normally() {
+        let (app, data) = run_codex_switch("", None, None, false).expect("switch should succeed");
+
+        assert_eq!(data.providers.current_id, "new-provider");
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    #[serial]
+    fn provider_switch_codex_auth_only_state_does_not_trigger_first_use_guard() {
+        let (app, data) = run_codex_switch(
+            "",
+            None,
+            Some(json!({"OPENAI_API_KEY": "legacy-key"})),
+            false,
+        )
+        .expect("switch should succeed");
+
+        assert_eq!(data.providers.current_id, "new-provider");
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    #[serial]
+    fn provider_switch_existing_codex_install_with_current_provider_skips_first_use_guard() {
+        let (app, data) = run_codex_switch(
+            "old-provider",
+            Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
+            None,
+            true,
+        )
+        .expect("switch should succeed");
+
+        assert_eq!(data.providers.current_id, "new-provider");
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    #[serial]
+    fn provider_import_codex_live_config_succeeds_without_auth_json() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        seed_codex_live_files(
+            Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
+            None,
+        )
+        .expect("seed codex live files");
+        codex_test_config("").save().expect("save codex config");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::Codex));
+        let mut data = UiData::load(&AppType::Codex).expect("load data");
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        import_live_config(&mut ctx).expect("import live config should succeed");
+
+        assert_eq!(data.providers.current_id, "imported-current");
+        assert!(data.providers.rows.iter().any(|row| {
+            row.id == "imported-current"
+                && row
+                    .provider
+                    .settings_config
+                    .get("config")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.contains("model_provider = \"legacy\""))
+                    .unwrap_or(false)
+                && row.provider.settings_config.get("auth").is_none()
+        }));
+    }
+
+    #[test]
+    #[serial]
+    fn codex_provider_switch_shows_one_time_shared_config_tip_after_first_real_switch() {
+        let (app, data) = run_codex_switch(
+            "old-provider",
+            Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
+            Some(json!({"OPENAI_API_KEY": "legacy-key"})),
+            false,
+        )
+        .expect("switch should succeed");
+
+        assert_eq!(data.providers.current_id, "new-provider");
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                title,
+                message,
+                action: ConfirmAction::ProviderSwitchSharedConfigNotice,
+            }) if title == texts::tui_provider_switch_shared_config_tip_title()
+                && message == texts::tui_codex_provider_switch_shared_config_tip_message()
+        ));
+        assert!(crate::settings::get_provider_switch_common_config_tip_shown_codex());
     }
 
     #[test]
@@ -671,10 +933,12 @@ mod tests {
             app.overlay,
             Overlay::ProviderSwitchFirstUseConfirm {
                 provider_id,
-                live_config_path,
+                title,
+                message,
                 selected,
             } if provider_id == "proxy-provider"
-                && live_config_path == "~/.claude/settings.json"
+                && title == texts::tui_provider_switch_first_use_title()
+                && message == texts::tui_provider_switch_first_use_message("~/.claude/settings.json")
                 && selected == 0
         ));
     }

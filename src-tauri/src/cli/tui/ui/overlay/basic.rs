@@ -32,7 +32,8 @@ pub(super) fn render_provider_switch_first_use_overlay(
     frame: &mut Frame<'_>,
     content_area: Rect,
     theme: &theme::Theme,
-    live_config_path: &str,
+    title: &str,
+    message: &str,
     selected: usize,
 ) {
     let area = centered_rect_fixed(72, 12, content_area);
@@ -42,7 +43,7 @@ pub(super) fn render_provider_switch_first_use_overlay(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(overlay_border_style(theme, true))
-        .title(texts::tui_provider_switch_first_use_title());
+        .title(title.to_string());
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
@@ -69,7 +70,7 @@ pub(super) fn render_provider_switch_first_use_overlay(
 
     frame.render_widget(
         Paragraph::new(centered_message_lines(
-            &texts::tui_provider_switch_first_use_message(live_config_path),
+            message,
             chunks[1].width,
             chunks[1].height,
         ))

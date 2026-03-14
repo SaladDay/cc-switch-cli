@@ -141,7 +141,8 @@ pub enum Overlay {
     Confirm(ConfirmOverlay),
     ProviderSwitchFirstUseConfirm {
         provider_id: String,
-        live_config_path: String,
+        title: String,
+        message: String,
         selected: usize,
     },
     TextInput(TextInputState),

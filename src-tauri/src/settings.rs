@@ -174,6 +174,9 @@ pub struct AppSettings {
     /// 是否已经展示过供应商切换后的通用配置提示
     #[serde(default)]
     pub provider_switch_common_config_tip_shown: bool,
+    /// 是否已经展示过 Codex 供应商切换后的通用配置提示
+    #[serde(default)]
+    pub provider_switch_common_config_tip_shown_codex: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,6 +221,7 @@ impl Default for AppSettings {
             enable_claude_plugin_integration: false,
             skip_claude_onboarding: false,
             provider_switch_common_config_tip_shown: false,
+            provider_switch_common_config_tip_shown_codex: false,
             claude_config_dir: None,
             codex_config_dir: None,
             gemini_config_dir: None,
@@ -477,9 +481,22 @@ pub fn get_provider_switch_common_config_tip_shown() -> bool {
         .unwrap_or(false)
 }
 
+pub fn get_provider_switch_common_config_tip_shown_codex() -> bool {
+    settings_store()
+        .read()
+        .map(|s| s.provider_switch_common_config_tip_shown_codex)
+        .unwrap_or(false)
+}
+
 pub fn set_provider_switch_common_config_tip_shown(shown: bool) -> Result<(), AppError> {
     let mut settings = get_settings();
     settings.provider_switch_common_config_tip_shown = shown;
+    update_settings(settings)
+}
+
+pub fn set_provider_switch_common_config_tip_shown_codex(shown: bool) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.provider_switch_common_config_tip_shown_codex = shown;
     update_settings(settings)
 }
 

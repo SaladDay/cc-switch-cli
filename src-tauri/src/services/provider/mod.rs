@@ -2011,16 +2011,25 @@ impl ProviderService {
         match app_type {
             AppType::Codex => {
                 let auth_path = get_codex_auth_path();
-                if !auth_path.exists() {
+                let config_path = get_codex_config_path();
+                if !config_path.exists() {
                     return Err(AppError::localized(
-                        "codex.auth.missing",
-                        "Codex 配置文件不存在：缺少 auth.json",
-                        "Codex configuration missing: auth.json not found",
+                        "codex.live.missing",
+                        "Codex 配置文件不存在",
+                        "Codex configuration is missing",
                     ));
                 }
-                let auth: Value = read_json_file(&auth_path)?;
-                let cfg_text = crate::codex_config::read_and_validate_codex_config_text()?;
-                Ok(json!({ "auth": auth, "config": cfg_text }))
+
+                let mut live_settings = serde_json::Map::new();
+                if auth_path.exists() {
+                    live_settings.insert("auth".to_string(), read_json_file(&auth_path)?);
+                }
+                if config_path.exists() {
+                    let cfg_text = crate::codex_config::read_and_validate_codex_config_text()?;
+                    live_settings.insert("config".to_string(), Value::String(cfg_text));
+                }
+
+                Ok(Value::Object(live_settings))
             }
             AppType::Claude => {
                 let path = get_claude_settings_path();
