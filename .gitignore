@@ -30,3 +30,4 @@ scripts/*
 .agent/
 .agents/
 .worktrees/
+docs/superpowers/
