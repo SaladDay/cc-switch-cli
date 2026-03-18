@@ -385,16 +385,22 @@ fn prompt_openclaw_config(provider_id: &str, current: Option<&Value>) -> Result<
     let api_key = if let Some(current) = current_api_key.as_deref() {
         Text::new(texts::api_key_label())
             .with_initial_value(current)
-            .with_help_message("Leave blank only if this provider does not require an API key")
+            .with_help_message("API key used by OpenClaw to authenticate requests")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     } else {
         Text::new(texts::api_key_label())
             .with_placeholder("sk-...")
-            .with_help_message("Leave blank only if this provider does not require an API key")
+            .with_help_message("API key used by OpenClaw to authenticate requests")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     };
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err(AppError::InvalidInput(
+            "OpenClaw API key cannot be empty".to_string(),
+        ));
+    }
 
     let api_options = vec![
         "openai-responses",
@@ -492,11 +498,7 @@ fn prompt_openclaw_config(provider_id: &str, current: Option<&Value>) -> Result<
 
     let mut provider_obj = current_provider.cloned().unwrap_or_default();
     provider_obj.insert("baseUrl".to_string(), json!(base_url));
-    if api_key.trim().is_empty() {
-        provider_obj.remove("apiKey");
-    } else {
-        provider_obj.insert("apiKey".to_string(), json!(api_key.trim()));
-    }
+    provider_obj.insert("apiKey".to_string(), json!(api_key));
     provider_obj.insert("api".to_string(), json!(api));
 
     let previous_target_model_id = current_target_model_id;

@@ -312,6 +312,132 @@ fn openclaw_import_reads_live_config_and_tracks_current_provider() {
 }
 
 #[test]
+fn openclaw_import_preserves_non_first_live_primary_model() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    std::fs::write(
+        openclaw_dir.join("openclaw.json"),
+        serde_json::to_string_pretty(&json!({
+            "models": {
+                "providers": {
+                    "openai": {
+                        "name": "OpenAI Compatible",
+                        "baseUrl": "https://api.openai.example/v1",
+                        "apiKey": "sk-openai",
+                        "api": "openai-responses",
+                        "models": [{
+                            "id": "gpt-4o-mini",
+                            "name": "gpt-4o-mini",
+                            "reasoning": false,
+                            "input": ["text"],
+                            "cost": {
+                                "input": 0.0,
+                                "output": 0.0,
+                                "cacheRead": 0.0,
+                                "cacheWrite": 0.0
+                            },
+                            "contextWindow": 200000,
+                            "maxTokens": 8192
+                        }, {
+                            "id": "gpt-4o",
+                            "name": "gpt-4o",
+                            "reasoning": false,
+                            "input": ["text"],
+                            "cost": {
+                                "input": 0.0,
+                                "output": 0.0,
+                                "cacheRead": 0.0,
+                                "cacheWrite": 0.0
+                            },
+                            "contextWindow": 200000,
+                            "maxTokens": 8192
+                        }]
+                    }
+                }
+            },
+            "agents": {
+                "defaults": {
+                    "model": {
+                        "primary": "openai/gpt-4o"
+                    }
+                }
+            }
+        }))
+        .expect("serialize live config"),
+    )
+    .expect("write openclaw live config");
+
+    let app_type = AppType::from_str("openclaw").expect("openclaw app type should parse");
+    let state = state_from_config(MultiAppConfig::default());
+
+    ProviderService::import_default_config(&state, app_type.clone())
+        .expect("import should succeed");
+
+    let manager = {
+        let config = state.config.read().expect("read state config");
+        config
+            .get_manager(&app_type)
+            .expect("openclaw manager should exist")
+            .clone()
+    };
+
+    assert_eq!(manager.current, "openai");
+    assert_eq!(
+        manager
+            .providers
+            .get("openai")
+            .and_then(|provider| provider.settings_config.get("primaryModel"))
+            .and_then(|value| value.as_str()),
+        Some("openai/gpt-4o")
+    );
+}
+
+#[test]
+fn openclaw_add_rejects_missing_api_key() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+
+    let app_type = AppType::from_str("openclaw").expect("openclaw app type should parse");
+    let state = state_from_config(MultiAppConfig::default());
+    let invalid = Provider::with_id(
+        "openai".to_string(),
+        "OpenAI Compatible".to_string(),
+        json!({
+            "provider": {
+                "baseUrl": "https://api.example.com/v1",
+                "api": "openai-responses",
+                "models": [{
+                    "id": "gpt-4o",
+                    "name": "gpt-4o",
+                    "reasoning": false,
+                    "input": ["text"],
+                    "cost": {
+                        "input": 0.0,
+                        "output": 0.0,
+                        "cacheRead": 0.0,
+                        "cacheWrite": 0.0
+                    },
+                    "contextWindow": 200000,
+                    "maxTokens": 8192
+                }]
+            },
+            "primaryModel": "openai/gpt-4o"
+        }),
+        None,
+    );
+
+    let err = ProviderService::add(&state, app_type, invalid).expect_err("add should fail");
+    assert!(
+        err.to_string().contains("apiKey"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn openclaw_switch_initializes_live_config_with_all_providers() {
     let _guard = lock_test_mutex();
     reset_test_fs();

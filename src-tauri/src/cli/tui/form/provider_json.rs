@@ -299,53 +299,59 @@ impl ProviderAddFormState {
                 set_or_remove_trimmed(provider_obj, "baseUrl", &self.opencode_base_url.value);
                 provider_obj.insert("api".to_string(), json!("openai-responses"));
 
-                let mut model_obj = serde_json::Map::new();
-                let model_id = self.opencode_primary_model_id().unwrap_or_default();
-                model_obj.insert("id".to_string(), json!(model_id.clone()));
-                model_obj.insert(
-                    "name".to_string(),
-                    json!(if self.opencode_model_name.value.trim().is_empty() {
-                        self.opencode_model_id.value.trim()
-                    } else {
-                        self.opencode_model_name.value.trim()
-                    }),
-                );
-                model_obj.insert("reasoning".to_string(), json!(false));
-                model_obj.insert("input".to_string(), json!(["text"]));
-                model_obj.insert(
-                    "cost".to_string(),
-                    json!({
-                        "input": 0.0,
-                        "output": 0.0,
-                        "cacheRead": 0.0,
-                        "cacheWrite": 0.0
-                    }),
-                );
-                model_obj.insert(
-                    "contextWindow".to_string(),
-                    json!(self
-                        .opencode_model_context_limit
-                        .value
-                        .trim()
-                        .parse::<u64>()
-                        .unwrap_or(200000)),
-                );
-                model_obj.insert(
-                    "maxTokens".to_string(),
-                    json!(self
-                        .opencode_model_output_limit
-                        .value
-                        .trim()
-                        .parse::<u64>()
-                        .unwrap_or(8192)),
-                );
-                provider_obj.insert("models".to_string(), json!([model_obj]));
+                let model_id = self.opencode_model_id.value.trim();
+                if !model_id.is_empty() {
+                    let mut model_obj = serde_json::Map::new();
+                    model_obj.insert("id".to_string(), json!(model_id));
+                    model_obj.insert(
+                        "name".to_string(),
+                        json!(if self.opencode_model_name.value.trim().is_empty() {
+                            model_id
+                        } else {
+                            self.opencode_model_name.value.trim()
+                        }),
+                    );
+                    model_obj.insert("reasoning".to_string(), json!(false));
+                    model_obj.insert("input".to_string(), json!(["text"]));
+                    model_obj.insert(
+                        "cost".to_string(),
+                        json!({
+                            "input": 0.0,
+                            "output": 0.0,
+                            "cacheRead": 0.0,
+                            "cacheWrite": 0.0
+                        }),
+                    );
+                    model_obj.insert(
+                        "contextWindow".to_string(),
+                        json!(self
+                            .opencode_model_context_limit
+                            .value
+                            .trim()
+                            .parse::<u64>()
+                            .unwrap_or(200000)),
+                    );
+                    model_obj.insert(
+                        "maxTokens".to_string(),
+                        json!(self
+                            .opencode_model_output_limit
+                            .value
+                            .trim()
+                            .parse::<u64>()
+                            .unwrap_or(8192)),
+                    );
+                    provider_obj.insert("models".to_string(), json!([model_obj]));
+                } else {
+                    provider_obj.remove("models");
+                }
                 settings_obj.insert("provider".to_string(), provider_value);
                 if !model_id.is_empty() {
                     settings_obj.insert(
                         "primaryModel".to_string(),
                         json!(format!("{}/{}", self.id.value.trim(), model_id)),
                     );
+                } else {
+                    settings_obj.remove("primaryModel");
                 }
             }
         }

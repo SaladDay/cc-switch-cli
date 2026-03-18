@@ -61,19 +61,33 @@ struct PostCommitAction {
 }
 
 impl ProviderService {
-    fn parse_common_opencode_config_snippet(snippet: &str) -> Result<Value, AppError> {
+    fn parse_common_additive_config_snippet(
+        snippet: &str,
+        app_key: &str,
+        app_display: &str,
+    ) -> Result<Value, AppError> {
+        let invalid_json_key = match app_key {
+            "opencode" => "common_config.opencode.invalid_json",
+            "openclaw" => "common_config.openclaw.invalid_json",
+            _ => "common_config.additive.invalid_json",
+        };
+        let not_object_key = match app_key {
+            "opencode" => "common_config.opencode.not_object",
+            "openclaw" => "common_config.openclaw.not_object",
+            _ => "common_config.additive.not_object",
+        };
         let value: Value = serde_json::from_str(snippet).map_err(|e| {
             AppError::localized(
-                "common_config.opencode.invalid_json",
-                format!("OpenCode 通用配置片段不是有效的 JSON：{e}"),
-                format!("OpenCode common config snippet is not valid JSON: {e}"),
+                invalid_json_key,
+                format!("{app_display} 通用配置片段不是有效的 JSON：{e}"),
+                format!("{app_display} common config snippet is not valid JSON: {e}"),
             )
         })?;
         if !value.is_object() {
             return Err(AppError::localized(
-                "common_config.opencode.not_object",
-                "OpenCode 通用配置片段必须是 JSON 对象",
-                "OpenCode common config snippet must be a JSON object",
+                not_object_key,
+                format!("{app_display} 通用配置片段必须是 JSON 对象"),
+                format!("{app_display} common config snippet must be a JSON object"),
             ));
         }
         Ok(value)
@@ -507,10 +521,10 @@ impl ProviderService {
                 Self::parse_common_gemini_config_snippet(snippet)?;
             }
             AppType::OpenCode => {
-                Self::parse_common_opencode_config_snippet(snippet)?;
+                Self::parse_common_additive_config_snippet(snippet, "opencode", "OpenCode")?;
             }
             AppType::OpenClaw => {
-                Self::parse_common_opencode_config_snippet(snippet)?;
+                Self::parse_common_additive_config_snippet(snippet, "openclaw", "OpenClaw")?;
             }
         }
 
@@ -1118,12 +1132,14 @@ impl ProviderService {
                 return Ok(());
             }
 
-            let current_provider_id = if matches!(app_type, AppType::OpenClaw) {
+            let current_primary_model = if matches!(app_type, AppType::OpenClaw) {
                 crate::openclaw_config::get_primary_model()?
-                    .and_then(|model| model.split('/').next().map(str::to_string))
             } else {
                 None
             };
+            let current_provider_id = current_primary_model
+                .as_deref()
+                .and_then(|model| model.split('/').next().map(str::to_string));
 
             {
                 let mut config = state.config.write().map_err(AppError::from)?;
@@ -1141,7 +1157,7 @@ impl ProviderService {
                         Self::build_openclaw_settings_config_from_live(
                             &id,
                             settings_config.clone(),
-                            current_provider_id.as_deref(),
+                            current_primary_model.as_deref(),
                         )
                     } else {
                         settings_config.clone()
@@ -1944,6 +1960,53 @@ impl ProviderService {
                         "provider.openclaw.provider.not_object",
                         "OpenClaw 供应商配置必须是 JSON 对象",
                         "OpenClaw provider config must be a JSON object",
+                    ));
+                }
+
+                let api_key = provider_config
+                    .get("apiKey")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("");
+                if api_key.is_empty() {
+                    return Err(AppError::localized(
+                        "provider.openclaw.api_key.missing",
+                        "OpenClaw 供应商缺少 apiKey 配置",
+                        "OpenClaw provider is missing apiKey configuration",
+                    ));
+                }
+
+                let base_url = provider_config
+                    .get("baseUrl")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("");
+                if base_url.is_empty() {
+                    return Err(AppError::localized(
+                        "provider.openclaw.base_url.missing",
+                        "OpenClaw 供应商缺少 baseUrl 配置",
+                        "OpenClaw provider is missing baseUrl configuration",
+                    ));
+                }
+
+                let has_model_id = provider_config
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .map(|models| {
+                        models.iter().any(|model| {
+                            model
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .is_some_and(|id| !id.is_empty())
+                        })
+                    })
+                    .unwrap_or(false);
+                if !has_model_id {
+                    return Err(AppError::localized(
+                        "provider.openclaw.model_id.missing",
+                        "OpenClaw 供应商至少需要一个带 id 的模型配置",
+                        "OpenClaw provider requires at least one model with a non-empty id",
                     ));
                 }
             }
