@@ -68,6 +68,97 @@ fn sync_claude_provider_writes_live_settings() {
 }
 
 #[test]
+fn sync_claude_provider_preserves_shared_live_settings() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+
+    let settings_path = get_claude_settings_path();
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent).expect("create claude settings dir");
+    }
+    fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "old-key",
+                "ANTHROPIC_BASE_URL": "https://old.example"
+            },
+            "statusLine": {
+                "type": "command",
+                "command": "oh-my-claudecode statusline"
+            },
+            "hooks": {
+                "Stop": [{
+                    "type": "command",
+                    "command": "oh-my-claudecode cleanup"
+                }]
+            }
+        }))
+        .expect("serialize existing live settings"),
+    )
+    .expect("seed existing live settings");
+
+    let mut config = MultiAppConfig::default();
+    let provider_config = json!({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "new-key",
+            "ANTHROPIC_BASE_URL": "https://new.example"
+        },
+        "ui": {
+            "displayName": "Test Provider"
+        }
+    });
+
+    let provider = Provider::with_id(
+        "prov-1".to_string(),
+        "Test Claude".to_string(),
+        provider_config.clone(),
+        None,
+    );
+
+    let manager = config
+        .get_manager_mut(&AppType::Claude)
+        .expect("claude manager");
+    manager.providers.insert("prov-1".to_string(), provider);
+    manager.current = "prov-1".to_string();
+
+    ConfigService::sync_current_providers_to_live(&mut config)
+        .expect("sync live settings with preserved shared keys");
+
+    let live_value: serde_json::Value = read_json_file(&settings_path).expect("read live file");
+    assert_eq!(
+        live_value
+            .pointer("/statusLine/command")
+            .and_then(|v| v.as_str()),
+        Some("oh-my-claudecode statusline"),
+        "shared statusLine config should survive live sync"
+    );
+    assert_eq!(
+        live_value
+            .pointer("/hooks/Stop/0/command")
+            .and_then(|v| v.as_str()),
+        Some("oh-my-claudecode cleanup"),
+        "shared hooks config should survive live sync"
+    );
+    assert_eq!(
+        live_value
+            .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(|v| v.as_str()),
+        Some("new-key"),
+        "provider auth should still refresh during live sync"
+    );
+
+    let updated = config
+        .get_manager(&AppType::Claude)
+        .and_then(|m| m.providers.get("prov-1"))
+        .expect("provider in config");
+    assert_eq!(
+        updated.settings_config, provider_config,
+        "preserved shared live settings should not leak back into the provider snapshot"
+    );
+}
+
+#[test]
 fn sync_codex_provider_writes_auth_and_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();
