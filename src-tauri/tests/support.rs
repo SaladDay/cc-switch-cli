@@ -9,7 +9,19 @@ use cc_switch_lib::{
 pub fn ensure_test_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let base = std::env::temp_dir().join("cc-switch-test-home");
+        // Use a per-test-process home so separate integration test binaries can run in parallel.
+        let binary_name = std::env::current_exe()
+            .ok()
+            .as_deref()
+            .and_then(Path::file_stem)
+            .and_then(|value| value.to_str())
+            .unwrap_or("cc-switch-tests")
+            .to_string();
+        let base = std::env::temp_dir().join(format!(
+            "cc-switch-test-home-{}-{}",
+            binary_name,
+            std::process::id()
+        ));
         if base.exists() {
             let _ = std::fs::remove_dir_all(&base);
         }
