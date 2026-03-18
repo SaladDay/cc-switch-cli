@@ -7,7 +7,9 @@ use crate::{
 };
 
 use super::{
-    calculator::{calculate_cost, format_decimal, lookup_model_pricing, pricing_model, resolve_pricing_config},
+    calculator::{
+        calculate_cost, format_decimal, lookup_model_pricing, pricing_model, resolve_pricing_config,
+    },
     parser::{
         error_message_from_response_bytes, fallback_model_from_response_bytes,
         parse_claude_response_usage, ParsedUsage, StreamLogCollector, TokenUsage,
@@ -180,7 +182,8 @@ async fn insert_request_log(
     status_code: u16,
     error_message: Option<String>,
 ) {
-    let pricing_config = resolve_pricing_config(state.db.as_ref(), &context.app_type, &context.provider).await;
+    let pricing_config =
+        resolve_pricing_config(state.db.as_ref(), &context.app_type, &context.provider).await;
     let pricing_model = pricing_model(
         &context.request_model,
         model,

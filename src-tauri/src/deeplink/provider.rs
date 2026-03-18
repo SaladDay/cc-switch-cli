@@ -67,6 +67,7 @@ pub fn import_provider_from_deeplink(
                 Some("codex") => Some("https://openai.com".to_string()),
                 Some("gemini") => Some("https://ai.google.dev".to_string()),
                 Some("opencode") => Some("https://opencode.ai".to_string()),
+                Some("openclaw") => Some("https://github.com/openclaw/openclaw".to_string()),
                 _ => None,
             };
         }
@@ -120,6 +121,16 @@ pub fn import_provider_from_deeplink(
         .to_lowercase();
     provider.id = format!("{sanitized_name}-{timestamp}");
     let provider_id = provider.id.clone();
+    if matches!(app_type, AppType::OpenClaw)
+        && crate::openclaw_config::primary_model_from_settings(&provider.settings_config).is_none()
+    {
+        let provider_config =
+            crate::openclaw_config::provider_config_from_settings(&provider.settings_config);
+        let primary_model =
+            crate::openclaw_config::infer_primary_model(&provider_id, &provider_config);
+        provider.settings_config =
+            crate::openclaw_config::build_settings_config(provider_config, primary_model);
+    }
 
     ProviderService::add(state, app_type.clone(), provider)?;
 
@@ -139,6 +150,7 @@ fn build_provider_from_request(
         AppType::Codex => build_codex_settings(request),
         AppType::Gemini => build_gemini_settings(request),
         AppType::OpenCode => build_opencode_settings(request),
+        AppType::OpenClaw => build_openclaw_settings(request),
     };
 
     let meta = build_provider_meta(request)?;
@@ -325,6 +337,48 @@ fn build_opencode_settings(request: &DeepLinkImportRequest) -> serde_json::Value
         "options": options,
         "models": models
     })
+}
+
+fn build_openclaw_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
+    let endpoint = get_primary_endpoint(request);
+    let model_id = request
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("gpt-5.2-codex");
+
+    let mut provider = serde_json::Map::new();
+    if !endpoint.trim().is_empty() {
+        provider.insert("baseUrl".to_string(), json!(endpoint.trim()));
+    }
+    if let Some(api_key) = request
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        provider.insert("apiKey".to_string(), json!(api_key));
+    }
+    provider.insert("api".to_string(), json!("openai-responses"));
+    provider.insert(
+        "models".to_string(),
+        json!([{
+            "id": model_id,
+            "name": model_id,
+            "reasoning": false,
+            "input": ["text"],
+            "cost": {
+                "input": 0.0,
+                "output": 0.0,
+                "cacheRead": 0.0,
+                "cacheWrite": 0.0
+            },
+            "contextWindow": 200000,
+            "maxTokens": 8192
+        }]),
+    );
+
+    crate::openclaw_config::build_settings_config(serde_json::Value::Object(provider), None)
 }
 
 /// Parse and merge configuration from Base64 encoded config or remote URL.

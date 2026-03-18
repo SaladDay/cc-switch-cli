@@ -99,6 +99,7 @@ impl ProxySnapshot {
             AppType::Codex => Some(self.codex_takeover),
             AppType::Gemini => Some(self.gemini_takeover),
             AppType::OpenCode => None,
+            AppType::OpenClaw => None,
         }
     }
 
@@ -218,6 +219,10 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
         AppType::OpenCode => settings_config
             .get("options")?
             .get("baseURL")?
+            .as_str()
+            .map(|s| s.to_string()),
+        AppType::OpenClaw => crate::openclaw_config::provider_config_from_settings(settings_config)
+            .get("baseUrl")?
             .as_str()
             .map(|s| s.to_string()),
     }

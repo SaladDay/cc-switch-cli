@@ -8,6 +8,7 @@ pub enum LocalTool {
     Codex,
     Gemini,
     OpenCode,
+    OpenClaw,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +39,12 @@ pub fn check_local_environment() -> Vec<ToolCheckResult> {
             LocalTool::OpenCode,
             "opencode",
             "OpenCode",
+            &["--version", "version"],
+        ),
+        (
+            LocalTool::OpenClaw,
+            "openclaw",
+            "OpenClaw",
             &["--version", "version"],
         ),
     ];

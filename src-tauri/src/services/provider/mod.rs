@@ -54,6 +54,7 @@ struct PostCommitAction {
     provider: Provider,
     backup: LiveSnapshot,
     sync_mcp: bool,
+    sync_all_additive_live: bool,
     refresh_snapshot: bool,
     common_config_snippet: Option<String>,
     takeover_active: bool,
@@ -76,6 +77,26 @@ impl ProviderService {
             ));
         }
         Ok(value)
+    }
+
+    fn build_openclaw_settings_config_from_live(
+        provider_id: &str,
+        provider_config: Value,
+        current_primary_model: Option<&str>,
+    ) -> Value {
+        let primary_model = current_primary_model
+            .map(str::trim)
+            .filter(|model| model.starts_with(&format!("{provider_id}/")))
+            .map(str::to_string)
+            .or_else(|| crate::openclaw_config::infer_primary_model(provider_id, &provider_config));
+
+        crate::openclaw_config::build_settings_config(provider_config, primary_model)
+    }
+
+    fn strip_openclaw_primary_model(settings_config: &mut Value) {
+        if let Some(settings) = settings_config.as_object_mut() {
+            settings.remove("primaryModel");
+        }
     }
 
     fn run_transaction<R, F>(state: &AppState, f: F) -> Result<R, AppError>
@@ -159,6 +180,8 @@ impl ProviderService {
                     .save_live_backup_snapshot(action.app_type.as_str(), &backup_snapshot),
             )
             .map_err(AppError::Message)?;
+        } else if action.sync_all_additive_live {
+            Self::sync_additive_app_to_live(state, &action.app_type)?;
         } else {
             Self::write_live_snapshot(
                 &action.app_type,
@@ -183,6 +206,45 @@ impl ProviderService {
         if let Err(e) = crate::services::skill::SkillService::sync_all_enabled_best_effort() {
             log::warn!("同步 Skills 失败: {e}");
         }
+        Ok(())
+    }
+
+    fn sync_additive_app_to_live(state: &AppState, app_type: &AppType) -> Result<(), AppError> {
+        let snapshots: Vec<(Provider, Option<String>)> = {
+            let guard = state.config.read().map_err(AppError::from)?;
+            let Some(manager) = guard.get_manager(app_type) else {
+                return Ok(());
+            };
+            let current_provider_id = manager.current.clone();
+            let common_config_snippet = guard.common_config_snippets.get(app_type).cloned();
+
+            manager
+                .providers
+                .values()
+                .cloned()
+                .map(|mut provider| {
+                    if matches!(app_type, AppType::OpenClaw) && provider.id != current_provider_id {
+                        Self::strip_openclaw_primary_model(&mut provider.settings_config);
+                    }
+                    (provider, common_config_snippet.clone())
+                })
+                .collect()
+        };
+
+        for (provider, common_config_snippet) in snapshots {
+            let apply_common_config = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.apply_common_config)
+                .unwrap_or(true);
+            Self::write_live_snapshot(
+                app_type,
+                &provider,
+                common_config_snippet.as_deref(),
+                apply_common_config,
+            )?;
+        }
+
         Ok(())
     }
 
@@ -386,6 +448,33 @@ impl ProviderService {
                 }
                 state.save()?;
             }
+            AppType::OpenClaw => {
+                let providers = crate::openclaw_config::get_providers()?;
+                let current_primary = crate::openclaw_config::get_primary_model()?;
+                let live_after = providers.get(provider_id).cloned().ok_or_else(|| {
+                    AppError::localized(
+                        "openclaw.live.missing_provider",
+                        format!("OpenClaw live 配置中缺少供应商: {provider_id}"),
+                        format!("OpenClaw live config missing provider: {provider_id}"),
+                    )
+                })?;
+
+                let snapshot = Self::build_openclaw_settings_config_from_live(
+                    provider_id,
+                    live_after,
+                    current_primary.as_deref(),
+                );
+
+                {
+                    let mut guard = state.config.write().map_err(AppError::from)?;
+                    if let Some(manager) = guard.get_manager_mut(app_type) {
+                        if let Some(target) = manager.providers.get_mut(provider_id) {
+                            target.settings_config = snapshot;
+                        }
+                    }
+                }
+                state.save()?;
+            }
         }
         Ok(())
     }
@@ -418,6 +507,9 @@ impl ProviderService {
                 Self::parse_common_gemini_config_snippet(snippet)?;
             }
             AppType::OpenCode => {
+                Self::parse_common_opencode_config_snippet(snippet)?;
+            }
+            AppType::OpenClaw => {
                 Self::parse_common_opencode_config_snippet(snippet)?;
             }
         }
@@ -457,6 +549,7 @@ impl ProviderService {
             AppType::Codex => Self::migrate_codex_common_config_snippet(config, old_snippet),
             AppType::Gemini => Self::migrate_gemini_common_config_snippet(config, old_snippet),
             AppType::OpenCode => Ok(()),
+            AppType::OpenClaw => Ok(()),
         };
 
         match result {
@@ -476,7 +569,7 @@ impl ProviderService {
         app_type: &AppType,
         takeover_active: bool,
     ) -> Result<Option<PostCommitAction>, AppError> {
-        if app_type.is_additive_mode() {
+        if matches!(app_type, AppType::OpenCode) {
             return Ok(None);
         }
 
@@ -513,6 +606,7 @@ impl ProviderService {
             provider,
             backup: Self::capture_live_snapshot(app_type)?,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
+            sync_all_additive_live: false,
             refresh_snapshot: false,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
             takeover_active,
@@ -535,6 +629,7 @@ impl ProviderService {
                 Self::strip_common_gemini_config_from_provider(provider, common_config_snippet)?;
             }
             AppType::OpenCode => {}
+            AppType::OpenClaw => {}
         }
 
         Ok(())
@@ -784,7 +879,7 @@ impl ProviderService {
 
     /// 获取当前供应商 ID
     pub fn current(state: &AppState, app_type: AppType) -> Result<String, AppError> {
-        if app_type.is_additive_mode() {
+        if matches!(app_type, AppType::OpenCode) {
             return Ok(String::new());
         }
 
@@ -839,7 +934,7 @@ impl ProviderService {
                 .get_manager(&app_type_clone)
                 .map(|manager| manager.current.clone())
                 .unwrap_or_default();
-            let healed_current = if !app_type_clone.is_additive_mode() {
+            let healed_current = if !matches!(app_type_clone, AppType::OpenCode) {
                 Self::self_heal_current_provider(config, &app_type_clone, "add")
             } else {
                 None
@@ -853,28 +948,36 @@ impl ProviderService {
                 .providers
                 .insert(provider_to_store.id.clone(), provider_to_store.clone());
 
-            if !app_type_clone.is_additive_mode() && was_empty && manager.current.is_empty() {
+            if !matches!(app_type_clone, AppType::OpenCode)
+                && was_empty
+                && manager.current.is_empty()
+            {
                 manager.current = provider_to_store.id.clone();
             }
 
-            let is_current =
-                app_type_clone.is_additive_mode() || manager.current == provider_to_store.id;
-            let current_was_healed = !app_type_clone.is_additive_mode()
+            let is_current = matches!(app_type_clone, AppType::OpenCode)
+                || manager.current == provider_to_store.id;
+            let current_was_healed = !matches!(app_type_clone, AppType::OpenCode)
                 && healed_current.as_deref() != Some(previous_current.as_str());
             let current_provider_id = if current_was_healed && !is_current {
                 Some(manager.current.clone())
             } else {
                 None
             };
-            let action = if is_current {
+            let action = if is_current || matches!(app_type_clone, AppType::OpenClaw) {
                 let backup = Self::capture_live_snapshot(&app_type_clone)?;
+                let mut action_provider = provider_to_store.clone();
+                if matches!(app_type_clone, AppType::OpenClaw) && !is_current {
+                    Self::strip_openclaw_primary_model(&mut action_provider.settings_config);
+                }
                 Some(PostCommitAction {
                     app_type: app_type_clone.clone(),
-                    provider: provider_to_store.clone(),
+                    provider: action_provider,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
+                    sync_all_additive_live: false,
                     refresh_snapshot: false,
                     common_config_snippet,
                     takeover_active: false,
@@ -914,7 +1017,7 @@ impl ProviderService {
                 .get_manager(&app_type_clone)
                 .map(|manager| manager.current.clone())
                 .unwrap_or_default();
-            let healed_current = if !app_type_clone.is_additive_mode() {
+            let healed_current = if !matches!(app_type_clone, AppType::OpenCode) {
                 Self::self_heal_current_provider(config, &app_type_clone, "update")
             } else {
                 None
@@ -931,7 +1034,8 @@ impl ProviderService {
                 ));
             }
 
-            let is_current = app_type_clone.is_additive_mode() || manager.current == provider_id;
+            let is_current =
+                matches!(app_type_clone, AppType::OpenCode) || manager.current == provider_id;
             let mut merged = if let Some(existing) = manager.providers.get(&provider_id) {
                 let mut updated = provider_clone.clone();
                 match (existing.meta.as_ref(), updated.meta.take()) {
@@ -962,22 +1066,27 @@ impl ProviderService {
                 .providers
                 .insert(provider_id.clone(), merged.clone());
 
-            let current_was_healed = !app_type_clone.is_additive_mode()
+            let current_was_healed = !matches!(app_type_clone, AppType::OpenCode)
                 && healed_current.as_deref() != Some(previous_current.as_str());
             let current_provider_id = if current_was_healed && !is_current {
                 Some(manager.current.clone())
             } else {
                 None
             };
-            let action = if is_current {
+            let action = if is_current || matches!(app_type_clone, AppType::OpenClaw) {
                 let backup = Self::capture_live_snapshot(&app_type_clone)?;
+                let mut action_provider = merged.clone();
+                if matches!(app_type_clone, AppType::OpenClaw) && !is_current {
+                    Self::strip_openclaw_primary_model(&mut action_provider.settings_config);
+                }
                 Some(PostCommitAction {
                     app_type: app_type_clone.clone(),
-                    provider: merged,
+                    provider: action_provider,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
+                    sync_all_additive_live: false,
                     refresh_snapshot: false,
                     common_config_snippet,
                     takeover_active: false,
@@ -1000,10 +1109,21 @@ impl ProviderService {
     /// 导入当前 live 配置为默认供应商
     pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<(), AppError> {
         if app_type.is_additive_mode() {
-            let providers = crate::opencode_config::get_providers()?;
+            let providers = match app_type {
+                AppType::OpenCode => crate::opencode_config::get_providers()?,
+                AppType::OpenClaw => crate::openclaw_config::get_providers()?,
+                _ => serde_json::Map::new(),
+            };
             if providers.is_empty() {
                 return Ok(());
             }
+
+            let current_provider_id = if matches!(app_type, AppType::OpenClaw) {
+                crate::openclaw_config::get_primary_model()?
+                    .and_then(|model| model.split('/').next().map(str::to_string))
+            } else {
+                None
+            };
 
             {
                 let mut config = state.config.write().map_err(AppError::from)?;
@@ -1017,15 +1137,32 @@ impl ProviderService {
                 }
 
                 for (id, settings_config) in providers {
-                    let name = settings_config
+                    let snapshot = if matches!(app_type, AppType::OpenClaw) {
+                        Self::build_openclaw_settings_config_from_live(
+                            &id,
+                            settings_config.clone(),
+                            current_provider_id.as_deref(),
+                        )
+                    } else {
+                        settings_config.clone()
+                    };
+                    let provider_view = if matches!(app_type, AppType::OpenClaw) {
+                        crate::openclaw_config::provider_config_from_settings(&snapshot)
+                    } else {
+                        settings_config.clone()
+                    };
+                    let name = provider_view
                         .get("name")
                         .and_then(Value::as_str)
                         .unwrap_or(&id)
                         .to_string();
-                    manager.providers.insert(
-                        id.clone(),
-                        Provider::with_id(id, name, settings_config, None),
-                    );
+                    manager
+                        .providers
+                        .insert(id.clone(), Provider::with_id(id, name, snapshot, None));
+                }
+
+                if let Some(current_provider_id) = current_provider_id {
+                    manager.current = current_provider_id;
                 }
             }
 
@@ -1103,6 +1240,7 @@ impl ProviderService {
                 })
             }
             AppType::OpenCode => unreachable!("additive mode apps are handled earlier"),
+            AppType::OpenClaw => unreachable!("additive mode apps are handled earlier"),
         };
 
         let mut provider = Provider::with_id(
@@ -1220,6 +1358,17 @@ impl ProviderService {
                 }
                 crate::opencode_config::read_opencode_config()
             }
+            AppType::OpenClaw => {
+                let config_path = crate::openclaw_config::get_openclaw_config_path();
+                if !config_path.exists() {
+                    return Err(AppError::localized(
+                        "openclaw.config.missing",
+                        "OpenClaw 配置文件不存在",
+                        "OpenClaw configuration file not found",
+                    ));
+                }
+                crate::openclaw_config::read_openclaw_config()
+            }
         }
     }
 
@@ -1258,12 +1407,25 @@ impl ProviderService {
         let snapshots: Vec<(AppType, Provider, Option<String>)> = {
             let guard = state.config.read().map_err(AppError::from)?;
             let mut result = Vec::new();
-            for app_type in AppType::all() {
+            for app_type in [
+                AppType::Claude,
+                AppType::Codex,
+                AppType::Gemini,
+                AppType::OpenCode,
+                AppType::OpenClaw,
+            ] {
                 if let Some(manager) = guard.get_manager(&app_type) {
                     if app_type.is_additive_mode() {
                         let snippet = guard.common_config_snippets.get(&app_type).cloned();
+                        let current_provider_id = manager.current.clone();
                         for provider in manager.providers.values() {
-                            result.push((app_type.clone(), provider.clone(), snippet.clone()));
+                            let mut provider = provider.clone();
+                            if matches!(app_type, AppType::OpenClaw)
+                                && provider.id != current_provider_id
+                            {
+                                Self::strip_openclaw_primary_model(&mut provider.settings_config);
+                            }
+                            result.push((app_type.clone(), provider, snippet.clone()));
                         }
                         continue;
                     }
@@ -1343,11 +1505,18 @@ impl ProviderService {
                         )
                     })?;
 
+                if matches!(app_type_clone, AppType::OpenClaw) {
+                    if let Some(manager) = config.get_manager_mut(&app_type_clone) {
+                        manager.current = provider_id_owned.clone();
+                    }
+                }
+
                 let action = PostCommitAction {
                     app_type: app_type_clone.clone(),
                     provider,
                     backup: Self::capture_live_snapshot(&app_type_clone)?,
                     sync_mcp: true,
+                    sync_all_additive_live: matches!(app_type_clone, AppType::OpenClaw),
                     refresh_snapshot: false,
                     common_config_snippet: config
                         .common_config_snippets
@@ -1383,6 +1552,7 @@ impl ProviderService {
                     provider,
                     backup: Self::capture_live_snapshot(&app_type_clone)?,
                     sync_mcp: false,
+                    sync_all_additive_live: false,
                     refresh_snapshot: false,
                     common_config_snippet: config
                         .common_config_snippets
@@ -1400,6 +1570,7 @@ impl ProviderService {
                 AppType::Claude => Self::prepare_switch_claude(config, &provider_id_owned)?,
                 AppType::Gemini => Self::prepare_switch_gemini(config, &provider_id_owned)?,
                 AppType::OpenCode => unreachable!("additive mode handled above"),
+                AppType::OpenClaw => unreachable!("additive mode handled above"),
             };
 
             let action = PostCommitAction {
@@ -1407,6 +1578,7 @@ impl ProviderService {
                 provider,
                 backup,
                 sync_mcp: true, // v3.7.0: 所有应用切换时都同步 MCP，防止配置丢失
+                sync_all_additive_live: false,
                 refresh_snapshot: true,
                 common_config_snippet: config.common_config_snippets.get(&app_type_clone).cloned(),
                 takeover_active: false,
@@ -1463,6 +1635,10 @@ impl ProviderService {
                     Err(_) => crate::opencode_config::set_provider(&provider.id, config_to_write),
                 }
             }
+            AppType::OpenClaw => crate::openclaw_config::apply_provider_snapshot(
+                &provider.id,
+                &provider.settings_config,
+            ),
         }
     }
 
@@ -1650,6 +1826,9 @@ impl ProviderService {
             AppType::OpenCode => Err(AppError::Config(
                 "OpenCode does not support proxy takeover backups".into(),
             )),
+            AppType::OpenClaw => Err(AppError::Config(
+                "OpenClaw does not support proxy takeover backups".into(),
+            )),
         }
     }
 
@@ -1748,6 +1927,26 @@ impl ProviderService {
                     ));
                 }
             }
+            AppType::OpenClaw => {
+                if !provider.settings_config.is_object() {
+                    return Err(AppError::localized(
+                        "provider.openclaw.settings.not_object",
+                        "OpenClaw 配置必须是 JSON 对象",
+                        "OpenClaw configuration must be a JSON object",
+                    ));
+                }
+
+                let provider_config = crate::openclaw_config::provider_config_from_settings(
+                    &provider.settings_config,
+                );
+                if !provider_config.is_object() {
+                    return Err(AppError::localized(
+                        "provider.openclaw.provider.not_object",
+                        "OpenClaw 供应商配置必须是 JSON 对象",
+                        "OpenClaw provider config must be a JSON object",
+                    ));
+                }
+            }
         }
 
         // 🔧 验证并清理 UsageScript 配置（所有应用类型通用）
@@ -1775,7 +1974,7 @@ impl ProviderService {
                 .get_manager(&app_type)
                 .ok_or_else(|| Self::app_not_found(&app_type))?;
 
-            if !app_type.is_additive_mode() && manager.current == provider_id {
+            if !matches!(app_type, AppType::OpenCode) && manager.current == provider_id {
                 return Err(AppError::localized(
                     "provider.delete.current",
                     "不能删除当前正在使用的供应商",
@@ -1793,8 +1992,18 @@ impl ProviderService {
         };
 
         if app_type.is_additive_mode() {
-            if crate::opencode_config::get_opencode_dir().exists() {
-                crate::opencode_config::remove_provider(provider_id)?;
+            match app_type {
+                AppType::OpenCode => {
+                    if crate::opencode_config::get_opencode_dir().exists() {
+                        crate::opencode_config::remove_provider(provider_id)?;
+                    }
+                }
+                AppType::OpenClaw => {
+                    if crate::openclaw_config::get_openclaw_dir().exists() {
+                        crate::openclaw_config::remove_provider(provider_id)?;
+                    }
+                }
+                _ => {}
             }
 
             {
@@ -1829,6 +2038,9 @@ impl ProviderService {
             AppType::OpenCode => {
                 let _ = provider_snapshot;
             }
+            AppType::OpenClaw => {
+                let _ = provider_snapshot;
+            }
         }
 
         {
@@ -1837,7 +2049,7 @@ impl ProviderService {
                 .get_manager_mut(&app_type)
                 .ok_or_else(|| Self::app_not_found(&app_type))?;
 
-            if !app_type.is_additive_mode() && manager.current == provider_id {
+            if !matches!(app_type, AppType::OpenCode) && manager.current == provider_id {
                 return Err(AppError::localized(
                     "provider.delete.current",
                     "不能删除当前正在使用的供应商",

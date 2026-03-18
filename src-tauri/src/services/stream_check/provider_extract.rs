@@ -30,6 +30,9 @@ impl StreamCheckService {
                 .and_then(|value| value.as_object())
                 .and_then(|models| models.keys().next().cloned())
                 .unwrap_or_else(|| config.codex_model.clone()),
+            AppType::OpenClaw => {
+                Self::extract_openclaw_model(provider).unwrap_or_else(|| config.codex_model.clone())
+            }
         }
     }
 
@@ -160,6 +163,13 @@ impl StreamCheckService {
                 .unwrap_or_default()
                 .trim_end_matches('/')
                 .to_string()),
+            AppType::OpenClaw => Self::extract_openclaw_base_url(provider).ok_or_else(|| {
+                AppError::localized(
+                    "provider.openclaw.base_url.missing",
+                    "缺少 OpenClaw baseUrl 配置",
+                    "Missing OpenClaw baseUrl configuration",
+                )
+            }),
         }
     }
 
@@ -203,7 +213,63 @@ impl StreamCheckService {
                         "API key is missing",
                     )
                 }),
+            AppType::OpenClaw => Self::extract_openclaw_key(provider)
+                .map(|key| AuthInfo::new(key, AuthStrategy::Bearer))
+                .ok_or_else(|| {
+                    AppError::localized(
+                        "provider.openclaw.api_key.missing",
+                        "缺少 API Key",
+                        "API key is missing",
+                    )
+                }),
         }
+    }
+
+    pub(crate) fn extract_openclaw_provider_config(provider: &Provider) -> serde_json::Value {
+        crate::openclaw_config::provider_config_from_settings(&provider.settings_config)
+    }
+
+    pub(crate) fn extract_openclaw_model(provider: &Provider) -> Option<String> {
+        if let Some(primary_model) =
+            crate::openclaw_config::primary_model_from_settings(&provider.settings_config)
+        {
+            let suffix = primary_model
+                .rsplit_once('/')
+                .map(|(_, model_id)| model_id)
+                .unwrap_or(primary_model.as_str())
+                .trim();
+            if !suffix.is_empty() {
+                return Some(suffix.to_string());
+            }
+        }
+
+        Self::extract_openclaw_provider_config(provider)
+            .get("models")
+            .and_then(|value| value.as_array())
+            .and_then(|models| models.first())
+            .and_then(|model| model.get("id"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
+    pub(crate) fn extract_openclaw_base_url(provider: &Provider) -> Option<String> {
+        Self::extract_openclaw_provider_config(provider)
+            .get("baseUrl")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.trim_end_matches('/').to_string())
+    }
+
+    pub(crate) fn extract_openclaw_key(provider: &Provider) -> Option<String> {
+        Self::extract_openclaw_provider_config(provider)
+            .get("apiKey")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
     }
 
     pub(crate) fn detect_claude_auth_strategy(provider: &Provider, base_url: &str) -> AuthStrategy {

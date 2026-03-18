@@ -251,6 +251,7 @@ impl ConfigService {
         Self::sync_current_provider_for_app(config, &AppType::Codex)?;
         Self::sync_current_provider_for_app(config, &AppType::Gemini)?;
         Self::sync_current_provider_for_app(config, &AppType::OpenCode)?;
+        Self::sync_current_provider_for_app(config, &AppType::OpenClaw)?;
         Ok(())
     }
 
@@ -286,6 +287,7 @@ impl ConfigService {
             AppType::Claude => Self::sync_claude_live(config, &current_id, &provider)?,
             AppType::Gemini => Self::sync_gemini_live(config, &current_id, &provider)?,
             AppType::OpenCode => {}
+            AppType::OpenClaw => Self::sync_openclaw_live(&provider)?,
         }
 
         Ok(())
@@ -381,5 +383,9 @@ impl ConfigService {
         }
 
         Ok(())
+    }
+
+    fn sync_openclaw_live(provider: &Provider) -> Result<(), AppError> {
+        crate::openclaw_config::apply_provider_snapshot(&provider.id, &provider.settings_config)
     }
 }

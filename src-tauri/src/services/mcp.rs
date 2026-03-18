@@ -163,6 +163,7 @@ impl McpService {
             AppType::OpenCode => {
                 mcp::sync_single_server_to_opencode(cfg, &server.id, &server.server)?;
             }
+            AppType::OpenClaw => {}
         }
         Ok(())
     }
@@ -186,6 +187,7 @@ impl McpService {
             AppType::Codex => mcp::remove_server_from_codex(id)?,
             AppType::Gemini => mcp::remove_server_from_gemini(id)?,
             AppType::OpenCode => mcp::remove_server_from_opencode(id)?,
+            AppType::OpenClaw => {}
         }
         Ok(())
     }

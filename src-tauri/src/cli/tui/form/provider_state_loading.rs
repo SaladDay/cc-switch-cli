@@ -15,6 +15,7 @@ pub(super) fn populate_form_from_provider(
         AppType::Codex => populate_codex_form(form, provider),
         AppType::Gemini => populate_gemini_form(form, provider),
         AppType::OpenCode => populate_opencode_form(form, provider),
+        AppType::OpenClaw => populate_openclaw_form(form, provider),
     }
 }
 
@@ -190,6 +191,87 @@ fn populate_opencode_form(form: &mut ProviderAddFormState, provider: &Provider) 
                 }
             }
         }
+    }
+}
+
+fn populate_openclaw_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    let provider_config =
+        crate::openclaw_config::provider_config_from_settings(&provider.settings_config);
+    if let Some(api_key) = provider_config
+        .get("apiKey")
+        .and_then(|value| value.as_str())
+    {
+        form.opencode_api_key.set(api_key);
+    }
+    if let Some(base_url) = provider_config
+        .get("baseUrl")
+        .and_then(|value| value.as_str())
+    {
+        form.opencode_base_url.set(base_url);
+    }
+
+    let target_model_id =
+        crate::openclaw_config::primary_model_from_settings(&provider.settings_config)
+            .and_then(|value| {
+                value
+                    .rsplit_once('/')
+                    .map(|(_, model_id)| model_id.to_string())
+                    .or(Some(value))
+            })
+            .or_else(|| {
+                provider_config
+                    .get("models")
+                    .and_then(|value| value.as_array())
+                    .and_then(|models| models.first())
+                    .and_then(|model| model.get("id"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            });
+
+    let target_model = provider_config
+        .get("models")
+        .and_then(|value| value.as_array())
+        .and_then(|models| {
+            target_model_id.as_deref().and_then(|target_id| {
+                models.iter().find(|model| {
+                    model
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|id| id == target_id)
+                })
+            })
+        })
+        .or_else(|| {
+            provider_config
+                .get("models")
+                .and_then(|value| value.as_array())
+                .and_then(|models| models.first())
+        });
+
+    if let Some(model_id) = target_model
+        .and_then(|model| model.get("id"))
+        .and_then(|value| value.as_str())
+    {
+        form.opencode_model_original_id = Some(model_id.to_string());
+        form.opencode_model_id.set(model_id);
+    }
+    if let Some(name) = target_model
+        .and_then(|model| model.get("name"))
+        .and_then(|value| value.as_str())
+    {
+        form.opencode_model_name.set(name);
+    }
+    if let Some(context) = target_model
+        .and_then(|model| model.get("contextWindow"))
+        .and_then(|value| value.as_u64())
+    {
+        form.opencode_model_context_limit.set(context.to_string());
+    }
+    if let Some(output) = target_model
+        .and_then(|model| model.get("maxTokens"))
+        .and_then(|value| value.as_u64())
+    {
+        form.opencode_model_output_limit.set(output.to_string());
     }
 }
 

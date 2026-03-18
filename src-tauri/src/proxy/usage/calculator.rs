@@ -136,15 +136,17 @@ pub fn calculate_cost(
     let million = Decimal::from(1_000_000u32);
     let billable_input_tokens = usage.input_tokens.saturating_sub(usage.cache_read_tokens);
 
-    let input_cost = Decimal::from(billable_input_tokens) * pricing.input_cost_per_million / million;
-    let output_cost = Decimal::from(usage.output_tokens) * pricing.output_cost_per_million / million;
+    let input_cost =
+        Decimal::from(billable_input_tokens) * pricing.input_cost_per_million / million;
+    let output_cost =
+        Decimal::from(usage.output_tokens) * pricing.output_cost_per_million / million;
     let cache_read_cost =
         Decimal::from(usage.cache_read_tokens) * pricing.cache_read_cost_per_million / million;
     let cache_creation_cost = Decimal::from(usage.cache_creation_tokens)
         * pricing.cache_creation_cost_per_million
         / million;
-    let total_cost = (input_cost + output_cost + cache_read_cost + cache_creation_cost)
-        * cost_multiplier;
+    let total_cost =
+        (input_cost + output_cost + cache_read_cost + cache_creation_cost) * cost_multiplier;
 
     Some(CostBreakdown {
         input_cost,
@@ -203,7 +205,13 @@ mod tests {
 
     #[test]
     fn pricing_model_prefers_request_when_configured() {
-        assert_eq!(pricing_model("claude-3-7-sonnet", "gpt-5.2", "request"), "claude-3-7-sonnet");
-        assert_eq!(pricing_model("claude-3-7-sonnet", "gpt-5.2", "response"), "gpt-5.2");
+        assert_eq!(
+            pricing_model("claude-3-7-sonnet", "gpt-5.2", "request"),
+            "claude-3-7-sonnet"
+        );
+        assert_eq!(
+            pricing_model("claude-3-7-sonnet", "gpt-5.2", "response"),
+            "gpt-5.2"
+        );
     }
 }
