@@ -1146,3 +1146,76 @@ fn provider_add_form_opencode_from_provider_backfills_and_preserves_extra_settin
         "medium"
     );
 }
+
+#[test]
+fn provider_add_form_openclaw_requires_api_key_base_url_and_model_id() {
+    let mut form = ProviderAddFormState::new(AppType::OpenClaw);
+    form.name.set("OpenClaw Provider");
+
+    assert!(
+        !form.has_required_fields(),
+        "OpenClaw form should require more than just provider name"
+    );
+
+    form.opencode_api_key.set("sk-openclaw");
+    assert!(
+        !form.has_required_fields(),
+        "OpenClaw form should still require base URL and model id"
+    );
+
+    form.opencode_base_url.set("https://api.example.com/v1");
+    assert!(
+        !form.has_required_fields(),
+        "OpenClaw form should still require model id"
+    );
+
+    form.opencode_model_id.set("gpt-5.2-codex");
+    assert!(
+        form.has_required_fields(),
+        "OpenClaw form should become submittable once api key, base URL, and model id are set"
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_builds_wrapped_settings_from_dedicated_fields() {
+    let mut form = ProviderAddFormState::new(AppType::OpenClaw);
+    form.id.set("oclaw1");
+    form.name.set("OpenClaw Provider");
+    form.opencode_api_key.set("sk-openclaw");
+    form.opencode_base_url.set("https://api.example.com/v1");
+    form.opencode_model_id.set("gpt-5.2-codex");
+    form.opencode_model_name.set("GPT-5.2 Codex");
+    form.opencode_model_context_limit.set("256000");
+    form.opencode_model_output_limit.set("16384");
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["id"], "oclaw1");
+    assert_eq!(
+        provider["settingsConfig"]["provider"]["apiKey"],
+        "sk-openclaw"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["provider"]["baseUrl"],
+        "https://api.example.com/v1"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["provider"]["models"][0]["id"],
+        "gpt-5.2-codex"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["provider"]["models"][0]["name"],
+        "GPT-5.2 Codex"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["provider"]["models"][0]["contextWindow"],
+        256000
+    );
+    assert_eq!(
+        provider["settingsConfig"]["provider"]["models"][0]["maxTokens"],
+        16384
+    );
+    assert_eq!(
+        provider["settingsConfig"]["primaryModel"],
+        "oclaw1/gpt-5.2-codex"
+    );
+}
