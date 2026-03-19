@@ -156,9 +156,7 @@ async fn handle_claude_request(
             Ok(response) => response,
             Err(failure) => {
                 let super::forwarder::ForwardFailure { provider, error } = failure;
-                if let Some(provider) = provider
-                    .or_else(|| context.primary_provider().cloned())
-                {
+                if let Some(provider) = provider.or_else(|| context.primary_provider().cloned()) {
                     let request_log = RequestLogContext::from_handler(
                         &context,
                         provider,
@@ -255,9 +253,7 @@ async fn handle_claude_request(
         Ok(response) => response,
         Err(failure) => {
             let super::forwarder::ForwardFailure { provider, error } = failure;
-            if let Some(provider) = provider
-                .or_else(|| context.primary_provider().cloned())
-            {
+            if let Some(provider) = provider.or_else(|| context.primary_provider().cloned()) {
                 let request_log = RequestLogContext::from_handler(
                     &context,
                     provider,

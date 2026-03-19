@@ -9,7 +9,19 @@ use cc_switch_lib::{
 pub fn ensure_test_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let base = std::env::temp_dir().join("cc-switch-test-home");
+        // Use a per-test-process home so separate integration test binaries can run in parallel.
+        let binary_name = std::env::current_exe()
+            .ok()
+            .as_deref()
+            .and_then(Path::file_stem)
+            .and_then(|value| value.to_str())
+            .unwrap_or("cc-switch-tests")
+            .to_string();
+        let base = std::env::temp_dir().join(format!(
+            "cc-switch-test-home-{}-{}",
+            binary_name,
+            std::process::id()
+        ));
         if base.exists() {
             let _ = std::fs::remove_dir_all(&base);
         }
@@ -25,7 +37,14 @@ pub fn ensure_test_home() -> &'static Path {
 /// 清理测试目录中生成的配置文件与缓存。
 pub fn reset_test_fs() {
     let home = ensure_test_home();
-    for sub in [".claude", ".codex", ".cc-switch", ".gemini", ".config"] {
+    for sub in [
+        ".claude",
+        ".codex",
+        ".cc-switch",
+        ".gemini",
+        ".config",
+        ".openclaw",
+    ] {
         let path = home.join(sub);
         if path.exists() {
             if let Err(err) = std::fs::remove_dir_all(&path) {

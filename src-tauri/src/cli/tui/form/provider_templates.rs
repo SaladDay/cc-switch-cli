@@ -104,12 +104,13 @@ pub(super) fn provider_builtin_template_defs(app_type: &AppType) -> &'static [Pr
         AppType::Codex => &PROVIDER_TEMPLATE_DEFS_CODEX,
         AppType::Gemini => &PROVIDER_TEMPLATE_DEFS_GEMINI,
         AppType::OpenCode => &PROVIDER_TEMPLATE_DEFS_OPENCODE,
+        AppType::OpenClaw => &PROVIDER_TEMPLATE_DEFS_OPENCODE,
     }
 }
 
 pub(super) fn provider_sponsor_presets(app_type: &AppType) -> &'static [SponsorProviderPreset] {
     match app_type {
-        AppType::OpenCode => &NO_SPONSOR_PROVIDER_PRESETS,
+        AppType::OpenCode | AppType::OpenClaw => &NO_SPONSOR_PROVIDER_PRESETS,
         _ => &SPONSOR_PROVIDER_PRESETS,
     }
 }
@@ -272,6 +273,7 @@ impl ProviderAddFormState {
                 self.gemini_base_url.set(preset.gemini_base_url);
             }
             AppType::OpenCode => {}
+            AppType::OpenClaw => {}
         }
     }
 }

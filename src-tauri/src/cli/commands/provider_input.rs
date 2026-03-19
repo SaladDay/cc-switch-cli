@@ -47,6 +47,7 @@ mod tests {
 
 pub fn prompt_settings_config_for_add(
     app_type: &AppType,
+    provider_id: &str,
     mode: ProviderAddMode,
 ) -> Result<Value, AppError> {
     match (app_type, mode) {
@@ -55,6 +56,7 @@ pub fn prompt_settings_config_for_add(
         (AppType::Codex, ProviderAddMode::ThirdParty) => prompt_codex_config(None),
         (AppType::Gemini, _) => prompt_gemini_config(None),
         (AppType::OpenCode, _) => Ok(json!({})),
+        (AppType::OpenClaw, _) => prompt_openclaw_config(provider_id, None),
     }
 }
 
@@ -226,6 +228,7 @@ pub fn prompt_basic_fields(
 /// 根据应用类型收集 settings_config
 pub fn prompt_settings_config(
     app_type: &AppType,
+    provider_id: &str,
     current: Option<&Value>,
 ) -> Result<Value, AppError> {
     match app_type {
@@ -275,7 +278,283 @@ pub fn prompt_settings_config(
         }
         AppType::Gemini => prompt_gemini_config(current),
         AppType::OpenCode => Ok(current.cloned().unwrap_or_else(|| json!({}))),
+        AppType::OpenClaw => prompt_openclaw_config(provider_id, current),
     }
+}
+
+fn prompt_openclaw_config(provider_id: &str, current: Option<&Value>) -> Result<Value, AppError> {
+    println!("\n{}", "OpenClaw Configuration".bright_cyan().bold());
+
+    let current_provider_config = current
+        .map(crate::openclaw_config::provider_config_from_settings)
+        .unwrap_or_else(|| json!({}));
+    let current_primary_model =
+        current.and_then(crate::openclaw_config::primary_model_from_settings);
+    let current_provider = current_provider_config.as_object();
+
+    let current_base_url = current_provider
+        .and_then(|provider| provider.get("baseUrl"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let current_api_key = current_provider
+        .and_then(|provider| provider.get("apiKey"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let current_api = current_provider
+        .and_then(|provider| provider.get("api"))
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            current_provider
+                .and_then(|provider| provider.get("models"))
+                .and_then(|value| value.as_array())
+                .and_then(|models| models.first())
+                .and_then(|model| model.get("api"))
+                .and_then(|value| value.as_str())
+        })
+        .unwrap_or("openai-responses")
+        .to_string();
+    let current_target_model_id = current_primary_model
+        .as_deref()
+        .and_then(|value| value.strip_prefix(&format!("{provider_id}/")))
+        .map(str::to_string)
+        .or_else(|| {
+            current_provider
+                .and_then(|provider| provider.get("models"))
+                .and_then(|value| value.as_array())
+                .and_then(|models| models.first())
+                .and_then(|model| model.get("id"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        });
+    let current_target_model = current_provider
+        .and_then(|provider| provider.get("models"))
+        .and_then(|value| value.as_array())
+        .and_then(|models| {
+            current_target_model_id.as_deref().and_then(|target_id| {
+                models.iter().find(|model| {
+                    model
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|id| id == target_id)
+                })
+            })
+        })
+        .or_else(|| {
+            current_provider
+                .and_then(|provider| provider.get("models"))
+                .and_then(|value| value.as_array())
+                .and_then(|models| models.first())
+        });
+    let current_model_id = current_target_model
+        .and_then(|model| model.get("id"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let current_model_name = current_target_model
+        .and_then(|model| model.get("name"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let current_context_window = current_target_model
+        .and_then(|model| model.get("contextWindow"))
+        .and_then(|value| value.as_u64())
+        .map(|value| value.to_string());
+    let current_max_tokens = current_target_model
+        .and_then(|model| model.get("maxTokens"))
+        .and_then(|value| value.as_u64())
+        .map(|value| value.to_string());
+
+    let base_url = if let Some(current) = current_base_url.as_deref() {
+        Text::new(&format!("{}:", texts::tui_label_base_url()))
+            .with_initial_value(current)
+            .with_help_message("API endpoint (e.g., https://api.openai.com/v1)")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    } else {
+        Text::new(&format!("{}:", texts::tui_label_base_url()))
+            .with_placeholder("https://api.openai.com/v1")
+            .with_help_message("API endpoint")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    };
+    let base_url = base_url.trim().to_string();
+    if base_url.is_empty() {
+        return Err(AppError::InvalidInput(
+            texts::base_url_empty_error().to_string(),
+        ));
+    }
+
+    let api_key = if let Some(current) = current_api_key.as_deref() {
+        Text::new(texts::api_key_label())
+            .with_initial_value(current)
+            .with_help_message("API key used by OpenClaw to authenticate requests")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    } else {
+        Text::new(texts::api_key_label())
+            .with_placeholder("sk-...")
+            .with_help_message("API key used by OpenClaw to authenticate requests")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    };
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err(AppError::InvalidInput(
+            "OpenClaw API key cannot be empty".to_string(),
+        ));
+    }
+
+    let api_options = vec![
+        "openai-responses",
+        "openai-completions",
+        "openai-codex-responses",
+        "anthropic-messages",
+        "google-generative-ai",
+        "ollama",
+    ];
+    let default_api_index = api_options
+        .iter()
+        .position(|candidate| *candidate == current_api)
+        .unwrap_or(0);
+    let api = Select::new("API adapter:", api_options.clone())
+        .with_starting_cursor(default_api_index)
+        .with_help_message("Choose the upstream API protocol OpenClaw should use")
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let model_id = if let Some(current) = current_model_id.as_deref() {
+        Text::new(&format!("{}:", texts::model_label()))
+            .with_initial_value(current)
+            .with_help_message("Model identifier exposed by the provider")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    } else {
+        Text::new(&format!("{}:", texts::model_label()))
+            .with_placeholder("gpt-5.2-codex")
+            .with_help_message("Model identifier exposed by the provider")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    };
+    let model_id = model_id.trim().to_string();
+    if model_id.is_empty() {
+        return Err(AppError::InvalidInput(
+            "OpenClaw model id cannot be empty".to_string(),
+        ));
+    }
+
+    let model_name = if let Some(current) = current_model_name.as_deref() {
+        Text::new("Model display name:")
+            .with_initial_value(current)
+            .with_help_message("Optional display name shown by OpenClaw")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    } else {
+        Text::new("Model display name:")
+            .with_placeholder(&model_id)
+            .with_help_message("Optional display name shown by OpenClaw")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    };
+
+    let context_window = if let Some(current) = current_context_window.as_deref() {
+        Text::new("Context window:")
+            .with_initial_value(current)
+            .with_help_message("Integer token limit, default 200000")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    } else {
+        Text::new("Context window:")
+            .with_placeholder("200000")
+            .with_help_message("Integer token limit, default 200000")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    };
+    let context_window = if context_window.trim().is_empty() {
+        200000
+    } else {
+        context_window.trim().parse::<u64>().map_err(|_| {
+            AppError::InvalidInput("OpenClaw context window must be a positive integer".to_string())
+        })?
+    };
+
+    let max_tokens = if let Some(current) = current_max_tokens.as_deref() {
+        Text::new("Max output tokens:")
+            .with_initial_value(current)
+            .with_help_message("Integer token limit, default 8192")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    } else {
+        Text::new("Max output tokens:")
+            .with_placeholder("8192")
+            .with_help_message("Integer token limit, default 8192")
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    };
+    let max_tokens = if max_tokens.trim().is_empty() {
+        8192
+    } else {
+        max_tokens.trim().parse::<u64>().map_err(|_| {
+            AppError::InvalidInput("OpenClaw max tokens must be a positive integer".to_string())
+        })?
+    };
+
+    let mut provider_obj = current_provider.cloned().unwrap_or_default();
+    provider_obj.insert("baseUrl".to_string(), json!(base_url));
+    provider_obj.insert("apiKey".to_string(), json!(api_key));
+    provider_obj.insert("api".to_string(), json!(api));
+
+    let previous_target_model_id = current_target_model_id;
+    let mut models = provider_obj
+        .remove("models")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+
+    if let Some(previous_id) = previous_target_model_id.as_deref() {
+        models.retain(|model| {
+            model
+                .get("id")
+                .and_then(|value| value.as_str())
+                .map_or(true, |id| id != previous_id)
+        });
+    }
+    models.retain(|model| {
+        model
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map_or(true, |id| id != model_id)
+    });
+
+    let mut model_obj = current_target_model
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    model_obj.insert("id".to_string(), json!(model_id.clone()));
+    model_obj.insert(
+        "name".to_string(),
+        json!(if model_name.trim().is_empty() {
+            model_id.as_str()
+        } else {
+            model_name.trim()
+        }),
+    );
+    model_obj.insert("reasoning".to_string(), json!(false));
+    model_obj.insert("input".to_string(), json!(["text"]));
+    model_obj.insert(
+        "cost".to_string(),
+        json!({
+            "input": 0.0,
+            "output": 0.0,
+            "cacheRead": 0.0,
+            "cacheWrite": 0.0
+        }),
+    );
+    model_obj.insert("contextWindow".to_string(), json!(context_window));
+    model_obj.insert("maxTokens".to_string(), json!(max_tokens));
+    models.insert(0, Value::Object(model_obj));
+    provider_obj.insert("models".to_string(), Value::Array(models));
+
+    Ok(crate::openclaw_config::build_settings_config(
+        Value::Object(provider_obj),
+        Some(format!("{provider_id}/{model_id}")),
+    ))
 }
 
 /// 提示用户输入单个模型字段
@@ -842,6 +1121,33 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                 .and_then(|v| v.as_object())
             {
                 println!("  {}: {}", texts::model_label(), models.len());
+            }
+        }
+        AppType::OpenClaw => {
+            let provider_config =
+                crate::openclaw_config::provider_config_from_settings(&provider.settings_config);
+            if let Some(api_key) = provider_config.get("apiKey").and_then(|v| v.as_str()) {
+                println!(
+                    "  {}: {}",
+                    texts::api_key_display_label(),
+                    mask_api_key(api_key)
+                );
+            }
+            if let Some(base_url) = provider_config.get("baseUrl").and_then(|v| v.as_str()) {
+                println!("  {}: {}", texts::base_url_display_label(), base_url);
+            }
+            if let Some(primary_model) =
+                crate::openclaw_config::primary_model_from_settings(&provider.settings_config)
+            {
+                println!("  {}: {}", texts::model_label(), primary_model);
+            } else if let Some(model_id) = provider_config
+                .get("models")
+                .and_then(|v| v.as_array())
+                .and_then(|models| models.first())
+                .and_then(|model| model.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                println!("  {}: {}", texts::model_label(), model_id);
             }
         }
     }

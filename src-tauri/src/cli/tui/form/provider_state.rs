@@ -104,7 +104,18 @@ impl ProviderAddFormState {
     }
 
     pub fn has_required_fields(&self) -> bool {
-        !self.name.is_blank()
+        if self.name.is_blank() {
+            return false;
+        }
+
+        match self.app_type {
+            AppType::OpenClaw => {
+                !self.opencode_api_key.is_blank()
+                    && !self.opencode_base_url.is_blank()
+                    && !self.opencode_model_id.is_blank()
+            }
+            _ => true,
+        }
     }
 
     pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {
@@ -155,6 +166,15 @@ impl ProviderAddFormState {
                 }
             }
             AppType::OpenCode => {
+                fields.push(ProviderAddField::OpenCodeNpmPackage);
+                fields.push(ProviderAddField::OpenCodeApiKey);
+                fields.push(ProviderAddField::OpenCodeBaseUrl);
+                fields.push(ProviderAddField::OpenCodeModelId);
+                fields.push(ProviderAddField::OpenCodeModelName);
+                fields.push(ProviderAddField::OpenCodeModelContextLimit);
+                fields.push(ProviderAddField::OpenCodeModelOutputLimit);
+            }
+            AppType::OpenClaw => {
                 fields.push(ProviderAddField::OpenCodeNpmPackage);
                 fields.push(ProviderAddField::OpenCodeApiKey);
                 fields.push(ProviderAddField::OpenCodeBaseUrl);

@@ -23,6 +23,9 @@ pub(super) enum LiveSnapshot {
     OpenCode {
         config: Option<Value>,
     },
+    OpenClaw {
+        config: Option<Value>,
+    },
 }
 
 impl LiveSnapshot {
@@ -76,6 +79,14 @@ impl LiveSnapshot {
             }
             LiveSnapshot::OpenCode { config } => {
                 let path = crate::opencode_config::get_opencode_config_path();
+                if let Some(value) = config {
+                    write_json_file(&path, value)?;
+                } else if path.exists() {
+                    delete_file(&path)?;
+                }
+            }
+            LiveSnapshot::OpenClaw { config } => {
+                let path = crate::openclaw_config::get_openclaw_config_path();
                 if let Some(value) = config {
                     write_json_file(&path, value)?;
                 } else if path.exists() {
@@ -140,6 +151,15 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
                 None
             };
             Ok(LiveSnapshot::OpenCode { config })
+        }
+        AppType::OpenClaw => {
+            let path = crate::openclaw_config::get_openclaw_config_path();
+            let config = if path.exists() {
+                Some(crate::openclaw_config::read_openclaw_config()?)
+            } else {
+                None
+            };
+            Ok(LiveSnapshot::OpenClaw { config })
         }
     }
 }

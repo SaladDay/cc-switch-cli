@@ -127,6 +127,7 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
         AppType::Codex,
         AppType::Gemini,
         AppType::OpenCode,
+        AppType::OpenClaw,
     ] {
         let app_key = app.as_str();
         let providers = db.get_all_providers(app_key)?;
@@ -141,6 +142,7 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
             AppType::Codex => config.prompts.codex.prompts = prompts.into_iter().collect(),
             AppType::Gemini => config.prompts.gemini.prompts = prompts.into_iter().collect(),
             AppType::OpenCode => config.prompts.opencode.prompts = prompts.into_iter().collect(),
+            AppType::OpenClaw => config.prompts.openclaw.prompts = prompts.into_iter().collect(),
         }
 
         // common snippet
@@ -163,6 +165,7 @@ fn persist_multi_app_config_to_db(db: &Database, config: &MultiAppConfig) -> Res
         AppType::Codex,
         AppType::Gemini,
         AppType::OpenCode,
+        AppType::OpenClaw,
     ] {
         let app_key = app.as_str();
         let manager = config.get_manager(&app);
@@ -201,6 +204,7 @@ fn persist_multi_app_config_to_db(db: &Database, config: &MultiAppConfig) -> Res
             AppType::Codex => &config.prompts.codex.prompts,
             AppType::Gemini => &config.prompts.gemini.prompts,
             AppType::OpenCode => &config.prompts.opencode.prompts,
+            AppType::OpenClaw => &config.prompts.openclaw.prompts,
         };
         let existing_prompts = db.get_prompts(app_key)?;
         for prompt in desired_prompts.values() {

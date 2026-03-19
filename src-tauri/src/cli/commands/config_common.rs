@@ -133,7 +133,7 @@ fn set(
     };
 
     let snippet = match app_type {
-        AppType::Claude | AppType::Gemini | AppType::OpenCode => {
+        AppType::Claude | AppType::Gemini | AppType::OpenCode | AppType::OpenClaw => {
             let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
                 AppError::InvalidInput(texts::tui_toast_invalid_json(&e.to_string()))
             })?;

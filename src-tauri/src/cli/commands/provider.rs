@@ -224,7 +224,7 @@ fn add_provider(app_type: AppType) -> Result<(), AppError> {
     println!("{}", info(&texts::generated_id_message(&id)));
 
     // 3. 收集配置
-    let settings_config = prompt_settings_config_for_add(&app_type, add_mode)?;
+    let settings_config = prompt_settings_config_for_add(&app_type, &id, add_mode)?;
 
     // 4. 询问是否配置可选字段
     let optional = if Confirm::new(texts::configure_optional_fields_prompt())
@@ -324,7 +324,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         .prompt()
         .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     {
-        prompt_settings_config(&app_type, Some(&original.settings_config))?
+        prompt_settings_config(&app_type, id, Some(&original.settings_config))?
     } else {
         original.settings_config.clone()
     };

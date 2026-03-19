@@ -215,10 +215,12 @@ pub(crate) fn cycle_app_type(current: &AppType, dir: i8) -> AppType {
         (AppType::Codex, 1) => AppType::Gemini,
         (AppType::Gemini, 1) => AppType::OpenCode,
         (AppType::OpenCode, 1) => AppType::Claude,
+        (AppType::OpenClaw, 1) => AppType::Claude,
         (AppType::Claude, -1) => AppType::OpenCode,
         (AppType::Codex, -1) => AppType::Claude,
         (AppType::Gemini, -1) => AppType::Codex,
         (AppType::OpenCode, -1) => AppType::Gemini,
+        (AppType::OpenClaw, -1) => AppType::Gemini,
         (other, _) => other.clone(),
     }
 }
@@ -229,6 +231,7 @@ pub(crate) fn app_type_picker_index(app_type: &AppType) -> usize {
         AppType::Codex => 1,
         AppType::Gemini => 2,
         AppType::OpenCode => 3,
+        AppType::OpenClaw => 3,
     }
 }
 

@@ -264,6 +264,19 @@ impl ProviderService {
                     )
                 })
                 .map(|s| s.to_string()),
+            AppType::OpenClaw => {
+                crate::openclaw_config::provider_config_from_settings(&provider.settings_config)
+                    .get("apiKey")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AppError::localized(
+                            "provider.openclaw.api_key.missing",
+                            "缺少 API Key",
+                            "API key is missing",
+                        )
+                    })
+                    .map(|s| s.to_string())
+            }
         }
     }
 
@@ -341,6 +354,19 @@ impl ProviderService {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string()),
+            AppType::OpenClaw => {
+                crate::openclaw_config::provider_config_from_settings(&provider.settings_config)
+                    .get("baseUrl")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AppError::localized(
+                            "provider.openclaw.base_url.missing",
+                            "缺少 OpenClaw baseUrl 配置",
+                            "Missing OpenClaw baseUrl configuration",
+                        )
+                    })
+                    .map(|s| s.to_string())
+            }
         }
     }
 

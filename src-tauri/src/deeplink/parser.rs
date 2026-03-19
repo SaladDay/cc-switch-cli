@@ -64,9 +64,14 @@ fn parse_provider_deeplink(
         .ok_or_else(|| AppError::InvalidInput("Missing 'app' parameter".to_string()))?
         .clone();
 
-    if app != "claude" && app != "codex" && app != "gemini" && app != "opencode" {
+    if app != "claude"
+        && app != "codex"
+        && app != "gemini"
+        && app != "opencode"
+        && app != "openclaw"
+    {
         return Err(AppError::InvalidInput(format!(
-            "Invalid app type: must be 'claude', 'codex', 'gemini', or 'opencode', got '{app}'"
+            "Invalid app type: must be 'claude', 'codex', 'gemini', 'opencode', or 'openclaw', got '{app}'"
         )));
     }
 

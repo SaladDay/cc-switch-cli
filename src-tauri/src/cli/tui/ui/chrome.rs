@@ -34,6 +34,7 @@ pub(super) fn render_header(
         AppType::Codex => 1,
         AppType::Gemini => 2,
         AppType::OpenCode => 3,
+        AppType::OpenClaw => 3,
     };
     let tabs_line = Line::from(vec![
         Span::styled(
@@ -64,7 +65,14 @@ pub(super) fn render_header(
         ),
         Span::raw(" "),
         Span::styled(
-            format!(" {} ", AppType::OpenCode.as_str()),
+            format!(
+                " {} ",
+                if matches!(app.app_type, AppType::OpenClaw) {
+                    AppType::OpenClaw.as_str()
+                } else {
+                    AppType::OpenCode.as_str()
+                }
+            ),
             if selected == 3 {
                 active_chip_style(theme)
             } else {
