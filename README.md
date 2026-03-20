@@ -31,13 +31,13 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 ## 🆕 What's New in 5.1.1
 
 <div align="center">
-  <h3><strong>Visible app controls and TUI polish</strong></h3>
+  <h3><strong>🦞 Visible app controls, TUI polish, and OpenClaw fixes</strong></h3>
 </div>
 
 - Added a visible apps picker in TUI settings, so you can choose which apps appear in the interface.
 - Your visible app choices now persist between sessions instead of resetting on restart.
 - Hidden apps are now handled consistently during startup, in the header tabs, and while switching with the keyboard.
-- Terminal behavior is more polished overall, with better header tab balance, truecolor handling on `xterm-256color`, and OpenClaw removal aligned with upstream behavior.
+- Terminal behavior is more polished overall, with better header tab balance, truecolor handling on `xterm-256color`, and 🦞 OpenClaw removal aligned with upstream behavior.
 
 ---
 
