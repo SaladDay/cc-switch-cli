@@ -378,3 +378,60 @@ mod tests {
         assert_eq!(deserialized.apply_common_config, Some(false));
     }
 }
+
+#[cfg(test)]
+mod issue_71_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn meta_with_both_common_config_keys_causes_duplicate_field_error() {
+        // When both commonConfigEnabled (rename) and applyCommonConfig (alias)
+        // are present, serde rejects as duplicate field.
+        let meta_json = json!({
+            "commonConfigEnabled": true,
+            "applyCommonConfig": false
+        });
+
+        let result: Result<ProviderMeta, _> = serde_json::from_value(meta_json);
+        assert!(
+            result.is_err(),
+            "serde should reject duplicate rename+alias keys"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("duplicate field"),
+            "error should mention duplicate field"
+        );
+    }
+
+    #[test]
+    fn meta_with_only_alias_key_deserializes_ok() {
+        // After the fix, to_provider_json_value removes commonConfigEnabled
+        // before inserting applyCommonConfig, so only one key remains.
+        let meta_json = json!({
+            "applyCommonConfig": false
+        });
+
+        let result: ProviderMeta =
+            serde_json::from_value(meta_json).expect("should deserialize with alias only");
+        assert_eq!(result.apply_common_config, Some(false));
+    }
+
+    #[test]
+    fn provider_with_only_alias_in_meta_deserializes_ok() {
+        let provider_json = json!({
+            "id": "test",
+            "name": "Test",
+            "settingsConfig": {},
+            "meta": {
+                "applyCommonConfig": true
+            }
+        });
+        let provider: Provider =
+            serde_json::from_value(provider_json).expect("should deserialize provider");
+        assert_eq!(
+            provider.meta.unwrap().apply_common_config,
+            Some(true)
+        );
+    }
+}

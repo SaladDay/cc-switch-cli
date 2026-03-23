@@ -1757,3 +1757,44 @@ fn provider_add_form_openclaw_ignores_common_config_snippet() {
         "OpenClaw should not inherit Common Config headers"
     );
 }
+
+#[test]
+fn provider_edit_form_roundtrip_no_duplicate_common_config_key() {
+    // Issue #71: editing a Claude provider and saving fails with
+    // "duplicate field `commonConfigEnabled`" because extra (from
+    // serde_json::to_value) has commonConfigEnabled while
+    // to_provider_json_value inserts applyCommonConfig.
+    use crate::provider::ProviderMeta;
+
+    let provider = Provider {
+        id: "test-provider".to_string(),
+        name: "Test Provider".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-test"
+            }
+        }),
+        website_url: None,
+        category: None,
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: Some(ProviderMeta {
+            apply_common_config: Some(true),
+            ..Default::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    let json_value = form.to_provider_json_value();
+    let json_str = serde_json::to_string_pretty(&json_value).unwrap();
+
+    // The roundtrip: deserialize back to Provider (this is what submit_provider_edit does)
+    let roundtrip: Provider = serde_json::from_str(&json_str)
+        .expect("roundtrip deserialization should succeed without duplicate field error");
+    assert_eq!(roundtrip.id, "test-provider");
+    assert_eq!(roundtrip.name, "Test Provider");
+}
