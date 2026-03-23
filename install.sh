@@ -9,6 +9,7 @@ RELEASES_URL="https://github.com/${REPO}/releases"
 FORCE_OVERWRITE="${CC_SWITCH_FORCE:-0}"
 LINUX_LIBC="${CC_SWITCH_LINUX_LIBC:-auto}"
 VERSION="${1:-latest}"
+[[ "${VERSION}" == "latest" ]] || [[ "${VERSION}" == v* ]] || VERSION="v${VERSION}"
 
 TMP_DIR=""
 ASSET_NAME=""
