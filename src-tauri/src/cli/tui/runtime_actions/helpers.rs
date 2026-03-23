@@ -3,6 +3,7 @@ use std::sync::mpsc;
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
+use crate::commands::workspace;
 use crate::error::AppError;
 use crate::services::McpService;
 
@@ -152,6 +153,36 @@ pub(crate) fn run_external_editor_for_current_editor(
 
 pub(super) fn export_target(path: String) -> PathBuf {
     PathBuf::from(path)
+}
+
+pub(super) fn refresh_openclaw_workspace_data(
+    app: &mut App,
+    data: &mut UiData,
+) -> Result<(), AppError> {
+    *data = UiData::load(&app.app_type)?;
+    refresh_openclaw_daily_memory_search_results(app)?;
+    app.clamp_selections(data);
+    Ok(())
+}
+
+pub(super) fn refresh_openclaw_daily_memory_search_results(app: &mut App) -> Result<(), AppError> {
+    let query = app.openclaw_daily_memory_search_query.trim();
+    if query.is_empty() {
+        app.openclaw_daily_memory_search_results.clear();
+        app.daily_memory_idx = 0;
+        return Ok(());
+    }
+
+    app.openclaw_daily_memory_search_results =
+        workspace::search_daily_memory_files(query.to_string()).map_err(AppError::Message)?;
+    if app.openclaw_daily_memory_search_results.is_empty() {
+        app.daily_memory_idx = 0;
+    } else {
+        app.daily_memory_idx = app
+            .daily_memory_idx
+            .min(app.openclaw_daily_memory_search_results.len() - 1);
+    }
+    Ok(())
 }
 
 pub(super) fn text_view(title: String, content: String) -> Overlay {

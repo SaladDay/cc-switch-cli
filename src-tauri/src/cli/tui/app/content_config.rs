@@ -15,6 +15,20 @@ impl App {
         self.open_editor(title, EditorKind::Json, initial, submit);
     }
 
+    pub(crate) fn open_daily_memory_filename_prompt(&mut self, initial: String) {
+        self.overlay = Overlay::TextInput(TextInputState {
+            title: texts::tui_openclaw_daily_memory_create_title().to_string(),
+            prompt: texts::tui_openclaw_daily_memory_create_prompt().to_string(),
+            buffer: initial,
+            submit: TextSubmit::OpenClawDailyMemoryFilename,
+            secret: false,
+        });
+    }
+
+    fn today_daily_memory_filename() -> String {
+        chrono::Local::now().format("%Y-%m-%d.md").to_string()
+    }
+
     pub(crate) fn on_config_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         let items = visible_config_items(&self.filter, &self.app_type);
         match key.code {
@@ -107,7 +121,8 @@ impl App {
                         Action::None
                     }
                     ConfigItem::Proxy => Action::ConfigOpenProxyHelp,
-                    ConfigItem::OpenClawEnv
+                    ConfigItem::OpenClawWorkspace
+                    | ConfigItem::OpenClawEnv
                     | ConfigItem::OpenClawTools
                     | ConfigItem::OpenClawAgents => self.push_route_and_switch(
                         item.detail_route()
@@ -128,6 +143,89 @@ impl App {
         }
     }
 
+    pub(crate) fn on_config_openclaw_workspace_key(
+        &mut self,
+        key: KeyEvent,
+        _data: &UiData,
+    ) -> Action {
+        match key.code {
+            KeyCode::Up => {
+                self.workspace_idx = self.workspace_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                self.workspace_idx =
+                    (self.workspace_idx + 1).min(openclaw_workspace_entry_count() - 1);
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char('e') => {
+                match openclaw_workspace_row(self.workspace_idx) {
+                    Some(OpenClawWorkspaceRow::DailyMemory) => {
+                        self.push_route_and_switch(Route::ConfigOpenClawDailyMemory)
+                    }
+                    Some(OpenClawWorkspaceRow::File(filename)) => {
+                        Action::OpenClawWorkspaceOpenFile {
+                            filename: filename.to_string(),
+                        }
+                    }
+                    None => Action::None,
+                }
+            }
+            KeyCode::Char('o') => Action::OpenClawOpenDirectory {
+                subdir: String::new(),
+            },
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn on_config_openclaw_daily_memory_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Action {
+        let visible = visible_openclaw_daily_memory(self, data);
+        match key.code {
+            KeyCode::Up => {
+                self.daily_memory_idx = self.daily_memory_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                if !visible.is_empty() {
+                    self.daily_memory_idx = (self.daily_memory_idx + 1).min(visible.len() - 1);
+                }
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char('e') => {
+                let Some(row) = visible.get(self.daily_memory_idx) else {
+                    return Action::None;
+                };
+                Action::OpenClawDailyMemoryOpenFile {
+                    filename: row.filename().to_string(),
+                }
+            }
+            KeyCode::Char('a') => {
+                self.open_daily_memory_filename_prompt(Self::today_daily_memory_filename());
+                Action::None
+            }
+            KeyCode::Char('d') => {
+                let Some(row) = visible.get(self.daily_memory_idx) else {
+                    return Action::None;
+                };
+                let filename = row.filename().to_string();
+                self.overlay = Overlay::Confirm(ConfirmOverlay {
+                    title: texts::tui_openclaw_daily_memory_delete_title().to_string(),
+                    message: texts::tui_openclaw_daily_memory_delete_message(&filename),
+                    action: ConfirmAction::OpenClawDailyMemoryDelete { filename },
+                });
+                Action::None
+            }
+            KeyCode::Char('o') => Action::OpenClawOpenDirectory {
+                subdir: "memory".to_string(),
+            },
+            _ => Action::None,
+        }
+    }
+
     pub(crate) fn on_config_openclaw_env_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         match key.code {
             KeyCode::Enter | KeyCode::Char('e') => {
@@ -142,30 +240,359 @@ impl App {
         }
     }
 
+    fn openclaw_tools_form(&mut self, data: &UiData) -> &mut OpenClawToolsFormState {
+        self.openclaw_tools_form.get_or_insert_with(|| {
+            OpenClawToolsFormState::from_snapshot(data.config.openclaw_tools.as_ref())
+        })
+    }
+
+    fn submit_openclaw_tools_form(&self) -> Action {
+        let Some(form) = self.openclaw_tools_form.as_ref() else {
+            return Action::None;
+        };
+
+        let content =
+            serde_json::to_string_pretty(&form.to_config()).unwrap_or_else(|_| "{}".to_string());
+        Action::EditorSubmit {
+            submit: EditorSubmit::ConfigOpenClawTools,
+            content,
+        }
+    }
+
+    fn try_submit_openclaw_tools_form(&mut self, data: &UiData) -> Action {
+        if super::openclaw_tools_has_blocking_warning(data) {
+            self.push_toast(
+                texts::tui_toast_openclaw_tools_save_blocked_parse_error(),
+                ToastKind::Error,
+            );
+            Action::None
+        } else {
+            self.submit_openclaw_tools_form()
+        }
+    }
+
+    pub(super) fn mutate_openclaw_tools_form<F>(&mut self, data: &UiData, mutate: F) -> Action
+    where
+        F: FnOnce(&mut OpenClawToolsFormState),
+    {
+        let changed = {
+            let form = self.openclaw_tools_form(data);
+            let before = form.clone();
+            mutate(form);
+            *form != before
+        };
+
+        if changed {
+            self.try_submit_openclaw_tools_form(data)
+        } else {
+            Action::None
+        }
+    }
+
+    fn open_openclaw_tools_profile_picker(&mut self, data: &UiData) -> Action {
+        let selected = super::openclaw_tools_profile_picker_index(
+            self.openclaw_tools_form(data).profile.as_deref(),
+        );
+        self.overlay = Overlay::OpenClawToolsProfilePicker { selected };
+        Action::None
+    }
+
+    pub(super) fn open_openclaw_tools_rule_editor(
+        &mut self,
+        section: OpenClawToolsSection,
+        row: Option<usize>,
+        initial: String,
+    ) -> Action {
+        let title = match section {
+            OpenClawToolsSection::Allow => texts::tui_openclaw_tools_allow_list_label(),
+            OpenClawToolsSection::Deny => texts::tui_openclaw_tools_deny_list_label(),
+            OpenClawToolsSection::Profile => return Action::None,
+        };
+
+        self.overlay = Overlay::TextInput(TextInputState {
+            title: title.to_string(),
+            prompt: texts::tui_openclaw_tools_pattern_placeholder().to_string(),
+            buffer: initial,
+            submit: TextSubmit::OpenClawToolsRule { section, row },
+            secret: false,
+        });
+        Action::None
+    }
+
+    fn open_current_openclaw_tools_rule_editor(&mut self, data: &UiData) -> Action {
+        let (section, row, initial) = {
+            let form = self.openclaw_tools_form(data);
+            (
+                form.section,
+                form.selected_rule_row(),
+                form.selected_rule_value().unwrap_or_default().to_string(),
+            )
+        };
+        self.open_openclaw_tools_rule_editor(section, row, initial)
+    }
+
     pub(crate) fn on_config_openclaw_tools_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
-        match key.code {
-            KeyCode::Enter | KeyCode::Char('e') => {
-                self.open_openclaw_editor(
-                    texts::tui_openclaw_config_tools_editor_title(),
-                    data.config.openclaw_tools.as_ref(),
-                    EditorSubmit::ConfigOpenClawTools,
+        if super::openclaw_tools_load_failed(data) {
+            self.openclaw_tools_form = None;
+            if matches!(key.code, KeyCode::Enter) {
+                self.push_toast(
+                    texts::tui_toast_openclaw_tools_save_blocked_parse_error(),
+                    ToastKind::Error,
                 );
+            }
+            return Action::None;
+        }
+
+        let section = self.openclaw_tools_form(data).section;
+        match key.code {
+            KeyCode::Up => {
+                self.openclaw_tools_form(data).move_up();
                 Action::None
+            }
+            KeyCode::Down => {
+                self.openclaw_tools_form(data).move_down();
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char('e') => match section {
+                OpenClawToolsSection::Profile => self.open_openclaw_tools_profile_picker(data),
+                OpenClawToolsSection::Allow | OpenClawToolsSection::Deny => {
+                    self.open_current_openclaw_tools_rule_editor(data)
+                }
+            },
+            KeyCode::Delete | KeyCode::Backspace => {
+                self.mutate_openclaw_tools_form(data, |form| form.remove_current_list_item())
             }
             _ => Action::None,
         }
     }
 
+    fn openclaw_agents_form(&mut self, data: &UiData) -> &mut OpenClawAgentsFormState {
+        self.openclaw_agents_form.get_or_insert_with(|| {
+            OpenClawAgentsFormState::from_snapshot(data.config.openclaw_agents_defaults.as_ref())
+        })
+    }
+
+    fn submit_openclaw_agents_form(&self) -> Action {
+        let Some(form) = self.openclaw_agents_form.as_ref() else {
+            return Action::None;
+        };
+
+        let content =
+            serde_json::to_string_pretty(&form.to_config()).unwrap_or_else(|_| "{}".to_string());
+        Action::EditorSubmit {
+            submit: EditorSubmit::ConfigOpenClawAgents,
+            content,
+        }
+    }
+
+    fn try_submit_openclaw_agents_form(&mut self, data: &UiData) -> Action {
+        let message = if super::openclaw_agents_has_blocking_warning(data) {
+            Some(texts::tui_toast_openclaw_agents_save_blocked_parse_error())
+        } else if self
+            .openclaw_agents_form(data)
+            .has_unmigratable_legacy_timeout()
+        {
+            Some(texts::tui_toast_openclaw_agents_save_blocked_legacy_timeout())
+        } else {
+            None
+        };
+
+        if let Some(message) = message {
+            self.push_toast(message, ToastKind::Error);
+            Action::None
+        } else {
+            self.submit_openclaw_agents_form()
+        }
+    }
+
+    pub(super) fn mutate_openclaw_agents_form<F>(&mut self, data: &UiData, mutate: F) -> Action
+    where
+        F: FnOnce(&mut OpenClawAgentsFormState),
+    {
+        let changed = {
+            let form = self.openclaw_agents_form(data);
+            let before = form.clone();
+            mutate(form);
+            *form != before
+        };
+
+        if changed {
+            self.try_submit_openclaw_agents_form(data)
+        } else {
+            Action::None
+        }
+    }
+
+    pub(super) fn submit_openclaw_agents_runtime_popup_field(
+        &mut self,
+        data: &UiData,
+        field: OpenClawAgentsRuntimeField,
+        raw: String,
+    ) -> Action {
+        if raw.trim().is_empty() {
+            return Action::None;
+        }
+
+        let changed = {
+            let form = self.openclaw_agents_form(data);
+            let before = form.runtime_field_value(field).to_string();
+            if before == raw {
+                false
+            } else {
+                form.set_runtime_field(field, raw);
+                true
+            }
+        };
+
+        if !changed {
+            return Action::None;
+        }
+
+        if super::openclaw_agents_has_blocking_warning(data) {
+            self.push_toast(
+                texts::tui_toast_openclaw_agents_save_blocked_parse_error(),
+                ToastKind::Error,
+            );
+            Action::None
+        } else {
+            self.submit_openclaw_agents_form()
+        }
+    }
+
+    fn open_openclaw_agents_runtime_editor(&mut self, data: &UiData) -> Action {
+        let (field, title, buffer) = {
+            let form = self.openclaw_agents_form(data);
+            let Some(field) = form.selected_runtime_field() else {
+                return Action::None;
+            };
+            let title = match field {
+                OpenClawAgentsRuntimeField::Workspace => texts::tui_openclaw_agents_workspace(),
+                OpenClawAgentsRuntimeField::Timeout => texts::tui_openclaw_agents_timeout(),
+                OpenClawAgentsRuntimeField::ContextTokens => {
+                    texts::tui_openclaw_agents_context_tokens()
+                }
+                OpenClawAgentsRuntimeField::MaxConcurrent => {
+                    texts::tui_openclaw_agents_max_concurrent()
+                }
+            };
+
+            (field, title, form.runtime_field_value(field).to_string())
+        };
+
+        self.overlay = Overlay::TextInput(TextInputState {
+            title: title.to_string(),
+            prompt: title.to_string(),
+            buffer,
+            submit: TextSubmit::OpenClawAgentsRuntimeField { field },
+            secret: false,
+        });
+        Action::None
+    }
+
+    fn open_openclaw_agents_model_picker(&mut self, data: &UiData) -> Action {
+        let model_options = super::openclaw_agents_model_options(data);
+        let Some((insert_at, selected, options)) = ({
+            let form = self.openclaw_agents_form(data);
+            match form.section {
+                OpenClawAgentsSection::PrimaryModel => (!model_options.is_empty()).then(|| {
+                    (
+                        0,
+                        form.primary_model_picker_selection(&model_options),
+                        model_options.clone(),
+                    )
+                }),
+                OpenClawAgentsSection::FallbackModels => {
+                    let row = form.row.min(form.fallbacks.len());
+                    if row < form.fallbacks.len() {
+                        let options = form.available_fallback_options_for_row(row, &model_options);
+                        (!options.is_empty()).then(|| {
+                            (
+                                row,
+                                form.current_fallback_picker_selection(row, &options),
+                                options,
+                            )
+                        })
+                    } else {
+                        let options = form.available_fallback_options(&model_options);
+                        (!options.is_empty()).then(|| (row, 0, options))
+                    }
+                }
+                OpenClawAgentsSection::Runtime => None,
+            }
+        }) else {
+            return Action::None;
+        };
+
+        self.overlay = Overlay::OpenClawAgentsFallbackPicker {
+            insert_at,
+            selected,
+            options,
+        };
+        Action::None
+    }
+
+    fn skip_disabled_openclaw_agents_add_row(&mut self, data: &UiData, moving_down: bool) {
+        let disabled_add_row_selected = {
+            let model_options = super::openclaw_agents_model_options(data);
+            let form = self.openclaw_agents_form(data);
+            form.section == OpenClawAgentsSection::FallbackModels
+                && form.row == form.fallbacks.len()
+                && form.available_fallback_options(&model_options).is_empty()
+        };
+
+        if disabled_add_row_selected {
+            let form = self.openclaw_agents_form(data);
+            if moving_down {
+                form.move_down();
+            } else {
+                form.move_up();
+            }
+        }
+    }
+
     pub(crate) fn on_config_openclaw_agents_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
-        match key.code {
-            KeyCode::Enter | KeyCode::Char('e') => {
-                self.open_openclaw_editor(
-                    texts::tui_openclaw_config_agents_editor_title(),
-                    data.config.openclaw_agents_defaults.as_ref(),
-                    EditorSubmit::ConfigOpenClawAgents,
+        if super::openclaw_agents_load_failed(data) {
+            self.openclaw_agents_form = None;
+            if matches!(key.code, KeyCode::Enter) {
+                self.push_toast(
+                    texts::tui_toast_openclaw_agents_save_blocked_parse_error(),
+                    ToastKind::Error,
                 );
+            }
+            return Action::None;
+        }
+        let section = self.openclaw_agents_form(data).section;
+
+        match key.code {
+            KeyCode::Up => {
+                self.openclaw_agents_form(data).move_up();
+                self.skip_disabled_openclaw_agents_add_row(data, false);
                 Action::None
             }
+            KeyCode::Down => {
+                self.openclaw_agents_form(data).move_down();
+                self.skip_disabled_openclaw_agents_add_row(data, true);
+                Action::None
+            }
+            KeyCode::Enter => match section {
+                OpenClawAgentsSection::PrimaryModel | OpenClawAgentsSection::FallbackModels => {
+                    self.open_openclaw_agents_model_picker(data)
+                }
+                OpenClawAgentsSection::Runtime => self.open_openclaw_agents_runtime_editor(data),
+            },
+            KeyCode::Delete | KeyCode::Backspace => match section {
+                OpenClawAgentsSection::PrimaryModel => {
+                    self.mutate_openclaw_agents_form(data, |form| form.clear_primary_model())
+                }
+                OpenClawAgentsSection::FallbackModels => {
+                    self.mutate_openclaw_agents_form(data, |form| form.remove_current_fallback())
+                }
+                OpenClawAgentsSection::Runtime => self.mutate_openclaw_agents_form(data, |form| {
+                    if let Some(field) = form.selected_runtime_field() {
+                        form.clear_runtime_field(field);
+                    }
+                }),
+            },
             _ => Action::None,
         }
     }

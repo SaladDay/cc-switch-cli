@@ -158,6 +158,10 @@ pub(super) fn nav_label(item: NavItem) -> &'static str {
         NavItem::Prompts => texts::menu_manage_prompts(),
         NavItem::Config => texts::menu_manage_config(),
         NavItem::Skills => texts::menu_manage_skills(),
+        NavItem::OpenClawWorkspace => texts::menu_openclaw_workspace(),
+        NavItem::OpenClawEnv => texts::menu_openclaw_env(),
+        NavItem::OpenClawTools => texts::menu_openclaw_tools(),
+        NavItem::OpenClawAgents => texts::menu_openclaw_agents(),
         NavItem::Settings => texts::menu_settings(),
         NavItem::Exit => texts::menu_exit(),
     }
@@ -171,6 +175,10 @@ pub(super) fn nav_label_variants(item: NavItem) -> (&'static str, &'static str) 
         NavItem::Prompts => texts::menu_manage_prompts_variants(),
         NavItem::Config => texts::menu_manage_config_variants(),
         NavItem::Skills => texts::menu_manage_skills_variants(),
+        NavItem::OpenClawWorkspace => texts::menu_openclaw_workspace_variants(),
+        NavItem::OpenClawEnv => texts::menu_openclaw_env_variants(),
+        NavItem::OpenClawTools => texts::menu_openclaw_tools_variants(),
+        NavItem::OpenClawAgents => texts::menu_openclaw_agents_variants(),
         NavItem::Settings => texts::menu_settings_variants(),
         NavItem::Exit => texts::menu_exit_variants(),
     }
@@ -186,6 +194,7 @@ pub(super) fn nav_pane_width(theme: &super::theme::Theme) -> u16 {
 
     let max_text_width = NavItem::ALL
         .iter()
+        .chain(NavItem::OPENCLAW_ALL.iter())
         .flat_map(|item| {
             let (en, zh) = nav_label_variants(*item);
             [en, zh]
@@ -213,7 +222,7 @@ pub(super) fn render_nav(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let rows = NavItem::ALL.iter().map(|item| {
+    let rows = app.nav_items().iter().map(|item| {
         let (icon, text) = split_nav_label(nav_label(*item));
         let icon_clean = cell_pad(icon).replace('\u{FE0F}', "");
         Row::new(vec![Cell::from(icon_clean), Cell::from(text)])

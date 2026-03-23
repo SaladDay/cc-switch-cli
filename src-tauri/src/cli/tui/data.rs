@@ -5,6 +5,7 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 use crate::app_config::{AppType, CommonConfigSnippets, McpServer};
+use crate::commands::workspace::{self, DailyMemoryFileInfo, ALLOWED_FILES};
 use crate::error::AppError;
 use crate::openclaw_config::{
     OpenClawAgentsDefaults, OpenClawEnvConfig, OpenClawHealthWarning, OpenClawToolsConfig,
@@ -70,6 +71,14 @@ pub struct ConfigSnapshot {
     pub openclaw_tools: Option<OpenClawToolsConfig>,
     pub openclaw_agents_defaults: Option<OpenClawAgentsDefaults>,
     pub openclaw_warnings: Option<Vec<OpenClawHealthWarning>>,
+    pub openclaw_workspace: OpenClawWorkspaceSnapshot,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OpenClawWorkspaceSnapshot {
+    pub directory_path: PathBuf,
+    pub file_exists: HashMap<String, bool>,
+    pub daily_memory_files: Vec<DailyMemoryFileInfo>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -414,6 +423,7 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
         (common_snippet, common_snippets)
     };
     let openclaw_snapshot = load_openclaw_config_snapshot(app_type)?;
+    let openclaw_workspace = load_openclaw_workspace_snapshot(app_type)?;
 
     Ok(ConfigSnapshot {
         config_path,
@@ -438,6 +448,7 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
             .as_ref()
             .and_then(|snapshot| snapshot.agents_defaults.clone()),
         openclaw_warnings: openclaw_snapshot.map(|snapshot| snapshot.warnings),
+        openclaw_workspace,
     })
 }
 
@@ -458,25 +469,68 @@ fn load_openclaw_config_snapshot(
         return Ok(None);
     }
 
-    let warnings = crate::openclaw_config::scan_openclaw_config_health()?;
-    let env = load_openclaw_slice("env", crate::openclaw_config::get_env_config)?;
-    let tools = load_openclaw_slice("tools", crate::openclaw_config::get_tools_config)?;
+    let mut warnings = crate::openclaw_config::scan_openclaw_config_health()?;
+    let env = load_openclaw_slice(
+        "env",
+        "env",
+        crate::openclaw_config::get_env_config,
+        &mut warnings,
+    )?;
+    let tools = load_openclaw_optional_slice(
+        "tools",
+        "tools",
+        crate::openclaw_config::get_tools_config,
+        &mut warnings,
+    )?;
     let agents_defaults = load_openclaw_slice(
         "agents.defaults",
+        "agents.defaults",
         crate::openclaw_config::get_agents_defaults,
+        &mut warnings,
     )?;
 
     Ok(Some(OpenClawConfigSnapshot {
         config_path: crate::openclaw_config::get_openclaw_config_path(),
         config_dir: crate::openclaw_config::get_openclaw_dir(),
         env: Some(env),
-        tools: Some(tools),
+        tools,
         agents_defaults,
         warnings,
     }))
 }
 
-fn load_openclaw_slice<T, F>(section_name: &'static str, loader: F) -> Result<T, AppError>
+fn load_openclaw_optional_slice<T, F>(
+    section_name: &'static str,
+    warning_path: &'static str,
+    loader: F,
+    warnings: &mut Vec<OpenClawHealthWarning>,
+) -> Result<Option<T>, AppError>
+where
+    F: FnOnce() -> Result<T, AppError>,
+{
+    match loader() {
+        Ok(value) => Ok(Some(value)),
+        Err(AppError::Config(message)) => {
+            log::warn!(
+                "Failed to load OpenClaw config section '{section_name}' for TUI snapshot: {message}"
+            );
+            warnings.push(OpenClawHealthWarning {
+                code: "config_parse_failed".to_string(),
+                message,
+                path: Some(warning_path.to_string()),
+            });
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn load_openclaw_slice<T, F>(
+    section_name: &'static str,
+    warning_path: &'static str,
+    loader: F,
+    warnings: &mut Vec<OpenClawHealthWarning>,
+) -> Result<T, AppError>
 where
     T: Default,
     F: FnOnce() -> Result<T, AppError>,
@@ -487,10 +541,40 @@ where
             log::warn!(
                 "Failed to load OpenClaw config section '{section_name}' for TUI snapshot: {message}"
             );
+            warnings.push(OpenClawHealthWarning {
+                code: "config_parse_failed".to_string(),
+                message,
+                path: Some(warning_path.to_string()),
+            });
             Ok(T::default())
         }
         Err(err) => Err(err),
     }
+}
+
+fn load_openclaw_workspace_snapshot(
+    app_type: &AppType,
+) -> Result<OpenClawWorkspaceSnapshot, AppError> {
+    if !matches!(app_type, AppType::OpenClaw) {
+        return Ok(OpenClawWorkspaceSnapshot::default());
+    }
+
+    let directory_path = crate::openclaw_config::get_openclaw_dir().join("workspace");
+    let file_exists = ALLOWED_FILES
+        .iter()
+        .map(|filename| {
+            let exists = workspace::workspace_file_exists((*filename).to_string())?;
+            Ok(((*filename).to_string(), exists))
+        })
+        .collect::<Result<HashMap<_, _>, String>>()
+        .map_err(AppError::Message)?;
+    let daily_memory_files = workspace::list_daily_memory_files().map_err(AppError::Message)?;
+
+    Ok(OpenClawWorkspaceSnapshot {
+        directory_path,
+        file_exists,
+        daily_memory_files,
+    })
 }
 
 pub(crate) fn load_proxy_config() -> Result<Option<crate::proxy::ProxyConfig>, AppError> {
@@ -875,6 +959,38 @@ mod tests {
 
     #[test]
     #[serial]
+    fn openclaw_config_snapshot_keeps_tools_parse_warning_when_tools_section_is_malformed() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("tempdir");
+        let _home = HomeGuard::set(temp.path());
+
+        let openclaw_dir = temp.path().join("openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let source = r#"{
+  tools: {
+    profile: 'coding',
+    allow: 'Read',
+  },
+}"#;
+        std::fs::write(openclaw_dir.join("openclaw.json"), source).expect("write openclaw config");
+
+        let state = load_state().expect("load state");
+        let snapshot = load_config_snapshot(&state, &AppType::OpenClaw).expect("load snapshot");
+
+        assert!(snapshot
+            .openclaw_warnings
+            .as_ref()
+            .is_some_and(|warnings| warnings
+                .iter()
+                .any(|warning| warning.code == "config_parse_failed"
+                    && warning.path.as_deref() == Some("tools"))));
+        assert!(snapshot.openclaw_tools.is_none());
+    }
+
+    #[test]
+    #[serial]
     fn non_openclaw_config_snapshot_leaves_openclaw_fields_unset() {
         let _guard = lock_test_home_and_settings();
         let temp = tempdir().expect("tempdir");
@@ -889,6 +1005,25 @@ mod tests {
         assert!(snapshot.openclaw_tools.is_none());
         assert!(snapshot.openclaw_agents_defaults.is_none());
         assert!(snapshot.openclaw_warnings.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_workspace_snapshot_uses_presence_probe_for_invalid_utf8_file() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(openclaw_dir.join("workspace")).expect("create workspace dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        std::fs::write(openclaw_dir.join("workspace/AGENTS.md"), [0xff, 0xfe, 0xfd])
+            .expect("write invalid utf8 workspace file");
+
+        let snapshot =
+            load_openclaw_workspace_snapshot(&AppType::OpenClaw).expect("load workspace snapshot");
+
+        assert_eq!(snapshot.file_exists.get("AGENTS.md"), Some(&true));
     }
 
     #[test]

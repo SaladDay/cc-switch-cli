@@ -1,5 +1,6 @@
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
+use crate::commands::workspace;
 use crate::error::AppError;
 use crate::services::{ConfigService, ProviderService};
 use crate::settings::set_webdav_sync_settings;
@@ -9,6 +10,7 @@ use super::super::data::{load_state, UiData};
 use super::super::runtime_systems::{WebDavReq, WebDavReqKind};
 use super::helpers::{
     export_target, open_proxy_help as open_proxy_help_overlay, refresh_common_snippet_overlay,
+    refresh_openclaw_daily_memory_search_results, refresh_openclaw_workspace_data,
 };
 use super::RuntimeActionContext;
 
@@ -264,6 +266,105 @@ pub(super) fn reset(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> 
         );
     }
     *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+pub(super) fn open_openclaw_workspace_file(
+    ctx: &mut RuntimeActionContext<'_>,
+    filename: String,
+) -> Result<(), AppError> {
+    let content = workspace::read_workspace_file(filename.clone()).map_err(|err| {
+        AppError::Message(texts::tui_openclaw_workspace_open_failed(&filename, &err))
+    })?;
+    ctx.app.open_editor(
+        texts::tui_openclaw_workspace_editor_title(&filename),
+        crate::cli::tui::app::EditorKind::Plain,
+        content.unwrap_or_default(),
+        crate::cli::tui::app::EditorSubmit::OpenClawWorkspaceFile { filename },
+    );
+    Ok(())
+}
+
+pub(super) fn open_openclaw_daily_memory_file(
+    ctx: &mut RuntimeActionContext<'_>,
+    filename: String,
+) -> Result<(), AppError> {
+    let content = workspace::read_daily_memory_file(filename.clone()).map_err(|err| {
+        AppError::Message(texts::tui_openclaw_daily_memory_open_failed(
+            &filename, &err,
+        ))
+    })?;
+    ctx.app.open_editor(
+        texts::tui_openclaw_daily_memory_editor_title(&filename),
+        crate::cli::tui::app::EditorKind::Plain,
+        content.unwrap_or_default(),
+        crate::cli::tui::app::EditorSubmit::OpenClawDailyMemoryFile { filename },
+    );
+    Ok(())
+}
+
+pub(super) fn search_openclaw_daily_memory(
+    ctx: &mut RuntimeActionContext<'_>,
+    query: String,
+) -> Result<(), AppError> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        ctx.app.openclaw_daily_memory_search_query.clear();
+        ctx.app.openclaw_daily_memory_search_results.clear();
+        ctx.app.daily_memory_idx = 0;
+        return Ok(());
+    }
+
+    ctx.app.openclaw_daily_memory_search_query = trimmed.to_string();
+    ctx.app.openclaw_daily_memory_search_results =
+        workspace::search_daily_memory_files(trimmed.to_string()).map_err(|err| {
+            AppError::Message(texts::tui_openclaw_daily_memory_search_failed(&err))
+        })?;
+    ctx.app.daily_memory_idx = 0;
+    Ok(())
+}
+
+pub(super) fn delete_openclaw_daily_memory(
+    ctx: &mut RuntimeActionContext<'_>,
+    filename: String,
+) -> Result<(), AppError> {
+    workspace::delete_daily_memory_file(filename.clone()).map_err(|err| {
+        AppError::Message(texts::tui_openclaw_daily_memory_delete_failed(
+            &filename, &err,
+        ))
+    })?;
+    ctx.app.push_toast(
+        texts::tui_openclaw_daily_memory_deleted(&filename),
+        ToastKind::Success,
+    );
+    refresh_openclaw_workspace_data(ctx.app, ctx.data).map_err(|err| {
+        AppError::Message(texts::tui_openclaw_daily_memory_refresh_failed(
+            &err.to_string(),
+        ))
+    })
+}
+
+pub(super) fn open_openclaw_directory(
+    ctx: &mut RuntimeActionContext<'_>,
+    subdir: String,
+) -> Result<(), AppError> {
+    if let Err(err) = workspace::open_workspace_directory((), subdir.clone()) {
+        ctx.app.push_toast(
+            if subdir == "memory" {
+                texts::tui_openclaw_memory_directory_open_failed(&err)
+            } else {
+                texts::tui_openclaw_workspace_directory_open_failed(&err)
+            },
+            ToastKind::Error,
+        );
+        return Ok(());
+    }
+
+    refresh_openclaw_daily_memory_search_results(ctx.app).map_err(|err| {
+        AppError::Message(texts::tui_openclaw_daily_memory_refresh_failed(
+            &err.to_string(),
+        ))
+    })?;
     Ok(())
 }
 

@@ -10,7 +10,15 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
-    use crate::cli::i18n::texts;
+    use crate::cli::i18n::{texts, use_test_language, Language};
+    use crate::cli::tui::data::ProviderRow;
+    use crate::cli::tui::runtime_actions::handle_action;
+    use crate::cli::tui::runtime_systems::RequestTracker;
+    use crate::cli::tui::terminal::TuiTerminal;
+    use crate::commands::workspace::{DailyMemoryFileInfo, DailyMemorySearchResult, ALLOWED_FILES};
+    use crate::error::AppError;
+    use crate::provider::Provider;
+    use crate::settings::{get_settings, update_settings, AppSettings};
     use crate::test_support::{
         lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
     };
@@ -53,6 +61,26 @@ mod tests {
         }
     }
 
+    struct SettingsGuard {
+        previous: AppSettings,
+    }
+
+    impl SettingsGuard {
+        fn with_openclaw_dir(path: &Path) -> Self {
+            let previous = get_settings();
+            let mut settings = AppSettings::default();
+            settings.openclaw_config_dir = Some(path.display().to_string());
+            update_settings(settings).expect("set openclaw override dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            update_settings(self.previous.clone()).expect("restore previous settings");
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -63,6 +91,80 @@ mod tests {
 
     fn data() -> UiData {
         UiData::default()
+    }
+
+    fn nav_index(app: &App, item: NavItem) -> usize {
+        app.nav_items()
+            .iter()
+            .position(|candidate| *candidate == item)
+            .expect("nav item should be visible for app")
+    }
+
+    fn workspace_row_index(row: OpenClawWorkspaceRow) -> usize {
+        openclaw_workspace_rows()
+            .iter()
+            .position(|candidate| *candidate == row)
+            .expect("workspace row should exist")
+    }
+
+    fn run_runtime_action(
+        app: &mut App,
+        data: &mut UiData,
+        action: Action,
+    ) -> Result<(), AppError> {
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+
+        handle_action(
+            &mut terminal,
+            app,
+            data,
+            None,
+            None,
+            None,
+            None,
+            &mut proxy_loading,
+            None,
+            None,
+            &mut webdav_loading,
+            None,
+            &mut update_check,
+            None,
+            action,
+        )
+    }
+
+    fn openclaw_provider_row(id: &str, name: &str, models: &[(&str, &str)]) -> ProviderRow {
+        let settings_config = json!({
+            "models": models
+                .iter()
+                .map(|(model_id, model_name)| json!({ "id": model_id, "name": model_name }))
+                .collect::<Vec<_>>()
+        });
+
+        ProviderRow {
+            id: id.to_string(),
+            provider: Provider::with_id(id.to_string(), name.to_string(), settings_config, None),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: models.first().map(|(model_id, _)| (*model_id).to_string()),
+            default_model_id: None,
+        }
+    }
+
+    fn openclaw_agents_runtime_form(
+        defaults: Option<&crate::openclaw_config::OpenClawAgentsDefaults>,
+        row: usize,
+    ) -> OpenClawAgentsFormState {
+        let mut form = OpenClawAgentsFormState::from_snapshot(defaults);
+        form.section = OpenClawAgentsSection::Runtime;
+        form.row = row;
+        form
     }
 
     #[test]
@@ -2207,17 +2309,20 @@ mod tests {
     }
 
     #[test]
-    fn openclaw_config_menu_exposes_env_tools_and_agents_items() {
+    fn openclaw_config_menu_hides_workspace_env_tools_and_agents_items() {
         let app = App::new(Some(AppType::OpenClaw));
         let items = visible_config_items(&app.filter, &app.app_type);
 
-        assert!(items
+        assert!(!items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawWorkspace)));
+        assert!(!items
             .iter()
             .any(|item| matches!(item, ConfigItem::OpenClawEnv)));
-        assert!(items
+        assert!(!items
             .iter()
             .any(|item| matches!(item, ConfigItem::OpenClawTools)));
-        assert!(items
+        assert!(!items
             .iter()
             .any(|item| matches!(item, ConfigItem::OpenClawAgents)));
     }
@@ -2225,6 +2330,12 @@ mod tests {
     #[test]
     fn openclaw_config_item_metadata_keeps_visibility_label_route_and_title_aligned() {
         let cases = [
+            (
+                ConfigItem::OpenClawWorkspace,
+                texts::tui_config_item_openclaw_workspace(),
+                texts::tui_openclaw_workspace_title(),
+                Route::ConfigOpenClawWorkspace,
+            ),
             (
                 ConfigItem::OpenClawEnv,
                 texts::tui_config_item_openclaw_env(),
@@ -2239,7 +2350,7 @@ mod tests {
             ),
             (
                 ConfigItem::OpenClawAgents,
-                texts::tui_config_item_openclaw_agents_defaults(),
+                texts::tui_config_item_openclaw_agents(),
                 texts::tui_openclaw_config_agents_title(),
                 Route::ConfigOpenClawAgents,
             ),
@@ -2264,6 +2375,9 @@ mod tests {
 
         assert!(!items
             .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawWorkspace)));
+        assert!(!items
+            .iter()
             .any(|item| matches!(item, ConfigItem::OpenClawEnv)));
         assert!(!items
             .iter()
@@ -2274,14 +2388,10 @@ mod tests {
     }
 
     #[test]
-    fn openclaw_config_route_env_enter_opens_dedicated_subroute() {
+    fn openclaw_nav_env_enter_opens_dedicated_subroute() {
         let mut app = App::new(Some(AppType::OpenClaw));
-        app.route = Route::Config;
-        app.focus = Focus::Content;
-        app.config_idx = visible_config_items(&app.filter, &app.app_type)
-            .iter()
-            .position(|item| matches!(item, ConfigItem::OpenClawEnv))
-            .expect("OpenClaw Env config item should be visible");
+        app.focus = Focus::Nav;
+        app.nav_idx = nav_index(&app, NavItem::OpenClawEnv);
 
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
 
@@ -2290,17 +2400,758 @@ mod tests {
             Action::SwitchRoute(Route::ConfigOpenClawEnv)
         ));
         assert!(matches!(app.route, Route::ConfigOpenClawEnv));
+        assert_eq!(app.route_stack, vec![Route::Main]);
     }
 
     #[test]
-    fn openclaw_config_route_tools_enter_opens_dedicated_subroute() {
+    fn openclaw_nav_workspace_enter_opens_dedicated_subroute() {
         let mut app = App::new(Some(AppType::OpenClaw));
-        app.route = Route::Config;
+        app.focus = Focus::Nav;
+        app.nav_idx = nav_index(&app, NavItem::OpenClawWorkspace);
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigOpenClawWorkspace)
+        ));
+        assert!(matches!(app.route, Route::ConfigOpenClawWorkspace));
+        assert_eq!(app.route_stack, vec![Route::Main]);
+    }
+
+    #[test]
+    fn openclaw_nav_split_keeps_non_openclaw_generic_routes() {
+        let cases = [
+            (NavItem::Mcp, Route::Mcp),
+            (NavItem::Skills, Route::Skills),
+            (NavItem::Prompts, Route::Prompts),
+            (NavItem::Config, Route::Config),
+        ];
+
+        for (nav_item, expected_route) in cases {
+            let mut app = App::new(Some(AppType::Claude));
+            app.focus = Focus::Nav;
+            app.nav_idx = nav_index(&app, nav_item);
+
+            let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+            assert!(matches!(
+                action,
+                Action::SwitchRoute(actual) if actual == expected_route
+            ));
+            assert_eq!(app.route, expected_route);
+            assert_eq!(app.route_stack, vec![Route::Main]);
+        }
+    }
+
+    #[test]
+    fn openclaw_workspace_route_enter_opens_workspace_file() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawWorkspace;
         app.focus = Focus::Content;
-        app.config_idx = visible_config_items(&app.filter, &app.app_type)
+        app.workspace_idx = workspace_row_index(OpenClawWorkspaceRow::File(ALLOWED_FILES[0]));
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::OpenClawWorkspaceOpenFile { filename }
+                if filename == ALLOWED_FILES[0]
+        ));
+    }
+
+    #[test]
+    fn openclaw_workspace_route_enter_on_daily_memory_row_from_nav_opens_daily_memory_route() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawWorkspace;
+        app.route_stack = vec![Route::Main];
+        app.focus = Focus::Content;
+        app.workspace_idx = workspace_row_index(OpenClawWorkspaceRow::DailyMemory);
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigOpenClawDailyMemory)
+        ));
+        assert!(matches!(app.route, Route::ConfigOpenClawDailyMemory));
+        assert_eq!(
+            app.route_stack,
+            vec![Route::Main, Route::ConfigOpenClawWorkspace]
+        );
+    }
+
+    #[test]
+    fn openclaw_daily_memory_entry_clears_stale_global_filter_state() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawWorkspace;
+        app.route_stack = vec![Route::Config];
+        app.focus = Focus::Content;
+        app.workspace_idx = workspace_row_index(OpenClawWorkspaceRow::DailyMemory);
+        app.filter.buffer = "workspace".to_string();
+        app.openclaw_daily_memory_search_results = vec![DailyMemorySearchResult {
+            filename: "2026-03-20.md".to_string(),
+            date: "2026-03-20".to_string(),
+            size_bytes: 12,
+            modified_at: 1,
+            snippet: "stale".to_string(),
+            match_count: 1,
+        }];
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigOpenClawDailyMemory)
+        ));
+        assert_eq!(app.route, Route::ConfigOpenClawDailyMemory);
+        assert!(!app.filter.active);
+        assert!(app.filter.buffer.is_empty());
+        assert!(app.openclaw_daily_memory_search_results.is_empty());
+    }
+
+    #[test]
+    fn openclaw_daily_memory_back_returns_to_workspace_route() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.route_stack = vec![Route::Main, Route::ConfigOpenClawWorkspace];
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Esc), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigOpenClawWorkspace)
+        ));
+        assert_eq!(app.route, Route::ConfigOpenClawWorkspace);
+        assert_eq!(app.focus, Focus::Content);
+    }
+
+    #[test]
+    fn openclaw_daily_memory_exit_clears_route_local_search_state() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.route_stack = vec![Route::Main, Route::ConfigOpenClawWorkspace];
+        app.focus = Focus::Content;
+        app.filter.buffer = "focus".to_string();
+        app.openclaw_daily_memory_search_results = vec![DailyMemorySearchResult {
+            filename: "2026-03-20.md".to_string(),
+            date: "2026-03-20".to_string(),
+            size_bytes: 12,
+            modified_at: 1,
+            snippet: "focus".to_string(),
+            match_count: 1,
+        }];
+
+        let action = app.on_key(key(KeyCode::Esc), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigOpenClawWorkspace)
+        ));
+        assert_eq!(app.route, Route::ConfigOpenClawWorkspace);
+        assert!(!app.filter.active);
+        assert!(app.filter.buffer.is_empty());
+        assert!(app.openclaw_daily_memory_search_results.is_empty());
+    }
+
+    #[test]
+    fn openclaw_daily_memory_create_prefills_today_filename() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.focus = Focus::Content;
+        let before = chrono::Local::now().format("%Y-%m-%d.md").to_string();
+
+        let action = app.on_key(key(KeyCode::Char('a')), &UiData::default());
+
+        let after = chrono::Local::now().format("%Y-%m-%d.md").to_string();
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::TextInput(TextInputState { submit, buffer, .. })
+                if *submit == TextSubmit::OpenClawDailyMemoryFilename
+                    && (buffer == &before || buffer == &after)
+        ));
+    }
+
+    #[test]
+    fn openclaw_daily_memory_invalid_filename_is_rejected_before_editor_open() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: texts::tui_openclaw_daily_memory_create_title().to_string(),
+            prompt: texts::tui_openclaw_daily_memory_create_prompt().to_string(),
+            buffer: "bad-name.md".to_string(),
+            submit: TextSubmit::OpenClawDailyMemoryFilename,
+            secret: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(
+            app.editor.is_none(),
+            "invalid filename should not open the editor"
+        );
+        assert!(matches!(
+            &app.overlay,
+            Overlay::TextInput(TextInputState { buffer, .. }) if buffer == "bad-name.md"
+        ));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Warning,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn openclaw_daily_memory_enter_dispatches_open_for_selected_file() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_workspace.daily_memory_files = vec![DailyMemoryFileInfo {
+            filename: "2026-03-20.md".to_string(),
+            date: "2026-03-20".to_string(),
+            size_bytes: 12,
+            modified_at: 1,
+            preview: "hello".to_string(),
+        }];
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(
+            action,
+            Action::OpenClawDailyMemoryOpenFile { filename }
+                if filename == "2026-03-20.md"
+        ));
+    }
+
+    #[test]
+    fn openclaw_daily_memory_delete_requires_confirmation() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_workspace.daily_memory_files = vec![DailyMemoryFileInfo {
+            filename: "2026-03-20.md".to_string(),
+            date: "2026-03-20".to_string(),
+            size_bytes: 12,
+            modified_at: 1,
+            preview: "hello".to_string(),
+        }];
+
+        let action = app.on_key(key(KeyCode::Char('d')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::OpenClawDailyMemoryDelete { filename },
+                ..
+            }) if filename == "2026-03-20.md"
+        ));
+    }
+
+    #[test]
+    fn openclaw_workspace_o_dispatches_open_workspace_directory() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawWorkspace;
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Char('o')), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::OpenClawOpenDirectory { subdir } if subdir.is_empty()
+        ));
+    }
+
+    #[test]
+    fn openclaw_daily_memory_o_dispatches_open_memory_directory() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Char('o')), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::OpenClawOpenDirectory { subdir } if subdir == "memory"
+        ));
+    }
+
+    #[test]
+    fn openclaw_daily_memory_search_edits_filter_buffer_while_filtering() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.filter.active = true;
+
+        let action = app.on_key(key(KeyCode::Char('m')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.filter.buffer, "m");
+    }
+
+    #[test]
+    fn openclaw_daily_memory_search_dispatches_on_enter_after_filter_edits() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.filter.active = true;
+        app.filter.buffer = "focus".to_string();
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::OpenClawDailyMemorySearch { query } if query == "focus"
+        ));
+        assert!(!app.filter.active);
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_workspace_open_missing_file_loads_empty_editor_state() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawWorkspace;
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::OpenClawWorkspaceOpenFile {
+                filename: "AGENTS.md".to_string(),
+            },
+        )
+        .expect("open workspace file action should succeed");
+
+        let editor = app
+            .editor
+            .as_ref()
+            .expect("missing workspace file should open an editor");
+        assert!(matches!(editor.kind, EditorKind::Plain));
+        assert_eq!(
+            editor.submit,
+            EditorSubmit::OpenClawWorkspaceFile {
+                filename: "AGENTS.md".to_string()
+            }
+        );
+        assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_workspace_save_refreshes_existence_state_after_editor_submit() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawWorkspace;
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit {
+                submit: EditorSubmit::OpenClawWorkspaceFile {
+                    filename: "AGENTS.md".to_string(),
+                },
+                content: "workspace body".to_string(),
+            },
+        )
+        .expect("save workspace file");
+
+        assert!(app.editor.is_none());
+        assert_eq!(app.route, Route::ConfigOpenClawWorkspace);
+        assert_eq!(
+            data.config
+                .openclaw_workspace
+                .file_exists
+                .get("AGENTS.md")
+                .copied(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_daily_memory_open_existing_file_loads_editor_state() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(openclaw_dir.join("workspace/memory")).expect("create memory dir");
+        std::fs::write(
+            openclaw_dir.join("workspace/memory/2026-03-20.md"),
+            "hello memory",
+        )
+        .expect("seed memory file");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::OpenClawDailyMemoryOpenFile {
+                filename: "2026-03-20.md".to_string(),
+            },
+        )
+        .expect("open daily memory file");
+
+        let editor = app
+            .editor
+            .as_ref()
+            .expect("daily memory editor should open");
+        assert_eq!(editor.text(), "hello memory");
+        assert_eq!(
+            editor.submit,
+            EditorSubmit::OpenClawDailyMemoryFile {
+                filename: "2026-03-20.md".to_string()
+            }
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_workspace_open_failure_is_localized() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        let workspace_dir = openclaw_dir.join("workspace");
+        std::fs::create_dir_all(&workspace_dir).expect("create workspace dir");
+        let target = temp_home.path().join("outside.md");
+        std::fs::write(&target, "outside").expect("seed target file");
+        std::os::unix::fs::symlink(&target, workspace_dir.join("AGENTS.md"))
+            .expect("create workspace symlink");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawWorkspace;
+        let mut data = UiData::default();
+
+        let err = run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::OpenClawWorkspaceOpenFile {
+                filename: "AGENTS.md".to_string(),
+            },
+        )
+        .expect_err("workspace open should fail for symlinked file");
+
+        assert_eq!(
+            err.to_string(),
+            texts::tui_openclaw_workspace_open_failed(
+                "AGENTS.md",
+                &format!(
+                    "Refusing to read workspace file symlink: {}",
+                    workspace_dir.join("AGENTS.md").display()
+                )
+            )
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_daily_memory_create_existing_filename_reopens_existing_content() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(openclaw_dir.join("workspace/memory")).expect("create memory dir");
+        std::fs::write(
+            openclaw_dir.join("workspace/memory/2026-03-20.md"),
+            "existing content",
+        )
+        .expect("seed memory file");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: texts::tui_openclaw_daily_memory_create_title().to_string(),
+            prompt: texts::tui_openclaw_daily_memory_create_prompt().to_string(),
+            buffer: "2026-03-20.md".to_string(),
+            submit: TextSubmit::OpenClawDailyMemoryFilename,
+            secret: false,
+        });
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(
+            action,
+            Action::OpenClawDailyMemoryOpenFile { ref filename } if filename == "2026-03-20.md"
+        ));
+
+        run_runtime_action(&mut app, &mut data, action).expect("open existing daily memory file");
+
+        let editor = app
+            .editor
+            .as_ref()
+            .expect("existing file should open in editor");
+        assert_eq!(editor.text(), "existing content");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_daily_memory_create_stale_snapshot_still_reopens_existing_content() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(openclaw_dir.join("workspace/memory")).expect("create memory dir");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: texts::tui_openclaw_daily_memory_create_title().to_string(),
+            prompt: texts::tui_openclaw_daily_memory_create_prompt().to_string(),
+            buffer: "2026-03-20.md".to_string(),
+            submit: TextSubmit::OpenClawDailyMemoryFilename,
+            secret: false,
+        });
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+
+        std::fs::write(
+            openclaw_dir.join("workspace/memory/2026-03-20.md"),
+            "late content",
+        )
+        .expect("seed memory file after snapshot load");
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(
+            action,
+            Action::OpenClawDailyMemoryOpenFile { ref filename } if filename == "2026-03-20.md"
+        ));
+
+        run_runtime_action(&mut app, &mut data, action)
+            .expect("open existing daily memory file from stale snapshot");
+
+        let editor = app
+            .editor
+            .as_ref()
+            .expect("existing file should open in editor");
+        assert_eq!(editor.text(), "late content");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_daily_memory_save_failure_is_localized() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        let workspace_dir = openclaw_dir.join("workspace");
+        std::fs::create_dir_all(&workspace_dir).expect("create workspace dir");
+        let target = temp_home.path().join("memory-target");
+        std::fs::create_dir_all(&target).expect("create symlink target dir");
+        std::os::unix::fs::symlink(&target, workspace_dir.join("memory"))
+            .expect("create memory dir symlink");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        let mut data = UiData::default();
+
+        let err = run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit {
+                submit: EditorSubmit::OpenClawDailyMemoryFile {
+                    filename: "2026-03-20.md".to_string(),
+                },
+                content: "hello".to_string(),
+            },
+        )
+        .expect_err("daily memory save should fail for symlinked memory dir");
+
+        assert_eq!(
+            err.to_string(),
+            texts::tui_openclaw_daily_memory_save_failed(
+                "2026-03-20.md",
+                &format!(
+                    "Refusing to use symlinked daily memory directory: {}",
+                    workspace_dir.join("memory").display()
+                )
+            )
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_daily_memory_save_refreshes_list_and_active_search_results() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(openclaw_dir.join("workspace/memory")).expect("create memory dir");
+        std::fs::write(
+            openclaw_dir.join("workspace/memory/2026-03-19.md"),
+            "old note",
+        )
+        .expect("seed old memory file");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.filter.buffer = "focus".to_string();
+        app.openclaw_daily_memory_search_query = "focus".to_string();
+        app.openclaw_daily_memory_search_results = vec![DailyMemorySearchResult {
+            filename: "2026-03-19.md".to_string(),
+            date: "2026-03-19".to_string(),
+            size_bytes: 8,
+            modified_at: 1,
+            snippet: "old".to_string(),
+            match_count: 1,
+        }];
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit {
+                submit: EditorSubmit::OpenClawDailyMemoryFile {
+                    filename: "2026-03-20.md".to_string(),
+                },
+                content: "focus refreshed".to_string(),
+            },
+        )
+        .expect("save daily memory file");
+
+        assert!(app.editor.is_none());
+        assert_eq!(app.route, Route::ConfigOpenClawDailyMemory);
+        assert!(data
+            .config
+            .openclaw_workspace
+            .daily_memory_files
             .iter()
-            .position(|item| matches!(item, ConfigItem::OpenClawTools))
-            .expect("OpenClaw Tools config item should be visible");
+            .any(|row| row.filename == "2026-03-20.md"));
+        assert!(app
+            .openclaw_daily_memory_search_results
+            .iter()
+            .any(|row| row.filename == "2026-03-20.md"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_daily_memory_delete_refreshes_search_results_and_keeps_nearest_row_selected() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(openclaw_dir.join("workspace/memory")).expect("create memory dir");
+        std::fs::write(
+            openclaw_dir.join("workspace/memory/2026-03-20.md"),
+            "focus newest",
+        )
+        .expect("seed newest memory file");
+        std::fs::write(
+            openclaw_dir.join("workspace/memory/2026-03-19.md"),
+            "focus previous",
+        )
+        .expect("seed previous memory file");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        app.filter.buffer = "focus".to_string();
+        app.openclaw_daily_memory_search_query = "focus".to_string();
+        app.daily_memory_idx = 1;
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+        app.openclaw_daily_memory_search_results = vec![
+            DailyMemorySearchResult {
+                filename: "2026-03-20.md".to_string(),
+                date: "2026-03-20".to_string(),
+                size_bytes: 12,
+                modified_at: 2,
+                snippet: "focus newest".to_string(),
+                match_count: 1,
+            },
+            DailyMemorySearchResult {
+                filename: "2026-03-19.md".to_string(),
+                date: "2026-03-19".to_string(),
+                size_bytes: 14,
+                modified_at: 1,
+                snippet: "focus previous".to_string(),
+                match_count: 1,
+            },
+        ];
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::OpenClawDailyMemoryDelete {
+                filename: "2026-03-19.md".to_string(),
+            },
+        )
+        .expect("delete daily memory file");
+
+        assert!(data
+            .config
+            .openclaw_workspace
+            .daily_memory_files
+            .iter()
+            .all(|row| row.filename != "2026-03-19.md"));
+        assert!(app
+            .openclaw_daily_memory_search_results
+            .iter()
+            .all(|row| row.filename != "2026-03-19.md"));
+        assert_eq!(app.daily_memory_idx, 0);
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_open_directory_failure_keeps_route_and_shows_feedback() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let blocked_path = temp_home.path().join("blocked-openclaw");
+        std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawDailyMemory;
+        let mut data = UiData::default();
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::OpenClawOpenDirectory {
+                subdir: "memory".to_string(),
+            },
+        )
+        .expect("failed open-directory action should surface as toast, not hard error");
+
+        assert_eq!(app.route, Route::ConfigOpenClawDailyMemory);
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Error,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn openclaw_nav_tools_enter_opens_dedicated_subroute() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.focus = Focus::Nav;
+        app.nav_idx = nav_index(&app, NavItem::OpenClawTools);
 
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
 
@@ -2309,17 +3160,14 @@ mod tests {
             Action::SwitchRoute(Route::ConfigOpenClawTools)
         ));
         assert!(matches!(app.route, Route::ConfigOpenClawTools));
+        assert_eq!(app.route_stack, vec![Route::Main]);
     }
 
     #[test]
-    fn openclaw_config_route_agents_enter_opens_dedicated_subroute() {
+    fn openclaw_nav_agents_enter_opens_dedicated_subroute() {
         let mut app = App::new(Some(AppType::OpenClaw));
-        app.route = Route::Config;
-        app.focus = Focus::Content;
-        app.config_idx = visible_config_items(&app.filter, &app.app_type)
-            .iter()
-            .position(|item| matches!(item, ConfigItem::OpenClawAgents))
-            .expect("OpenClaw Agents config item should be visible");
+        app.focus = Focus::Nav;
+        app.nav_idx = nav_index(&app, NavItem::OpenClawAgents);
 
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
 
@@ -2328,6 +3176,7 @@ mod tests {
             Action::SwitchRoute(Route::ConfigOpenClawAgents)
         ));
         assert!(matches!(app.route, Route::ConfigOpenClawAgents));
+        assert_eq!(app.route_stack, vec![Route::Main]);
     }
 
     #[test]
@@ -2404,7 +3253,501 @@ mod tests {
     }
 
     #[test]
-    fn openclaw_config_route_tools_enter_opens_tools_editor() {
+    fn openclaw_tools_enter_on_unsupported_profile_opens_picker_without_changing_form() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("unsupported-profile".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(app.overlay.is_active());
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should be initialized");
+        assert_eq!(form.profile.as_deref(), Some("unsupported-profile"));
+        assert_eq!(form.allow, vec!["Read".to_string()]);
+        assert!(form.deny.is_empty());
+    }
+
+    #[test]
+    fn openclaw_tools_profile_enter_opens_picker_with_current_value_preselected() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("minimal".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        let open_action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(open_action, Action::None));
+        assert!(app.overlay.is_active());
+
+        let confirm_action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(confirm_action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should stay initialized");
+        assert_eq!(form.profile.as_deref(), Some("minimal"));
+        assert_eq!(form.allow, vec!["Read".to_string()]);
+    }
+
+    #[test]
+    fn openclaw_tools_profile_e_shortcut_opens_picker_with_current_value_preselected() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("minimal".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::OpenClawToolsProfilePicker { selected: Some(1) }
+        ));
+    }
+
+    #[test]
+    fn openclaw_tools_profile_picker_navigation_does_not_auto_submit() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("minimal".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(app.overlay.is_active());
+
+        let navigate_action = app.on_key(key(KeyCode::Down), &data);
+
+        assert!(matches!(navigate_action, Action::None));
+        assert!(app.overlay.is_active());
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should stay initialized");
+        assert_eq!(form.profile.as_deref(), Some("minimal"));
+        assert_eq!(form.allow, vec!["Read".to_string()]);
+
+        let confirm_action = app.on_key(key(KeyCode::Enter), &data);
+
+        let Action::EditorSubmit { submit, content } = confirm_action else {
+            panic!("expected picker confirmation to auto-submit, got {confirm_action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawTools);
+        assert!(matches!(app.overlay, Overlay::None));
+
+        let saved: crate::openclaw_config::OpenClawToolsConfig =
+            serde_json::from_str(&content).expect("serialize tools form");
+        assert_eq!(saved.profile.as_deref(), Some("coding"));
+        assert_eq!(saved.allow, vec!["Read".to_string()]);
+    }
+
+    #[test]
+    fn openclaw_tools_profile_picker_escape_leaves_form_unchanged() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("full".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: vec!["Exec".to_string()],
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(app.overlay.is_active());
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should stay initialized");
+        assert_eq!(form.profile.as_deref(), Some("full"));
+        assert_eq!(form.allow, vec!["Read".to_string()]);
+        assert_eq!(form.deny, vec!["Exec".to_string()]);
+    }
+
+    #[test]
+    fn openclaw_tools_profile_picker_ctrl_s_is_ignored_while_overlay_is_open() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("minimal".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: vec!["Exec".to_string()],
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::OpenClawToolsProfilePicker { selected: Some(1) }
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::OpenClawToolsProfilePicker { selected: Some(2) }
+        ));
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::OpenClawToolsProfilePicker { selected: Some(2) }
+        ));
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should stay initialized");
+        assert_eq!(form.profile.as_deref(), Some("minimal"));
+        assert_eq!(form.allow, vec!["Read".to_string()]);
+        assert_eq!(form.deny, vec!["Exec".to_string()]);
+    }
+
+    #[test]
+    fn openclaw_tools_profile_picker_unsupported_value_requires_explicit_selection_before_submit() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("unsupported-profile".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(app.overlay.is_active());
+
+        let no_op_action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(no_op_action, Action::None));
+        assert!(app.overlay.is_active());
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should stay initialized");
+        assert_eq!(form.profile.as_deref(), Some("unsupported-profile"));
+        assert_eq!(form.allow, vec!["Read".to_string()]);
+        assert!(form.deny.is_empty());
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let confirm_action = app.on_key(key(KeyCode::Enter), &data);
+
+        let Action::EditorSubmit { submit, content } = confirm_action else {
+            panic!("expected picker confirmation to auto-submit, got {confirm_action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawTools);
+
+        let saved: crate::openclaw_config::OpenClawToolsConfig =
+            serde_json::from_str(&content).expect("serialize tools form");
+        assert_eq!(saved.profile, None);
+        assert_eq!(saved.allow, vec!["Read".to_string()]);
+        assert!(saved.deny.is_empty());
+    }
+
+    #[test]
+    fn openclaw_tools_profile_picker_full_to_unset_with_empty_rules_saves_silently() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("full".to_string()),
+            allow: Vec::new(),
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(app.overlay.is_active());
+        for _ in 0..4 {
+            assert!(matches!(app.on_key(key(KeyCode::Up), &data), Action::None));
+        }
+
+        let confirm_action = app.on_key(key(KeyCode::Enter), &data);
+
+        let Action::EditorSubmit { submit, content } = confirm_action else {
+            panic!("expected picker confirmation to auto-submit, got {confirm_action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawTools);
+
+        let pending: crate::openclaw_config::OpenClawToolsConfig =
+            serde_json::from_str(&content).expect("serialize tools form");
+        assert_eq!(pending.profile, None);
+        assert!(pending.allow.is_empty());
+        assert!(pending.deny.is_empty());
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("picker-driven tools save should succeed");
+
+        assert_eq!(
+            data.config
+                .openclaw_tools
+                .as_ref()
+                .and_then(|tools| tools.profile.as_deref()),
+            None
+        );
+        assert!(
+            app.toast.is_none(),
+            "successful tools auto-save should stay silent"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_tools_profile_picker_confirm_save_failure_shows_error_toast() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let blocked_path = temp_home.path().join("blocked-openclaw");
+        std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("minimal".to_string()),
+            allow: Vec::new(),
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected picker confirmation to auto-submit, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawTools);
+        assert!(matches!(app.overlay, Overlay::None));
+
+        let saved: crate::openclaw_config::OpenClawToolsConfig =
+            serde_json::from_str(&content).expect("serialize tools form");
+        assert_eq!(saved.profile.as_deref(), Some("coding"));
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("picker-confirm save failure should stay in-route and show a toast");
+
+        assert_eq!(app.route, Route::ConfigOpenClawTools);
+        assert!(matches!(app.overlay, Overlay::None));
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should stay initialized after failed save");
+        assert_eq!(form.profile.as_deref(), Some("coding"));
+        let toast = app
+            .toast
+            .as_ref()
+            .expect("save failure should show a toast");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(
+            toast
+                .message
+                .starts_with(texts::tui_toast_openclaw_tools_save_result(false)),
+            "{}",
+            toast.message
+        );
+        assert!(
+            toast.message.contains("blocked-openclaw"),
+            "{}",
+            toast.message
+        );
+    }
+
+    #[test]
+    fn openclaw_tools_rule_popup_accepts_global_hotkey_characters() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer.is_empty()
+        ));
+
+        for ch in ['/', '?', '[', ']', 'q'] {
+            assert!(matches!(
+                app.on_key(key(KeyCode::Char(ch)), &data),
+                Action::None
+            ));
+        }
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer == "/?[]q"
+        ));
+        assert_eq!(app.route, Route::ConfigOpenClawTools);
+        assert_eq!(app.app_type, AppType::OpenClaw);
+        assert!(!app.filter.active, "typing should not open filter mode");
+    }
+
+    #[test]
+    fn openclaw_tools_profile_still_honors_global_help_hotkey() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::Help));
+        assert!(app.openclaw_tools_form.is_none());
+    }
+
+    #[test]
+    fn openclaw_tools_profile_row_still_uses_vim_navigation() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('j')), &data),
+            Action::None
+        ));
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should be initialized");
+        assert_eq!(form.section, OpenClawToolsSection::Allow);
+        assert_eq!(form.row, 0);
+    }
+
+    #[test]
+    fn openclaw_tools_rule_popup_accepts_hjkl_characters() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+
+        for ch in ['h', 'j', 'k', 'l'] {
+            assert!(matches!(
+                app.on_key(key(KeyCode::Char(ch)), &data),
+                Action::None
+            ));
+        }
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer == "hjkl"
+        ));
+    }
+
+    #[test]
+    fn openclaw_tools_enter_on_existing_and_add_rule_rows_opens_popup_editor() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ConfigOpenClawTools;
         app.focus = Focus::Content;
@@ -2417,39 +3760,423 @@ mod tests {
             extra: std::collections::HashMap::new(),
         });
 
-        let action = app.on_key(key(KeyCode::Enter), &data);
-
-        assert!(matches!(action, Action::None));
         assert!(matches!(
-            app.editor
-                .as_ref()
-                .map(|editor| (&editor.kind, &editor.submit)),
-            Some((EditorKind::Json, EditorSubmit::ConfigOpenClawTools))
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
         ));
-        assert_eq!(
-            app.editor.as_ref().map(|editor| editor.title.as_str()),
-            Some(texts::tui_openclaw_config_tools_editor_title())
-        );
-        assert!(app
-            .editor
-            .as_ref()
-            .expect("tools editor should open")
-            .text()
-            .contains("coding"));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer == "Read"
+        ));
+
+        assert!(matches!(app.on_key(key(KeyCode::Esc), &data), Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer.is_empty()
+        ));
     }
 
     #[test]
-    fn openclaw_config_route_agents_enter_opens_agents_editor() {
+    fn openclaw_tools_existing_rule_row_e_shortcut_opens_popup_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer == "Read"
+        ));
+    }
+
+    #[test]
+    fn openclaw_tools_add_rule_row_e_shortcut_opens_popup_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer.is_empty()
+        ));
+    }
+
+    #[test]
+    fn openclaw_tools_e_shortcut_matches_enter_on_non_text_rows() {
+        let make_data = || {
+            let mut data = UiData::default();
+            data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+                profile: Some("coding".to_string()),
+                allow: vec!["Read".to_string()],
+                deny: vec!["Exec".to_string()],
+                extra: std::collections::HashMap::new(),
+            });
+            data
+        };
+        let overlay_signature = |overlay: &Overlay| match overlay {
+            Overlay::OpenClawToolsProfilePicker { selected } => {
+                format!("profile-picker:{selected:?}")
+            }
+            Overlay::TextInput(TextInputState { buffer, .. }) => format!("text-input:{buffer}"),
+            other => panic!("expected tools picker or popup editor, got {other:?}"),
+        };
+
+        for (down_presses, row_name) in [
+            (0usize, "profile"),
+            (1, "allow existing"),
+            (2, "allow add"),
+            (3, "deny existing"),
+            (4, "deny add"),
+        ] {
+            let mut enter_app = App::new(Some(AppType::OpenClaw));
+            enter_app.route = Route::ConfigOpenClawTools;
+            enter_app.focus = Focus::Content;
+            let enter_data = make_data();
+
+            for _ in 0..down_presses {
+                assert!(matches!(
+                    enter_app.on_key(key(KeyCode::Down), &enter_data),
+                    Action::None
+                ));
+            }
+
+            let enter_action = enter_app.on_key(key(KeyCode::Enter), &enter_data);
+            assert!(matches!(enter_action, Action::None));
+            let enter_overlay = overlay_signature(&enter_app.overlay);
+
+            let mut shortcut_app = App::new(Some(AppType::OpenClaw));
+            shortcut_app.route = Route::ConfigOpenClawTools;
+            shortcut_app.focus = Focus::Content;
+            let shortcut_data = make_data();
+
+            for _ in 0..down_presses {
+                assert!(matches!(
+                    shortcut_app.on_key(key(KeyCode::Down), &shortcut_data),
+                    Action::None
+                ));
+            }
+
+            let shortcut_action = shortcut_app.on_key(key(KeyCode::Char('e')), &shortcut_data);
+            assert!(matches!(shortcut_action, Action::None));
+            let shortcut_overlay = overlay_signature(&shortcut_app.overlay);
+
+            assert_eq!(
+                shortcut_overlay, enter_overlay,
+                "e should mirror Enter on the {row_name} row"
+            );
+        }
+    }
+
+    #[test]
+    fn openclaw_tools_existing_rule_popup_cancel_keeps_lists_unchanged() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: vec!["Exec".to_string()],
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('W')), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should stay initialized");
+        assert_eq!(form.allow, vec!["Read".to_string()]);
+        assert_eq!(form.deny, vec!["Exec".to_string()]);
+        assert_eq!(form.section, OpenClawToolsSection::Allow);
+        assert_eq!(form.row, 0);
+    }
+
+    #[test]
+    fn openclaw_tools_add_rule_popup_cancel_keeps_lists_unchanged() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: vec!["Exec".to_string()],
+            extra: std::collections::HashMap::new(),
+        });
+
+        for _ in 0..4 {
+            assert!(matches!(
+                app.on_key(key(KeyCode::Down), &data),
+                Action::None
+            ));
+        }
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer.is_empty()
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('G')), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should stay initialized");
+        assert_eq!(form.allow, vec!["Read".to_string()]);
+        assert_eq!(form.deny, vec!["Exec".to_string()]);
+        assert_eq!(form.section, OpenClawToolsSection::Deny);
+        assert_eq!(form.row, 1);
+    }
+
+    #[test]
+    fn openclaw_tools_rule_popup_empty_confirm_is_rejected_without_saving() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer.is_empty()
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::TextInput(_)));
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should be initialized");
+        assert!(form.allow.is_empty());
+        assert_eq!(form.section, OpenClawToolsSection::Allow);
+        assert_eq!(form.row, 0);
+    }
+
+    #[test]
+    fn openclaw_tools_rule_popup_ctrl_s_does_not_type_or_submit() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer.is_empty()
+        ));
+    }
+
+    #[test]
+    fn openclaw_tools_ctrl_s_on_allow_row_does_not_edit_or_submit() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        assert!(matches!(action, Action::None));
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should be initialized");
+        assert_eq!(form.section, OpenClawToolsSection::Allow);
+        assert_eq!(form.allow, vec!["Read".to_string()]);
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn openclaw_tools_navigation_stops_before_hidden_save_section() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: vec!["Exec".to_string()],
+            extra: std::collections::HashMap::new(),
+        });
+
+        for _ in 0..3 {
+            assert!(matches!(
+                app.on_key(key(KeyCode::Down), &data),
+                Action::None
+            ));
+        }
+
+        let form = app
+            .openclaw_tools_form
+            .as_ref()
+            .expect("tools form should be initialized");
+        assert_eq!(form.section, OpenClawToolsSection::Deny);
+        assert_eq!(form.row, 0);
+    }
+
+    #[test]
+    fn openclaw_agents_enter_opens_picker_without_opening_json_editor() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ConfigOpenClawAgents;
         app.focus = Focus::Content;
 
         let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[("gpt-4.1", "GPT-4.1"), ("gpt-4o-mini", "GPT-4o Mini")],
+        )];
         data.config.openclaw_agents_defaults =
             Some(crate::openclaw_config::OpenClawAgentsDefaults {
                 model: Some(crate::openclaw_config::OpenClawDefaultModel {
-                    primary: "gpt-4.1".to_string(),
-                    fallbacks: vec!["gpt-4o-mini".to_string()],
+                    primary: "demo/gpt-4.1".to_string(),
+                    fallbacks: vec!["demo/gpt-4o-mini".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(app.editor.is_none());
+        assert!(app.openclaw_agents_form.is_some());
+        assert!(matches!(
+            app.overlay,
+            Overlay::OpenClawAgentsFallbackPicker { .. }
+        ));
+    }
+
+    #[test]
+    fn openclaw_agents_primary_model_enter_opens_picker_with_supported_value_preselected() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[
+                ("model-a", "Model A"),
+                ("model-b", "Model B"),
+                ("model-c", "Model C"),
+            ],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/model-b".to_string(),
+                    fallbacks: Vec::new(),
                     extra: std::collections::HashMap::new(),
                 }),
                 models: None,
@@ -2460,46 +4187,2463 @@ mod tests {
 
         assert!(matches!(action, Action::None));
         assert!(matches!(
-            app.editor
-                .as_ref()
-                .map(|editor| (&editor.kind, &editor.submit)),
-            Some((EditorKind::Json, EditorSubmit::ConfigOpenClawAgents))
+            app.overlay,
+            Overlay::OpenClawAgentsFallbackPicker { .. }
         ));
-        assert_eq!(
-            app.editor.as_ref().map(|editor| editor.title.as_str()),
-            Some(texts::tui_openclaw_config_agents_editor_title())
-        );
-        assert!(app
-            .editor
-            .as_ref()
-            .expect("agents editor should open")
-            .text()
-            .contains("gpt-4.1"));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected primary model picker confirmation to auto-submit, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+        assert!(matches!(app.overlay, Overlay::None));
+
+        let saved: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        let model = saved
+            .model
+            .expect("model should be present after auto-save");
+        assert_eq!(model.primary, "demo/model-c");
+        assert!(model.fallbacks.is_empty());
     }
 
     #[test]
-    fn openclaw_config_route_tools_edit_shortcut_opens_tools_editor() {
+    fn openclaw_agents_primary_model_picker_requires_explicit_selection_for_unsupported_value() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[("model-a", "Model A"), ("model-b", "Model B")],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "missing/off-catalog".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::OpenClawAgentsFallbackPicker { .. }
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::OpenClawAgentsFallbackPicker { .. }
+        ));
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.primary_model, "missing/off-catalog");
+    }
+
+    #[test]
+    fn openclaw_agents_primary_model_picker_escape_leaves_value_unchanged() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[("model-a", "Model A"), ("model-b", "Model B")],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/model-b".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.primary_model, "demo/model-b");
+    }
+
+    #[test]
+    fn openclaw_agents_delete_primary_model_auto_submits_cleared_value() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[("model-a", "Model A"), ("model-b", "Model B")],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/model-a".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        let action = app.on_key(key(KeyCode::Delete), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected primary-model delete to auto-submit, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert!(form.primary_model.is_empty());
+
+        let saved: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        assert!(saved.model.is_none(), "{content}");
+    }
+
+    #[test]
+    fn openclaw_agents_backspace_clears_unsupported_primary_model_auto_submits() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[("model-a", "Model A")],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "missing/off-catalog".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        let action = app.on_key(key(KeyCode::Backspace), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected primary-model backspace clear to auto-submit, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert!(form.primary_model.is_empty());
+
+        let saved: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        assert!(saved.model.is_none(), "{content}");
+    }
+
+    #[test]
+    fn openclaw_agents_add_fallback_keeps_form_unchanged_until_picker_confirmation() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[
+                ("primary", "Primary"),
+                ("fallback-a", "Fallback A"),
+                ("fallback-b", "Fallback B"),
+            ],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: vec!["demo/fallback-a".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should be initialized");
+        assert_eq!(form.fallbacks, vec!["demo/fallback-a".to_string()]);
+        assert!(
+            app.overlay.is_active(),
+            "fallback add should open a picker overlay"
+        );
+    }
+
+    #[test]
+    fn openclaw_agents_existing_fallback_enter_opens_picker_excluding_primary_and_other_rows() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[
+                ("primary", "Primary"),
+                ("fallback-a", "Fallback A"),
+                ("fallback-b", "Fallback B"),
+                ("fallback-c", "Fallback C"),
+                ("fallback-d", "Fallback D"),
+            ],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: vec!["demo/fallback-a".to_string(), "demo/fallback-c".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        let Overlay::OpenClawAgentsFallbackPicker { options, .. } = &app.overlay else {
+            panic!(
+                "expected existing fallback edit to open picker, got {:?}",
+                app.overlay
+            );
+        };
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["demo/fallback-b", "demo/fallback-c", "demo/fallback-d"]
+        );
+    }
+
+    #[test]
+    fn openclaw_agents_existing_fallback_picker_escape_leaves_row_unchanged() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[
+                ("primary", "Primary"),
+                ("fallback-a", "Fallback A"),
+                ("fallback-b", "Fallback B"),
+                ("fallback-c", "Fallback C"),
+            ],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: vec!["demo/fallback-a".to_string(), "demo/fallback-c".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(
+            form.fallbacks,
+            vec!["demo/fallback-a".to_string(), "demo/fallback-c".to_string()]
+        );
+        assert_eq!(form.section, OpenClawAgentsSection::FallbackModels);
+        assert_eq!(form.row, 1);
+    }
+
+    #[test]
+    fn openclaw_agents_delete_existing_fallback_auto_submits_removed_value() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[
+                ("primary", "Primary"),
+                ("fallback-a", "Fallback A"),
+                ("fallback-b", "Fallback B"),
+            ],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: vec!["demo/fallback-a".to_string(), "demo/fallback-b".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Delete), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected fallback delete to auto-submit, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+
+        let saved: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        let model = saved.model.expect("model should remain present");
+        assert_eq!(model.primary, "demo/primary");
+        assert_eq!(model.fallbacks, vec!["demo/fallback-a".to_string()]);
+    }
+
+    #[test]
+    fn openclaw_agents_backspace_deletes_existing_fallback_auto_submits_removed_value() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[
+                ("primary", "Primary"),
+                ("fallback-a", "Fallback A"),
+                ("fallback-b", "Fallback B"),
+            ],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: vec!["demo/fallback-a".to_string(), "demo/fallback-b".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Backspace), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected fallback backspace delete to auto-submit, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+
+        let saved: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        let model = saved.model.expect("model should remain present");
+        assert_eq!(model.primary, "demo/primary");
+        assert_eq!(model.fallbacks, vec!["demo/fallback-a".to_string()]);
+    }
+
+    #[test]
+    fn openclaw_agents_navigation_skips_disabled_add_fallback_row_when_no_eligible_models_remain() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[("primary", "Primary"), ("fallback-a", "Fallback A")],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: vec!["demo/fallback-a".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should be initialized");
+        assert_eq!(form.fallbacks, vec!["demo/fallback-a".to_string()]);
+        assert_eq!(form.section, OpenClawAgentsSection::Runtime);
+        assert_eq!(form.row, 0);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn openclaw_agents_disabled_add_fallback_row_still_noops_for_stale_selection_state() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[("primary", "Primary"), ("fallback-a", "Fallback A")],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: vec!["demo/fallback-a".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        let mut form = crate::cli::tui::app::OpenClawAgentsFormState::from_snapshot(
+            data.config.openclaw_agents_defaults.as_ref(),
+        );
+        form.section = OpenClawAgentsSection::FallbackModels;
+        form.row = form.fallbacks.len();
+        app.openclaw_agents_form = Some(form);
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.section, OpenClawAgentsSection::FallbackModels);
+        assert_eq!(form.row, form.fallbacks.len());
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn openclaw_agents_ctrl_s_on_runtime_row_does_not_edit_or_submit() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::from([(
+                    "workspace".to_string(),
+                    json!("existing-workspace"),
+                )]),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        assert!(matches!(action, Action::None));
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should be initialized");
+        assert_eq!(form.section, OpenClawAgentsSection::Runtime);
+        assert_eq!(form.workspace, "existing-workspace");
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn openclaw_agents_ctrl_s_is_ignored_while_model_picker_overlay_is_open() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[("model-a", "Model A"), ("model-b", "Model B")],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/model-a".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::OpenClawAgentsFallbackPicker { .. }
+        ));
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::OpenClawAgentsFallbackPicker { .. }
+        ));
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.primary_model, "demo/model-a");
+        assert!(form.fallbacks.is_empty());
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn openclaw_agents_navigation_stops_before_hidden_save_section() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[("primary", "Primary")],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        for _ in 0..6 {
+            assert!(matches!(
+                app.on_key(key(KeyCode::Down), &data),
+                Action::None
+            ));
+        }
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should be initialized");
+        assert_eq!(form.section, OpenClawAgentsSection::Runtime);
+        assert_eq!(form.row, 3);
+    }
+
+    #[test]
+    fn openclaw_tools_save_preserves_unsupported_profile_without_explicit_change() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ConfigOpenClawTools;
         app.focus = Focus::Content;
 
         let mut data = UiData::default();
         data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
-            profile: Some("messaging".to_string()),
+            profile: Some("unsupported-profile".to_string()),
             allow: vec!["Read".to_string()],
             deny: vec!["Bash".to_string()],
             extra: std::collections::HashMap::new(),
         });
 
-        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('W')), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected tools form save action, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawTools);
+
+        let pending: crate::openclaw_config::OpenClawToolsConfig =
+            serde_json::from_str(&content).expect("serialize tools form");
+        assert_eq!(pending.profile.as_deref(), Some("unsupported-profile"));
+        assert_eq!(pending.allow, vec!["ReadW".to_string()]);
+        assert_eq!(pending.deny, vec!["Bash".to_string()]);
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("structured tools save should succeed");
+
+        assert_eq!(
+            data.config
+                .openclaw_tools
+                .as_ref()
+                .and_then(|tools| tools.profile.as_deref()),
+            Some("unsupported-profile")
+        );
+        assert!(
+            app.toast.is_none(),
+            "successful tools auto-save should stay silent"
+        );
+    }
+
+    #[test]
+    fn openclaw_tools_list_editing_updates_allow_and_deny_entries_before_save() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('W')), &data),
+            Action::None
+        ));
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected tools form save action, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawTools);
+
+        let saved: crate::openclaw_config::OpenClawToolsConfig =
+            serde_json::from_str(&content).expect("serialize tools form");
+        assert_eq!(saved.profile.as_deref(), Some("coding"));
+        assert_eq!(saved.allow, vec!["ReadW".to_string()]);
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        for ch in ['E', 'x', 'e', 'c'] {
+            assert!(matches!(
+                app.on_key(key(KeyCode::Char(ch)), &data),
+                Action::None
+            ));
+        }
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected tools form save action, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawTools);
+
+        let saved: crate::openclaw_config::OpenClawToolsConfig =
+            serde_json::from_str(&content).expect("serialize tools form");
+        assert_eq!(saved.profile.as_deref(), Some("coding"));
+        assert_eq!(saved.allow, vec!["ReadW".to_string()]);
+        assert_eq!(saved.deny, vec!["Exec".to_string()]);
+
+        let delete_action = app.on_key(key(KeyCode::Delete), &data);
+        let Action::EditorSubmit { submit, content } = delete_action else {
+            panic!("expected delete to auto-save, got {delete_action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawTools);
+
+        let saved: crate::openclaw_config::OpenClawToolsConfig =
+            serde_json::from_str(&content).expect("serialize tools form");
+        assert_eq!(saved.allow, vec!["ReadW".to_string()]);
+        assert!(saved.deny.is_empty());
+    }
+
+    #[test]
+    fn openclaw_tools_backspace_on_existing_rule_row_deletes_and_auto_submits() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: vec!["Exec".to_string()],
+            extra: std::collections::HashMap::new(),
+        });
+
+        for _ in 0..3 {
+            assert!(matches!(
+                app.on_key(key(KeyCode::Down), &data),
+                Action::None
+            ));
+        }
+
+        let action = app.on_key(key(KeyCode::Backspace), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected backspace delete to auto-save, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawTools);
+
+        let saved: crate::openclaw_config::OpenClawToolsConfig =
+            serde_json::from_str(&content).expect("serialize tools form");
+        assert_eq!(saved.allow, vec!["Read".to_string()]);
+        assert!(saved.deny.is_empty());
+    }
+
+    #[test]
+    fn openclaw_agents_add_and_remove_fallbacks_without_opening_json_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[
+                ("primary", "Primary"),
+                ("fallback-a", "Fallback A"),
+                ("fallback-b", "Fallback B"),
+            ],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: vec!["demo/fallback-a".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        let _ = app.on_key(key(KeyCode::Enter), &data);
+        let _ = app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(key(KeyCode::Delete), &data);
+        assert!(
+            app.editor.is_none(),
+            "agents route should stay in structured form mode"
+        );
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected agents delete to auto-submit, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+
+        let saved: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        let model = saved.model.expect("model should remain present");
+        assert_eq!(model.primary, "demo/primary");
+        assert_eq!(model.fallbacks, vec!["demo/fallback-a".to_string()]);
+    }
+
+    #[test]
+    fn openclaw_agents_picker_enter_inserts_selected_fallback_and_auto_submits() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[
+                ("primary", "Primary"),
+                ("fallback-a", "Fallback A"),
+                ("fallback-b", "Fallback B"),
+                ("fallback-c", "Fallback C"),
+            ],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: vec!["demo/fallback-a".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected picker confirmation to auto-submit, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+        assert!(matches!(app.overlay, Overlay::None));
+
+        let saved: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        let model = saved.model.expect("model should remain present");
+        assert_eq!(
+            model.fallbacks,
+            vec!["demo/fallback-a".to_string(), "demo/fallback-b".to_string(),]
+        );
+    }
+
+    #[test]
+    fn openclaw_agents_picker_navigation_selects_non_default_fallback() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[
+                ("primary", "Primary"),
+                ("fallback-a", "Fallback A"),
+                ("fallback-b", "Fallback B"),
+                ("fallback-c", "Fallback C"),
+            ],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: vec!["demo/fallback-a".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected picker confirmation to auto-submit, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+
+        let saved: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        let model = saved.model.expect("model should remain present");
+        assert_eq!(
+            model.fallbacks,
+            vec!["demo/fallback-a".to_string(), "demo/fallback-c".to_string(),]
+        );
+    }
+
+    #[test]
+    fn openclaw_agents_picker_escape_leaves_fallbacks_unchanged() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[
+                ("primary", "Primary"),
+                ("fallback-a", "Fallback A"),
+                ("fallback-b", "Fallback B"),
+            ],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: vec!["demo/fallback-a".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should be initialized");
+        assert_eq!(form.fallbacks, vec!["demo/fallback-a".to_string()]);
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_enter_opens_popup_editor_for_selected_row() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            1,
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
 
         assert!(matches!(action, Action::None));
         assert!(matches!(
-            app.editor
-                .as_ref()
-                .map(|editor| (&editor.kind, &editor.submit)),
-            Some((EditorKind::Json, EditorSubmit::ConfigOpenClawTools))
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                ref title,
+                ref prompt,
+                ref buffer,
+                submit: TextSubmit::OpenClawAgentsRuntimeField {
+                    field: OpenClawAgentsRuntimeField::Timeout,
+                },
+                ..
+            }) if title == texts::tui_openclaw_agents_timeout()
+                && prompt == texts::tui_openclaw_agents_timeout()
+                && buffer.is_empty()
         ));
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_popup_accepts_hjkl_characters() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(None, 0));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+
+        for ch in ['h', 'j', 'k', 'l'] {
+            assert!(matches!(
+                app.on_key(key(KeyCode::Char(ch)), &data),
+                Action::None
+            ));
+        }
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer == "hjkl"
+        ));
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should be initialized");
+        assert_eq!(form.section, OpenClawAgentsSection::Runtime);
+        assert_eq!(form.row, 0);
+        assert!(form.workspace.is_empty());
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_popup_accepts_global_hotkey_characters() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(None, 0));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+
+        for ch in ['/', '?', '[', ']', 'q'] {
+            assert!(matches!(
+                app.on_key(key(KeyCode::Char(ch)), &data),
+                Action::None
+            ));
+        }
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer == "/?[]q"
+        ));
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should be initialized");
+        assert_eq!(form.section, OpenClawAgentsSection::Runtime);
+        assert!(form.workspace.is_empty());
+        assert_eq!(app.route, Route::ConfigOpenClawAgents);
+        assert_eq!(app.app_type, AppType::OpenClaw);
+        assert!(!app.filter.active, "typing should not open filter mode");
+        assert!(matches!(app.overlay, Overlay::TextInput(_)));
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_popup_ignores_ctrl_s() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(None, 0));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('x')), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState { ref buffer, .. }) if buffer == "x"
+        ));
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.workspace, "");
+        assert_eq!(form.section, OpenClawAgentsSection::Runtime);
+        assert_eq!(form.row, 0);
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_popup_confirm_applies_value_and_auto_submits() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: None,
+                models: None,
+                extra: std::collections::HashMap::from([(
+                    "workspace".to_string(),
+                    json!("existing-workspace"),
+                )]),
+            });
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            0,
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('x')), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected agents popup submit to auto-save, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+        assert!(matches!(app.overlay, Overlay::None));
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.workspace, "existing-workspacex");
+
+        let pending: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        assert_eq!(
+            pending.extra.get("workspace"),
+            Some(&json!("existing-workspacex"))
+        );
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_popup_confirm_allows_unrelated_legacy_timeout_values() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: None,
+                models: None,
+                extra: std::collections::HashMap::from([
+                    ("workspace".to_string(), json!("existing-workspace")),
+                    ("timeout".to_string(), json!("manual-value")),
+                ]),
+            });
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            0,
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('x')), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!(
+                "expected workspace popup submit to bypass legacy timeout blocker, got {action:?}"
+            );
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+        assert!(app.toast.is_none());
+
+        let pending: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        assert_eq!(
+            pending.extra.get("workspace"),
+            Some(&json!("existing-workspacex"))
+        );
+        assert_eq!(
+            pending.extra.get("timeoutSeconds"),
+            Some(&json!("manual-value"))
+        );
+        assert!(!pending.extra.contains_key("timeout"));
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_popup_whitespace_confirm_is_non_destructive() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: None,
+                models: None,
+                extra: std::collections::HashMap::from([(
+                    "workspace".to_string(),
+                    json!("existing-workspace"),
+                )]),
+            });
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            0,
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        if let Overlay::TextInput(ref mut input) = app.overlay {
+            input.buffer = "   ".to_string();
+        } else {
+            panic!("expected runtime text input overlay");
+        }
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.toast.is_none());
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.workspace, "existing-workspace");
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_popup_empty_confirm_does_not_clear_legacy_timeout_state() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: None,
+                models: None,
+                extra: std::collections::HashMap::from([(
+                    "timeout".to_string(),
+                    json!("manual-value"),
+                )]),
+            });
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            1,
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        if let Overlay::TextInput(ref mut input) = app.overlay {
+            input.buffer.clear();
+        } else {
+            panic!("expected timeout text input overlay");
+        }
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.toast.is_none());
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.timeout, "manual-value");
+        assert!(form.has_legacy_timeout);
+        assert!(form.timeout_seconds_seed.is_none());
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_submit_helper_treats_whitespace_as_non_destructive() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: None,
+                models: None,
+                extra: std::collections::HashMap::from([(
+                    "workspace".to_string(),
+                    json!("existing-workspace"),
+                )]),
+            });
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            0,
+        ));
+
+        let action = app.submit_openclaw_agents_runtime_popup_field(
+            &data,
+            OpenClawAgentsRuntimeField::Workspace,
+            "   ".to_string(),
+        );
+
+        assert!(matches!(action, Action::None));
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.workspace, "existing-workspace");
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_delete_clears_timeout_seed_and_legacy_state() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: None,
+                models: None,
+                extra: std::collections::HashMap::from([
+                    ("timeout".to_string(), json!(42)),
+                    ("timeoutSeconds".to_string(), json!(false)),
+                ]),
+            });
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            1,
+        ));
+
+        let action = app.on_key(key(KeyCode::Delete), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected timeout delete to auto-submit, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.section, OpenClawAgentsSection::Runtime);
+        assert_eq!(form.row, 1);
+        assert!(form.timeout.is_empty());
+        assert!(form.timeout_seconds_seed.is_none());
+        assert!(!form.has_legacy_timeout);
+
+        let pending: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        assert!(!pending.extra.contains_key("timeout"), "{content}");
+        assert!(!pending.extra.contains_key("timeoutSeconds"), "{content}");
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_backspace_clears_preserved_non_string_seed() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: None,
+                models: None,
+                extra: std::collections::HashMap::from([(
+                    "contextTokens".to_string(),
+                    json!(false),
+                )]),
+            });
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            2,
+        ));
+
+        let action = app.on_key(key(KeyCode::Backspace), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected runtime backspace clear to auto-submit, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.section, OpenClawAgentsSection::Runtime);
+        assert_eq!(form.row, 2);
+        assert!(form.context_tokens.is_empty());
+        assert!(form.context_tokens_seed.is_none());
+
+        let pending: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        assert!(!pending.extra.contains_key("contextTokens"), "{content}");
+    }
+
+    #[test]
+    fn openclaw_agents_runtime_popup_cancel_leaves_field_unchanged() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: None,
+                models: None,
+                extra: std::collections::HashMap::from([(
+                    "workspace".to_string(),
+                    json!("existing-workspace"),
+                )]),
+            });
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            0,
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('x')), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        let form = app
+            .openclaw_agents_form
+            .as_ref()
+            .expect("agents form should stay initialized");
+        assert_eq!(form.workspace, "existing-workspace");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_agents_save_migrates_legacy_timeout_and_preserves_unknown_fields() {
+        let _lang = use_test_language(Language::Chinese);
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "catalog",
+            "Catalog Provider",
+            &[("fallback-a", "Fallback A")],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "missing/current-primary".to_string(),
+                    fallbacks: vec![
+                        "catalog/fallback-a".to_string(),
+                        "missing/off-catalog".to_string(),
+                    ],
+                    extra: std::collections::HashMap::from([(
+                        "temperature".to_string(),
+                        json!(0.2),
+                    )]),
+                }),
+                models: None,
+                extra: std::collections::HashMap::from([
+                    ("workspace".to_string(), json!("./workspace")),
+                    ("timeout".to_string(), json!(42)),
+                    ("contextTokens".to_string(), json!(4096)),
+                    ("maxConcurrent".to_string(), json!(3)),
+                    ("customFlag".to_string(), json!(true)),
+                ]),
+            });
+
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            0,
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('x')), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected agents runtime popup submit to auto-save, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+
+        let pending: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        let model = pending.model.as_ref().expect("model should be serialized");
+        assert_eq!(model.primary, "missing/current-primary");
+        assert_eq!(
+            model.fallbacks,
+            vec![
+                "catalog/fallback-a".to_string(),
+                "missing/off-catalog".to_string(),
+            ]
+        );
+        assert_eq!(model.extra.get("temperature"), Some(&json!(0.2)));
+        assert_eq!(pending.extra.get("workspace"), Some(&json!("./workspacex")));
+        assert_eq!(pending.extra.get("timeoutSeconds"), Some(&json!(42)));
+        assert!(!pending.extra.contains_key("timeout"));
+        assert_eq!(pending.extra.get("contextTokens"), Some(&json!(4096)));
+        assert_eq!(pending.extra.get("maxConcurrent"), Some(&json!(3)));
+        assert_eq!(pending.extra.get("customFlag"), Some(&json!(true)));
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("structured agents save should succeed");
+
+        assert!(
+            app.toast.is_none(),
+            "successful agents auto-save should stay silent"
+        );
+
+        let source = std::fs::read_to_string(openclaw_dir.join("openclaw.json"))
+            .expect("read saved openclaw config");
+        assert!(source.contains("timeoutSeconds"), "{source}");
+        assert!(!source.contains("timeout: 42"), "{source}");
+        assert!(source.contains("customFlag"), "{source}");
+        assert!(source.contains("missing/current-primary"), "{source}");
+        assert!(source.contains("missing/off-catalog"), "{source}");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_agents_save_preserves_existing_invalid_runtime_values() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::from([
+                    ("timeoutSeconds".to_string(), json!("manual-timeout")),
+                    ("contextTokens".to_string(), json!("manual-context")),
+                    ("maxConcurrent".to_string(), json!("manual-max")),
+                ]),
+            });
+
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            0,
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('w')), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected agents runtime popup submit to auto-save, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+
+        let pending: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        assert_eq!(pending.extra.get("workspace"), Some(&json!("w")));
+        assert_eq!(
+            pending.extra.get("timeoutSeconds"),
+            Some(&json!("manual-timeout"))
+        );
+        assert_eq!(
+            pending.extra.get("contextTokens"),
+            Some(&json!("manual-context"))
+        );
+        assert_eq!(
+            pending.extra.get("maxConcurrent"),
+            Some(&json!("manual-max"))
+        );
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("structured agents save should preserve invalid runtime strings");
+
+        let source = std::fs::read_to_string(openclaw_dir.join("openclaw.json"))
+            .expect("read saved openclaw config");
+        assert!(
+            source.contains("\"timeoutSeconds\": \"manual-timeout\""),
+            "{source}"
+        );
+        assert!(
+            source.contains("\"contextTokens\": \"manual-context\""),
+            "{source}"
+        );
+        assert!(
+            source.contains("\"maxConcurrent\": \"manual-max\""),
+            "{source}"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_agents_save_preserves_existing_non_string_runtime_values() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::from([
+                    ("timeoutSeconds".to_string(), json!(false)),
+                    ("contextTokens".to_string(), json!(null)),
+                    ("maxConcurrent".to_string(), json!({ "raw": 3 })),
+                ]),
+            });
+
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            0,
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('w')), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected agents runtime popup submit to auto-save, got {action:?}");
+        };
+        assert_eq!(submit, EditorSubmit::ConfigOpenClawAgents);
+
+        let pending: crate::openclaw_config::OpenClawAgentsDefaults =
+            serde_json::from_str(&content).expect("serialize agents form");
+        assert_eq!(pending.extra.get("workspace"), Some(&json!("w")));
+        assert_eq!(pending.extra.get("timeoutSeconds"), Some(&json!(false)));
+        assert_eq!(pending.extra.get("contextTokens"), Some(&json!(null)));
+        assert_eq!(
+            pending.extra.get("maxConcurrent"),
+            Some(&json!({ "raw": 3 }))
+        );
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("structured agents save should preserve invalid runtime values");
+
+        let source = std::fs::read_to_string(openclaw_dir.join("openclaw.json"))
+            .expect("read saved openclaw config");
+        assert!(source.contains("\"timeoutSeconds\": false"), "{source}");
+        assert!(source.contains("\"contextTokens\": null"), "{source}");
+        assert!(
+            source.contains("\"maxConcurrent\": {") && source.contains("\"raw\": 3"),
+            "{source}"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_agents_save_failure_surfaces_upstream_copy() {
+        let _lang = use_test_language(Language::Chinese);
+        let temp_home = TempDir::new().expect("create temp home");
+        let blocked_path = temp_home.path().join("blocked-openclaw");
+        std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[("primary", "Primary")],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "demo/primary".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            0,
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('x')), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected agents runtime popup submit to auto-save, got {action:?}");
+        };
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("agents save failure should stay in-route and show a toast");
+
+        assert_eq!(app.route, Route::ConfigOpenClawAgents);
+        let toast = app
+            .toast
+            .as_ref()
+            .expect("save failure should show a toast");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(
+            toast
+                .message
+                .starts_with(texts::tui_toast_openclaw_agents_save_result(false)),
+            "{}",
+            toast.message
+        );
+        assert!(
+            toast.message.contains("blocked-openclaw"),
+            "{}",
+            toast.message
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_tools_save_failure_surfaces_upstream_copy() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let blocked_path = temp_home.path().join("blocked-openclaw");
+        std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: Vec::new(),
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        for ch in ['E', 'x', 'e', 'c'] {
+            assert!(matches!(
+                app.on_key(key(KeyCode::Char(ch)), &data),
+                Action::None
+            ));
+        }
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("expected tools form save action, got {action:?}");
+        };
+
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("tools save failure should stay in-route and show a toast");
+
+        assert_eq!(app.route, Route::ConfigOpenClawTools);
+        let toast = app
+            .toast
+            .as_ref()
+            .expect("save failure should show a toast");
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(
+            toast
+                .message
+                .starts_with(texts::tui_toast_openclaw_tools_save_result(false)),
+            "{}",
+            toast.message
+        );
+        assert!(
+            toast.message.contains("blocked-openclaw"),
+            "{}",
+            toast.message
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_tools_typing_continues_across_failed_and_successful_auto_save() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let valid_openclaw_dir = temp_home.path().join(".openclaw");
+        let blocked_path = temp_home.path().join("blocked-openclaw");
+        std::fs::create_dir_all(&valid_openclaw_dir).expect("create openclaw dir");
+        std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&valid_openclaw_dir);
+
+        let set_openclaw_dir = |path: &Path| {
+            let mut settings = get_settings();
+            settings.openclaw_config_dir = Some(path.display().to_string());
+            update_settings(settings).expect("update openclaw override dir");
+        };
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load ui data");
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('W')), &data),
+            Action::None
+        ));
+        let first_action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = first_action else {
+            panic!("expected first tools auto-save submit, got {first_action:?}");
+        };
+
+        set_openclaw_dir(&blocked_path);
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("failed tools auto-save should stay in-route");
+
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Error,
+                ..
+            })
+        ));
+        assert_eq!(
+            app.openclaw_tools_form.as_ref().map(|form| (
+                form.section,
+                form.row,
+                form.allow.clone()
+            )),
+            Some((OpenClawToolsSection::Allow, 0, vec!["ReadW".to_string()]))
+        );
+
+        set_openclaw_dir(&valid_openclaw_dir);
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('r')), &data),
+            Action::None
+        ));
+        let second_action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = second_action else {
+            panic!("expected second tools auto-save submit, got {second_action:?}");
+        };
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("successful tools auto-save should reload data");
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('i')), &data),
+            Action::None
+        ));
+        let third_action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = third_action else {
+            panic!("expected continued typing submit after auto-save, got {third_action:?}");
+        };
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("continued typing after tools auto-save should keep working");
+
+        assert_eq!(app.route, Route::ConfigOpenClawTools);
+        assert!(
+            app.toast.is_none(),
+            "successful tools auto-save should clear stale error toast without showing success"
+        );
+        assert_eq!(
+            app.openclaw_tools_form.as_ref().map(|form| (
+                form.section,
+                form.row,
+                form.allow.clone()
+            )),
+            Some((OpenClawToolsSection::Allow, 0, vec!["ReadWri".to_string()]))
+        );
+        assert_eq!(
+            data.config
+                .openclaw_tools
+                .as_ref()
+                .map(|tools| tools.allow.clone()),
+            Some(vec!["ReadWri".to_string()])
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_agents_runtime_popup_edits_continue_across_failed_and_successful_auto_save() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let valid_openclaw_dir = temp_home.path().join(".openclaw");
+        let blocked_path = temp_home.path().join("blocked-openclaw");
+        std::fs::create_dir_all(&valid_openclaw_dir).expect("create openclaw dir");
+        std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&valid_openclaw_dir);
+
+        let set_openclaw_dir = |path: &Path| {
+            let mut settings = get_settings();
+            settings.openclaw_config_dir = Some(path.display().to_string());
+            update_settings(settings).expect("update openclaw override dir");
+        };
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load ui data");
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: None,
+                models: None,
+                extra: std::collections::HashMap::from([("workspace".to_string(), json!("work"))]),
+            });
+        app.openclaw_agents_form = Some(openclaw_agents_runtime_form(
+            data.config.openclaw_agents_defaults.as_ref(),
+            0,
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('x')), &data),
+            Action::None
+        ));
+
+        let first_action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = first_action else {
+            panic!("expected first agents popup submit, got {first_action:?}");
+        };
+
+        set_openclaw_dir(&blocked_path);
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("failed agents auto-save should stay in-route");
+
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Error,
+                ..
+            })
+        ));
+        assert_eq!(
+            app.openclaw_agents_form.as_ref().map(|form| (
+                form.section,
+                form.row,
+                form.workspace.clone()
+            )),
+            Some((OpenClawAgentsSection::Runtime, 0, "workx".to_string()))
+        );
+
+        set_openclaw_dir(&valid_openclaw_dir);
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('y')), &data),
+            Action::None
+        ));
+
+        let second_action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = second_action else {
+            panic!("expected second agents popup submit, got {second_action:?}");
+        };
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("successful agents auto-save should reload data");
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('z')), &data),
+            Action::None
+        ));
+
+        let third_action = app.on_key(key(KeyCode::Enter), &data);
+        let Action::EditorSubmit { submit, content } = third_action else {
+            panic!("expected continued popup submit after auto-save, got {third_action:?}");
+        };
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit { submit, content },
+        )
+        .expect("continued typing after agents auto-save should keep working");
+
+        assert_eq!(app.route, Route::ConfigOpenClawAgents);
+        assert!(
+            app.toast.is_none(),
+            "successful agents auto-save should clear stale error toast without showing success"
+        );
+        assert_eq!(
+            app.openclaw_agents_form.as_ref().map(|form| (
+                form.section,
+                form.row,
+                form.workspace.clone()
+            )),
+            Some((OpenClawAgentsSection::Runtime, 0, "workxyz".to_string()))
+        );
+        assert_eq!(
+            data.config
+                .openclaw_agents_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.extra.get("workspace")),
+            Some(&json!("workxyz"))
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_agents_save_is_blocked_for_real_malformed_agents_section_without_seeding_form() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        std::fs::write(
+            openclaw_dir.join("openclaw.json"),
+            r#"{
+  agents: {
+    defaults: 'broken-defaults',
+  },
+}"#,
+        )
+        .expect("write malformed openclaw config");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+        let data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(app.openclaw_agents_form.is_none());
+        assert!(app.editor.is_none());
+        assert_eq!(
+            app.toast
+                .as_ref()
+                .map(|toast| (toast.kind, toast.message.as_str())),
+            Some((
+                ToastKind::Error,
+                texts::tui_toast_openclaw_agents_save_blocked_parse_error()
+            ))
+        );
+    }
+
+    #[test]
+    fn openclaw_agents_save_is_blocked_when_legacy_timeout_value_cannot_migrate() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows = vec![openclaw_provider_row(
+            "demo",
+            "Demo Provider",
+            &[("primary", "Primary")],
+        )];
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: None,
+                models: None,
+                extra: std::collections::HashMap::from([(
+                    "timeout".to_string(),
+                    json!("manual-value"),
+                )]),
+            });
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(app.editor.is_none());
+        assert_eq!(
+            app.toast
+                .as_ref()
+                .map(|toast| (toast.kind, toast.message.as_str())),
+            Some((
+                ToastKind::Error,
+                texts::tui_toast_openclaw_agents_save_blocked_legacy_timeout()
+            ))
+        );
+        assert_eq!(
+            app.openclaw_agents_form
+                .as_ref()
+                .map(|form| form.primary_model.as_str()),
+            Some("demo/primary")
+        );
+
+        assert!(matches!(
+            app.on_back_key(),
+            Action::SwitchRoute(Route::Main)
+        ));
+        assert!(app.openclaw_agents_form.is_none());
+
+        assert!(matches!(
+            app.push_route_and_switch(Route::ConfigOpenClawAgents),
+            Action::SwitchRoute(Route::ConfigOpenClawAgents)
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+        assert_eq!(
+            app.openclaw_agents_form
+                .as_ref()
+                .map(|form| form.primary_model.as_str()),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn openclaw_tools_save_is_blocked_when_parse_warning_is_present() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+        data.config.openclaw_warnings = Some(vec![crate::openclaw_config::OpenClawHealthWarning {
+            code: "config_parse_failed".to_string(),
+            message:
+                "Failed to parse tools config: invalid type: string \"Read\", expected a sequence"
+                    .to_string(),
+            path: Some("tools".to_string()),
+        }]);
+
+        let open_action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(open_action, Action::None));
+        assert!(app.overlay.is_active());
+        assert!(
+            app.editor.is_none(),
+            "tools route should not fall back to editor mode"
+        );
+        assert!(app.toast.is_none(), "opening picker should stay silent");
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Down), &data),
+            Action::None
+        ));
+
+        let confirm_action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(confirm_action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(
+            app.toast
+                .as_ref()
+                .map(|toast| (toast.kind, toast.message.as_str())),
+            Some((
+                ToastKind::Error,
+                texts::tui_toast_openclaw_tools_save_blocked_parse_error()
+            ))
+        );
+        assert_eq!(
+            app.openclaw_tools_form
+                .as_ref()
+                .and_then(|form| form.profile.as_deref()),
+            Some("messaging")
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_tools_save_is_blocked_for_real_malformed_tools_section_without_seeding_form() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let openclaw_dir = temp_home.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        std::fs::write(
+            openclaw_dir.join("openclaw.json"),
+            r#"{
+  tools: {
+    profile: 'coding',
+    allow: 'Read',
+  },
+}"#,
+        )
+        .expect("write malformed openclaw config");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+        let data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(app.openclaw_tools_form.is_none());
+        assert!(app.editor.is_none());
+        assert_eq!(
+            app.toast
+                .as_ref()
+                .map(|toast| (toast.kind, toast.message.as_str())),
+            Some((
+                ToastKind::Error,
+                texts::tui_toast_openclaw_tools_save_blocked_parse_error()
+            ))
+        );
     }
 
     #[test]

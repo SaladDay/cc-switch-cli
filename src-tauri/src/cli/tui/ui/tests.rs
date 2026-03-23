@@ -1,3 +1,4 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 use serde_json::json;
 use serial_test::serial;
@@ -13,17 +14,19 @@ use crate::{
     cli::tui::{
         app,
         app::{
-            App, ConfigItem, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit, Focus,
-            Overlay, TextInputState, TextSubmit,
+            Action, App, ConfigItem, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit,
+            Focus, Overlay, TextInputState, TextSubmit,
         },
         data::{
-            ConfigSnapshot, McpSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
-            ProxySnapshot, SkillsSnapshot, UiData,
+            ConfigSnapshot, McpSnapshot, OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow,
+            ProvidersSnapshot, ProxySnapshot, SkillsSnapshot, UiData,
         },
         form::{FormFocus, ProviderAddField},
-        route::Route,
+        route::{NavItem, Route},
         theme::theme_for,
     },
+    commands::workspace::{DailyMemoryFileInfo, ALLOWED_FILES},
+    openclaw_config::write_openclaw_config_source,
     provider::Provider,
     services::skill::{InstalledSkill, SkillApps, SkillRepo, SyncMethod, UnmanagedSkill},
     test_support::{lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock},
@@ -321,6 +324,44 @@ fn all_text(buf: &Buffer) -> String {
     all
 }
 
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn nav_text(app: &App, buf: &Buffer) -> String {
+    let theme = theme_for(&app.app_type);
+    let nav_width = super::nav_pane_width(&theme);
+    let mut all = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..nav_width.min(buf.area.width) {
+            all.push_str(buf[(x, y)].symbol());
+        }
+        all.push('\n');
+    }
+    all
+}
+
+fn content_text(app: &App, buf: &Buffer) -> String {
+    let theme = theme_for(&app.app_type);
+    let nav_width = super::nav_pane_width(&theme).min(buf.area.width);
+    let mut all = String::new();
+    for y in 0..buf.area.height {
+        for x in nav_width..buf.area.width {
+            all.push_str(buf[(x, y)].symbol());
+        }
+        all.push('\n');
+    }
+    all
+}
+
+fn nav_label_text(item: NavItem) -> String {
+    buffer_cell_text(super::nav_label(item))
+}
+
+fn nav_title_text(item: NavItem) -> &'static str {
+    super::split_nav_label(super::nav_label(item)).1
+}
+
 fn spaces_before_substring(text: &str, needle: &str) -> usize {
     let idx = text.find(needle).expect("substring should exist");
     text.as_bytes()[..idx]
@@ -339,6 +380,48 @@ fn buffer_cell_text(text: &str) -> String {
         }
     }
     out
+}
+
+fn line_index(text: &str, needle: &str) -> usize {
+    text.lines()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("missing `{needle}` in:\n{text}"))
+}
+
+fn last_line_index(text: &str, needle: &str) -> usize {
+    text.lines()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .enumerate()
+        .rev()
+        .find(|(_, line)| line.contains(needle))
+        .map(|(index, _)| index)
+        .unwrap_or_else(|| panic!("missing `{needle}` in:\n{text}"))
+}
+
+fn line_with<'a>(text: &'a str, needle: &str) -> &'a str {
+    text.lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("missing `{needle}` in:\n{text}"))
+}
+
+fn block_title_needle(title: &str) -> String {
+    format!("┌{}", buffer_cell_text(title))
+}
+
+fn block_label_needle(label: &str) -> String {
+    format!("│ {}", buffer_cell_text(label))
+}
+
+fn has_visible_action_button_or_block(text: &str, label: &str) -> bool {
+    let label = buffer_cell_text(label);
+    let selected_label = format!("> {label}");
+    let block_title = format!("┌{label}");
+
+    text.lines().any(|line| {
+        let trimmed = line.trim_matches(|ch| ch == ' ' || ch == '│');
+        line.contains(&block_title) || trimmed == label || trimmed == selected_label
+    })
 }
 
 fn visible_tab_labels(header: &str) -> usize {
@@ -381,6 +464,27 @@ fn minimal_data(_app_type: &AppType) -> UiData {
         config: ConfigSnapshot::default(),
         skills: SkillsSnapshot::default(),
         proxy: ProxySnapshot::default(),
+    }
+}
+
+fn openclaw_provider_row(id: &str, name: &str, models: &[(&str, &str)]) -> ProviderRow {
+    let settings_config = json!({
+        "models": models
+            .iter()
+            .map(|(model_id, model_name)| json!({ "id": model_id, "name": model_name }))
+            .collect::<Vec<_>>()
+    });
+
+    ProviderRow {
+        id: id.to_string(),
+        provider: Provider::with_id(id.to_string(), name.to_string(), settings_config, None),
+        api_url: Some("https://example.com".to_string()),
+        is_current: false,
+        is_in_config: true,
+        is_saved: true,
+        is_default_model: false,
+        primary_model_id: models.first().map(|(model_id, _)| (*model_id).to_string()),
+        default_model_id: None,
     }
 }
 
@@ -665,6 +769,68 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
     assert!(all.contains(AppType::OpenClaw.as_str()), "{all}");
     assert!(
         all.contains(texts::tui_toast_visible_apps_zero_selection_warning()),
+        "{all}"
+    );
+}
+
+#[test]
+fn openclaw_agents_picker_overlay_marks_current_option_when_editing_existing_fallback() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+    app.openclaw_agents_form = Some(app::OpenClawAgentsFormState {
+        primary_model: "demo/primary".to_string(),
+        fallbacks: vec!["demo/fallback-a".to_string(), "demo/fallback-b".to_string()],
+        workspace: String::new(),
+        timeout: String::new(),
+        timeout_seconds_seed: None,
+        context_tokens: String::new(),
+        context_tokens_seed: None,
+        max_concurrent: String::new(),
+        max_concurrent_seed: None,
+        model_catalog: None,
+        defaults_extra: std::collections::HashMap::new(),
+        model_extra: std::collections::HashMap::new(),
+        has_legacy_timeout: false,
+        section: app::OpenClawAgentsSection::FallbackModels,
+        row: 1,
+    });
+    app.overlay = Overlay::OpenClawAgentsFallbackPicker {
+        insert_at: 1,
+        selected: 1,
+        options: vec![
+            app::OpenClawModelOption {
+                value: "demo/fallback-b".to_string(),
+                label: "Demo Provider / 回退 B".to_string(),
+            },
+            app::OpenClawModelOption {
+                value: "demo/fallback-c".to_string(),
+                label: "Demo Provider / 回退 C".to_string(),
+            },
+        ],
+    };
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(&buffer_cell_text(
+            texts::tui_openclaw_agents_fallback_models()
+        )),
+        "{all}"
+    );
+    assert!(
+        all.contains(&buffer_cell_text(&format!(
+            "{}  Demo Provider / 回退 B",
+            texts::tui_marker_active()
+        ))),
+        "{all}"
+    );
+    assert!(
+        all.contains(&buffer_cell_text("Demo Provider / 回退 C")),
         "{all}"
     );
 }
@@ -2882,10 +3048,10 @@ fn openclaw_config_route_render_uses_dedicated_env_page() {
 
     let mut data = minimal_data(&app.app_type);
     data.config.openclaw_env = Some(crate::openclaw_config::OpenClawEnvConfig {
-        vars: std::collections::HashMap::from([(
-            "OPENCLAW_ENV_TOKEN".to_string(),
-            json!("demo-token"),
-        )]),
+        vars: std::collections::HashMap::from([
+            ("OPENCLAW_ENV_TOKEN".to_string(), json!("demo-token")),
+            ("OPENCLAW_ENV_MODE".to_string(), json!("development")),
+        ]),
     });
     data.config.openclaw_warnings = Some(vec![crate::openclaw_config::OpenClawHealthWarning {
         code: "stringified_env_vars".to_string(),
@@ -2893,7 +3059,9 @@ fn openclaw_config_route_render_uses_dedicated_env_page() {
         path: Some("env.vars".to_string()),
     }]);
 
-    let all = all_text(&render(&app, &data));
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+    let content = content_text(&app, &buf);
 
     assert!(matches!(
         ConfigItem::from_openclaw_route(&app.route),
@@ -2904,28 +3072,109 @@ fn openclaw_config_route_render_uses_dedicated_env_page() {
             .detail_title()
             .expect("OpenClaw Env route should have a title")
     ));
-    assert!(all.contains("OPENCLAW_ENV_TOKEN"));
+    assert!(all.contains(texts::tui_openclaw_config_env_description()));
+    assert!(
+        line_with(&all, "OPENCLAW_ENV_TOKEN").contains("[redacted]"),
+        "{all}"
+    );
+    assert!(
+        !line_with(&all, "OPENCLAW_ENV_TOKEN").contains("demo-token"),
+        "{all}"
+    );
+    assert!(
+        line_with(&all, "OPENCLAW_ENV_MODE").contains("development"),
+        "{all}"
+    );
+    assert!(
+        !has_visible_action_button_or_block(&content, texts::tui_openclaw_tools_save_label()),
+        "{all}"
+    );
     assert!(all.contains(texts::tui_openclaw_config_warning_title()));
     assert!(all.contains("env.vars"));
+    assert!(
+        !all.contains(texts::tui_openclaw_config_file_label()),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_openclaw_config_section_label()),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_openclaw_config_env_editor_title()),
+        "{all}"
+    );
+    assert!(!all.contains("\"OPENCLAW_ENV_TOKEN\""), "{all}");
     assert!(!all.contains(super::config_item_label(&ConfigItem::ShowFull)));
 }
 
 #[test]
-fn openclaw_tui_config_routes_redact_sensitive_json_values() {
+fn openclaw_env_editor_keeps_ctrl_s_save_hint() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawEnv;
+    app.focus = Focus::Content;
+    app.open_editor(
+        texts::tui_openclaw_config_env_title(),
+        EditorKind::Json,
+        "{}\n",
+        EditorSubmit::ConfigOpenClawEnv,
+    );
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(all.contains("Ctrl+S"), "{all}");
+    assert!(all.contains(texts::tui_key_save()), "{all}");
+}
+
+#[test]
+fn openclaw_tools_and_agents_routes_hide_ctrl_s_save_hint() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    for route in [Route::ConfigOpenClawTools, Route::ConfigOpenClawAgents] {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = route;
+        app.focus = Focus::Content;
+
+        let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+        assert!(!all.contains("Ctrl+S"), "{all}");
+        assert!(!all.contains(texts::tui_key_save()), "{all}");
+    }
+}
+
+#[test]
+fn openclaw_tools_route_shows_edit_and_delete_shortcuts_for_structured_rows() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(all.contains("Enter"), "{all}");
+    assert!(all.contains("e"), "{all}");
+    assert!(all.contains("Del/Backspace"), "{all}");
+    assert!(all.contains(texts::tui_key_edit()), "{all}");
+    assert!(all.contains(texts::tui_key_delete()), "{all}");
+}
+
+#[test]
+fn openclaw_tui_config_routes_redact_sensitive_preserved_fields() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
-    for (route, setup) in [
-        (
-            Route::ConfigOpenClawEnv,
-            json!({
-                "vars": {
-                    "OPENCLAW_ENV_TOKEN": "env-secret"
-                }
-            }),
-        ),
+    for (route, expected_label, setup) in [
         (
             Route::ConfigOpenClawTools,
+            texts::tui_openclaw_tools_extra_fields_label(),
             json!({
                 "demo": {
                     "apiKey": "tools-secret"
@@ -2934,6 +3183,7 @@ fn openclaw_tui_config_routes_redact_sensitive_json_values() {
         ),
         (
             Route::ConfigOpenClawAgents,
+            texts::tui_openclaw_agents_preserved_fields_label(),
             json!({
                 "default": {
                     "Authorization": "Bearer agents-secret"
@@ -2947,10 +3197,6 @@ fn openclaw_tui_config_routes_redact_sensitive_json_values() {
 
         let mut data = minimal_data(&app.app_type);
         match app.route {
-            Route::ConfigOpenClawEnv => {
-                data.config.openclaw_env =
-                    Some(serde_json::from_value(setup.clone()).expect("valid env section"));
-            }
             Route::ConfigOpenClawTools => {
                 data.config.openclaw_tools =
                     Some(serde_json::from_value(setup.clone()).expect("valid tools section"));
@@ -2963,8 +3209,8 @@ fn openclaw_tui_config_routes_redact_sensitive_json_values() {
         }
 
         let all = all_text(&render(&app, &data));
+        assert!(all.contains(expected_label), "{all}");
         assert!(all.contains("[redacted]"), "{all}");
-        assert!(!all.contains("env-secret"), "{all}");
         assert!(!all.contains("tools-secret"), "{all}");
         assert!(!all.contains("agents-secret"), "{all}");
     }
@@ -2986,7 +3232,8 @@ fn openclaw_config_warning_banner_shows_backend_warning_copy() {
         path: Some("env.vars".to_string()),
     }]);
 
-    let all = all_text(&render(&app, &data));
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
 
     assert!(all.contains(texts::tui_openclaw_config_warning_title()));
     assert!(all.contains("backend warning copy from scanner"));
@@ -3003,7 +3250,8 @@ fn openclaw_config_warning_banner_hides_when_health_scan_is_clean() {
     app.focus = Focus::Content;
 
     let data = minimal_data(&app.app_type);
-    let all = all_text(&render(&app, &data));
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
 
     assert!(!all.contains(texts::tui_openclaw_config_warning_title()));
 }
@@ -3040,6 +3288,602 @@ fn openclaw_config_warning_global_banner_is_visible_on_all_subroutes() {
 }
 
 #[test]
+fn openclaw_config_warning_banner_wraps_multiple_long_warnings_without_clipping() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    for route in [
+        Route::ConfigOpenClawEnv,
+        Route::ConfigOpenClawTools,
+        Route::ConfigOpenClawAgents,
+    ] {
+        let config_path = "/tmp/openclaw/openclaw.json";
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = route;
+        app.focus = Focus::Content;
+
+        let mut data = minimal_data(&app.app_type);
+        data.config.openclaw_config_path = Some(std::path::PathBuf::from(config_path));
+        data.config.openclaw_warnings = Some(vec![
+            crate::openclaw_config::OpenClawHealthWarning {
+                code: "config_parse_failed".to_string(),
+                message: "OpenClaw config warning copy keeps wrapping across narrow terminals until marker tail-one is reached".to_string(),
+                path: Some(config_path.to_string()),
+            },
+            crate::openclaw_config::OpenClawHealthWarning {
+                code: "config_parse_failed".to_string(),
+                message: "A second wrapped warning should remain fully visible too so marker tail-two still renders".to_string(),
+                path: Some(config_path.to_string()),
+            },
+        ]);
+
+        let all = all_text(&render_with_size(&app, &data, 72, 24));
+
+        assert!(
+            all.contains(texts::tui_openclaw_config_warning_title()),
+            "{all}"
+        );
+        assert!(all.contains("tail-one"), "{all}");
+        assert!(all.contains("tail-two"), "{all}");
+    }
+}
+
+#[test]
+fn openclaw_tools_route_renders_upstream_copy_profile_row_and_add_rows_without_raw_json() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+        profile: Some("coding".to_string()),
+        allow: vec!["Read".to_string()],
+        deny: vec!["Exec".to_string()],
+        extra: std::collections::HashMap::new(),
+    });
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+    let content = content_text(&app, &buf);
+
+    assert!(
+        all.contains("Manage tool permissions in openclaw.json (allow/deny lists)"),
+        "{all}"
+    );
+    assert!(
+        line_with(&content, &buffer_cell_text("Profile: Coding")).contains("Profile: Coding"),
+        "{all}"
+    );
+    assert!(all.contains("Allow List"), "{all}");
+    assert!(all.contains("Deny List"), "{all}");
+    assert!(all.contains("Read"), "{all}");
+    assert!(all.contains("Exec"), "{all}");
+    assert!(all.contains("+ Add allow rule"), "{all}");
+    assert!(all.contains("+ Add deny rule"), "{all}");
+    assert!(all.contains("Permission Profile"), "{all}");
+    assert!(all.contains("Rule Lists"), "{all}");
+    assert!(
+        !all.contains("Not set | Minimal | Coding | Messaging | Full"),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_openclaw_config_file_label()),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_openclaw_config_section_label()),
+        "{all}"
+    );
+    assert!(!all.contains("\"profile\""), "{all}");
+}
+
+#[test]
+fn openclaw_tools_route_renders_grouped_profile_and_rules_blocks() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+        profile: Some("unsupported-profile".to_string()),
+        allow: vec!["Read".to_string(), "Glob".to_string()],
+        deny: vec!["Exec".to_string()],
+        extra: std::collections::HashMap::new(),
+    });
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+    let content = content_text(&app, &buf);
+    let profile_block = line_index(&content, &block_title_needle("权限档位"));
+    let rules_block = line_index(&content, &block_title_needle("规则列表"));
+    let profile_row = line_index(
+        &content,
+        &buffer_cell_text("配置档位: unsupported-profile (不受支持)"),
+    );
+    let allow_label = line_index(
+        &content,
+        &block_label_needle(texts::tui_openclaw_tools_allow_list_label()),
+    );
+    let allow_row = line_index(&content, &buffer_cell_text("Read"));
+    let allow_add = line_index(&content, &buffer_cell_text("+ 添加允许规则"));
+    let deny_label = line_index(
+        &content,
+        &block_label_needle(texts::tui_openclaw_tools_deny_list_label()),
+    );
+    let deny_row = line_index(&content, &buffer_cell_text("Exec"));
+    let deny_add = line_index(&content, &buffer_cell_text("+ 添加拒绝规则"));
+    let unsupported_title = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_tools_unsupported_profile_title()),
+    );
+
+    assert!(
+        content.contains(&buffer_cell_text(texts::tui_openclaw_tools_description())),
+        "{all}"
+    );
+    assert!(profile_block < rules_block, "{all}");
+    assert!(
+        profile_block < profile_row
+            && profile_row < unsupported_title
+            && unsupported_title < rules_block,
+        "{all}"
+    );
+    assert!(
+        rules_block < allow_label
+            && allow_label < allow_row
+            && allow_row < allow_add
+            && allow_add < deny_label
+            && deny_label < deny_row
+            && deny_row < deny_add,
+        "{all}"
+    );
+    assert!(
+        !all.contains("未设置 | 最小权限 | 编码 | 对话 | 完全访问"),
+        "{all}"
+    );
+    assert!(
+        !has_visible_action_button_or_block(&content, texts::tui_openclaw_tools_save_label()),
+        "{all}"
+    );
+}
+
+#[test]
+fn openclaw_tools_route_renders_second_level_labels_with_indented_rows() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::app::OpenClawToolsFormState::from_snapshot(None);
+    form.profile = Some("coding".to_string());
+    form.allow = vec!["Read".to_string(), "Glob".to_string()];
+    form.deny = vec!["Exec".to_string()];
+    form.section = crate::cli::tui::app::OpenClawToolsSection::Allow;
+    form.row = 0;
+    app.openclaw_tools_form = Some(form);
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+        profile: Some("coding".to_string()),
+        allow: vec!["Read".to_string(), "Glob".to_string()],
+        deny: vec!["Exec".to_string()],
+        extra: std::collections::HashMap::new(),
+    });
+
+    let rendered = render(&app, &data);
+    let all = all_text(&rendered);
+    let content = content_text(&app, &rendered);
+    let profile_row = line_with(&content, &buffer_cell_text("配置档位: 编码"));
+    let allow_label = line_with(
+        &content,
+        &block_label_needle(texts::tui_openclaw_tools_allow_list_label()),
+    );
+    let allow_row = line_with(&content, &format!("> {}", buffer_cell_text("Read")));
+    let allow_add = line_with(&content, &buffer_cell_text("+ 添加允许规则"));
+    let deny_label = line_with(
+        &content,
+        &block_label_needle(texts::tui_openclaw_tools_deny_list_label()),
+    );
+    let deny_row = line_with(&content, &buffer_cell_text("Exec"));
+    let deny_add = line_with(&content, &buffer_cell_text("+ 添加拒绝规则"));
+
+    assert!(!profile_row.contains('>'), "{all}");
+    assert!(!allow_label.contains('>'), "{all}");
+    assert!(allow_row.contains('>'), "{all}");
+    assert!(
+        spaces_before_substring(allow_row, ">")
+            > spaces_before_substring(
+                allow_label,
+                &buffer_cell_text(texts::tui_openclaw_tools_allow_list_label())
+            ),
+        "{content}"
+    );
+    assert!(
+        spaces_before_substring(allow_add, &buffer_cell_text("+ 添加允许规则"))
+            > spaces_before_substring(
+                allow_label,
+                &buffer_cell_text(texts::tui_openclaw_tools_allow_list_label())
+            ),
+        "{content}"
+    );
+    assert!(!deny_label.contains('>'), "{all}");
+    assert!(
+        spaces_before_substring(deny_row, &buffer_cell_text("Exec"))
+            > spaces_before_substring(
+                deny_label,
+                &buffer_cell_text(texts::tui_openclaw_tools_deny_list_label())
+            ),
+        "{content}"
+    );
+    assert!(
+        spaces_before_substring(deny_add, &buffer_cell_text("+ 添加拒绝规则"))
+            > spaces_before_substring(
+                deny_label,
+                &buffer_cell_text(texts::tui_openclaw_tools_deny_list_label())
+            ),
+        "{content}"
+    );
+}
+
+#[test]
+fn openclaw_tools_route_keeps_selected_rule_visible_in_short_viewport() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+        profile: Some("coding".to_string()),
+        allow: (1..=6).map(|index| format!("allow-{index:02}")).collect(),
+        deny: (1..=8).map(|index| format!("deny-{index:02}")).collect(),
+        extra: std::collections::HashMap::new(),
+    });
+
+    let mut form = crate::cli::tui::app::OpenClawToolsFormState::from_snapshot(
+        data.config.openclaw_tools.as_ref(),
+    );
+    form.section = crate::cli::tui::app::OpenClawToolsSection::Deny;
+    form.row = 7;
+    app.openclaw_tools_form = Some(form);
+
+    let rendered = render_with_size(&app, &data, 72, 15);
+    let content = content_text(&app, &rendered);
+
+    assert!(
+        content.contains(&format!("> {}", buffer_cell_text("deny-08"))),
+        "{content}"
+    );
+}
+
+#[test]
+fn openclaw_tools_route_renders_unsupported_profile_warning_and_label() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+        profile: Some("unsupported-profile".to_string()),
+        allow: vec!["Read".to_string()],
+        deny: Vec::new(),
+        extra: std::collections::HashMap::new(),
+    });
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("Unsupported tools profile detected"), "{all}");
+    assert!(
+        all.contains("The current tools.profile value 'unsupported-profile'"),
+        "{all}"
+    );
+    assert!(
+        all.contains("list. It will be preserved until you choose a new value."),
+        "{all}"
+    );
+    assert!(all.contains("unsupported-profile"), "{all}");
+    assert!(all.contains("unsupported"), "{all}");
+}
+
+#[test]
+fn openclaw_tools_route_renders_unsupported_profile_inline_without_placeholder_rows() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+        profile: Some("unsupported-profile".to_string()),
+        allow: Vec::new(),
+        deny: Vec::new(),
+        extra: std::collections::HashMap::new(),
+    });
+
+    let all = all_text(&render(&app, &data));
+    let has_inline_profile_value = all
+        .lines()
+        .any(|line| line.contains("Profile: unsupported-profile (unsupported)"));
+    let has_separate_unsupported_choice = all.lines().any(|line| {
+        line.contains("unsupported-profile (unsupported)") && !line.contains("Profile:")
+    });
+
+    assert!(
+        has_inline_profile_value,
+        "expected unsupported profile to stay on the profile row, got:\n{all}"
+    );
+    assert!(!has_separate_unsupported_choice, "{all}");
+    assert!(all.contains("+ Add allow rule"), "{all}");
+    assert!(all.contains("+ Add deny rule"), "{all}");
+    assert!(
+        !all.contains(texts::tui_openclaw_tools_pattern_placeholder()),
+        "{all}"
+    );
+}
+
+#[test]
+fn openclaw_tools_profile_picker_overlay_renders_supported_choices_in_order() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+        profile: Some("coding".to_string()),
+        allow: vec!["Read".to_string()],
+        deny: Vec::new(),
+        extra: std::collections::HashMap::new(),
+    });
+
+    assert!(matches!(
+        app.on_key(key(KeyCode::Enter), &data),
+        Action::None
+    ));
+
+    let all = all_text(&render(&app, &data));
+    let labels = [
+        texts::tui_openclaw_tools_profile_unset(),
+        texts::tui_openclaw_tools_profile_minimal(),
+        texts::tui_openclaw_tools_profile_coding(),
+        texts::tui_openclaw_tools_profile_messaging(),
+        texts::tui_openclaw_tools_profile_full(),
+    ];
+    let choice_lines = all
+        .lines()
+        .filter(|line| {
+            labels.iter().any(|label| line.contains(label))
+                && line.contains('│')
+                && !line.contains('|')
+                && !line.contains('>')
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(choice_lines.len(), labels.len(), "{all}");
+    for (line, label) in choice_lines.iter().zip(labels) {
+        assert!(line.contains(label), "{all}");
+    }
+    assert!(
+        choice_lines[2].contains(texts::tui_marker_active()),
+        "{all}"
+    );
+}
+
+#[test]
+fn openclaw_tools_profile_picker_overlay_unsupported_state_requires_selection_before_apply() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+        profile: Some("unsupported-profile".to_string()),
+        allow: vec!["Read".to_string()],
+        deny: Vec::new(),
+        extra: std::collections::HashMap::new(),
+    });
+
+    assert!(matches!(
+        app.on_key(key(KeyCode::Enter), &data),
+        Action::None
+    ));
+
+    let all = all_text(&render(&app, &data));
+    let labels = [
+        texts::tui_openclaw_tools_profile_unset(),
+        texts::tui_openclaw_tools_profile_minimal(),
+        texts::tui_openclaw_tools_profile_coding(),
+        texts::tui_openclaw_tools_profile_messaging(),
+        texts::tui_openclaw_tools_profile_full(),
+    ];
+    let choice_lines = all
+        .lines()
+        .filter(|line| {
+            labels.iter().any(|label| line.contains(label))
+                && line.contains('│')
+                && !line.contains('|')
+                && !line.contains('>')
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(choice_lines.len(), labels.len(), "{all}");
+    assert!(
+        choice_lines
+            .iter()
+            .all(|line| !line.contains("unsupported-profile")),
+        "{all}"
+    );
+    assert!(
+        choice_lines
+            .iter()
+            .all(|line| !line.contains(texts::tui_marker_active())),
+        "{all}"
+    );
+    assert!(
+        !all.contains(&format!("Enter {}", texts::tui_key_apply())),
+        "{all}"
+    );
+}
+
+#[test]
+#[serial(home_settings)]
+fn openclaw_tools_route_shows_real_parse_warning_without_default_seeded_form_values() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let openclaw_dir = temp_home.path().join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+
+    write_openclaw_config_source(
+        r#"{
+  tools: {
+    profile: 'coding',
+    allow: 'Read',
+  },
+}"#,
+    )
+    .expect("write malformed openclaw config");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+    let data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        all.contains(texts::tui_openclaw_config_warning_title()),
+        "{all}"
+    );
+    assert!(all.contains("Failed to parse tools config"), "{all}");
+    assert!(!all.contains("Profile: Not set"), "{all}");
+}
+
+#[test]
+#[serial(home_settings)]
+fn openclaw_agents_route_shows_real_parse_warning_without_default_seeded_form_values() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let openclaw_dir = temp_home.path().join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+
+    write_openclaw_config_source(
+        r#"{
+  agents: {
+    defaults: 'broken-defaults',
+  },
+}"#,
+    )
+    .expect("write malformed openclaw config");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+    let data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        all.contains(texts::tui_openclaw_config_warning_title()),
+        "{all}"
+    );
+    assert!(all.contains("Failed to parse agents.defaults"), "{all}");
+    assert!(
+        all.contains("The current agents.defaults section could not be loaded."),
+        "{all}"
+    );
+    assert!(all.contains("parse warning above"), "{all}");
+    assert!(!all.contains("Default Model: Not set"), "{all}");
+}
+
+#[test]
+#[serial(home_settings)]
+fn openclaw_tools_route_ignores_unrelated_agents_parse_warning_and_keeps_save_available() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let openclaw_dir = temp_home.path().join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+
+    write_openclaw_config_source(
+        r#"{
+  agents: {
+    defaults: 'broken-defaults',
+  },
+  tools: {
+    profile: 'coding',
+    allow: ['Read'],
+  },
+}"#,
+    )
+    .expect("write openclaw config with unrelated agents parse failure");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+    let data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        !all.contains("Failed to parse agents.defaults"),
+        "tools route should not render unrelated agents parse warnings:\n{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_openclaw_config_warning_title()),
+        "tools route should stay clean for unrelated section warnings:\n{all}"
+    );
+
+    assert!(matches!(
+        app.on_key(key(KeyCode::Down), &data),
+        crate::cli::tui::app::Action::None
+    ));
+
+    let action = app.on_key(key(KeyCode::Enter), &data);
+
+    assert!(matches!(action, crate::cli::tui::app::Action::None));
+    assert!(matches!(app.overlay, Overlay::TextInput(_)));
+    assert!(
+        app.toast.is_none(),
+        "save should not be blocked: {action:?}"
+    );
+}
+
+#[test]
 fn openclaw_config_item_and_route_titles_follow_i18n_texts() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::Chinese);
@@ -3054,9 +3898,9 @@ fn openclaw_config_item_and_route_titles_follow_i18n_texts() {
         .map(|item| super::config_item_label(&item))
         .collect::<Vec<_>>();
 
-    assert!(config_labels.contains(&texts::tui_config_item_openclaw_env()));
-    assert!(config_labels.contains(&texts::tui_config_item_openclaw_tools()));
-    assert!(config_labels.contains(&texts::tui_config_item_openclaw_agents_defaults()));
+    assert!(!config_labels.contains(&texts::tui_config_item_openclaw_env()));
+    assert!(!config_labels.contains(&texts::tui_config_item_openclaw_tools()));
+    assert!(!config_labels.contains(&texts::tui_config_item_openclaw_agents()));
     assert!(!config_labels.contains(&"OpenClaw Env"));
     assert!(!config_labels.contains(&"OpenClaw Tools"));
 
@@ -3071,6 +3915,1311 @@ fn openclaw_config_item_and_route_titles_follow_i18n_texts() {
         ConfigItem::OpenClawAgents.detail_title(),
         Some("OpenClaw Agents Defaults")
     );
+}
+
+#[test]
+fn workspace_openclaw_nav_uses_app_specific_labels_and_hides_generic_entries() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let app = App::new(Some(AppType::OpenClaw));
+    let buf = render(&app, &minimal_data(&app.app_type));
+    let all = nav_text(&app, &buf);
+    let expected = [
+        NavItem::Main,
+        NavItem::Providers,
+        NavItem::OpenClawWorkspace,
+        NavItem::OpenClawEnv,
+        NavItem::OpenClawTools,
+        NavItem::OpenClawAgents,
+        NavItem::Settings,
+        NavItem::Exit,
+    ]
+    .map(nav_label_text);
+    let positions = expected
+        .iter()
+        .map(|label| all.find(label).expect("OpenClaw nav label should render"))
+        .collect::<Vec<_>>();
+
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{all}");
+    assert!(!all.contains(&nav_label_text(NavItem::Mcp)), "{all}");
+    assert!(!all.contains(&nav_label_text(NavItem::Skills)), "{all}");
+    assert!(!all.contains(&nav_label_text(NavItem::Prompts)), "{all}");
+    assert!(!all.contains(&nav_label_text(NavItem::Config)), "{all}");
+}
+
+#[test]
+fn workspace_non_openclaw_nav_keeps_generic_labels() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let app = App::new(Some(AppType::Claude));
+    let all = nav_text(&app, &render(&app, &minimal_data(&app.app_type)));
+
+    for item in [
+        NavItem::Main,
+        NavItem::Providers,
+        NavItem::Mcp,
+        NavItem::Skills,
+        NavItem::Prompts,
+        NavItem::Config,
+    ] {
+        assert!(all.contains(&nav_label_text(item)), "{all}");
+    }
+    for item in [
+        NavItem::OpenClawWorkspace,
+        NavItem::OpenClawEnv,
+        NavItem::OpenClawTools,
+        NavItem::OpenClawAgents,
+    ] {
+        assert!(!all.contains(&nav_label_text(item)), "{all}");
+    }
+}
+
+#[test]
+fn workspace_route_render_shows_workspace_files_and_daily_memory_entry() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawWorkspace;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_workspace = OpenClawWorkspaceSnapshot {
+        directory_path: std::path::PathBuf::from("/tmp/.openclaw/workspace"),
+        file_exists: std::collections::HashMap::from([
+            ("AGENTS.md".to_string(), true),
+            ("SOUL.md".to_string(), false),
+        ]),
+        daily_memory_files: vec![DailyMemoryFileInfo {
+            filename: "2026-03-20.md".to_string(),
+            date: "2026-03-20".to_string(),
+            size_bytes: 12,
+            modified_at: 1,
+            preview: "remember this".to_string(),
+        }],
+    };
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains(nav_title_text(NavItem::OpenClawWorkspace)));
+    assert!(all.contains(texts::tui_openclaw_workspace_directory_label()));
+    assert!(all.contains("/tmp/.openclaw/workspace"));
+    assert!(all.contains(ALLOWED_FILES[0]));
+    assert!(all.contains(texts::tui_openclaw_workspace_daily_memory_label()));
+    assert!(all.contains("1 file"), "{all}");
+    assert!(!all.contains("1 files"), "{all}");
+    assert!(all.contains(texts::tui_key_open_directory()), "{all}");
+    assert!(
+        !all.contains("Press Enter to browse files, or press o to open the memory directory."),
+        "{all}"
+    );
+    assert!(!all.contains("press o there"), "{all}");
+}
+
+#[test]
+fn workspace_route_render_groups_workspace_files_and_daily_memory_sections() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawWorkspace;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_workspace = OpenClawWorkspaceSnapshot {
+        directory_path: std::path::PathBuf::from("/tmp/.openclaw/workspace"),
+        file_exists: std::collections::HashMap::from([
+            ("AGENTS.md".to_string(), true),
+            ("SOUL.md".to_string(), false),
+        ]),
+        daily_memory_files: vec![DailyMemoryFileInfo {
+            filename: "2026-03-20.md".to_string(),
+            date: "2026-03-20".to_string(),
+            size_bytes: 12,
+            modified_at: 1,
+            preview: "remember this".to_string(),
+        }],
+    };
+
+    let rendered = render(&app, &data);
+    let all = all_text(&rendered);
+    let content = content_text(&app, &rendered);
+    let workspace_block = line_index(&content, &buffer_cell_text("Workspace 文件"));
+    let daily_memory_block = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_workspace_daily_memory_label()),
+    );
+    let workspace_dir = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_workspace_directory_label()),
+    );
+    let memory_dir = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_daily_memory_directory_label()),
+    );
+    assert!(workspace_block < daily_memory_block, "{all}");
+    assert!(
+        workspace_block < workspace_dir && workspace_dir < daily_memory_block,
+        "{all}"
+    );
+    assert!(all.contains(&buffer_cell_text("AGENTS.md")), "{all}");
+    assert!(all.contains(&buffer_cell_text("SOUL.md")), "{all}");
+    assert!(daily_memory_block < memory_dir, "{all}");
+    assert!(
+        !content.lines().enumerate().any(|(index, line)| {
+            index > daily_memory_block
+                && line.contains(&buffer_cell_text(texts::tui_key_open_directory()))
+        }),
+        "{content}"
+    );
+    assert!(
+        !content.lines().enumerate().any(|(index, line)| {
+            index > daily_memory_block && line.contains(&buffer_cell_text(texts::tui_key_open()))
+        }),
+        "{content}"
+    );
+    assert!(all.contains("remember this"), "{all}");
+}
+
+#[test]
+fn workspace_route_render_does_not_leave_an_unused_gap_before_body_blocks() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawWorkspace;
+    app.focus = Focus::Content;
+
+    let rendered = render(&app, &minimal_data(&app.app_type));
+    let content = content_text(&app, &rendered);
+    let key_bar_line = line_index(
+        &content,
+        &format!(
+            "Enter {}  o {}",
+            texts::tui_key_open(),
+            texts::tui_key_open_directory()
+        ),
+    );
+    let workspace_block_line = content
+        .lines()
+        .enumerate()
+        .find_map(|(index, line)| {
+            (index > key_bar_line
+                && line.contains(&block_title_needle(
+                    texts::tui_openclaw_workspace_files_block_title(),
+                )))
+            .then_some(index)
+        })
+        .unwrap_or_else(|| panic!("missing workspace files block title in:\n{content}"));
+
+    assert_eq!(workspace_block_line - key_bar_line, 1, "{content}");
+}
+
+#[test]
+fn openclaw_polish_keeps_route_header_chrome_unchanged() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let cases = [
+        (
+            Route::ConfigOpenClawWorkspace,
+            texts::tui_openclaw_workspace_title(),
+        ),
+        (
+            Route::ConfigOpenClawEnv,
+            texts::tui_openclaw_config_env_title(),
+        ),
+        (
+            Route::ConfigOpenClawTools,
+            texts::tui_openclaw_config_tools_title(),
+        ),
+        (
+            Route::ConfigOpenClawAgents,
+            texts::tui_openclaw_config_agents_title(),
+        ),
+    ];
+
+    for (route, title) in cases {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = route;
+        app.focus = Focus::Content;
+
+        let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+        assert!(
+            all.contains(&buffer_cell_text(title)),
+            "missing title `{title}` in:\n{all}"
+        );
+    }
+
+    let mut provider_app = App::new(Some(AppType::OpenClaw));
+    provider_app.route = Route::Providers;
+    provider_app.focus = Focus::Content;
+    let provider_buf = render(&provider_app, &minimal_data(&provider_app.app_type));
+    let provider_render = content_text(&provider_app, &provider_buf);
+    assert!(
+        provider_render.contains("Demo Provider"),
+        "{provider_render}"
+    );
+    assert!(
+        !provider_render.contains(&buffer_cell_text("权限档位")),
+        "{provider_render}"
+    );
+    assert!(
+        !provider_render.contains(&buffer_cell_text("规则列表")),
+        "{provider_render}"
+    );
+}
+
+#[test]
+fn workspace_openclaw_route_titles_follow_nav_wording() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    assert_eq!(
+        texts::tui_openclaw_workspace_title(),
+        nav_title_text(NavItem::OpenClawWorkspace)
+    );
+    assert_eq!(
+        texts::tui_openclaw_config_env_title(),
+        nav_title_text(NavItem::OpenClawEnv)
+    );
+    assert_eq!(
+        texts::tui_openclaw_config_tools_title(),
+        nav_title_text(NavItem::OpenClawTools)
+    );
+    assert_eq!(
+        texts::tui_openclaw_config_agents_title(),
+        nav_title_text(NavItem::OpenClawAgents)
+    );
+
+    let cases = vec![
+        (
+            Route::ConfigOpenClawEnv,
+            nav_title_text(NavItem::OpenClawEnv),
+            vec![buffer_cell_text("OPENCLAW_ENV_TOKEN")],
+        ),
+        (
+            Route::ConfigOpenClawTools,
+            nav_title_text(NavItem::OpenClawTools),
+            vec![
+                buffer_cell_text(texts::tui_openclaw_tools_description()),
+                buffer_cell_text(texts::tui_openclaw_tools_profile_label()),
+            ],
+        ),
+        (
+            Route::ConfigOpenClawAgents,
+            nav_title_text(NavItem::OpenClawAgents),
+            vec![
+                buffer_cell_text(texts::tui_openclaw_agents_description()),
+                buffer_cell_text(texts::tui_openclaw_agents_model_section()),
+                buffer_cell_text(texts::tui_openclaw_agents_runtime_section()),
+            ],
+        ),
+    ];
+
+    for (route, title, expected_content) in cases {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = route.clone();
+        app.focus = Focus::Content;
+
+        let mut data = minimal_data(&app.app_type);
+        match route {
+            Route::ConfigOpenClawEnv => {
+                data.config.openclaw_env = Some(crate::openclaw_config::OpenClawEnvConfig {
+                    vars: std::collections::HashMap::from([(
+                        "OPENCLAW_ENV_TOKEN".to_string(),
+                        json!("demo-token"),
+                    )]),
+                });
+            }
+            Route::ConfigOpenClawTools => {
+                data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+                    profile: Some("coding".to_string()),
+                    allow: vec!["Read".to_string()],
+                    deny: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                });
+            }
+            Route::ConfigOpenClawAgents => {
+                data.config.openclaw_agents_defaults =
+                    Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                            primary: "gpt-4.1".to_string(),
+                            fallbacks: vec!["gpt-4o-mini".to_string()],
+                            extra: std::collections::HashMap::new(),
+                        }),
+                        models: None,
+                        extra: std::collections::HashMap::new(),
+                    });
+            }
+            _ => unreachable!(),
+        }
+
+        let all = all_text(&render(&app, &data));
+        assert!(all.contains(&buffer_cell_text(title)), "{all}");
+        for expected in expected_content {
+            assert!(all.contains(&expected), "missing `{expected}` in:\n{all}");
+        }
+    }
+}
+
+#[test]
+fn openclaw_agents_route_render_shows_upstream_sections_and_warning_copy() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows = vec![openclaw_provider_row(
+        "catalog",
+        "目录供应商",
+        &[("primary", "主模型"), ("fallback-a", "回退 A")],
+    )];
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "missing/current-primary".to_string(),
+            fallbacks: vec!["catalog/fallback-a".to_string()],
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::from([
+            ("workspace".to_string(), json!("./workspace")),
+            ("timeout".to_string(), json!(42)),
+            ("contextTokens".to_string(), json!(8192)),
+            ("maxConcurrent".to_string(), json!(2)),
+        ]),
+    });
+
+    let all = all_text(&render(&app, &data));
+
+    for expected in [
+        "管理 openclaw.json 中的 agents.defaults 配置（默认模型、运行参数等）",
+        "模型配置",
+        "运行参数",
+        "默认模型",
+        "回退模型",
+        "工作区路径",
+        "超时时间（秒）",
+        "上下文 Token 数",
+        "最大并发数",
+        "检测到旧版超时字段",
+        "当前配置仍在使用 agents.defaults.timeout。保存本页面时会迁移为 timeoutSeconds。",
+    ] {
+        assert!(
+            all.contains(&buffer_cell_text(expected)),
+            "missing `{expected}` in:\n{all}"
+        );
+    }
+}
+
+#[test]
+fn openclaw_agents_route_render_groups_model_runtime_and_save_sections() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows = vec![openclaw_provider_row(
+        "catalog",
+        "目录供应商",
+        &[("fallback-a", "回退 A")],
+    )];
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "missing/current-primary".to_string(),
+            fallbacks: vec![
+                "catalog/fallback-a".to_string(),
+                "missing/off-catalog".to_string(),
+            ],
+            extra: std::collections::HashMap::from([("temperature".to_string(), json!(0.2))]),
+        }),
+        models: None,
+        extra: std::collections::HashMap::from([
+            ("workspace".to_string(), json!("./workspace")),
+            ("timeout".to_string(), json!(42)),
+            ("contextTokens".to_string(), json!(false)),
+            ("maxConcurrent".to_string(), json!(2)),
+        ]),
+    });
+
+    let rendered = render(&app, &data);
+    let all = all_text(&rendered);
+    let content = content_text(&app, &rendered);
+    let model_block = line_index(
+        &content,
+        &block_title_needle(texts::tui_openclaw_agents_model_section()),
+    );
+    let runtime_block = line_index(
+        &content,
+        &block_title_needle(texts::tui_openclaw_agents_runtime_section()),
+    );
+    let default_model = line_index(
+        &content,
+        &buffer_cell_text(&format!(
+            "{}: {}",
+            texts::tui_openclaw_agents_primary_model(),
+            "missing/current-primary (供应商未配置)"
+        )),
+    );
+    let fallbacks = line_index(
+        &content,
+        &buffer_cell_text(&format!(
+            "{}: {}",
+            texts::tui_openclaw_agents_fallback_models(),
+            "目录供应商 / 回退 A"
+        )),
+    );
+    let off_catalog_fallback = line_index(
+        &content,
+        &buffer_cell_text(&format!(
+            "{}: {}",
+            texts::tui_openclaw_agents_fallback_models(),
+            "missing/off-catalog (供应商未配置)"
+        )),
+    );
+    let add_fallback = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_add_fallback_disabled()),
+    );
+    let legacy_title = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_legacy_timeout_title()),
+    );
+    let preserved_notice = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_preserved_runtime_notice()),
+    );
+    let preserved_fields = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_preserved_fields_label()),
+    );
+    assert!(
+        content.contains(&buffer_cell_text(texts::tui_openclaw_agents_description())),
+        "{all}"
+    );
+    assert!(model_block < runtime_block, "{all}");
+    assert!(
+        model_block < default_model && default_model < fallbacks,
+        "{all}"
+    );
+    assert!(
+        fallbacks < off_catalog_fallback && off_catalog_fallback < add_fallback,
+        "{all}"
+    );
+    assert!(add_fallback < runtime_block, "{all}");
+    assert!(
+        model_block < preserved_fields && preserved_fields < runtime_block,
+        "{all}"
+    );
+    assert!(
+        runtime_block < legacy_title && legacy_title < preserved_notice,
+        "{all}"
+    );
+    assert!(
+        !has_visible_action_button_or_block(&content, texts::tui_openclaw_agents_save_label()),
+        "{all}"
+    );
+}
+
+#[test]
+fn openclaw_agents_route_render_uses_single_line_model_and_runtime_rows() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows = vec![openclaw_provider_row(
+        "catalog",
+        "目录供应商",
+        &[
+            ("primary", "主模型"),
+            ("fallback-a", "回退 A"),
+            ("fallback-b", "回退 B"),
+        ],
+    )];
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "catalog/primary".to_string(),
+            fallbacks: vec!["catalog/fallback-a".to_string()],
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::from([
+            ("workspace".to_string(), json!("./workspace")),
+            ("timeoutSeconds".to_string(), json!(42)),
+            ("contextTokens".to_string(), json!(8192)),
+            ("maxConcurrent".to_string(), json!(2)),
+        ]),
+    });
+
+    let rendered = render(&app, &data);
+    let all = all_text(&rendered);
+    let content = content_text(&app, &rendered);
+    let primary_row = line_with(
+        &content,
+        &buffer_cell_text(&format!(
+            "{}: {}",
+            texts::tui_openclaw_agents_primary_model(),
+            "目录供应商 / 主模型"
+        )),
+    );
+    let fallback_row = line_with(
+        &content,
+        &buffer_cell_text(&format!(
+            "{}: {}",
+            texts::tui_openclaw_agents_fallback_models(),
+            "目录供应商 / 回退 A"
+        )),
+    );
+    let action_row = line_with(
+        &content,
+        &format!(
+            "+ {}",
+            buffer_cell_text(texts::tui_openclaw_agents_add_fallback())
+        ),
+    );
+    let workspace_row = line_with(
+        &content,
+        &buffer_cell_text(&format!(
+            "{}: [{}]",
+            texts::tui_openclaw_agents_workspace(),
+            "./workspace"
+        )),
+    );
+
+    assert!(
+        primary_row.contains(&buffer_cell_text("目录供应商 / 主模型")),
+        "{all}"
+    );
+    assert!(
+        fallback_row.contains(&buffer_cell_text("目录供应商 / 回退 A")),
+        "{all}"
+    );
+    assert!(action_row.contains('+'), "{all}");
+    assert!(
+        workspace_row.contains(&buffer_cell_text("./workspace")),
+        "{all}"
+    );
+    assert!(workspace_row.contains('['), "{all}");
+    assert!(workspace_row.contains(']'), "{all}");
+}
+
+#[test]
+fn openclaw_agents_route_render_renders_runtime_value_rows_with_bracketed_values() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/primary".to_string(),
+            fallbacks: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::from([
+            ("workspace".to_string(), json!("./workspace")),
+            ("timeoutSeconds".to_string(), json!(42)),
+            ("contextTokens".to_string(), json!(false)),
+            ("maxConcurrent".to_string(), json!(2)),
+            ("preservedField".to_string(), json!("kept")),
+        ]),
+    });
+
+    let rendered = render_with_size(&app, &data, 140, 40);
+    let content = content_text(&app, &rendered);
+    let workspace_row = line_with(
+        &content,
+        &buffer_cell_text(&format!(
+            "{}: [{}]",
+            texts::tui_openclaw_agents_workspace(),
+            "./workspace"
+        )),
+    );
+    let timeout_row = line_with(
+        &content,
+        &buffer_cell_text(&format!(
+            "{}: [{}]",
+            texts::tui_openclaw_agents_timeout(),
+            "42"
+        )),
+    );
+    let context_row = line_with(
+        &content,
+        &buffer_cell_text(&format!(
+            "{}: [{}]",
+            texts::tui_openclaw_agents_context_tokens(),
+            "false (preserved non-standard value)"
+        )),
+    );
+    let max_row = line_with(
+        &content,
+        &buffer_cell_text(&format!(
+            "{}: [{}]",
+            texts::tui_openclaw_agents_max_concurrent(),
+            "2"
+        )),
+    );
+
+    assert!(workspace_row.contains('['), "{content}");
+    assert!(timeout_row.contains('['), "{content}");
+    assert!(context_row.contains('['), "{content}");
+    assert!(max_row.contains('['), "{content}");
+    assert!(
+        content.contains(texts::tui_openclaw_agents_preserved_runtime_notice()),
+        "{content}"
+    );
+    assert!(
+        content.contains(texts::tui_openclaw_agents_preserved_fields_label()),
+        "{content}"
+    );
+}
+
+#[test]
+fn openclaw_agents_route_render_keeps_primary_row_visible_in_short_viewport() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows = vec![openclaw_provider_row(
+        "demo",
+        "Demo Provider",
+        &[
+            ("primary", "Primary"),
+            ("fallback-1", "Fallback 01"),
+            ("fallback-2", "Fallback 02"),
+            ("fallback-3", "Fallback 03"),
+            ("fallback-4", "Fallback 04"),
+            ("fallback-5", "Fallback 05"),
+            ("fallback-6", "Fallback 06"),
+        ],
+    )];
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/primary".to_string(),
+            fallbacks: (1..=6)
+                .map(|index| format!("demo/fallback-{index}"))
+                .collect(),
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::from([
+            ("workspace".to_string(), json!("./workspace")),
+            ("timeoutSeconds".to_string(), json!(42)),
+            ("contextTokens".to_string(), json!(8192)),
+            ("maxConcurrent".to_string(), json!(2)),
+        ]),
+    });
+
+    let mut form = crate::cli::tui::app::OpenClawAgentsFormState::from_snapshot(
+        data.config.openclaw_agents_defaults.as_ref(),
+    );
+    form.section = crate::cli::tui::app::OpenClawAgentsSection::PrimaryModel;
+    form.row = 0;
+    app.openclaw_agents_form = Some(form);
+
+    let rendered = render_with_size(&app, &data, 72, 11);
+    let content = content_text(&app, &rendered);
+
+    assert!(
+        content.contains(&format!(
+            "> {}:",
+            buffer_cell_text(texts::tui_openclaw_agents_primary_model())
+        )),
+        "{content}"
+    );
+}
+
+#[test]
+fn openclaw_agents_route_render_keeps_selected_fallback_row_visible_in_short_viewport() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    let models = std::iter::once(("primary", "Primary"))
+        .chain((1..=10).map(|index| {
+            let id = format!("fallback-{index}");
+            let label = format!("Fallback {index:02}");
+            (
+                Box::leak(id.into_boxed_str()) as &str,
+                Box::leak(label.into_boxed_str()) as &str,
+            )
+        }))
+        .collect::<Vec<_>>();
+    data.providers.rows = vec![openclaw_provider_row("demo", "Demo Provider", &models)];
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/primary".to_string(),
+            fallbacks: (1..=9)
+                .map(|index| format!("demo/fallback-{index}"))
+                .collect(),
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::new(),
+    });
+
+    let mut form = crate::cli::tui::app::OpenClawAgentsFormState::from_snapshot(
+        data.config.openclaw_agents_defaults.as_ref(),
+    );
+    form.section = crate::cli::tui::app::OpenClawAgentsSection::FallbackModels;
+    form.row = 8;
+    app.openclaw_agents_form = Some(form);
+
+    let rendered = render_with_size(&app, &data, 72, 14);
+    let content = content_text(&app, &rendered);
+
+    assert!(
+        content.contains(&format!(
+            "> {}:",
+            buffer_cell_text(texts::tui_openclaw_agents_fallback_models())
+        )),
+        "{content}"
+    );
+}
+
+#[test]
+fn openclaw_agents_route_render_keeps_add_fallback_row_visible_in_short_viewport() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    let models = std::iter::once(("primary", "Primary"))
+        .chain((1..=10).map(|index| {
+            let id = format!("fallback-{index}");
+            let label = format!("Fallback {index:02}");
+            (
+                Box::leak(id.into_boxed_str()) as &str,
+                Box::leak(label.into_boxed_str()) as &str,
+            )
+        }))
+        .collect::<Vec<_>>();
+    data.providers.rows = vec![openclaw_provider_row("demo", "Demo Provider", &models)];
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/primary".to_string(),
+            fallbacks: (1..=8)
+                .map(|index| format!("demo/fallback-{index}"))
+                .collect(),
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::new(),
+    });
+
+    let mut form = crate::cli::tui::app::OpenClawAgentsFormState::from_snapshot(
+        data.config.openclaw_agents_defaults.as_ref(),
+    );
+    form.section = crate::cli::tui::app::OpenClawAgentsSection::FallbackModels;
+    form.row = form.fallbacks.len();
+    app.openclaw_agents_form = Some(form);
+
+    let rendered = render_with_size(&app, &data, 72, 14);
+    let content = content_text(&app, &rendered);
+
+    assert!(
+        content.contains(&format!(
+            "> {}",
+            buffer_cell_text(&format!("+ {}", texts::tui_openclaw_agents_add_fallback()))
+        )),
+        "{content}"
+    );
+}
+
+#[test]
+fn openclaw_agents_route_render_keeps_runtime_rows_single_line_when_space_is_tight() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/primary".to_string(),
+            fallbacks: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::from([
+            (
+                "workspace".to_string(),
+                json!("./workspace-path-that-would-wrap"),
+            ),
+            ("timeoutSeconds".to_string(), json!(42)),
+            ("contextTokens".to_string(), json!(8192)),
+            ("maxConcurrent".to_string(), json!(2)),
+        ]),
+    });
+
+    let rendered = render_with_size(&app, &data, 58, 40);
+    let content = content_text(&app, &rendered);
+    let workspace_line = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_workspace()),
+    );
+    let timeout_line = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_timeout()),
+    );
+    let context_line = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_context_tokens()),
+    );
+    let max_line = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_max_concurrent()),
+    );
+
+    assert_eq!(timeout_line, workspace_line + 1, "{content}");
+    assert_eq!(context_line, timeout_line + 1, "{content}");
+    assert_eq!(max_line, context_line + 1, "{content}");
+}
+
+#[test]
+fn openclaw_agents_route_wraps_runtime_notes_without_wrapping_value_rows() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/primary".to_string(),
+            fallbacks: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::from([
+            (
+                "workspace".to_string(),
+                json!("./workspace-path-that-would-wrap"),
+            ),
+            ("timeout".to_string(), json!(42)),
+            ("contextTokens".to_string(), json!(8192)),
+            ("maxConcurrent".to_string(), json!(2)),
+            ("visibilityNote".to_string(), json!("retained after wrap")),
+        ]),
+    });
+
+    let rendered = render_with_size(&app, &data, 58, 50);
+    let content = content_text(&app, &rendered);
+    let workspace_line = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_workspace()),
+    );
+    let timeout_line = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_timeout()),
+    );
+    let context_line = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_context_tokens()),
+    );
+    let max_line = line_index(
+        &content,
+        &buffer_cell_text(texts::tui_openclaw_agents_max_concurrent()),
+    );
+    let warning_tail = line_index(&content, "timeoutSeconds.");
+    let json_tail = line_index(&content, "after wrap\"");
+
+    assert!(warning_tail < workspace_line, "{content}");
+    assert_eq!(timeout_line, workspace_line + 1, "{content}");
+    assert_eq!(context_line, timeout_line + 1, "{content}");
+    assert_eq!(max_line, context_line + 1, "{content}");
+    assert!(json_tail > max_line, "{content}");
+}
+
+#[test]
+fn openclaw_agents_route_warns_when_legacy_timeout_is_not_migratable() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/primary".to_string(),
+            fallbacks: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::from([("timeout".to_string(), json!("manual-value"))]),
+    });
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        all.contains(texts::tui_openclaw_agents_legacy_timeout_title()),
+        "{all}"
+    );
+    assert!(all.contains("manual-value"), "{all}");
+}
+
+#[test]
+fn openclaw_agents_route_render_keeps_selected_runtime_row_visible_with_wrapped_notes() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/primary".to_string(),
+            fallbacks: vec!["demo/fallback-a".to_string()],
+            extra: std::collections::HashMap::from([(
+                "retainedModelField".to_string(),
+                json!("retained model field that keeps wrapping in short terminals"),
+            )]),
+        }),
+        models: None,
+        extra: std::collections::HashMap::from([
+            (
+                "workspace".to_string(),
+                json!("./workspace-path-that-keeps-wrapping-through-the-runtime-block"),
+            ),
+            ("timeout".to_string(), json!(42)),
+            ("contextTokens".to_string(), json!(false)),
+            ("maxConcurrent".to_string(), json!(2)),
+            (
+                "retainedRuntimeField".to_string(),
+                json!("retained runtime field that also wraps after the selected row"),
+            ),
+        ]),
+    });
+
+    let mut form = crate::cli::tui::app::OpenClawAgentsFormState::from_snapshot(
+        data.config.openclaw_agents_defaults.as_ref(),
+    );
+    form.section = crate::cli::tui::app::OpenClawAgentsSection::Runtime;
+    form.row = 3;
+    app.openclaw_agents_form = Some(form);
+
+    let rendered = render_with_size(&app, &data, 72, 16);
+    let content = content_text(&app, &rendered);
+
+    assert!(
+        content.contains(&format!(
+            "> {}",
+            buffer_cell_text(&format!(
+                "{}: [{}]",
+                texts::tui_openclaw_agents_max_concurrent(),
+                "2"
+            ))
+        )),
+        "{content}"
+    );
+}
+
+#[test]
+fn openclaw_agents_route_render_keeps_off_catalog_values_visible_without_raw_json_view() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows = vec![openclaw_provider_row(
+        "catalog",
+        "目录供应商",
+        &[("fallback-a", "回退 A")],
+    )];
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "missing/current-primary".to_string(),
+            fallbacks: vec![
+                "catalog/fallback-a".to_string(),
+                "missing/off-catalog".to_string(),
+            ],
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::new(),
+    });
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        all.contains(&buffer_cell_text("missing/current-primary (供应商未配置)")),
+        "{all}"
+    );
+    assert!(
+        all.contains(&buffer_cell_text("missing/off-catalog (供应商未配置)")),
+        "{all}"
+    );
+    assert!(
+        all.contains(&buffer_cell_text(
+            texts::tui_openclaw_agents_add_fallback_disabled()
+        )),
+        "{all}"
+    );
+    assert!(
+        !all.contains("\"primary\": \"missing/current-primary\""),
+        "agents route should not fall back to a raw JSON section view: {all}"
+    );
+}
+
+#[test]
+fn openclaw_agents_route_render_shows_disabled_add_fallback_row_when_no_models_remain() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows = vec![openclaw_provider_row(
+        "demo",
+        "Demo Provider",
+        &[("primary", "Primary"), ("fallback-a", "Fallback A")],
+    )];
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/primary".to_string(),
+            fallbacks: vec!["demo/fallback-a".to_string()],
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::new(),
+    });
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        all.contains(&buffer_cell_text("No fallback models available to add")),
+        "{all}"
+    );
+    assert!(
+        !all.contains(&buffer_cell_text("+ No fallback models available to add")),
+        "{all}"
+    );
+    assert!(
+        !all.contains(&buffer_cell_text("+ Add fallback model")),
+        "{all}"
+    );
+    assert!(
+        !all.contains(&buffer_cell_text("> No fallback models available to add")),
+        "{all}"
+    );
+}
+
+#[test]
+fn openclaw_agents_route_surfaces_preserved_non_string_runtime_values() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawAgents;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_agents_defaults = Some(crate::openclaw_config::OpenClawAgentsDefaults {
+        model: Some(crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/primary".to_string(),
+            fallbacks: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        }),
+        models: None,
+        extra: std::collections::HashMap::from([
+            ("timeoutSeconds".to_string(), json!(false)),
+            ("contextTokens".to_string(), json!(null)),
+            ("maxConcurrent".to_string(), json!({ "raw": 3 })),
+        ]),
+    });
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        all.contains("false (preserved non-standard value)"),
+        "{all}"
+    );
+    assert!(all.contains("null (preserved non-standard value)"), "{all}");
+    assert!(
+        all.contains("{\"raw\":3} (preserved non-standard value)"),
+        "{all}"
+    );
+    assert!(
+        all.contains("Non-standard runtime values are preserved until you replace them."),
+        "{all}"
+    );
+    assert!(!all.contains("Timeout (seconds): Not set"), "{all}");
+    assert!(!all.contains("Context Tokens: Not set"), "{all}");
+    assert!(!all.contains("Max Concurrent: Not set"), "{all}");
+}
+
+#[test]
+fn workspace_daily_memory_route_render_shows_memory_files_and_directory_label() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawDailyMemory;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_workspace = OpenClawWorkspaceSnapshot {
+        directory_path: std::path::PathBuf::from("/tmp/.openclaw/workspace/"),
+        file_exists: std::collections::HashMap::new(),
+        daily_memory_files: vec![DailyMemoryFileInfo {
+            filename: "2026-03-20.md".to_string(),
+            date: "2026-03-20".to_string(),
+            size_bytes: 12,
+            modified_at: 1,
+            preview: "remember this".to_string(),
+        }],
+    };
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains(texts::tui_openclaw_daily_memory_title()));
+    assert!(all.contains(texts::tui_openclaw_daily_memory_directory_label()));
+    assert!(all.contains("/tmp/.openclaw/workspace/memory"), "{all}");
+    assert!(!all.contains("/tmp/.openclaw/workspace//memory"), "{all}");
+    assert!(all.contains("2026-03-20.md"));
+    assert!(all.contains("remember this"));
+}
+
+#[test]
+fn workspace_daily_memory_route_render_keeps_existing_structure() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawDailyMemory;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_workspace = OpenClawWorkspaceSnapshot {
+        directory_path: std::path::PathBuf::from("/tmp/.openclaw/workspace/"),
+        file_exists: std::collections::HashMap::new(),
+        daily_memory_files: vec![DailyMemoryFileInfo {
+            filename: "2026-03-20.md".to_string(),
+            date: "2026-03-20".to_string(),
+            size_bytes: 12,
+            modified_at: 1,
+            preview: "remember this".to_string(),
+        }],
+    };
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+    let content = content_text(&app, &buf);
+
+    assert!(
+        all.contains(texts::tui_openclaw_daily_memory_title()),
+        "{all}"
+    );
+    assert!(
+        all.contains(texts::tui_openclaw_daily_memory_directory_label()),
+        "{all}"
+    );
+    assert!(all.contains("2026-03-20.md"), "{all}");
+    assert!(all.contains("remember this"), "{all}");
+    assert!(
+        !content.contains(&buffer_cell_text("Workspace 文件")),
+        "{content}"
+    );
+    assert!(
+        !content.contains(&buffer_cell_text(texts::tui_openclaw_workspace_title())),
+        "{content}"
+    );
+}
+
+#[test]
+fn workspace_daily_memory_route_render_shows_search_results_when_query_is_active() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawDailyMemory;
+    app.focus = Focus::Content;
+    app.filter.buffer = "focus".to_string();
+    app.openclaw_daily_memory_search_query = "focus".to_string();
+    app.openclaw_daily_memory_search_results =
+        vec![crate::commands::workspace::DailyMemorySearchResult {
+            filename: "2026-03-18.md".to_string(),
+            date: "2026-03-18".to_string(),
+            size_bytes: 10,
+            modified_at: 1,
+            snippet: "focus snippet".to_string(),
+            match_count: 2,
+        }];
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_workspace = OpenClawWorkspaceSnapshot {
+        directory_path: std::path::PathBuf::from("/tmp/.openclaw/workspace"),
+        file_exists: std::collections::HashMap::new(),
+        daily_memory_files: vec![],
+    };
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("2026-03-18.md"));
+    assert!(all.contains("focus snippet"));
+    assert!(!all.contains(texts::tui_openclaw_daily_memory_empty()));
 }
 
 #[test]

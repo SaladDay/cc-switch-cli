@@ -69,6 +69,7 @@ pub enum ConfirmAction {
     SettingsSetClaudePluginIntegration { enabled: bool },
     ProviderApiFormatProxyNotice,
     ProviderSwitchSharedConfigNotice,
+    OpenClawDailyMemoryDelete { filename: String },
     EditorDiscard,
     EditorSaveBeforeClose,
     WebDavMigrateV1ToV2,
@@ -91,6 +92,14 @@ pub enum TextSubmit {
     SkillsInstallSpec,
     SkillsDiscoverQuery,
     SkillsRepoAdd,
+    OpenClawDailyMemoryFilename,
+    OpenClawToolsRule {
+        section: OpenClawToolsSection,
+        row: Option<usize>,
+    },
+    OpenClawAgentsRuntimeField {
+        field: OpenClawAgentsRuntimeField,
+    },
     WebDavJianguoyunUsername,
     WebDavJianguoyunPassword,
 }
@@ -174,6 +183,14 @@ pub enum Overlay {
         models: Vec<String>,
         error: Option<String>,
         selected_idx: usize,
+    },
+    OpenClawToolsProfilePicker {
+        selected: Option<usize>,
+    },
+    OpenClawAgentsFallbackPicker {
+        insert_at: usize,
+        selected: usize,
+        options: Vec<OpenClawModelOption>,
     },
     McpAppsPicker {
         id: String,

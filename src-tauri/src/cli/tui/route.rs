@@ -1,3 +1,5 @@
+use crate::app_config::AppType;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     Main,
@@ -6,6 +8,8 @@ pub enum Route {
     Mcp,
     Prompts,
     Config,
+    ConfigOpenClawWorkspace,
+    ConfigOpenClawDailyMemory,
     ConfigOpenClawEnv,
     ConfigOpenClawTools,
     ConfigOpenClawAgents,
@@ -26,6 +30,10 @@ pub enum NavItem {
     Prompts,
     Config,
     Skills,
+    OpenClawWorkspace,
+    OpenClawEnv,
+    OpenClawTools,
+    OpenClawAgents,
     Settings,
     Exit,
 }
@@ -42,6 +50,25 @@ impl NavItem {
         NavItem::Exit,
     ];
 
+    pub const OPENCLAW_ALL: [NavItem; 8] = [
+        NavItem::Main,
+        NavItem::Providers,
+        NavItem::OpenClawWorkspace,
+        NavItem::OpenClawEnv,
+        NavItem::OpenClawTools,
+        NavItem::OpenClawAgents,
+        NavItem::Settings,
+        NavItem::Exit,
+    ];
+
+    pub fn all_for_app(app_type: &AppType) -> &'static [NavItem] {
+        if matches!(app_type, AppType::OpenClaw) {
+            &Self::OPENCLAW_ALL
+        } else {
+            &Self::ALL
+        }
+    }
+
     pub fn to_route(self) -> Option<Route> {
         match self {
             NavItem::Main => Some(Route::Main),
@@ -50,6 +77,10 @@ impl NavItem {
             NavItem::Prompts => Some(Route::Prompts),
             NavItem::Config => Some(Route::Config),
             NavItem::Skills => Some(Route::Skills),
+            NavItem::OpenClawWorkspace => Some(Route::ConfigOpenClawWorkspace),
+            NavItem::OpenClawEnv => Some(Route::ConfigOpenClawEnv),
+            NavItem::OpenClawTools => Some(Route::ConfigOpenClawTools),
+            NavItem::OpenClawAgents => Some(Route::ConfigOpenClawAgents),
             NavItem::Settings => Some(Route::Settings),
             NavItem::Exit => None,
         }

@@ -133,6 +133,21 @@ pub enum Action {
         username: String,
         password: String,
     },
+    OpenClawWorkspaceOpenFile {
+        filename: String,
+    },
+    OpenClawDailyMemoryOpenFile {
+        filename: String,
+    },
+    OpenClawDailyMemorySearch {
+        query: String,
+    },
+    OpenClawDailyMemoryDelete {
+        filename: String,
+    },
+    OpenClawOpenDirectory {
+        subdir: String,
+    },
     ConfigReset,
 
     EditorSubmit {
@@ -187,6 +202,7 @@ pub enum ConfigItem {
     Validate,
     CommonSnippet,
     Proxy,
+    OpenClawWorkspace,
     OpenClawEnv,
     OpenClawTools,
     OpenClawAgents,
@@ -225,7 +241,7 @@ fn openclaw_config_item_metadata(
 }
 
 impl ConfigItem {
-    pub const ALL: [ConfigItem; 13] = [
+    pub const ALL: [ConfigItem; 14] = [
         ConfigItem::Path,
         ConfigItem::ShowFull,
         ConfigItem::Export,
@@ -234,6 +250,7 @@ impl ConfigItem {
         ConfigItem::Restore,
         ConfigItem::Validate,
         ConfigItem::CommonSnippet,
+        ConfigItem::OpenClawWorkspace,
         ConfigItem::OpenClawEnv,
         ConfigItem::OpenClawTools,
         ConfigItem::OpenClawAgents,
@@ -254,6 +271,11 @@ impl ConfigItem {
                 config_item_metadata(texts::tui_config_item_common_snippet())
             }
             ConfigItem::Proxy => config_item_metadata(texts::tui_config_item_proxy()),
+            ConfigItem::OpenClawWorkspace => openclaw_config_item_metadata(
+                texts::tui_config_item_openclaw_workspace(),
+                texts::tui_openclaw_workspace_title(),
+                Route::ConfigOpenClawWorkspace,
+            ),
             ConfigItem::OpenClawEnv => openclaw_config_item_metadata(
                 texts::tui_config_item_openclaw_env(),
                 texts::tui_openclaw_config_env_title(),
@@ -265,7 +287,7 @@ impl ConfigItem {
                 Route::ConfigOpenClawTools,
             ),
             ConfigItem::OpenClawAgents => openclaw_config_item_metadata(
-                texts::tui_config_item_openclaw_agents_defaults(),
+                texts::tui_config_item_openclaw_agents(),
                 texts::tui_openclaw_config_agents_title(),
                 Route::ConfigOpenClawAgents,
             ),
@@ -276,6 +298,17 @@ impl ConfigItem {
 
     pub(crate) fn visible_for_app(&self, app_type: &AppType) -> bool {
         !self.metadata().openclaw_only || matches!(app_type, AppType::OpenClaw)
+    }
+
+    pub(crate) fn listed_in_config_menu(&self, app_type: &AppType) -> bool {
+        self.visible_for_app(app_type)
+            && !matches!(
+                self,
+                ConfigItem::OpenClawWorkspace
+                    | ConfigItem::OpenClawEnv
+                    | ConfigItem::OpenClawTools
+                    | ConfigItem::OpenClawAgents
+            )
     }
 
     pub(crate) fn label(&self) -> &'static str {
@@ -351,6 +384,19 @@ impl WebDavConfigItem {
         WebDavConfigItem::Reset,
         WebDavConfigItem::JianguoyunQuickSetup,
     ];
+
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            WebDavConfigItem::Settings => texts::tui_config_item_webdav_settings(),
+            WebDavConfigItem::CheckConnection => texts::tui_config_item_webdav_check_connection(),
+            WebDavConfigItem::Upload => texts::tui_config_item_webdav_upload(),
+            WebDavConfigItem::Download => texts::tui_config_item_webdav_download(),
+            WebDavConfigItem::Reset => texts::tui_config_item_webdav_reset(),
+            WebDavConfigItem::JianguoyunQuickSetup => {
+                texts::tui_config_item_webdav_jianguoyun_quick_setup()
+            }
+        }
+    }
 }
 
 pub(crate) const PROXY_HERO_TRANSITION_TICKS: u64 = 10;
@@ -401,6 +447,13 @@ pub struct App {
     pub skills_unmanaged_results: Vec<crate::services::skill::UnmanagedSkill>,
     pub skills_unmanaged_selected: HashSet<String>,
     pub config_idx: usize,
+    pub workspace_idx: usize,
+    pub daily_memory_idx: usize,
+    pub openclaw_tools_form: Option<OpenClawToolsFormState>,
+    pub openclaw_agents_form: Option<OpenClawAgentsFormState>,
+    pub openclaw_daily_memory_search_query: String,
+    pub openclaw_daily_memory_search_results:
+        Vec<crate::commands::workspace::DailyMemorySearchResult>,
     pub config_webdav_idx: usize,
     pub webdav_quick_setup_username: Option<String>,
     pub language_idx: usize,

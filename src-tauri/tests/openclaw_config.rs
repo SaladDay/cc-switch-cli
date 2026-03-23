@@ -513,6 +513,33 @@ fn set_tools_config_preserves_other_root_sections() {
 
 #[test]
 #[serial]
+fn set_tools_config_writes_effectively_empty_tools_object() {
+    let source = r#"{
+  models: {
+    mode: 'merge',
+    providers: {},
+  },
+}
+"#;
+
+    with_fixture(source, |config_path| {
+        set_tools_config(&OpenClawToolsConfig::default())
+            .expect("write empty tools section without panicking");
+
+        let written = fs::read_to_string(config_path).expect("read config after empty tools write");
+        let parsed: serde_json::Value =
+            json5::from_str(&written).expect("parse config after empty tools write");
+
+        assert_eq!(parsed["tools"], json!({}));
+        assert!(
+            written.contains("tools: {}"),
+            "empty tools config should stay a valid empty object: {written}"
+        );
+    });
+}
+
+#[test]
+#[serial]
 fn provider_point_updates_preserve_models_mode_and_other_provider_keys() {
     with_fixture(shared_round_trip_boundary_fixture(), |_| {
         set_provider(

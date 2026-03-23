@@ -18,6 +18,8 @@ pub enum EditorSubmit {
     McpAdd,
     McpEdit { id: String },
     ConfigCommonSnippet { app_type: AppType },
+    OpenClawWorkspaceFile { filename: String },
+    OpenClawDailyMemoryFile { filename: String },
     ConfigOpenClawEnv,
     ConfigOpenClawTools,
     ConfigOpenClawAgents,

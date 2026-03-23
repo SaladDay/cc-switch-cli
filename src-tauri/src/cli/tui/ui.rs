@@ -137,6 +137,13 @@ fn render_content(
         Route::Mcp => render_mcp(frame, app, data, content_area, theme),
         Route::Prompts => render_prompts(frame, app, data, content_area, theme),
         Route::Config => render_config(frame, app, data, content_area, theme),
+        Route::ConfigOpenClawWorkspace | Route::ConfigOpenClawDailyMemory => {
+            if matches!(app.app_type, AppType::OpenClaw) {
+                render_openclaw_workspace_routes(frame, app, data, content_area, theme)
+            } else {
+                render_config(frame, app, data, content_area, theme)
+            }
+        }
         Route::ConfigOpenClawEnv | Route::ConfigOpenClawTools | Route::ConfigOpenClawAgents => {
             if matches!(app.app_type, AppType::OpenClaw) {
                 render_config_openclaw_route(frame, app, data, content_area, theme)

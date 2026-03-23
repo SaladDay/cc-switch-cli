@@ -2094,6 +2094,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_open_directory() -> &'static str {
+        if is_chinese() {
+            "打开目录"
+        } else {
+            "open dir"
+        }
+    }
+
+    pub fn tui_key_create() -> &'static str {
+        if is_chinese() {
+            "新建"
+        } else {
+            "create"
+        }
+    }
+
     pub fn tui_key_apply() -> &'static str {
         if is_chinese() {
             "应用"
@@ -2867,25 +2883,33 @@ pub mod texts {
 
     pub fn tui_config_item_openclaw_env() -> &'static str {
         if is_chinese() {
-            "OpenClaw 环境变量"
+            "环境变量"
         } else {
-            "OpenClaw Env"
+            "Env Variables"
+        }
+    }
+
+    pub fn tui_config_item_openclaw_workspace() -> &'static str {
+        if is_chinese() {
+            "Workspace 文件管理"
+        } else {
+            "Workspace Files"
         }
     }
 
     pub fn tui_config_item_openclaw_tools() -> &'static str {
         if is_chinese() {
-            "OpenClaw 工具设置"
+            "工具权限"
         } else {
-            "OpenClaw Tools"
+            "Tool Permissions"
         }
     }
 
-    pub fn tui_config_item_openclaw_agents_defaults() -> &'static str {
+    pub fn tui_config_item_openclaw_agents() -> &'static str {
         if is_chinese() {
-            "OpenClaw 默认 Agent 配置"
+            "Agents 配置"
         } else {
-            "OpenClaw Agents Defaults"
+            "Agents Config"
         }
     }
 
@@ -2965,35 +2989,505 @@ pub mod texts {
         tui_config_item_openclaw_env()
     }
 
+    pub fn tui_openclaw_workspace_title() -> &'static str {
+        tui_config_item_openclaw_workspace()
+    }
+
+    pub fn tui_openclaw_workspace_files_block_title() -> &'static str {
+        if is_chinese() {
+            "Workspace 文件"
+        } else {
+            "Workspace Files"
+        }
+    }
+
+    pub fn tui_openclaw_workspace_directory_label() -> &'static str {
+        if is_chinese() {
+            "工作区目录"
+        } else {
+            "Workspace directory"
+        }
+    }
+
+    pub fn tui_openclaw_workspace_daily_memory_label() -> &'static str {
+        if is_chinese() {
+            "Daily Memory"
+        } else {
+            "Daily Memory"
+        }
+    }
+
+    pub fn tui_openclaw_workspace_daily_memory_count(count: usize) -> String {
+        if is_chinese() {
+            format!("{count} 个文件")
+        } else if count == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{count} files")
+        }
+    }
+
+    pub fn tui_openclaw_workspace_status_exists() -> &'static str {
+        if is_chinese() {
+            "已存在"
+        } else {
+            "Exists"
+        }
+    }
+
+    pub fn tui_openclaw_workspace_status_missing() -> &'static str {
+        if is_chinese() {
+            "缺失"
+        } else {
+            "Missing"
+        }
+    }
+
     pub fn tui_openclaw_config_tools_title() -> &'static str {
         tui_config_item_openclaw_tools()
     }
 
+    pub fn tui_openclaw_tools_description() -> &'static str {
+        if is_chinese() {
+            "管理 openclaw.json 中的工具权限配置（允许/拒绝列表）"
+        } else {
+            "Manage tool permissions in openclaw.json (allow/deny lists)"
+        }
+    }
+
+    pub fn tui_openclaw_tools_profile_block_title() -> &'static str {
+        if is_chinese() {
+            "权限档位"
+        } else {
+            "Permission Profile"
+        }
+    }
+
+    pub fn tui_openclaw_tools_rules_block_title() -> &'static str {
+        if is_chinese() {
+            "规则列表"
+        } else {
+            "Rule Lists"
+        }
+    }
+
+    pub fn tui_openclaw_tools_profile_label() -> &'static str {
+        if is_chinese() {
+            "配置档位"
+        } else {
+            "Profile"
+        }
+    }
+
+    pub fn tui_openclaw_tools_profile_unset() -> &'static str {
+        if is_chinese() {
+            "未设置"
+        } else {
+            "Not set"
+        }
+    }
+
+    pub fn tui_openclaw_tools_profile_minimal() -> &'static str {
+        if is_chinese() {
+            "最小权限"
+        } else {
+            "Minimal"
+        }
+    }
+
+    pub fn tui_openclaw_tools_profile_coding() -> &'static str {
+        if is_chinese() {
+            "编码"
+        } else {
+            "Coding"
+        }
+    }
+
+    pub fn tui_openclaw_tools_profile_messaging() -> &'static str {
+        if is_chinese() {
+            "对话"
+        } else {
+            "Messaging"
+        }
+    }
+
+    pub fn tui_openclaw_tools_profile_full() -> &'static str {
+        if is_chinese() {
+            "完全访问"
+        } else {
+            "Full"
+        }
+    }
+
+    pub fn tui_openclaw_tools_unsupported_profile_title() -> &'static str {
+        if is_chinese() {
+            "检测到不受支持的工具配置"
+        } else {
+            "Unsupported tools profile detected"
+        }
+    }
+
+    pub fn tui_openclaw_tools_unsupported_profile_description(value: &str) -> String {
+        if is_chinese() {
+            format!(
+                "当前 tools.profile 的值“{value}”不在 OpenClaw 支持列表内。在你手动选择新值之前，它会被保留。"
+            )
+        } else {
+            format!(
+                "The current tools.profile value '{value}' is not in the supported OpenClaw list. It will be preserved until you choose a new value."
+            )
+        }
+    }
+
+    pub fn tui_openclaw_tools_unsupported_profile_label() -> &'static str {
+        if is_chinese() {
+            "不受支持"
+        } else {
+            "unsupported"
+        }
+    }
+
+    pub fn tui_openclaw_tools_allow_list_label() -> &'static str {
+        if is_chinese() {
+            "允许列表"
+        } else {
+            "Allow List"
+        }
+    }
+
+    pub fn tui_openclaw_tools_deny_list_label() -> &'static str {
+        if is_chinese() {
+            "拒绝列表"
+        } else {
+            "Deny List"
+        }
+    }
+
+    pub fn tui_openclaw_tools_pattern_placeholder() -> &'static str {
+        if is_chinese() {
+            "工具名称或模式"
+        } else {
+            "Tool name or pattern"
+        }
+    }
+
+    pub fn tui_openclaw_tools_add_allow_rule() -> &'static str {
+        if is_chinese() {
+            "+ 添加允许规则"
+        } else {
+            "+ Add allow rule"
+        }
+    }
+
+    pub fn tui_openclaw_tools_add_deny_rule() -> &'static str {
+        if is_chinese() {
+            "+ 添加拒绝规则"
+        } else {
+            "+ Add deny rule"
+        }
+    }
+
+    pub fn tui_openclaw_tools_extra_fields_label() -> &'static str {
+        if is_chinese() {
+            "保留的其他字段"
+        } else {
+            "Preserved extra fields"
+        }
+    }
+
+    pub fn tui_openclaw_tools_save_label() -> &'static str {
+        if is_chinese() {
+            "保存"
+        } else {
+            "Save"
+        }
+    }
+
+    pub fn tui_openclaw_tools_load_failed_message() -> &'static str {
+        if is_chinese() {
+            "当前 tools 配置无法加载；请先修复上方解析警告，再编辑工具权限。"
+        } else {
+            "The current tools section could not be loaded. Fix the parse warning above before editing tool permissions."
+        }
+    }
+
+    pub fn tui_toast_openclaw_tools_save_result(success: bool) -> &'static str {
+        if success {
+            if is_chinese() {
+                "工具权限已保存"
+            } else {
+                "Tool permissions saved"
+            }
+        } else if is_chinese() {
+            "保存工具权限失败"
+        } else {
+            "Failed to save tool permissions"
+        }
+    }
+
+    pub fn tui_toast_openclaw_tools_save_failed_detail(err: &str) -> String {
+        if is_chinese() {
+            format!("保存工具权限失败: {err}")
+        } else {
+            format!("Failed to save tool permissions: {err}")
+        }
+    }
+
+    pub fn tui_toast_openclaw_tools_save_blocked_parse_error() -> &'static str {
+        if is_chinese() {
+            "请先修复 OpenClaw 工具配置解析警告，再保存工具权限"
+        } else {
+            "Fix OpenClaw tools parse warnings before saving tool permissions"
+        }
+    }
+
+    pub fn tui_toast_openclaw_tools_rule_empty() -> &'static str {
+        if is_chinese() {
+            "工具规则不能为空"
+        } else {
+            "Tool rule cannot be empty"
+        }
+    }
+
+    pub fn tui_openclaw_agents_description() -> &'static str {
+        if is_chinese() {
+            "管理 openclaw.json 中的 agents.defaults 配置（默认模型、运行参数等）"
+        } else {
+            "Manage agents.defaults in openclaw.json (default model, runtime parameters, etc.)"
+        }
+    }
+
+    pub fn tui_openclaw_agents_model_section() -> &'static str {
+        if is_chinese() {
+            "模型配置"
+        } else {
+            "Model Configuration"
+        }
+    }
+
+    pub fn tui_openclaw_agents_primary_model() -> &'static str {
+        if is_chinese() {
+            "默认模型"
+        } else {
+            "Default Model"
+        }
+    }
+
+    pub fn tui_openclaw_agents_not_set() -> &'static str {
+        if is_chinese() {
+            "未设置"
+        } else {
+            "Not set"
+        }
+    }
+
+    pub fn tui_openclaw_agents_fallback_models() -> &'static str {
+        if is_chinese() {
+            "回退模型"
+        } else {
+            "Fallback Models"
+        }
+    }
+
+    pub fn tui_openclaw_agents_add_fallback() -> &'static str {
+        if is_chinese() {
+            "添加回退模型"
+        } else {
+            "Add fallback model"
+        }
+    }
+
+    pub fn tui_openclaw_agents_add_fallback_disabled() -> &'static str {
+        if is_chinese() {
+            "没有可添加的回退模型了"
+        } else {
+            "No fallback models available to add"
+        }
+    }
+
+    pub fn tui_openclaw_agents_not_in_list(value: &str) -> String {
+        if is_chinese() {
+            format!("{value} (供应商未配置)")
+        } else {
+            format!("{value} (not configured)")
+        }
+    }
+
+    pub fn tui_openclaw_agents_runtime_section() -> &'static str {
+        if is_chinese() {
+            "运行参数"
+        } else {
+            "Runtime Parameters"
+        }
+    }
+
+    pub fn tui_openclaw_agents_workspace() -> &'static str {
+        if is_chinese() {
+            "工作区路径"
+        } else {
+            "Workspace Path"
+        }
+    }
+
+    pub fn tui_openclaw_agents_timeout() -> &'static str {
+        if is_chinese() {
+            "超时时间（秒）"
+        } else {
+            "Timeout (seconds)"
+        }
+    }
+
+    pub fn tui_openclaw_agents_context_tokens() -> &'static str {
+        if is_chinese() {
+            "上下文 Token 数"
+        } else {
+            "Context Tokens"
+        }
+    }
+
+    pub fn tui_openclaw_agents_max_concurrent() -> &'static str {
+        if is_chinese() {
+            "最大并发数"
+        } else {
+            "Max Concurrent"
+        }
+    }
+
+    pub fn tui_openclaw_agents_preserved_non_standard_value(value: &str) -> String {
+        if is_chinese() {
+            format!("{value}（已保留的非标准值）")
+        } else {
+            format!("{value} (preserved non-standard value)")
+        }
+    }
+
+    pub fn tui_openclaw_agents_preserved_runtime_notice() -> &'static str {
+        if is_chinese() {
+            "非标准运行参数会在你替换它们之前保持原样保存。"
+        } else {
+            "Non-standard runtime values are preserved until you replace them."
+        }
+    }
+
+    pub fn tui_openclaw_agents_preserved_fields_label() -> &'static str {
+        if is_chinese() {
+            "保留字段"
+        } else {
+            "Preserved Fields"
+        }
+    }
+
+    pub fn tui_openclaw_agents_legacy_timeout_title() -> &'static str {
+        if is_chinese() {
+            "检测到旧版超时字段"
+        } else {
+            "Legacy timeout detected"
+        }
+    }
+
+    pub fn tui_openclaw_agents_legacy_timeout_description() -> &'static str {
+        if is_chinese() {
+            "当前配置仍在使用 agents.defaults.timeout。保存本页面时会迁移为 timeoutSeconds。"
+        } else {
+            "This config still uses agents.defaults.timeout. Saving here will migrate it to timeoutSeconds."
+        }
+    }
+
+    pub fn tui_openclaw_agents_legacy_timeout_invalid_description() -> &'static str {
+        if is_chinese() {
+            "当前配置仍在使用 agents.defaults.timeout，但该值无法自动迁移。请先改为数字，或清空该字段后再保存。"
+        } else {
+            "This config still uses agents.defaults.timeout, but the current value cannot be migrated automatically. Change it to a number or clear the field before saving."
+        }
+    }
+
+    pub fn tui_openclaw_agents_load_failed_message() -> &'static str {
+        if is_chinese() {
+            "当前 agents.defaults 配置无法加载；请先修复上方解析警告，再编辑 Agents 配置。"
+        } else {
+            "The current agents.defaults section could not be loaded. Fix the parse warning above before editing agents defaults."
+        }
+    }
+
+    pub fn tui_openclaw_agents_save_label() -> &'static str {
+        if is_chinese() {
+            "保存"
+        } else {
+            "Save"
+        }
+    }
+
+    pub fn tui_toast_openclaw_agents_save_result(success: bool) -> &'static str {
+        if success {
+            if is_chinese() {
+                "Agents 配置已保存"
+            } else {
+                "Agents config saved"
+            }
+        } else if is_chinese() {
+            "保存 Agents 配置失败"
+        } else {
+            "Failed to save agents config"
+        }
+    }
+
+    pub fn tui_toast_openclaw_agents_save_failed_detail(err: &str) -> String {
+        if is_chinese() {
+            format!("保存 Agents 配置失败: {err}")
+        } else {
+            format!("Failed to save agents config: {err}")
+        }
+    }
+
+    pub fn tui_toast_openclaw_agents_save_blocked_parse_error() -> &'static str {
+        if is_chinese() {
+            "请先修复 OpenClaw agents.defaults 解析警告，再保存 Agents 配置"
+        } else {
+            "Fix OpenClaw agents parse warnings before saving agents defaults"
+        }
+    }
+
+    pub fn tui_toast_openclaw_agents_save_blocked_legacy_timeout() -> &'static str {
+        if is_chinese() {
+            "请先处理 agents.defaults.timeout，再保存 Agents 配置"
+        } else {
+            "Resolve agents.defaults.timeout before saving agents config"
+        }
+    }
+
     pub fn tui_openclaw_config_agents_title() -> &'static str {
-        tui_config_item_openclaw_agents_defaults()
+        tui_config_item_openclaw_agents()
     }
 
     pub fn tui_openclaw_config_env_editor_title() -> &'static str {
         if is_chinese() {
-            "编辑 OpenClaw 环境变量 (JSON)"
+            "编辑环境变量 (JSON)"
         } else {
-            "Edit OpenClaw Env (JSON)"
+            "Edit Env Variables (JSON)"
+        }
+    }
+
+    pub fn tui_openclaw_config_env_description() -> &'static str {
+        if is_chinese() {
+            "管理 openclaw.json 中的环境变量映射；保存时会写回 env.vars。"
+        } else {
+            "Manage the environment variable map in openclaw.json; saving writes back to env.vars."
         }
     }
 
     pub fn tui_openclaw_config_tools_editor_title() -> &'static str {
         if is_chinese() {
-            "编辑 OpenClaw 工具设置 (JSON)"
+            "编辑工具权限 (JSON)"
         } else {
-            "Edit OpenClaw Tools (JSON)"
+            "Edit Tool Permissions (JSON)"
         }
     }
 
     pub fn tui_openclaw_config_agents_editor_title() -> &'static str {
         if is_chinese() {
-            "编辑 OpenClaw 默认 Agent 配置 (JSON)"
+            "编辑 Agents 配置 (JSON)"
         } else {
-            "Edit OpenClaw Agents Defaults (JSON)"
+            "Edit Agents Config (JSON)"
         }
     }
 
@@ -3058,6 +3552,198 @@ pub mod texts {
             format!("已保存 {section}")
         } else {
             format!("Saved {section}")
+        }
+    }
+
+    pub fn tui_openclaw_workspace_editor_title(filename: &str) -> String {
+        if is_chinese() {
+            format!("编辑 Workspace 文件: {filename}")
+        } else {
+            format!("Edit Workspace File: {filename}")
+        }
+    }
+
+    pub fn tui_openclaw_workspace_saved(filename: &str) -> String {
+        if is_chinese() {
+            format!("已保存 Workspace 文件: {filename}")
+        } else {
+            format!("Saved workspace file: {filename}")
+        }
+    }
+
+    pub fn tui_openclaw_workspace_open_failed(filename: &str, detail: &str) -> String {
+        if is_chinese() {
+            format!("打开 Workspace 文件失败 {filename}: {detail}")
+        } else {
+            format!("Failed to open workspace file {filename}: {detail}")
+        }
+    }
+
+    pub fn tui_openclaw_workspace_save_failed(filename: &str, detail: &str) -> String {
+        if is_chinese() {
+            format!("保存 Workspace 文件失败 {filename}: {detail}")
+        } else {
+            format!("Failed to save workspace file {filename}: {detail}")
+        }
+    }
+
+    pub fn tui_openclaw_workspace_refresh_failed(detail: &str) -> String {
+        if is_chinese() {
+            format!("刷新 Workspace 状态失败: {detail}")
+        } else {
+            format!("Failed to refresh workspace state: {detail}")
+        }
+    }
+
+    pub fn tui_openclaw_workspace_directory_open_failed(detail: &str) -> String {
+        if is_chinese() {
+            format!("打开 Workspace 目录失败: {detail}")
+        } else {
+            format!("Failed to open workspace directory: {detail}")
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_title() -> &'static str {
+        if is_chinese() {
+            "Daily Memory"
+        } else {
+            "Daily Memory"
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_directory_label() -> &'static str {
+        if is_chinese() {
+            "Memory 目录"
+        } else {
+            "Memory directory"
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_create_title() -> &'static str {
+        if is_chinese() {
+            "新建 Daily Memory"
+        } else {
+            "Create Daily Memory"
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_create_prompt() -> &'static str {
+        if is_chinese() {
+            "输入文件名（YYYY-MM-DD.md）："
+        } else {
+            "Enter a filename (YYYY-MM-DD.md):"
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_invalid_filename() -> &'static str {
+        if is_chinese() {
+            "文件名无效，请使用 YYYY-MM-DD.md。"
+        } else {
+            "Invalid filename. Use YYYY-MM-DD.md."
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_editor_title(filename: &str) -> String {
+        if is_chinese() {
+            format!("编辑 Daily Memory: {filename}")
+        } else {
+            format!("Edit Daily Memory: {filename}")
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_saved(filename: &str) -> String {
+        if is_chinese() {
+            format!("已保存 Daily Memory: {filename}")
+        } else {
+            format!("Saved daily memory: {filename}")
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_open_failed(filename: &str, detail: &str) -> String {
+        if is_chinese() {
+            format!("打开 Daily Memory 失败 {filename}: {detail}")
+        } else {
+            format!("Failed to open daily memory {filename}: {detail}")
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_save_failed(filename: &str, detail: &str) -> String {
+        if is_chinese() {
+            format!("保存 Daily Memory 失败 {filename}: {detail}")
+        } else {
+            format!("Failed to save daily memory {filename}: {detail}")
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_deleted(filename: &str) -> String {
+        if is_chinese() {
+            format!("已删除 Daily Memory: {filename}")
+        } else {
+            format!("Deleted daily memory: {filename}")
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_delete_failed(filename: &str, detail: &str) -> String {
+        if is_chinese() {
+            format!("删除 Daily Memory 失败 {filename}: {detail}")
+        } else {
+            format!("Failed to delete daily memory {filename}: {detail}")
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_search_failed(detail: &str) -> String {
+        if is_chinese() {
+            format!("搜索 Daily Memory 失败: {detail}")
+        } else {
+            format!("Failed to search daily memory: {detail}")
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_refresh_failed(detail: &str) -> String {
+        if is_chinese() {
+            format!("刷新 Daily Memory 列表失败: {detail}")
+        } else {
+            format!("Failed to refresh daily memory list: {detail}")
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_delete_title() -> &'static str {
+        if is_chinese() {
+            "删除 Daily Memory"
+        } else {
+            "Delete Daily Memory"
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_delete_message(filename: &str) -> String {
+        if is_chinese() {
+            format!("确认删除 {filename}？")
+        } else {
+            format!("Delete {filename}?")
+        }
+    }
+
+    pub fn tui_openclaw_memory_directory_open_failed(detail: &str) -> String {
+        if is_chinese() {
+            format!("打开 Memory 目录失败: {detail}")
+        } else {
+            format!("Failed to open memory directory: {detail}")
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_empty() -> &'static str {
+        if is_chinese() {
+            "还没有 Daily Memory 文件。按 a 新建。"
+        } else {
+            "No daily memory files yet. Press a to create one."
+        }
+    }
+
+    pub fn tui_openclaw_daily_memory_search_empty() -> &'static str {
+        if is_chinese() {
+            "没有匹配的 Daily Memory 文件。"
+        } else {
+            "No matching daily memory files."
         }
     }
 
@@ -4560,6 +5246,58 @@ pub mod texts {
 
     pub fn menu_manage_skills_variants() -> (&'static str, &'static str) {
         ("🧩 Skills", "🧩 技能")
+    }
+
+    pub fn menu_openclaw_workspace() -> &'static str {
+        let (en, zh) = menu_openclaw_workspace_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_openclaw_workspace_variants() -> (&'static str, &'static str) {
+        ("📁 Workspace Files", "📁 Workspace 文件管理")
+    }
+
+    pub fn menu_openclaw_env() -> &'static str {
+        let (en, zh) = menu_openclaw_env_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_openclaw_env_variants() -> (&'static str, &'static str) {
+        ("🌱 Env Variables", "🌱 环境变量")
+    }
+
+    pub fn menu_openclaw_tools() -> &'static str {
+        let (en, zh) = menu_openclaw_tools_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_openclaw_tools_variants() -> (&'static str, &'static str) {
+        ("🔐 Tool Permissions", "🔐 工具权限")
+    }
+
+    pub fn menu_openclaw_agents() -> &'static str {
+        let (en, zh) = menu_openclaw_agents_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_openclaw_agents_variants() -> (&'static str, &'static str) {
+        ("🤖 Agents Config", "🤖 Agents 配置")
     }
 
     pub fn menu_settings() -> &'static str {

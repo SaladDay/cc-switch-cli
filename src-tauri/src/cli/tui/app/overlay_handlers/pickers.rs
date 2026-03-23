@@ -18,6 +18,12 @@ impl App {
         if let Some(action) = self.handle_model_fetch_picker_key(key) {
             return Some(action);
         }
+        if let Some(action) = self.handle_openclaw_tools_profile_picker_key(key, data) {
+            return Some(action);
+        }
+        if let Some(action) = self.handle_openclaw_agents_fallback_picker_key(key, data) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_mcp_apps_picker_key(key, data) {
             return Some(action);
         }
@@ -367,6 +373,127 @@ impl App {
                     }
                 }
                 Action::None
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_openclaw_tools_profile_picker_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Option<Action> {
+        let Overlay::OpenClawToolsProfilePicker { selected } = &mut self.overlay else {
+            return None;
+        };
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = Some(match *selected {
+                    Some(selected) => selected.saturating_sub(1),
+                    None => super::OPENCLAW_TOOLS_PROFILE_PICKER_LEN.saturating_sub(1),
+                });
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = Some(match *selected {
+                    Some(selected) => (selected + 1)
+                        .min(super::OPENCLAW_TOOLS_PROFILE_PICKER_LEN.saturating_sub(1)),
+                    None => 0,
+                });
+                Action::None
+            }
+            KeyCode::Enter => {
+                let Some(selected) = *selected else {
+                    return Some(Action::None);
+                };
+                let next_profile =
+                    super::openclaw_tools_profile_for_picker_index(selected).map(str::to_string);
+                self.overlay = Overlay::None;
+                self.mutate_openclaw_tools_form(data, move |form| {
+                    form.profile = next_profile;
+                })
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_openclaw_agents_fallback_picker_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Option<Action> {
+        let Overlay::OpenClawAgentsFallbackPicker {
+            insert_at,
+            selected,
+            options,
+        } = &mut self.overlay
+        else {
+            return None;
+        };
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                if !options.is_empty() {
+                    *selected = if *selected == OPENCLAW_AGENTS_MODEL_PICKER_NONE {
+                        options.len().saturating_sub(1)
+                    } else {
+                        selected.saturating_sub(1)
+                    };
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                if !options.is_empty() {
+                    *selected = if *selected == OPENCLAW_AGENTS_MODEL_PICKER_NONE {
+                        0
+                    } else {
+                        (*selected + 1).min(options.len() - 1)
+                    };
+                }
+                Action::None
+            }
+            KeyCode::Enter => {
+                let Some(option) = options.get(*selected).cloned() else {
+                    return Some(Action::None);
+                };
+                let insert_at = *insert_at;
+                let Some(form) = self.openclaw_agents_form.as_ref() else {
+                    self.overlay = Overlay::None;
+                    return Some(Action::None);
+                };
+                let section = form.section;
+                let row = form.row;
+                let fallback_len = form.fallbacks.len();
+                self.overlay = Overlay::None;
+                match section {
+                    OpenClawAgentsSection::PrimaryModel => {
+                        self.mutate_openclaw_agents_form(data, |form| {
+                            form.primary_model = option.value;
+                        })
+                    }
+                    OpenClawAgentsSection::FallbackModels if row < fallback_len => self
+                        .mutate_openclaw_agents_form(data, |form| {
+                            let target_row = insert_at.min(form.fallbacks.len().saturating_sub(1));
+                            form.row = target_row;
+                            form.set_current_fallback(target_row, option.value);
+                        }),
+                    OpenClawAgentsSection::FallbackModels => {
+                        self.mutate_openclaw_agents_form(data, |form| {
+                            form.row = insert_at.min(form.fallbacks.len());
+                            form.insert_fallback(option.value);
+                        })
+                    }
+                    OpenClawAgentsSection::Runtime => Action::None,
+                }
             }
             _ => Action::None,
         })

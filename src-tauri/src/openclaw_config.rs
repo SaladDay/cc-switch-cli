@@ -417,14 +417,23 @@ fn derive_entry_separator(leading_ws: &str) -> String {
     String::new()
 }
 
+fn is_empty_object(value: &Value) -> bool {
+    value
+        .as_object()
+        .map(|object| object.is_empty())
+        .unwrap_or(false)
+}
+
 fn should_use_precise_empty_object_fallback(section: &str, value: &Value) -> bool {
-    section == "models"
-        && value
+    match section {
+        "models" => value
             .as_object()
             .and_then(|models| models.get("providers"))
-            .and_then(Value::as_object)
-            .map(|providers| providers.is_empty())
-            .unwrap_or(false)
+            .map(is_empty_object)
+            .unwrap_or(false),
+        "tools" => is_empty_object(value),
+        _ => false,
+    }
 }
 
 fn serialize_json5_string(value: &str) -> String {
@@ -1202,11 +1211,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_object_fallback_only_targets_models_with_empty_providers() {
+    fn empty_object_fallback_targets_models_with_empty_providers_and_empty_tools() {
         let models_value = json!({
             "mode": "merge",
             "providers": {}
         });
+        let empty_tools_value = json!({});
         let env_value = json!({
             "vars": {}
         });
@@ -1223,6 +1233,10 @@ mod tests {
             "models",
             &models_value
         ));
+        assert!(should_use_precise_empty_object_fallback(
+            "tools",
+            &empty_tools_value
+        ));
         assert!(!should_use_precise_empty_object_fallback("env", &env_value));
         assert!(!should_use_precise_empty_object_fallback(
             "models",
@@ -1237,17 +1251,29 @@ mod tests {
                 "TOKEN": "value"
             }
         });
+        let tools_value = json!({
+            "profile": "coding",
+            "allow": ["Read"]
+        });
 
-        let expected = json_five::to_string_formatted(
+        let expected_env = json_five::to_string_formatted(
             &env_value,
             FormatConfiguration::with_indent(2, TrailingComma::NONE),
         )
         .expect("standard formatter should handle non-fallback shape");
+        let expected_tools = json_five::to_string_formatted(
+            &tools_value,
+            FormatConfiguration::with_indent(2, TrailingComma::NONE),
+        )
+        .expect("standard formatter should handle non-empty tools shape");
 
-        let actual = serialize_section_value("env", &env_value)
+        let actual_env = serialize_section_value("env", &env_value)
             .expect("serialize non-fallback shape should succeed");
+        let actual_tools = serialize_section_value("tools", &tools_value)
+            .expect("serialize non-empty tools shape should succeed");
 
-        assert_eq!(actual, expected);
+        assert_eq!(actual_env, expected_env);
+        assert_eq!(actual_tools, expected_tools);
     }
 
     #[test]

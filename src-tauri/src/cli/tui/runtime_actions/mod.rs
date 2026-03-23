@@ -4,7 +4,7 @@ use crate::app_config::AppType;
 use crate::cli::i18n::{set_language, texts};
 use crate::error::AppError;
 
-use super::app::{Action, App, Overlay, ToastKind};
+use super::app::{Action, App, Focus, Overlay, ToastKind};
 use super::data::UiData;
 use super::runtime_systems::{
     LocalEnvReq, ModelFetchReq, ProxyReq, RequestTracker, SkillsReq, StreamCheckReq, UpdateReq,
@@ -29,23 +29,56 @@ pub(crate) use helpers::{
     run_external_editor_for_current_editor,
 };
 
-fn normalize_openclaw_config_route(route: &super::route::Route) -> super::route::Route {
-    match route {
-        super::route::Route::ConfigOpenClawEnv
-        | super::route::Route::ConfigOpenClawTools
-        | super::route::Route::ConfigOpenClawAgents => super::route::Route::Config,
-        _ => route.clone(),
+fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> super::route::Route {
+    match app_type {
+        AppType::OpenClaw => match route {
+            super::route::Route::Main
+            | super::route::Route::Providers
+            | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::ConfigOpenClawWorkspace
+            | super::route::Route::ConfigOpenClawDailyMemory
+            | super::route::Route::ConfigOpenClawEnv
+            | super::route::Route::ConfigOpenClawTools
+            | super::route::Route::ConfigOpenClawAgents
+            | super::route::Route::Settings
+            | super::route::Route::SettingsProxy => route.clone(),
+            _ => super::route::Route::Main,
+        },
+        _ => match route {
+            super::route::Route::ConfigOpenClawWorkspace
+            | super::route::Route::ConfigOpenClawDailyMemory
+            | super::route::Route::ConfigOpenClawEnv
+            | super::route::Route::ConfigOpenClawTools
+            | super::route::Route::ConfigOpenClawAgents => super::route::Route::Config,
+            _ => route.clone(),
+        },
     }
 }
 
 fn apply_preloaded_app_switch(app: &mut App, data: &mut UiData, next: AppType, next_data: UiData) {
+    app.clear_openclaw_daily_memory_search_state();
     app.app_type = next;
-    app.route = normalize_openclaw_config_route(&app.route);
+    let original_route = app.route.clone();
+    app.route = normalize_route_for_app(&app.app_type, &app.route);
     for route in &mut app.route_stack {
-        *route = normalize_openclaw_config_route(route);
+        *route = normalize_route_for_app(&app.app_type, route);
     }
     while app.route_stack.last() == Some(&app.route) {
         app.route_stack.pop();
+    }
+    if let Some(idx) = app
+        .nav_items()
+        .iter()
+        .position(|item| *item == App::nav_item_for_route(&app.app_type, &app.route))
+    {
+        app.nav_idx = idx;
+    }
+    if app.route != original_route {
+        app.focus = if matches!(app.route, super::route::Route::Main) {
+            Focus::Nav
+        } else {
+            Focus::Content
+        };
     }
     *data = next_data;
     app.reset_proxy_activity(
@@ -214,6 +247,21 @@ pub(crate) fn handle_action(
         Action::ConfigWebDavJianguoyunQuickSetup { username, password } => {
             config::webdav_jianguoyun_quick_setup(&mut ctx, username, password)
         }
+        Action::OpenClawWorkspaceOpenFile { filename } => {
+            config::open_openclaw_workspace_file(&mut ctx, filename)
+        }
+        Action::OpenClawDailyMemoryOpenFile { filename } => {
+            config::open_openclaw_daily_memory_file(&mut ctx, filename)
+        }
+        Action::OpenClawDailyMemorySearch { query } => {
+            config::search_openclaw_daily_memory(&mut ctx, query)
+        }
+        Action::OpenClawDailyMemoryDelete { filename } => {
+            config::delete_openclaw_daily_memory(&mut ctx, filename)
+        }
+        Action::OpenClawOpenDirectory { subdir } => {
+            config::open_openclaw_directory(&mut ctx, subdir)
+        }
         Action::ConfigReset => config::reset(&mut ctx),
         Action::SetSkipClaudeOnboarding { enabled } => {
             crate::settings::set_skip_claude_onboarding(enabled)?;
@@ -366,6 +414,19 @@ mod tests {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ConfigOpenClawTools;
         app.route_stack.push(Route::Config);
+        app.filter.active = true;
+        app.filter.buffer = "focus".to_string();
+        app.openclaw_daily_memory_search_query = "focus".to_string();
+        app.daily_memory_idx = 1;
+        app.openclaw_daily_memory_search_results =
+            vec![crate::commands::workspace::DailyMemorySearchResult {
+                filename: "2026-03-20.md".to_string(),
+                date: "2026-03-20".to_string(),
+                size_bytes: 12,
+                modified_at: 1,
+                snippet: "focus".to_string(),
+                match_count: 1,
+            }];
         let mut data = UiData::default();
         let mut proxy_loading = RequestTracker::default();
         let mut webdav_loading = RequestTracker::default();
@@ -396,6 +457,33 @@ mod tests {
             app.route_stack.is_empty(),
             "route stack should be normalized too so Back does not land on a duplicate config route"
         );
+        assert!(!app.filter.active);
+        assert!(app.filter.buffer.is_empty());
+        assert!(app.openclaw_daily_memory_search_query.is_empty());
+        assert!(app.openclaw_daily_memory_search_results.is_empty());
+        assert_eq!(app.daily_memory_idx, 0);
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn set_app_type_normalizes_unsupported_routes_when_switching_into_openclaw() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Mcp;
+        app.route_stack.push(Route::Prompts);
+        app.focus = super::super::app::Focus::Content;
+        let mut data = UiData::default();
+
+        run_action(&mut app, &mut data, Action::SetAppType(AppType::OpenClaw))
+            .expect("switch app type");
+
+        assert_eq!(app.app_type, AppType::OpenClaw);
+        assert_eq!(app.route, Route::Main);
+        assert!(app.route_stack.is_empty());
+        assert_eq!(app.nav_item(), super::super::route::NavItem::Main);
+        assert!(matches!(app.focus, super::super::app::Focus::Nav));
     }
 
     #[test]
@@ -422,6 +510,19 @@ mod tests {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ConfigOpenClawTools;
         app.route_stack.push(Route::Config);
+        app.filter.active = true;
+        app.filter.buffer = "focus".to_string();
+        app.openclaw_daily_memory_search_query = "focus".to_string();
+        app.daily_memory_idx = 1;
+        app.openclaw_daily_memory_search_results =
+            vec![crate::commands::workspace::DailyMemorySearchResult {
+                filename: "2026-03-20.md".to_string(),
+                date: "2026-03-20".to_string(),
+                size_bytes: 12,
+                modified_at: 1,
+                snippet: "focus".to_string(),
+                match_count: 1,
+            }];
         let mut data = UiData::default();
 
         run_action(
@@ -446,6 +547,11 @@ mod tests {
             app.route_stack.is_empty(),
             "route stack should normalize the same way as SetAppType"
         );
+        assert!(!app.filter.active);
+        assert!(app.filter.buffer.is_empty());
+        assert!(app.openclaw_daily_memory_search_query.is_empty());
+        assert!(app.openclaw_daily_memory_search_results.is_empty());
+        assert_eq!(app.daily_memory_idx, 0);
     }
 
     #[test]

@@ -4,6 +4,14 @@ const PROXY_ACTIVITY_WINDOW: usize = 48;
 const PROXY_ACTIVITY_POLL_INTERVAL_TICKS: u64 = 5;
 
 impl App {
+    pub(crate) fn clear_openclaw_daily_memory_search_state(&mut self) {
+        self.filter.active = false;
+        self.filter.buffer.clear();
+        self.openclaw_daily_memory_search_query.clear();
+        self.openclaw_daily_memory_search_results.clear();
+        self.daily_memory_idx = 0;
+    }
+
     pub fn new(app_override: Option<AppType>) -> Self {
         let app_type = app_override.unwrap_or(AppType::Claude);
         Self {
@@ -41,6 +49,12 @@ impl App {
             skills_unmanaged_results: Vec::new(),
             skills_unmanaged_selected: HashSet::new(),
             config_idx: 0,
+            workspace_idx: 0,
+            daily_memory_idx: 0,
+            openclaw_tools_form: None,
+            openclaw_agents_form: None,
+            openclaw_daily_memory_search_query: String::new(),
+            openclaw_daily_memory_search_results: Vec::new(),
             config_webdav_idx: 0,
             webdav_quick_setup_username: None,
             language_idx: 0,
@@ -50,23 +64,52 @@ impl App {
     }
 
     pub fn nav_item(&self) -> NavItem {
-        NavItem::ALL
+        self.nav_items()
             .get(self.nav_idx)
             .copied()
             .unwrap_or(NavItem::Main)
     }
 
-    pub(crate) fn nav_item_for_route(route: &Route) -> NavItem {
+    pub(crate) fn nav_items(&self) -> &'static [NavItem] {
+        NavItem::all_for_app(&self.app_type)
+    }
+
+    pub(crate) fn nav_item_for_route(app_type: &AppType, route: &Route) -> NavItem {
         match route {
             Route::Main => NavItem::Main,
             Route::Providers | Route::ProviderDetail { .. } => NavItem::Providers,
             Route::Mcp => NavItem::Mcp,
             Route::Prompts => NavItem::Prompts,
-            Route::Config
-            | Route::ConfigOpenClawEnv
-            | Route::ConfigOpenClawTools
-            | Route::ConfigOpenClawAgents
-            | Route::ConfigWebDav => NavItem::Config,
+            Route::Config => NavItem::Config,
+            Route::ConfigOpenClawWorkspace | Route::ConfigOpenClawDailyMemory => {
+                if matches!(app_type, AppType::OpenClaw) {
+                    NavItem::OpenClawWorkspace
+                } else {
+                    NavItem::Config
+                }
+            }
+            Route::ConfigOpenClawEnv => {
+                if matches!(app_type, AppType::OpenClaw) {
+                    NavItem::OpenClawEnv
+                } else {
+                    NavItem::Config
+                }
+            }
+            Route::ConfigOpenClawTools => {
+                if matches!(app_type, AppType::OpenClaw) {
+                    NavItem::OpenClawTools
+                } else {
+                    NavItem::Config
+                }
+            }
+            Route::ConfigOpenClawAgents => {
+                if matches!(app_type, AppType::OpenClaw) {
+                    NavItem::OpenClawAgents
+                } else {
+                    NavItem::Config
+                }
+            }
+            Route::ConfigWebDav => NavItem::Config,
             Route::Skills
             | Route::SkillsDiscover
             | Route::SkillsRepos
@@ -80,11 +123,23 @@ impl App {
             return Action::None;
         }
 
+        let was_daily_memory = matches!(self.route, Route::ConfigOpenClawDailyMemory);
+        let is_daily_memory = matches!(route, Route::ConfigOpenClawDailyMemory);
+        if was_daily_memory != is_daily_memory {
+            self.clear_openclaw_daily_memory_search_state();
+        }
+        if !matches!(route, Route::ConfigOpenClawTools) {
+            self.openclaw_tools_form = None;
+        }
+        if !matches!(route, Route::ConfigOpenClawAgents) {
+            self.openclaw_agents_form = None;
+        }
+
         self.route = route.clone();
         self.focus = route_default_focus(&route);
 
-        let nav_item = Self::nav_item_for_route(&route);
-        if let Some(idx) = NavItem::ALL.iter().position(|item| *item == nav_item) {
+        let nav_item = Self::nav_item_for_route(&self.app_type, &route);
+        if let Some(idx) = self.nav_items().iter().position(|item| *item == nav_item) {
             self.nav_idx = idx;
         }
 
@@ -206,6 +261,21 @@ impl App {
         self.overlay = self.pending_overlay.take().unwrap_or(Overlay::None);
     }
 
+    fn structured_form_is_editing_text_field(&self) -> bool {
+        match self.route {
+            Route::ConfigOpenClawTools => false,
+            Route::ConfigOpenClawAgents => false,
+            _ => false,
+        }
+    }
+
+    fn should_route_printable_content_input_before_globals(&self, key: &KeyEvent) -> bool {
+        matches!(self.focus, Focus::Content)
+            && self.structured_form_is_editing_text_field()
+            && matches!(key.code, KeyCode::Char(c) if !c.is_control())
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+    }
+
     pub fn on_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         self.clamp_selections(data);
         if !self.overlay.is_active() {
@@ -234,13 +304,23 @@ impl App {
         }
 
         // Vim-style hjkl navigation
-        let key = match key.code {
-            KeyCode::Char('h') => KeyEvent::new(KeyCode::Left, key.modifiers),
-            KeyCode::Char('j') => KeyEvent::new(KeyCode::Down, key.modifiers),
-            KeyCode::Char('k') => KeyEvent::new(KeyCode::Up, key.modifiers),
-            KeyCode::Char('l') => KeyEvent::new(KeyCode::Right, key.modifiers),
-            _ => key,
+        let key = if matches!(self.focus, Focus::Content)
+            && self.structured_form_is_editing_text_field()
+        {
+            key
+        } else {
+            match key.code {
+                KeyCode::Char('h') => KeyEvent::new(KeyCode::Left, key.modifiers),
+                KeyCode::Char('j') => KeyEvent::new(KeyCode::Down, key.modifiers),
+                KeyCode::Char('k') => KeyEvent::new(KeyCode::Up, key.modifiers),
+                KeyCode::Char('l') => KeyEvent::new(KeyCode::Right, key.modifiers),
+                _ => key,
+            }
         };
+
+        if self.should_route_printable_content_input_before_globals(&key) {
+            return self.on_content_key(key, data);
+        }
 
         // Global actions.
         match key.code {
@@ -308,16 +388,34 @@ impl App {
     }
 
     pub(crate) fn on_filter_key(&mut self, key: KeyEvent) -> Action {
+        let is_daily_memory = matches!(self.route, Route::ConfigOpenClawDailyMemory);
         match key.code {
             KeyCode::Esc => {
                 self.filter.active = false;
                 self.filter.buffer.clear();
+                if is_daily_memory {
+                    self.openclaw_daily_memory_search_results.clear();
+                    self.daily_memory_idx = 0;
+                    return Action::OpenClawDailyMemorySearch {
+                        query: String::new(),
+                    };
+                }
             }
             KeyCode::Enter => {
                 self.filter.active = false;
+                if is_daily_memory {
+                    return Action::OpenClawDailyMemorySearch {
+                        query: self.filter.buffer.clone(),
+                    };
+                }
             }
             KeyCode::Backspace => {
                 self.filter.buffer.pop();
+                if is_daily_memory && self.filter.buffer.is_empty() {
+                    return Action::OpenClawDailyMemorySearch {
+                        query: String::new(),
+                    };
+                }
             }
             KeyCode::Char(c) => {
                 if !c.is_control() {
@@ -336,7 +434,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                self.nav_idx = (self.nav_idx + 1).min(NavItem::ALL.len() - 1);
+                self.nav_idx = (self.nav_idx + 1).min(self.nav_items().len() - 1);
                 Action::None
             }
             KeyCode::Enter => {
@@ -362,6 +460,8 @@ impl App {
             Route::Mcp => self.on_mcp_key(key, data),
             Route::Prompts => self.on_prompts_key(key, data),
             Route::Config => self.on_config_key(key, data),
+            Route::ConfigOpenClawWorkspace => self.on_config_openclaw_workspace_key(key, data),
+            Route::ConfigOpenClawDailyMemory => self.on_config_openclaw_daily_memory_key(key, data),
             Route::ConfigOpenClawEnv => self.on_config_openclaw_env_key(key, data),
             Route::ConfigOpenClawTools => self.on_config_openclaw_tools_key(key, data),
             Route::ConfigOpenClawAgents => self.on_config_openclaw_agents_key(key, data),
@@ -436,6 +536,20 @@ impl App {
             self.config_idx = 0;
         } else {
             self.config_idx = self.config_idx.min(config_len - 1);
+        }
+
+        let workspace_len = openclaw_workspace_entry_count();
+        if workspace_len == 0 {
+            self.workspace_idx = 0;
+        } else {
+            self.workspace_idx = self.workspace_idx.min(workspace_len - 1);
+        }
+
+        let daily_memory_len = visible_openclaw_daily_memory(self, data).len();
+        if daily_memory_len == 0 {
+            self.daily_memory_idx = 0;
+        } else {
+            self.daily_memory_idx = self.daily_memory_idx.min(daily_memory_len - 1);
         }
 
         let config_webdav_len = visible_webdav_config_items(&self.filter).len();

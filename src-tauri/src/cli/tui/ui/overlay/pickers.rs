@@ -344,6 +344,163 @@ pub(super) fn render_model_fetch_picker_overlay(
     frame.render_stateful_widget(list, list_area, &mut state);
 }
 
+pub(super) fn render_openclaw_agents_fallback_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+    options: &[app::OpenClawModelOption],
+) {
+    let area = centered_rect_fixed(OVERLAY_FIXED_LG.0, 12, content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(openclaw_agents_picker_title(app));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    let has_selection = selected != app::OPENCLAW_AGENTS_MODEL_PICKER_NONE;
+    let key_items = if has_selection {
+        vec![
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_cancel()),
+        ]
+    } else {
+        vec![
+            ("↑↓", texts::tui_key_select()),
+            ("Esc", texts::tui_key_cancel()),
+        ]
+    };
+    render_key_bar_center(frame, chunks[0], theme, &key_items);
+
+    let body_area = inset_top(chunks[1], 1);
+    let current_value = openclaw_agents_picker_current_value(app);
+    let items = options.iter().map(|option| {
+        let marker = if current_value == Some(option.value.as_str()) {
+            texts::tui_marker_active()
+        } else {
+            texts::tui_marker_inactive()
+        };
+        ListItem::new(Line::raw(format!("{marker}  {}", option.label)))
+    });
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = ListState::default();
+    state.select(
+        (selected != app::OPENCLAW_AGENTS_MODEL_PICKER_NONE)
+            .then_some(selected.min(options.len().saturating_sub(1))),
+    );
+    frame.render_stateful_widget(list, body_area, &mut state);
+}
+
+fn openclaw_agents_picker_title(app: &App) -> &'static str {
+    let Some(form) = app.openclaw_agents_form.as_ref() else {
+        return texts::tui_openclaw_agents_add_fallback();
+    };
+
+    match form.section {
+        app::OpenClawAgentsSection::PrimaryModel => texts::tui_openclaw_agents_primary_model(),
+        app::OpenClawAgentsSection::FallbackModels if form.row < form.fallbacks.len() => {
+            texts::tui_openclaw_agents_fallback_models()
+        }
+        app::OpenClawAgentsSection::FallbackModels | app::OpenClawAgentsSection::Runtime => {
+            texts::tui_openclaw_agents_add_fallback()
+        }
+    }
+}
+
+fn openclaw_agents_picker_current_value(app: &App) -> Option<&str> {
+    let form = app.openclaw_agents_form.as_ref()?;
+
+    match form.section {
+        app::OpenClawAgentsSection::PrimaryModel => Some(form.primary_model.as_str()),
+        app::OpenClawAgentsSection::FallbackModels => {
+            form.fallbacks.get(form.row).map(String::as_str)
+        }
+        app::OpenClawAgentsSection::Runtime => None,
+    }
+}
+
+pub(super) fn render_openclaw_tools_profile_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: Option<usize>,
+) {
+    let area = centered_rect_fixed(58, 12, content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(texts::tui_openclaw_tools_profile_block_title());
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    let key_items = if selected.is_some() {
+        vec![
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_cancel()),
+        ]
+    } else {
+        vec![
+            ("↑↓", texts::tui_key_select()),
+            ("Esc", texts::tui_key_cancel()),
+        ]
+    };
+    render_key_bar_center(frame, chunks[0], theme, &key_items);
+
+    let body_area = inset_top(chunks[1], 1);
+    let current = app
+        .openclaw_tools_form
+        .as_ref()
+        .and_then(|form| app::openclaw_tools_profile_picker_index(form.profile.as_deref()));
+
+    let items = (0..app::OPENCLAW_TOOLS_PROFILE_PICKER_LEN).map(|index| {
+        let marker = if current == Some(index) {
+            texts::tui_marker_active()
+        } else {
+            texts::tui_marker_inactive()
+        };
+        ListItem::new(Line::from(Span::raw(format!(
+            "{marker}  {}",
+            app::openclaw_tools_profile_picker_label(index)
+        ))))
+    });
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = ListState::default();
+    state
+        .select(selected.map(|selected| {
+            selected.min(app::OPENCLAW_TOOLS_PROFILE_PICKER_LEN.saturating_sub(1))
+        }));
+    frame.render_stateful_widget(list, body_area, &mut state);
+}
+
 pub(super) fn render_mcp_apps_picker_overlay(
     frame: &mut Frame<'_>,
     content_area: Rect,

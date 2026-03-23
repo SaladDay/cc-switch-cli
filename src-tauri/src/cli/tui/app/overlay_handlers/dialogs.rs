@@ -96,6 +96,11 @@ impl App {
                     }
                     ConfirmAction::ProviderApiFormatProxyNotice => Action::None,
                     ConfirmAction::ProviderSwitchSharedConfigNotice => Action::None,
+                    ConfirmAction::OpenClawDailyMemoryDelete { filename } => {
+                        Action::OpenClawDailyMemoryDelete {
+                            filename: filename.clone(),
+                        }
+                    }
                     ConfirmAction::EditorDiscard => Action::EditorDiscard,
                     ConfirmAction::EditorSaveBeforeClose => {
                         if let Some(editor) = self.editor.as_ref() {
@@ -161,7 +166,7 @@ impl App {
                 Action::None
             }
             KeyCode::Char(c) => {
-                if !c.is_control() {
+                if !c.is_control() && !key.modifiers.contains(KeyModifiers::CONTROL) {
                     if let Overlay::TextInput(input) = &mut self.overlay {
                         input.buffer.push(c);
                     }
@@ -228,9 +233,60 @@ impl App {
                 }
                 Action::SkillsRepoAdd { spec: raw }
             }
+            TextSubmit::OpenClawDailyMemoryFilename => {
+                let filename = raw.trim().to_string();
+                let regex = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}\.md$")
+                    .expect("valid daily memory regex");
+                if !regex.is_match(&filename) {
+                    self.push_toast(
+                        texts::tui_openclaw_daily_memory_invalid_filename(),
+                        ToastKind::Warning,
+                    );
+                    self.open_daily_memory_filename_prompt(filename);
+                    return Action::None;
+                }
+                Action::OpenClawDailyMemoryOpenFile { filename }
+            }
+            TextSubmit::OpenClawAgentsRuntimeField { field } => {
+                self.handle_openclaw_agents_runtime_submit(field, raw, data)
+            }
+            TextSubmit::OpenClawToolsRule { section, row } => {
+                self.handle_openclaw_tools_rule_submit(section, row, raw, data)
+            }
             TextSubmit::WebDavJianguoyunUsername => self.handle_webdav_username_submit(raw),
             TextSubmit::WebDavJianguoyunPassword => self.handle_webdav_password_submit(raw),
         }
+    }
+
+    fn handle_openclaw_agents_runtime_submit(
+        &mut self,
+        field: OpenClawAgentsRuntimeField,
+        raw: String,
+        data: &UiData,
+    ) -> Action {
+        self.submit_openclaw_agents_runtime_popup_field(data, field, raw)
+    }
+
+    fn handle_openclaw_tools_rule_submit(
+        &mut self,
+        section: OpenClawToolsSection,
+        row: Option<usize>,
+        raw: String,
+        data: &UiData,
+    ) -> Action {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            self.push_toast(
+                texts::tui_toast_openclaw_tools_rule_empty(),
+                ToastKind::Warning,
+            );
+            return self.open_openclaw_tools_rule_editor(section, row, raw);
+        }
+
+        let value = trimmed.to_string();
+        self.mutate_openclaw_tools_form(data, move |form| {
+            form.upsert_rule(section, row, value);
+        })
     }
 
     fn handle_webdav_username_submit(&mut self, raw: String) -> Action {

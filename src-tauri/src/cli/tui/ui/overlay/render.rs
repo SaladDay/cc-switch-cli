@@ -99,6 +99,25 @@ pub(crate) fn render_overlay(
             error.as_deref(),
             *selected_idx,
         ),
+        Overlay::OpenClawToolsProfilePicker { selected } => {
+            super::pickers::render_openclaw_tools_profile_picker_overlay(
+                frame,
+                app,
+                content_area,
+                theme,
+                *selected,
+            )
+        }
+        Overlay::OpenClawAgentsFallbackPicker {
+            selected, options, ..
+        } => super::pickers::render_openclaw_agents_fallback_picker_overlay(
+            frame,
+            app,
+            content_area,
+            theme,
+            *selected,
+            options,
+        ),
         Overlay::McpAppsPicker {
             name,
             selected,
