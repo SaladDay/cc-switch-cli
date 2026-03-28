@@ -756,6 +756,72 @@ fn mcp_add_form_builds_server_and_apps() {
 }
 
 #[test]
+fn mcp_env_form_restores_sorted_rows() {
+    let server = crate::app_config::McpServer {
+        id: "m1".to_string(),
+        name: "Server One".to_string(),
+        server: json!({
+            "command": "npx",
+            "args": ["-y", "@scope/server"],
+            "env": {
+                "Z_TOKEN": "tail",
+                "A_TOKEN": ""
+            }
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+
+    let form = McpAddFormState::from_server(&server);
+
+    assert_eq!(
+        form.env_rows,
+        vec![
+            McpEnvVarRow {
+                key: "A_TOKEN".to_string(),
+                value: "".to_string(),
+            },
+            McpEnvVarRow {
+                key: "Z_TOKEN".to_string(),
+                value: "tail".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn mcp_env_form_serializes_rows_and_skips_empty_object() {
+    let mut form = McpAddFormState::new();
+    form.id.set("m1");
+    form.name.set("Server One");
+    form.command.set("npx");
+    form.env_rows = vec![
+        McpEnvVarRow {
+            key: "API_KEY".to_string(),
+            value: "secret".to_string(),
+        },
+        McpEnvVarRow {
+            key: "PROJECT_ROOT".to_string(),
+            value: "".to_string(),
+        },
+    ];
+
+    let saved = form.to_mcp_server_json_value();
+    assert_eq!(saved["server"]["env"]["API_KEY"], "secret");
+    assert_eq!(saved["server"]["env"]["PROJECT_ROOT"], "");
+
+    form.env_rows.clear();
+    let saved = form.to_mcp_server_json_value();
+    assert!(
+        saved["server"].get("env").is_none(),
+        "empty env rows should remove server.env instead of serializing {{}}"
+    );
+}
+
+#[test]
 fn provider_add_form_switching_back_to_custom_clears_template_values() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     let existing_ids = Vec::<String>::new();

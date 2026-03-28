@@ -264,6 +264,12 @@ pub enum McpAddField {
     AppGemini,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpEnvVarRow {
+    pub key: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderAddFormState {
     pub app_type: AppType,
@@ -330,6 +336,7 @@ pub struct McpAddFormState {
     pub name: TextInput,
     pub command: TextInput,
     pub args: TextInput,
+    pub env_rows: Vec<McpEnvVarRow>,
     pub apps: McpApps,
     pub json_scroll: usize,
 }

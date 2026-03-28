@@ -1,7 +1,7 @@
 use crate::app_config::McpServer;
 use serde_json::{json, Value};
 
-use super::{FormFocus, FormMode, McpAddField, McpAddFormState, TextInput};
+use super::{FormFocus, FormMode, McpAddField, McpAddFormState, McpEnvVarRow, TextInput};
 
 const MCP_TEMPLATES: [&str; 2] = ["Custom", "Filesystem (npx)"];
 
@@ -18,6 +18,7 @@ impl McpAddFormState {
             name: TextInput::new(""),
             command: TextInput::new(""),
             args: TextInput::new(""),
+            env_rows: Vec::new(),
             apps: Default::default(),
             json_scroll: 0,
         }
@@ -49,8 +50,26 @@ impl McpAddFormState {
                 .join(" ");
             form.args.set(joined);
         }
+        form.env_rows = load_env_rows(server);
 
         form
+    }
+
+    pub fn upsert_env_row(&mut self, row: Option<usize>, key: String, value: String) {
+        let next = McpEnvVarRow { key, value };
+        if let Some(idx) = row.filter(|idx| *idx < self.env_rows.len()) {
+            self.env_rows[idx] = next;
+        } else {
+            self.env_rows.push(next);
+        }
+        self.env_rows
+            .sort_by(|left, right| left.key.cmp(&right.key));
+    }
+
+    pub fn remove_env_row(&mut self, row: usize) {
+        if row < self.env_rows.len() {
+            self.env_rows.remove(row);
+        }
     }
 
     pub fn locked_id(&self) -> Option<&str> {
@@ -115,6 +134,7 @@ impl McpAddFormState {
                 self.name = defaults.name;
                 self.command = defaults.command;
                 self.args = defaults.args;
+                self.env_rows = defaults.env_rows;
                 self.json_scroll = defaults.json_scroll;
             }
             return;
@@ -153,6 +173,18 @@ impl McpAddFormState {
             .expect("server must be a JSON object");
         server_obj.insert("command".to_string(), json!(self.command.value.trim()));
         server_obj.insert("args".to_string(), Value::Array(args));
+        let env = self
+            .env_rows
+            .iter()
+            .fold(serde_json::Map::new(), |mut map, row| {
+                map.insert(row.key.clone(), Value::String(row.value.clone()));
+                map
+            });
+        if env.is_empty() {
+            server_obj.remove("env");
+        } else {
+            server_obj.insert("env".to_string(), Value::Object(env));
+        }
 
         obj.insert(
             "apps".to_string(),
@@ -165,4 +197,22 @@ impl McpAddFormState {
 
         Value::Object(obj)
     }
+}
+
+fn load_env_rows(server: &McpServer) -> Vec<McpEnvVarRow> {
+    let mut rows = server
+        .server
+        .get("env")
+        .and_then(|value| value.as_object())
+        .into_iter()
+        .flat_map(|env| env.iter())
+        .filter_map(|(key, value)| {
+            value.as_str().map(|value| McpEnvVarRow {
+                key: key.clone(),
+                value: value.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.key.cmp(&right.key));
+    rows
 }
