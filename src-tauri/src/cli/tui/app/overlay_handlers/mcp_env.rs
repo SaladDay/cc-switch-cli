@@ -115,11 +115,11 @@ impl App {
                 }
 
                 let duplicate = match self.form.as_ref() {
-                    Some(FormState::McpAdd(mcp)) => mcp
-                        .env_rows
-                        .iter()
-                        .enumerate()
-                        .any(|(idx, existing)| Some(idx) != row && existing.key == key_text),
+                    Some(FormState::McpAdd(mcp)) => {
+                        mcp.env_rows.iter().enumerate().any(|(idx, existing)| {
+                            Some(idx) != row && existing.key.trim() == key_text
+                        })
+                    }
                     _ => false,
                 };
                 if duplicate {

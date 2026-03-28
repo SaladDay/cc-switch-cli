@@ -1900,6 +1900,34 @@ mod tests {
     }
 
     #[test]
+    fn mcp_env_editor_rejects_duplicate_key_when_existing_has_whitespace() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut form = McpAddFormState::new();
+        form.env_rows.push(McpEnvVarRow {
+            key: " KEY".to_string(),
+            value: "secret".to_string(),
+        });
+        app.form = Some(FormState::McpAdd(form));
+        app.overlay = Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
+            row: None,
+            return_selected: 0,
+            field: McpEnvEditorField::Key,
+            key: TextInput::new("KEY"),
+            value: TextInput::new("new"),
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::McpEnvEntryEditor(_)));
+
+        let form = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form,
+            other => panic!("expected MCP form, got {other:?}"),
+        };
+        assert_eq!(form.env_rows.len(), 1, "duplicate should not be inserted");
+    }
+
+    #[test]
     fn mcp_env_picker_edit_reorder_keeps_selection_on_edited_row() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
