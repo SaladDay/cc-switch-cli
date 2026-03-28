@@ -822,6 +822,53 @@ fn mcp_env_form_serializes_rows_and_skips_empty_object() {
 }
 
 #[test]
+fn mcp_env_form_exposes_env_field_and_summary() {
+    let mut form = McpAddFormState::new();
+    let fields = form.fields();
+    assert!(
+        fields.contains(&McpAddField::Env),
+        "MCP form fields should expose Env section"
+    );
+    let args_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::Args)
+        .expect("MCP Args field should exist");
+    let env_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::Env)
+        .expect("MCP Env field should exist");
+    let app_claude_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::AppClaude)
+        .expect("MCP AppClaude field should exist");
+    assert!(
+        args_idx < env_idx && env_idx < app_claude_idx,
+        "MCP Env field should appear between Args and AppClaude"
+    );
+    assert!(form.input(McpAddField::Env).is_none());
+    assert!(form.input_mut(McpAddField::Env).is_none());
+    assert_eq!(form.env_summary(), crate::cli::i18n::texts::none());
+
+    form.env_rows.push(McpEnvVarRow {
+        key: "API_KEY".to_string(),
+        value: "secret".to_string(),
+    });
+    assert_eq!(
+        form.env_summary(),
+        crate::cli::i18n::texts::tui_mcp_env_entry_count(1)
+    );
+
+    form.env_rows.push(McpEnvVarRow {
+        key: "PROJECT_ROOT".to_string(),
+        value: "".to_string(),
+    });
+    assert_eq!(
+        form.env_summary(),
+        crate::cli::i18n::texts::tui_mcp_env_entry_count(2)
+    );
+}
+
+#[test]
 fn provider_add_form_switching_back_to_custom_clears_template_values() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     let existing_ids = Vec::<String>::new();

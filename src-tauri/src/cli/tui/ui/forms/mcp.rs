@@ -175,12 +175,14 @@ pub(crate) fn mcp_field_label_and_value(
         McpAddField::Name => texts::header_name().to_string(),
         McpAddField::Command => texts::tui_label_command().to_string(),
         McpAddField::Args => texts::tui_label_args().to_string(),
+        McpAddField::Env => texts::tui_label_env().to_string(),
         McpAddField::AppClaude => texts::tui_label_app_claude().to_string(),
         McpAddField::AppCodex => texts::tui_label_app_codex().to_string(),
         McpAddField::AppGemini => texts::tui_label_app_gemini().to_string(),
     };
 
     let value = match field {
+        McpAddField::Env => mcp.env_summary(),
         McpAddField::AppClaude => {
             if mcp.apps.claude {
                 format!("[{}]", texts::tui_marker_active())
@@ -228,6 +230,7 @@ pub(crate) fn mcp_field_editor_line(
     };
 
     let text = match field {
+        McpAddField::Env => texts::tui_mcp_env_editor_hint().to_string(),
         McpAddField::AppClaude => format!("claude = {}", mcp.apps.claude),
         McpAddField::AppCodex => format!("codex = {}", mcp.apps.codex),
         McpAddField::AppGemini => format!("gemini = {}", mcp.apps.gemini),

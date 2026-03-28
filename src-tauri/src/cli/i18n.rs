@@ -1546,6 +1546,32 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_env() -> &'static str {
+        if is_chinese() {
+            "环境变量"
+        } else {
+            "Env"
+        }
+    }
+
+    pub fn tui_mcp_env_entry_count(count: usize) -> String {
+        if is_chinese() {
+            format!("{count} 项")
+        } else if count == 1 {
+            "1 entry".to_string()
+        } else {
+            format!("{count} entries")
+        }
+    }
+
+    pub fn tui_mcp_env_editor_hint() -> &'static str {
+        if is_chinese() {
+            "按 Enter 管理环境变量"
+        } else {
+            "Press Enter to manage env vars"
+        }
+    }
+
     pub fn tui_label_app_claude() -> &'static str {
         if is_chinese() {
             "应用: Claude"

@@ -259,6 +259,7 @@ pub enum McpAddField {
     Name,
     Command,
     Args,
+    Env,
     AppClaude,
     AppCodex,
     AppGemini,

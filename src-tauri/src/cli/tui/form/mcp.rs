@@ -1,4 +1,4 @@
-use crate::app_config::McpServer;
+use crate::{app_config::McpServer, cli::i18n::texts};
 use serde_json::{json, Value};
 
 use super::{FormFocus, FormMode, McpAddField, McpAddFormState, McpEnvVarRow, TextInput};
@@ -72,6 +72,14 @@ impl McpAddFormState {
         }
     }
 
+    pub fn env_summary(&self) -> String {
+        match self.env_rows.len() {
+            0 => texts::none().to_string(),
+            1 => texts::tui_mcp_env_entry_count(1),
+            count => texts::tui_mcp_env_entry_count(count),
+        }
+    }
+
     pub fn locked_id(&self) -> Option<&str> {
         match &self.mode {
             FormMode::Edit { id } => Some(id.as_str()),
@@ -97,6 +105,7 @@ impl McpAddFormState {
             McpAddField::Name,
             McpAddField::Command,
             McpAddField::Args,
+            McpAddField::Env,
             McpAddField::AppClaude,
             McpAddField::AppCodex,
             McpAddField::AppGemini,
@@ -109,7 +118,10 @@ impl McpAddFormState {
             McpAddField::Name => Some(&self.name),
             McpAddField::Command => Some(&self.command),
             McpAddField::Args => Some(&self.args),
-            McpAddField::AppClaude | McpAddField::AppCodex | McpAddField::AppGemini => None,
+            McpAddField::Env
+            | McpAddField::AppClaude
+            | McpAddField::AppCodex
+            | McpAddField::AppGemini => None,
         }
     }
 
@@ -119,7 +131,10 @@ impl McpAddFormState {
             McpAddField::Name => Some(&mut self.name),
             McpAddField::Command => Some(&mut self.command),
             McpAddField::Args => Some(&mut self.args),
-            McpAddField::AppClaude | McpAddField::AppCodex | McpAddField::AppGemini => None,
+            McpAddField::Env
+            | McpAddField::AppClaude
+            | McpAddField::AppCodex
+            | McpAddField::AppGemini => None,
         }
     }
 
