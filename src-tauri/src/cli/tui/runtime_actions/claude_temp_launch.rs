@@ -105,13 +105,7 @@ fn handoff_to_claude(
     use std::os::unix::process::CommandExt;
 
     terminal.with_terminal_restored_for_handoff(|| {
-        let exec_err = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("trap 'rm -f -- \"$1\"' EXIT; \"$2\" --settings \"$1\"")
-            .arg("cc-switch-claude-temp-launch")
-            .arg(&prepared.settings_path)
-            .arg(&prepared.executable)
-            .exec();
+        let exec_err = build_handoff_command(prepared).exec();
 
         Err(AppError::localized(
             "claude.temp_launch_exec_failed",
@@ -119,6 +113,13 @@ fn handoff_to_claude(
             format!("Failed to launch Claude: {exec_err}"),
         ))
     })
+}
+
+#[cfg(unix)]
+fn build_handoff_command(prepared: &PreparedClaudeLaunch) -> std::process::Command {
+    let mut command = std::process::Command::new(&prepared.executable);
+    command.arg("--settings").arg(&prepared.settings_path);
+    command
 }
 
 #[cfg(not(unix))]
@@ -220,6 +221,18 @@ fn write_temp_settings_file(
     provider: &Provider,
     settings: &serde_json::Value,
 ) -> Result<PathBuf, AppError> {
+    write_temp_settings_file_with(temp_dir, provider, settings, finalize_temp_settings_file)
+}
+
+fn write_temp_settings_file_with<Finalize>(
+    temp_dir: &Path,
+    provider: &Provider,
+    settings: &serde_json::Value,
+    finalize: Finalize,
+) -> Result<PathBuf, AppError>
+where
+    Finalize: FnOnce(&Path) -> Result<(), AppError>,
+{
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -237,20 +250,46 @@ fn write_temp_settings_file(
         fs::create_dir_all(parent).map_err(|err| AppError::io(parent, err))?;
     }
 
-    let mut file = create_secret_temp_file(&path)?;
-    file.write_all(&content)
-        .and_then(|()| file.flush())
-        .map_err(|err| AppError::io(&path, err))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+    let write_result = (|| {
+        let mut file = create_secret_temp_file(&path)?;
+        file.write_all(&content)
+            .and_then(|()| file.flush())
             .map_err(|err| AppError::io(&path, err))?;
-    }
+        finalize(&path)?;
+        Ok(())
+    })();
 
-    Ok(path)
+    match write_result {
+        Ok(()) => Ok(path),
+        Err(err) => {
+            let cleanup_result = cleanup_temp_settings_file(&path);
+            match cleanup_result {
+                Ok(()) => Err(err),
+                Err(cleanup_err) => Err(AppError::localized(
+                    "claude.temp_launch_tempfile_cleanup_failed",
+                    format!(
+                        "写入临时设置文件失败: {err}；同时清理失败: {cleanup_err}"
+                    ),
+                    format!(
+                        "Failed to write the temporary settings file: {err}; also failed to clean it up: {cleanup_err}"
+                    ),
+                )),
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn finalize_temp_settings_file(path: &Path) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|err| AppError::io(path, err))
+}
+
+#[cfg(not(unix))]
+fn finalize_temp_settings_file(_path: &Path) -> Result<(), AppError> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -307,6 +346,8 @@ mod tests {
     use crate::provider::Provider;
     use serde_json::{json, Value};
     use std::cell::Cell;
+    #[cfg(unix)]
+    use std::ffi::OsString;
     use tempfile::TempDir;
 
     struct LaunchFixture {
@@ -373,6 +414,71 @@ mod tests {
             primary_model_id: None,
             default_model_id: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_handoff_command_execs_claude_directly() {
+        let prepared = PreparedClaudeLaunch {
+            executable: PathBuf::from("/usr/local/bin/claude"),
+            settings_path: PathBuf::from("/tmp/cc-switch-claude-settings.json"),
+        };
+
+        let command = build_handoff_command(&prepared);
+        let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
+
+        assert_eq!(
+            command.get_program(),
+            std::path::Path::new("/usr/local/bin/claude")
+        );
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("--settings"),
+                OsString::from("/tmp/cc-switch-claude-settings.json"),
+            ]
+        );
+    }
+
+    #[test]
+    fn temp_settings_file_is_removed_when_finalize_step_fails() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let provider = Provider::with_id(
+            "demo".to_string(),
+            "Demo".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-demo"
+                }
+            }),
+            None,
+        );
+
+        let err = write_temp_settings_file_with(
+            temp_dir.path(),
+            &provider,
+            &json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-demo"
+                }
+            }),
+            |_| Err(AppError::Message("simulated finalize failure".to_string())),
+        )
+        .expect_err("finalize failure should bubble up");
+
+        assert!(
+            err.to_string().contains("simulated finalize failure"),
+            "unexpected error: {err}"
+        );
+
+        let leftover_files: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .expect("read temp dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .collect();
+        assert!(
+            leftover_files.is_empty(),
+            "temporary settings file should be removed on failure, found: {leftover_files:?}"
+        );
     }
 
     #[test]
