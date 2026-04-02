@@ -59,6 +59,17 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
   </tr>
   <tr>
     <td width="180">
+      <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">
+        <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to AICodeMirror for sponsoring this project! AICodeMirror provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at 38% / 2% / 9% of original price, with extra discounts on top-ups! AICodeMirror offers special benefits for cc-switch-cli users: register via <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">this link</a> to enjoy 20% off your first top-up, and enterprise customers can get up to 25% off!<br/>
+      Website: <a href="https://www.aicodemirror.com">https://www.aicodemirror.com</a>
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://www.right.codes/register?aff=ccswitch-cli">
         <img src="assets/partners/logos/rightcode.jpg" alt="RightCode" width="150">
       </a>

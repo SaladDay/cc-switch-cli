@@ -14,6 +14,10 @@ fn packycode_template_index(app_type: AppType) -> usize {
     template_index_by_label(app_type, "* PackyCode")
 }
 
+fn aicodemirror_template_index(app_type: AppType) -> usize {
+    template_index_by_label(app_type, "* AICodeMirror")
+}
+
 fn rightcode_template_index(app_type: AppType) -> usize {
     template_index_by_label(app_type, "* RightCode")
 }
@@ -30,26 +34,69 @@ fn provider_add_form_template_labels_use_ascii_prefix_for_packycode() {
 }
 
 #[test]
-fn provider_add_form_template_labels_include_rightcode_for_all_app_types() {
-    let claude_form = ProviderAddFormState::new(AppType::Claude);
-    let claude_labels = claude_form.template_labels();
-    assert!(
-        claude_labels.contains(&"* RightCode"),
-        "expected RightCode sponsor label to exist for Claude"
+fn provider_add_form_template_labels_follow_explicit_support_matrix() {
+    let claude_labels = ProviderAddFormState::new(AppType::Claude).template_labels();
+    assert_eq!(
+        claude_labels,
+        vec![
+            "Custom",
+            "Claude Official",
+            "* PackyCode",
+            "* AICodeMirror",
+            "* RightCode",
+        ]
     );
 
-    let codex_form = ProviderAddFormState::new(AppType::Codex);
-    let codex_labels = codex_form.template_labels();
-    assert!(
-        codex_labels.contains(&"* RightCode"),
-        "expected RightCode sponsor label to exist for Codex"
+    let codex_labels = ProviderAddFormState::new(AppType::Codex).template_labels();
+    assert_eq!(
+        codex_labels,
+        vec![
+            "Custom",
+            "OpenAI Official",
+            "* PackyCode",
+            "* AICodeMirror",
+            "* RightCode",
+        ]
     );
 
-    let gemini_form = ProviderAddFormState::new(AppType::Gemini);
-    let gemini_labels = gemini_form.template_labels();
+    let gemini_labels = ProviderAddFormState::new(AppType::Gemini).template_labels();
+    assert_eq!(
+        gemini_labels,
+        vec![
+            "Custom",
+            "Google OAuth",
+            "* PackyCode",
+            "* AICodeMirror",
+            "* RightCode",
+        ]
+    );
+
+    let opencode_labels = ProviderAddFormState::new(AppType::OpenCode).template_labels();
+    assert_eq!(opencode_labels, vec!["Custom", "* AICodeMirror"]);
     assert!(
-        gemini_labels.contains(&"* RightCode"),
-        "expected RightCode sponsor label to exist for Gemini"
+        !opencode_labels.contains(&"* PackyCode") && !opencode_labels.contains(&"* RightCode"),
+        "OpenCode should only expose the AICodeMirror sponsor preset"
+    );
+
+    let openclaw_labels = ProviderAddFormState::new(AppType::OpenClaw).template_labels();
+    assert_eq!(openclaw_labels, vec!["Custom", "* AICodeMirror"]);
+    assert!(
+        !openclaw_labels.contains(&"* PackyCode") && !openclaw_labels.contains(&"* RightCode"),
+        "OpenClaw should only expose the AICodeMirror sponsor preset"
+    );
+}
+
+#[test]
+fn provider_add_form_aicodemirror_preset_keeps_affiliate_register_url_in_metadata() {
+    let claude_presets = super::provider_templates::provider_sponsor_presets(&AppType::Claude);
+    let aicodemirror = claude_presets
+        .iter()
+        .find(|preset| preset.id() == "aicodemirror")
+        .expect("expected AICodeMirror sponsor preset for Claude");
+
+    assert_eq!(
+        aicodemirror.register_url(),
+        "https://www.aicodemirror.com/register?invitecode=77V9EA"
     );
 }
 
@@ -214,6 +261,70 @@ fn provider_add_form_packycode_template_gemini_sets_partner_meta_and_base_url() 
     );
     assert_eq!(provider["meta"]["isPartner"], true);
     assert_eq!(provider["meta"]["partnerPromotionKey"], "packycode");
+}
+
+#[test]
+fn provider_add_form_aicodemirror_template_claude_sets_partner_meta_and_base_url() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+
+    form.apply_template(aicodemirror_template_index(AppType::Claude), &[]);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "AICodeMirror");
+    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.com");
+    assert_eq!(
+        provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
+        "https://api.aicodemirror.com/api/claudecode"
+    );
+    assert_eq!(provider["meta"]["isPartner"], true);
+    assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
+}
+
+#[test]
+fn provider_add_form_aicodemirror_template_codex_preserves_third_party_auth_behavior() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+
+    form.apply_template(aicodemirror_template_index(AppType::Codex), &[]);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "AICodeMirror");
+    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.com");
+    let cfg = provider["settingsConfig"]["config"]
+        .as_str()
+        .expect("settingsConfig.config should be string");
+    assert!(cfg.contains("base_url = \"https://api.aicodemirror.com/api/codex/backend-api/codex\""));
+    assert!(cfg.contains("model = \"gpt-5.2-codex\""));
+    assert!(cfg.contains("wire_api = \"responses\""));
+    assert!(cfg.contains("requires_openai_auth = true"));
+    assert_eq!(provider["meta"]["isPartner"], true);
+    assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
+
+    let fields = form.fields();
+    assert!(
+        fields.contains(&ProviderAddField::CodexApiKey),
+        "third-party Codex presets should still show the API Key field"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::CodexEnvKey),
+        "Codex env key should stay hidden for sponsor presets"
+    );
+}
+
+#[test]
+fn provider_add_form_aicodemirror_template_gemini_sets_partner_meta_and_base_url() {
+    let mut form = ProviderAddFormState::new(AppType::Gemini);
+
+    form.apply_template(aicodemirror_template_index(AppType::Gemini), &[]);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "AICodeMirror");
+    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.com");
+    assert_eq!(
+        provider["settingsConfig"]["env"]["GOOGLE_GEMINI_BASE_URL"],
+        "https://api.aicodemirror.com/api/gemini"
+    );
+    assert_eq!(provider["meta"]["isPartner"], true);
+    assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
 }
 
 #[test]
@@ -1225,11 +1336,11 @@ fn provider_add_form_disabling_common_config_preserves_provider_specific_env_key
 }
 
 #[test]
-fn provider_add_form_opencode_uses_custom_template_only() {
+fn provider_add_form_opencode_only_adds_aicodemirror_beyond_custom() {
     let form = ProviderAddFormState::new(AppType::OpenCode);
     let labels = form.template_labels();
 
-    assert_eq!(labels, vec!["Custom"]);
+    assert_eq!(labels, vec!["Custom", "* AICodeMirror"]);
 }
 
 #[test]
@@ -1240,10 +1351,83 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
         super::provider_templates::provider_builtin_template_defs(&AppType::OpenCode);
     let openclaw_labels = ProviderAddFormState::new(AppType::OpenClaw).template_labels();
 
-    assert_eq!(openclaw_labels, vec!["Custom"]);
+    assert_eq!(openclaw_labels, vec!["Custom", "* AICodeMirror"]);
     assert!(
         !std::ptr::eq(openclaw_defs, opencode_defs),
         "OpenClaw should keep its own template mapping instead of aliasing OpenCode"
+    );
+}
+
+#[test]
+fn provider_add_form_aicodemirror_template_opencode_matches_serializer_and_loader_semantics() {
+    let mut form = ProviderAddFormState::new(AppType::OpenCode);
+
+    form.apply_template(aicodemirror_template_index(AppType::OpenCode), &[]);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "AICodeMirror");
+    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.com");
+    assert_eq!(provider["meta"]["isPartner"], true);
+    assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
+    assert_eq!(provider["settingsConfig"]["npm"], "@ai-sdk/anthropic");
+    assert!(
+        provider["settingsConfig"]["options"]
+            .get("apiKey")
+            .is_none(),
+        "blank OpenCode API keys should be omitted on save"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["options"]["baseURL"],
+        "https://api.aicodemirror.com/api/claudecode"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["models"]["claude-sonnet-4.6"]["name"],
+        "Claude Sonnet 4.6"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["models"]["claude-opus-4.6"]["name"],
+        "Claude Opus 4.6"
+    );
+
+    let mut parsed = Provider::with_id(
+        "opencode-aicodemirror".to_string(),
+        "AICodeMirror".to_string(),
+        provider["settingsConfig"].clone(),
+        Some("https://www.aicodemirror.com".to_string()),
+    );
+    parsed.meta = Some(crate::provider::ProviderMeta {
+        is_partner: Some(true),
+        partner_promotion_key: Some("aicodemirror".to_string()),
+        ..Default::default()
+    });
+
+    let roundtrip_form = ProviderAddFormState::from_provider(AppType::OpenCode, &parsed);
+    assert_eq!(
+        roundtrip_form.opencode_npm_package.value,
+        "@ai-sdk/anthropic"
+    );
+    assert!(roundtrip_form.opencode_api_key.value.is_empty());
+    assert_eq!(
+        roundtrip_form.opencode_base_url.value,
+        "https://api.aicodemirror.com/api/claudecode"
+    );
+    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-4.6");
+    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 4.6");
+
+    let roundtrip = roundtrip_form.to_provider_json_value();
+    assert!(
+        roundtrip["settingsConfig"]["options"]
+            .get("apiKey")
+            .is_none(),
+        "OpenCode roundtrip should still omit blank API keys"
+    );
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"]["claude-sonnet-4.6"]["name"],
+        "Claude Sonnet 4.6"
+    );
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"]["claude-opus-4.6"]["name"],
+        "Claude Opus 4.6"
     );
 }
 
@@ -1470,6 +1654,87 @@ fn provider_add_form_openclaw_uses_upstream_default_api_protocol() {
         "https://api.openclaw.example/v1"
     );
     assert_eq!(provider["settingsConfig"]["api"], "openai-completions");
+}
+
+#[test]
+fn provider_add_form_aicodemirror_template_openclaw_matches_serializer_and_loader_semantics() {
+    let mut form = ProviderAddFormState::new(AppType::OpenClaw);
+
+    form.apply_template(aicodemirror_template_index(AppType::OpenClaw), &[]);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "AICodeMirror");
+    assert_eq!(provider["websiteUrl"], "https://www.aicodemirror.com");
+    assert_eq!(provider["meta"]["isPartner"], true);
+    assert_eq!(provider["meta"]["partnerPromotionKey"], "aicodemirror");
+    assert!(
+        provider["settingsConfig"].get("apiKey").is_none(),
+        "blank OpenClaw API keys should be omitted on save"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["baseUrl"],
+        "https://api.aicodemirror.com/api/claudecode"
+    );
+    assert_eq!(provider["settingsConfig"]["api"], "anthropic-messages");
+    assert_eq!(
+        provider["settingsConfig"]["models"],
+        json!([
+            {
+                "id": "claude-opus-4-6",
+                "name": "Claude Opus 4.6",
+                "contextWindow": 200000,
+                "cost": {
+                    "input": 5,
+                    "output": 25
+                }
+            },
+            {
+                "id": "claude-sonnet-4-6",
+                "name": "Claude Sonnet 4.6",
+                "contextWindow": 200000,
+                "cost": {
+                    "input": 3,
+                    "output": 15
+                }
+            }
+        ])
+    );
+
+    let mut parsed = Provider::with_id(
+        "openclaw-aicodemirror".to_string(),
+        "AICodeMirror".to_string(),
+        provider["settingsConfig"].clone(),
+        Some("https://www.aicodemirror.com".to_string()),
+    );
+    parsed.meta = Some(crate::provider::ProviderMeta {
+        is_partner: Some(true),
+        partner_promotion_key: Some("aicodemirror".to_string()),
+        ..Default::default()
+    });
+
+    let roundtrip_form = ProviderAddFormState::from_provider(AppType::OpenClaw, &parsed);
+    assert_eq!(
+        roundtrip_form.opencode_npm_package.value,
+        "anthropic-messages"
+    );
+    assert!(roundtrip_form.opencode_api_key.value.is_empty());
+    assert_eq!(
+        roundtrip_form.opencode_base_url.value,
+        "https://api.aicodemirror.com/api/claudecode"
+    );
+    assert_eq!(roundtrip_form.opencode_model_id.value, "claude-opus-4-6");
+    assert_eq!(roundtrip_form.opencode_model_name.value, "Claude Opus 4.6");
+    assert_eq!(roundtrip_form.opencode_model_context_limit.value, "200000");
+
+    let roundtrip = roundtrip_form.to_provider_json_value();
+    assert!(
+        roundtrip["settingsConfig"].get("apiKey").is_none(),
+        "OpenClaw roundtrip should still omit blank API keys"
+    );
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"],
+        provider["settingsConfig"]["models"]
+    );
 }
 
 #[test]

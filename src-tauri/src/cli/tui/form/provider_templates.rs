@@ -31,7 +31,18 @@ pub(super) struct SponsorProviderPreset {
     gemini_base_url: &'static str,
 }
 
-static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 2] = [
+#[cfg(test)]
+impl SponsorProviderPreset {
+    pub(super) fn id(&self) -> &'static str {
+        self.id
+    }
+
+    pub(super) fn register_url(&self) -> &'static str {
+        self.register_url
+    }
+}
+
+static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 3] = [
     SponsorProviderPreset {
         id: "packycode",
         provider_name: "PackyCode",
@@ -43,6 +54,18 @@ static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 2] = [
         claude_base_url: "https://www.packyapi.com",
         codex_base_url: "https://www.packyapi.com/v1",
         gemini_base_url: "https://www.packyapi.com",
+    },
+    SponsorProviderPreset {
+        id: "aicodemirror",
+        provider_name: "AICodeMirror",
+        chip_label: "* AICodeMirror",
+        website_url: "https://www.aicodemirror.com",
+        register_url: "https://www.aicodemirror.com/register?invitecode=77V9EA",
+        promo_code: "",
+        partner_promotion_key: "aicodemirror",
+        claude_base_url: "https://api.aicodemirror.com/api/claudecode",
+        codex_base_url: "https://api.aicodemirror.com/api/codex/backend-api/codex",
+        gemini_base_url: "https://api.aicodemirror.com/api/gemini",
     },
     SponsorProviderPreset {
         id: "rightcode",
@@ -57,6 +80,30 @@ static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 2] = [
         gemini_base_url: "https://www.right.codes",
     },
 ];
+
+static SPONSOR_PROVIDER_PRESETS_CLAUDE: [SponsorProviderPreset; 3] = [
+    SPONSOR_PROVIDER_PRESETS[0],
+    SPONSOR_PROVIDER_PRESETS[1],
+    SPONSOR_PROVIDER_PRESETS[2],
+];
+
+static SPONSOR_PROVIDER_PRESETS_CODEX: [SponsorProviderPreset; 3] = [
+    SPONSOR_PROVIDER_PRESETS[0],
+    SPONSOR_PROVIDER_PRESETS[1],
+    SPONSOR_PROVIDER_PRESETS[2],
+];
+
+static SPONSOR_PROVIDER_PRESETS_GEMINI: [SponsorProviderPreset; 3] = [
+    SPONSOR_PROVIDER_PRESETS[0],
+    SPONSOR_PROVIDER_PRESETS[1],
+    SPONSOR_PROVIDER_PRESETS[2],
+];
+
+static SPONSOR_PROVIDER_PRESETS_OPENCODE: [SponsorProviderPreset; 1] =
+    [SPONSOR_PROVIDER_PRESETS[1]];
+
+static SPONSOR_PROVIDER_PRESETS_OPENCLAW: [SponsorProviderPreset; 1] =
+    [SPONSOR_PROVIDER_PRESETS[1]];
 
 static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 2] = [
     ProviderTemplateDef {
@@ -101,8 +148,6 @@ static PROVIDER_TEMPLATE_DEFS_OPENCLAW: [ProviderTemplateDef; 1] = [ProviderTemp
     label: "Custom",
 }];
 
-static NO_SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 0] = [];
-
 pub(super) fn provider_builtin_template_defs(app_type: &AppType) -> &'static [ProviderTemplateDef] {
     match app_type {
         AppType::Claude => &PROVIDER_TEMPLATE_DEFS_CLAUDE,
@@ -115,9 +160,11 @@ pub(super) fn provider_builtin_template_defs(app_type: &AppType) -> &'static [Pr
 
 pub(super) fn provider_sponsor_presets(app_type: &AppType) -> &'static [SponsorProviderPreset] {
     match app_type {
-        AppType::OpenCode => &NO_SPONSOR_PROVIDER_PRESETS,
-        AppType::OpenClaw => &NO_SPONSOR_PROVIDER_PRESETS,
-        _ => &SPONSOR_PROVIDER_PRESETS,
+        AppType::Claude => &SPONSOR_PROVIDER_PRESETS_CLAUDE,
+        AppType::Codex => &SPONSOR_PROVIDER_PRESETS_CODEX,
+        AppType::Gemini => &SPONSOR_PROVIDER_PRESETS_GEMINI,
+        AppType::OpenCode => &SPONSOR_PROVIDER_PRESETS_OPENCODE,
+        AppType::OpenClaw => &SPONSOR_PROVIDER_PRESETS_OPENCLAW,
     }
 }
 
@@ -277,13 +324,70 @@ impl ProviderAddFormState {
                 self.codex_base_url.set(preset.codex_base_url);
                 self.codex_model.set("gpt-5.2-codex");
                 self.codex_wire_api = CodexWireApi::Responses;
+                self.codex_requires_openai_auth = true;
             }
             AppType::Gemini => {
                 self.gemini_auth_type = GeminiAuthType::ApiKey;
                 self.gemini_base_url.set(preset.gemini_base_url);
             }
-            AppType::OpenCode => {}
-            AppType::OpenClaw => {}
+            AppType::OpenCode => {
+                if preset.id == "aicodemirror" {
+                    self.extra["settingsConfig"] = json!({
+                        "npm": "@ai-sdk/anthropic",
+                        "options": {
+                            "baseURL": preset.claude_base_url,
+                        },
+                        "models": {
+                            "claude-opus-4.6": {
+                                "name": "Claude Opus 4.6",
+                            },
+                            "claude-sonnet-4.6": {
+                                "name": "Claude Sonnet 4.6",
+                            },
+                        },
+                    });
+                    self.opencode_npm_package.set("@ai-sdk/anthropic");
+                    self.opencode_api_key.set("");
+                    self.opencode_base_url.set(preset.claude_base_url);
+                    self.opencode_model_id.set("claude-opus-4.6");
+                    self.opencode_model_name.set("Claude Opus 4.6");
+                    self.opencode_model_context_limit.set("");
+                    self.opencode_model_output_limit.set("");
+                    self.opencode_model_original_id = Some("claude-opus-4.6".to_string());
+                }
+            }
+            AppType::OpenClaw => {
+                if preset.id == "aicodemirror" {
+                    self.opencode_api_key.set("");
+                    self.opencode_base_url.set(preset.claude_base_url);
+                    self.opencode_npm_package.set("anthropic-messages");
+                    self.openclaw_user_agent = false;
+                    self.openclaw_models = vec![
+                        json!({
+                            "id": "claude-opus-4-6",
+                            "name": "Claude Opus 4.6",
+                            "contextWindow": 200000,
+                            "cost": {
+                                "input": 5,
+                                "output": 25,
+                            },
+                        }),
+                        json!({
+                            "id": "claude-sonnet-4-6",
+                            "name": "Claude Sonnet 4.6",
+                            "contextWindow": 200000,
+                            "cost": {
+                                "input": 3,
+                                "output": 15,
+                            },
+                        }),
+                    ];
+                    self.opencode_model_id.set("claude-opus-4-6");
+                    self.opencode_model_name.set("Claude Opus 4.6");
+                    self.opencode_model_context_limit.set("200000");
+                    self.opencode_model_original_id = Some("claude-opus-4-6".to_string());
+                }
+            }
         }
     }
 }
