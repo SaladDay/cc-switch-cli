@@ -440,10 +440,18 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                 continue;
             };
 
-            // type 缺省为 stdio
+            // Codex 的远程 MCP 可以只写 `url`，不显式提供 `type`。
+            // 这种情况下应按 HTTP 服务器导入，而不是回退到 stdio。
             let typ = entry_tbl
                 .get("type")
                 .and_then(|v| v.as_str())
+                .or_else(|| {
+                    entry_tbl
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .filter(|url| !url.trim().is_empty())
+                        .map(|_| "http")
+                })
                 .unwrap_or("stdio");
 
             // 构建 JSON 规范

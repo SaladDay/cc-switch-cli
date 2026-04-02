@@ -530,6 +530,58 @@ url = "https://example.com"
 }
 
 #[test]
+fn import_from_codex_infers_http_when_url_is_present_without_type() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+    fs::write(
+        &path,
+        r#"[mcp_servers.cloudflare_api]
+url = "https://mcp.cloudflare.com/mcp"
+
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+bearer_token_env_var = "GITHUB_MCP_TOKEN"
+"#,
+    )
+    .expect("write codex config");
+
+    let mut config = MultiAppConfig::default();
+    let changed = cc_switch_lib::import_from_codex(&mut config).expect("import codex");
+    assert_eq!(changed, 2, "should import both URL-based servers");
+
+    let servers = config
+        .mcp
+        .servers
+        .as_ref()
+        .expect("unified servers should exist");
+
+    let cloudflare = servers
+        .get("cloudflare_api")
+        .expect("cloudflare server should be imported");
+    assert!(
+        cloudflare.apps.codex,
+        "Codex app should be enabled for cloudflare_api"
+    );
+    assert_eq!(cloudflare.server["type"], "http");
+    assert_eq!(cloudflare.server["url"], "https://mcp.cloudflare.com/mcp");
+
+    let github = servers
+        .get("github")
+        .expect("github server should be imported");
+    assert!(github.apps.codex, "Codex app should be enabled for github");
+    assert_eq!(github.server["type"], "http");
+    assert_eq!(github.server["url"], "https://api.githubcopilot.com/mcp/");
+    assert_eq!(
+        github.server["bearer_token_env_var"], "GITHUB_MCP_TOKEN",
+        "custom Codex HTTP fields should be preserved during import"
+    );
+}
+
+#[test]
 fn mcp_env_import_from_codex_preserves_env_table() {
     let _guard = lock_test_mutex();
     reset_test_fs();
