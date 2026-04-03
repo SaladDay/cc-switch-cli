@@ -11,6 +11,13 @@ fn validate_server_spec(spec: &Value) -> Result<(), AppError> {
             "MCP 服务器连接定义必须为 JSON 对象".into(),
         ));
     }
+    if let Some(type_val) = spec.get("type") {
+        if !type_val.is_string() {
+            return Err(AppError::McpValidation(
+                "MCP 服务器 type 必须是字符串".into(),
+            ));
+        }
+    }
     let t_opt = spec.get("type").and_then(|x| x.as_str());
     // 支持三种：stdio/http/sse；若缺省 type 则按 stdio 处理（与社区常见 .mcp.json 一致）
     let is_stdio = t_opt.map(|t| t == "stdio").unwrap_or(true);
@@ -440,34 +447,77 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                 continue;
             };
 
+            let toml_to_json = |toml_val: &toml::Value| -> Option<serde_json::Value> {
+                match toml_val {
+                    toml::Value::String(s) => Some(json!(s)),
+                    toml::Value::Integer(i) => Some(json!(i)),
+                    toml::Value::Float(f) => Some(json!(f)),
+                    toml::Value::Boolean(b) => Some(json!(b)),
+                    toml::Value::Array(arr) => {
+                        let json_arr: Vec<serde_json::Value> = arr
+                            .iter()
+                            .filter_map(|item| match item {
+                                toml::Value::String(s) => Some(json!(s)),
+                                toml::Value::Integer(i) => Some(json!(i)),
+                                toml::Value::Float(f) => Some(json!(f)),
+                                toml::Value::Boolean(b) => Some(json!(b)),
+                                _ => None,
+                            })
+                            .collect();
+                        if json_arr.is_empty() {
+                            None
+                        } else {
+                            Some(serde_json::Value::Array(json_arr))
+                        }
+                    }
+                    toml::Value::Table(tbl) => {
+                        let mut json_obj = serde_json::Map::new();
+                        for (k, v) in tbl.iter() {
+                            if let Some(s) = v.as_str() {
+                                json_obj.insert(k.clone(), json!(s));
+                            }
+                        }
+                        if json_obj.is_empty() {
+                            None
+                        } else {
+                            Some(serde_json::Value::Object(json_obj))
+                        }
+                    }
+                    toml::Value::Datetime(_) => None,
+                }
+            };
+
             // Codex 的远程 MCP 可以只写 `url`，不显式提供 `type`。
-            // 这种情况下应按 HTTP 服务器导入，而不是回退到 stdio。
-            let typ = entry_tbl
-                .get("type")
-                .and_then(|v| v.as_str())
-                .or_else(|| {
-                    entry_tbl
-                        .get("url")
-                        .and_then(|v| v.as_str())
-                        .filter(|url| !url.trim().is_empty())
-                        .map(|_| "http")
-                })
-                .unwrap_or("stdio");
+            // 仅在 `type` 真正缺失时才推断为 HTTP，避免掩盖显式但非法的配置。
+            let typ = if entry_tbl.contains_key("type") {
+                entry_tbl.get("type").and_then(|v| v.as_str())
+            } else {
+                entry_tbl
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .filter(|url| !url.trim().is_empty())
+                    .map(|_| "http")
+                    .or(Some("stdio"))
+            };
 
             // 构建 JSON 规范
             let mut spec = serde_json::Map::new();
-            spec.insert("type".into(), json!(typ));
+            if let Some(typ) = typ {
+                spec.insert("type".into(), json!(typ));
+            } else if let Some(type_val) = entry_tbl.get("type").and_then(toml_to_json) {
+                spec.insert("type".into(), type_val);
+            }
 
             // 核心字段（需要手动处理的字段）
             let core_fields = match typ {
-                "stdio" => vec!["type", "command", "args", "env", "cwd"],
-                "http" | "sse" => vec!["type", "url", "http_headers"],
+                Some("stdio") => vec!["type", "command", "args", "env", "cwd"],
+                Some("http") | Some("sse") => vec!["type", "url", "http_headers"],
                 _ => vec!["type"],
             };
 
             // 1. 处理核心字段（强类型）
             match typ {
-                "stdio" => {
+                Some("stdio") => {
                     if let Some(cmd) = entry_tbl.get("command").and_then(|v| v.as_str()) {
                         spec.insert("command".into(), json!(cmd));
                     }
@@ -498,7 +548,7 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                         }
                     }
                 }
-                "http" | "sse" => {
+                Some("http") | Some("sse") => {
                     if let Some(url) = entry_tbl.get("url").and_then(|v| v.as_str()) {
                         spec.insert("url".into(), json!(url));
                     }
@@ -520,10 +570,7 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                         }
                     }
                 }
-                _ => {
-                    log::warn!("跳过未知类型 '{typ}' 的 Codex MCP 项 '{id}'");
-                    return changed;
-                }
+                _ => {}
             }
 
             // 2. 处理扩展字段和其他未知字段（通用 TOML → JSON 转换）
@@ -534,54 +581,13 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                 }
 
                 // 通用 TOML 值到 JSON 值转换
-                let json_val = match toml_val {
-                    toml::Value::String(s) => Some(json!(s)),
-                    toml::Value::Integer(i) => Some(json!(i)),
-                    toml::Value::Float(f) => Some(json!(f)),
-                    toml::Value::Boolean(b) => Some(json!(b)),
-                    toml::Value::Array(arr) => {
-                        // 只支持简单类型数组
-                        let json_arr: Vec<serde_json::Value> = arr
-                            .iter()
-                            .filter_map(|item| match item {
-                                toml::Value::String(s) => Some(json!(s)),
-                                toml::Value::Integer(i) => Some(json!(i)),
-                                toml::Value::Float(f) => Some(json!(f)),
-                                toml::Value::Boolean(b) => Some(json!(b)),
-                                _ => None,
-                            })
-                            .collect();
-                        if !json_arr.is_empty() {
-                            Some(serde_json::Value::Array(json_arr))
-                        } else {
-                            log::debug!("跳过复杂数组字段 '{key}' (TOML → JSON)");
-                            None
-                        }
-                    }
-                    toml::Value::Table(tbl) => {
-                        // 浅层表转为 JSON 对象（仅支持字符串值）
-                        let mut json_obj = serde_json::Map::new();
-                        for (k, v) in tbl.iter() {
-                            if let Some(s) = v.as_str() {
-                                json_obj.insert(k.clone(), json!(s));
-                            }
-                        }
-                        if !json_obj.is_empty() {
-                            Some(serde_json::Value::Object(json_obj))
-                        } else {
-                            log::debug!("跳过复杂对象字段 '{key}' (TOML → JSON)");
-                            None
-                        }
-                    }
-                    toml::Value::Datetime(_) => {
-                        log::debug!("跳过日期时间字段 '{key}' (TOML → JSON)");
-                        None
-                    }
-                };
+                let json_val = toml_to_json(toml_val);
 
                 if let Some(val) = json_val {
                     spec.insert(key.clone(), val);
                     log::debug!("导入扩展字段 '{key}' = {toml_val:?}");
+                } else {
+                    log::debug!("跳过复杂字段 '{key}' (TOML → JSON)");
                 }
             }
 
