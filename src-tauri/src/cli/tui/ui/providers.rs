@@ -80,10 +80,7 @@ pub(super) fn render_providers(
                 ("d", texts::tui_key_delete()),
                 ("t", texts::tui_key_speedtest()),
             ]);
-            if matches!(
-                app.app_type,
-                crate::app_config::AppType::Claude | crate::app_config::AppType::Codex
-            ) {
+            if crate::cli::tui::app::supports_temporary_provider_launch(&app.app_type) {
                 keys.push(("o", texts::tui_key_launch_temp()));
             }
             keys.push(("c", texts::tui_key_stream_check()));
@@ -400,6 +397,46 @@ mod tests {
 
         assert!(
             all.contains(&format!("o {}", texts::tui_key_launch_temp())),
+            "{all}"
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn claude_provider_list_key_bar_hides_launch_temp_hint_on_non_unix() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = super::super::tests::minimal_data(&app.app_type);
+        let all = all_text(&super::super::tests::render(&app, &data));
+
+        assert!(
+            !all.contains(&format!("o {}", texts::tui_key_launch_temp())),
+            "{all}"
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn codex_provider_detail_key_bar_hides_launch_temp_hint_on_non_unix() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let data = super::super::tests::minimal_data(&app.app_type);
+        let all = all_text(&super::super::tests::render(&app, &data));
+
+        assert!(
+            !all.contains(&format!("o {}", texts::tui_key_launch_temp())),
             "{all}"
         );
     }

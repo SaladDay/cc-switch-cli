@@ -214,13 +214,11 @@ pub(crate) fn handle_action(
         Action::ProviderImportLiveConfig => providers::import_live_config(&mut ctx),
         Action::ProviderDelete { id } => providers::delete(&mut ctx, id),
         Action::ProviderSpeedtest { url } => providers::speedtest(&mut ctx, url),
-        Action::ProviderLaunchTemporary { id } => {
-            if matches!(ctx.app.app_type, AppType::Codex) {
-                codex_temp_launch::launch(&mut ctx, id)
-            } else {
-                Ok(())
-            }
-        }
+        Action::ProviderLaunchTemporary { id } => match ctx.app.app_type {
+            AppType::Claude => claude_temp_launch::launch(&mut ctx, id),
+            AppType::Codex => codex_temp_launch::launch(&mut ctx, id),
+            _ => Ok(()),
+        },
         Action::ProviderStreamCheck { id } => providers::stream_check(&mut ctx, id),
         Action::ProviderModelFetch {
             base_url,
@@ -700,6 +698,29 @@ mod tests {
             Some(toast)
                 if toast.kind == super::super::app::ToastKind::Warning
                     && toast.message == texts::tui_toast_visible_apps_zero_selection_warning()
+        ));
+    }
+
+    #[test]
+    fn claude_provider_launch_temporary_dispatches_to_claude_runtime_handler() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+
+        run_action(
+            &mut app,
+            &mut data,
+            Action::ProviderLaunchTemporary {
+                id: "missing".to_string(),
+            },
+        )
+        .expect("dispatch should stay inside the TUI");
+
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == super::super::app::ToastKind::Error
+                    && (toast.message.contains("missing")
+                        || toast.message.contains("未找到选中的供应商"))
         ));
     }
 }

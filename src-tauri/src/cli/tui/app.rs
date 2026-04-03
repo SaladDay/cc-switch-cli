@@ -43,3 +43,13 @@ pub use types::{
 };
 
 const PROVIDER_NOTES_MAX_CHARS: usize = 120;
+
+#[cfg(unix)]
+pub(crate) fn supports_temporary_provider_launch(app_type: &AppType) -> bool {
+    matches!(app_type, AppType::Claude | AppType::Codex)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn supports_temporary_provider_launch(_app_type: &AppType) -> bool {
+    false
+}

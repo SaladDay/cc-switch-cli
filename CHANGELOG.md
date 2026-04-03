@@ -7,6 +7,69 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.3.0] - 2026-04-03
+
+### Added
+
+- **Claude / Codex / CLI**: Add temporary start commands so you can launch Claude or Codex with a selected provider without switching the global current provider.
+- **TUI / MCP**: Add overlay-based MCP env editing with dedicated env rows, cleaner summaries, and duplicate-key validation.
+- **OpenClaw / TUI**: Add OpenClaw config-dir override support in the TUI.
+- **Sponsors / Presets**: Add AICodeMirror sponsor presets and refresh supporting README copy.
+
+### Changed
+
+- **README / Release Notes**: Refresh the README release highlights for 5.3.0 around multi-window temporary launch, MCP env editing, and runtime polish.
+- **Runtime / TUI**: Align temporary-launch affordances with real platform support so Unix-only features are routed and advertised consistently.
+- **TUI / Forms**: Tighten dirty-form exit confirms and MCP env interaction flows for a more predictable editing experience.
+
+### Fixed
+
+- **Claude / TUI**: Fix temporary launch routing so Claude provider launches dispatch through the Claude runtime handler instead of silently no-oping.
+- **MCP / TUI**: Reject duplicate env keys after trimming input and stabilize picker/editing behavior across the env editor flow.
+- **Proxy / Runtime**: Publish the managed proxy session after takeover setup and continue aligning runtime behavior with upstream expectations.
+
+### Commits (since v5.2.1)
+
+- 74da3b6 Keep temporary-launch UX aligned with actual platform support
+- 71c2757 docs: refine README sponsor copy
+- 51077a8 feat: add AICodeMirror sponsor presets
+- 7425652 feat(cli): add codex temporary start command
+- 86e6c30 feat(tui): add codex temporary launch handoff
+- d924dc5 Merge branch 'feat/upstream-runtime-align'
+- cdaf60f fix: align upstream runtime behavior
+- f750c9b feat(cli): add temporary claude start command
+- aa48594 Merge branch 'feature/provider-mcp-unsaved-exit-confirm'
+- d9cda98 feat(tui): unify dirty form exit confirms
+- 87fa16f fix(tui): tighten Claude temp launch handoff
+- f91bdd7 fix(tui): preflight Claude temp launch platform support
+- 1d6cc61 fix(tui): secure Claude temp launch settings
+- 8314338 fix(tui): guard and recover Claude temp launch
+- 377d80e feat(tui): launch Claude with a temporary provider
+- 417849f test(tui): cover provider detail launch temp key hint
+- 96d31e5 feat(tui): show Claude temporary launch hint
+- 07f3b80 test(tui): add provider detail non-claude o-key noop coverage
+- bdfa11e feat(tui): add Claude temporary launch action
+- 5066c85 docs: add Claude temporary launch design
+- d37238e docs: add unsaved form exit confirm spec
+- 446da43 feat(openclaw): support config dir override in tui
+- 35d8838 test(mcp): lock env import and sync regressions
+- b56dcba fix(tui): reject MCP env duplicates with trimmed key comparison
+- 541939b fix(tui): tighten MCP env editor esc and add-flow tests
+- d6bc552 fix(tui): keep MCP env picker selection stable
+- 706a81a feat(tui): add MCP env overlay editor
+- 5c0a15e fix(tui): align MCP env hint copy and split env form tests
+- fb0853d fix(tui): wire MCP env field summary into form UI
+- 2e807c3 feat(tui): add MCP env rows to form state
+- caf62e1 docs: add MCP env list editor design
+- 12fc7d1 merge: fix managed proxy readiness timeout
+- e9c1aee fix(proxy): publish managed session after takeover setup
+- 7f26487 docs: add Trendshift badge to README
+
+### Thanks
+
+- Thanks `@saladday` for leading the 5.3.0 cycle across temporary launch, MCP env editing, TUI polish, sponsor integrations, and release/docs updates.
+- Thanks `@XyzenSun`, `@1-bytes`, and `@opposj` for the recent fixes and improvements that helped stabilize the current release line.
+
 ## [5.2.1] - 2026-03-24
 
 ### Changed

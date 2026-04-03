@@ -117,7 +117,7 @@ impl App {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                if !matches!(self.app_type, AppType::Claude | AppType::Codex) {
+                if !supports_temporary_provider_launch(&self.app_type) {
                     return Action::None;
                 }
                 Action::ProviderLaunchTemporary { id: row.id.clone() }
@@ -208,7 +208,7 @@ impl App {
                 Action::ProviderSpeedtest { url }
             }
             KeyCode::Char('o') => {
-                if !matches!(self.app_type, AppType::Claude | AppType::Codex) {
+                if !supports_temporary_provider_launch(&self.app_type) {
                     return Action::None;
                 }
                 Action::ProviderLaunchTemporary { id: row.id.clone() }
@@ -462,6 +462,34 @@ mod tests {
             action,
             Action::ProviderLaunchTemporary { id } if id == "p1"
         ));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn claude_provider_o_key_is_noop_on_non_unix() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Char('o')), &data);
+        assert!(matches!(action, Action::None));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn codex_provider_o_key_is_noop_on_non_unix() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Char('o')), &data);
+        assert!(matches!(action, Action::None));
     }
 
     #[test]

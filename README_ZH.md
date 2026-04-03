@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.2.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.3.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -11,7 +11,7 @@
 
 统一管理 Claude Code、Codex、Gemini、OpenCode 与 OpenClaw 的供应商配置，并按应用提供 MCP 服务器、Skills 扩展、提示词、本地代理路由和环境检查等能力。
 
-[English](README.md) | [中文](README_ZH.md)
+[English](README.md) | 中文
 
 </div>
 
@@ -26,16 +26,16 @@
 
 ---
 
-## 🆕 5.2.1 更新内容
+## 🆕 5.3.0 更新内容
 
 <div align="center">
-  <h3><strong>🦞 增强 OpenClaw 支持、Workspace 管理与安装流程更新</strong></h3>
+  <h3><strong>🧭 多窗口临时启动、更完整的 MCP 环境编辑能力，以及运行时体验打磨</strong></h3>
 </div>
 
-- 🦞 进一步增强了对 OpenClaw 的支持，覆盖切换、Workspace 管理、Daily Memory 和独立配置路由。
-- 新增了面向 Workspace 文件、记忆笔记和 OpenClaw 配置操作的命令与 TUI 流程。
-- 安装脚本现在支持指定版本安装，并会自动为裸版本号补上 `v` 前缀。
-- 修复了 provider meta 残留配置清理问题，以及近期 provider / TUI 流程里的重复字段保存失败问题。
+- 支持让不同 Claude / Codex 窗口分别使用不同 provider，而不影响你当前的全局 current provider 设置。
+- 增强 TUI 中的 MCP 环境变量编辑流程，支持 overlay 编辑、重复 key 拦截，以及更清晰的字段摘要展示。
+- 持续打磨运行时与 TUI 的一致性，包括临时启动分发修复、provider 安全流程与平台能力提示对齐。
+- 继续完善 OpenClaw 流程、赞助商预设、配置路由与发布文档，提升当前 CLI 版本线的整体体验。
 
 ---
 
@@ -54,6 +54,17 @@
       CC-Switch CLI 专属优惠：通过
       <a href="https://www.packyapi.com/register?aff=cc-switch-cli">此链接</a>
       注册，并在充值时填写优惠码 <code>cc-switch-cli</code>，即可享受 <b>9 折优惠</b>。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">
+        <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>AICodeMirror</b> 赞助本项目！<b>AICodeMirror</b> 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级并发、快速开票与 7x24 专属技术支持。Claude Code / Codex / Gemini 官方通道价格低至原价的 <b>38% / 2% / 9%</b>，充值另有折上折！<br/>
+      <b>AICodeMirror</b> 为 cc-switch-cli 用户提供专属福利：通过<a href="https://www.aicodemirror.com/register?invitecode=77V9EA">此链接</a>注册，首充可享 <b>8 折</b>，即 <b>20% off</b>，企业客户最高可享 <b>75 折</b>，即 <b>25% off</b>。
     </td>
   </tr>
   <tr>
