@@ -235,7 +235,7 @@ impl ProviderService {
         let mut provider_content = provider.settings_config.clone();
         let _ = Self::normalize_claude_models_in_value(&mut provider_content);
 
-        let content_to_write = if let Some(snippet) = common_config_snippet {
+        let new_content = if let Some(snippet) = common_config_snippet {
             let snippet = snippet.trim();
             if snippet.is_empty() {
                 provider_content
@@ -248,6 +248,35 @@ impl ProviderService {
             }
         } else {
             provider_content
+        };
+
+        // Preserve user-defined top-level fields that are not managed by cc-switch.
+        // These are Claude Code settings that users configure independently
+        // (e.g. statusLine for HUD plugins, hooks for automation).
+        const PRESERVE_KEYS: &[&str] = &["statusLine", "hooks", "permissions", "apiKeyHelper"];
+
+        let content_to_write = if settings_path.exists() {
+            if let Ok(existing) = read_json_file::<Value>(&settings_path) {
+                if let Some(existing_map) = existing.as_object() {
+                    let mut result = new_content.clone();
+                    if let Some(result_map) = result.as_object_mut() {
+                        for key in PRESERVE_KEYS {
+                            if let Some(value) = existing_map.get(*key) {
+                                if !result_map.contains_key(*key) {
+                                    result_map.insert(key.to_string(), value.clone());
+                                }
+                            }
+                        }
+                    }
+                    result
+                } else {
+                    new_content
+                }
+            } else {
+                new_content
+            }
+        } else {
+            new_content
         };
 
         write_json_file(&settings_path, &content_to_write)?;
