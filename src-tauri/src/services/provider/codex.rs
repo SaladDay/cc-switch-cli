@@ -298,10 +298,15 @@ impl ProviderService {
             return Ok(());
         };
 
+        // Read auth from disk; if absent, fall back to the DB snapshot's auth
+        // so that WebDAV-synced credentials are not overwritten with empty data.
         let auth = if auth_path.exists() {
             Some(read_json_file::<Value>(&auth_path)?)
         } else {
-            None
+            current_provider
+                .settings_config
+                .get("auth")
+                .cloned()
         };
 
         let settings_config = if config_path.exists() {

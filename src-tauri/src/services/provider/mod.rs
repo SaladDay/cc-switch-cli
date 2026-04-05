@@ -367,11 +367,6 @@ impl ProviderService {
             }
             AppType::Codex => {
                 let auth_path = get_codex_auth_path();
-                let auth = if auth_path.exists() {
-                    Some(read_json_file::<Value>(&auth_path)?)
-                } else {
-                    None
-                };
                 let cfg_text = crate::codex_config::read_and_validate_codex_config_text()?;
                 let common_snippet_extracted =
                     Self::extract_codex_common_config_from_config_toml(&cfg_text)?;
@@ -395,6 +390,15 @@ impl ProviderService {
                         guard.common_config_snippets.codex.clone(),
                     )
                 };
+
+                // Read auth from disk; if absent, fall back to the DB snapshot's auth
+                // so that WebDAV-synced credentials are not overwritten with empty data.
+                let auth = if auth_path.exists() {
+                    Some(read_json_file::<Value>(&auth_path)?)
+                } else {
+                    provider.settings_config.get("auth").cloned()
+                };
+
                 let effective_common_snippet = if common_snippet_for_strip
                     .as_deref()
                     .unwrap_or_default()
