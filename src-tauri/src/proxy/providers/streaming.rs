@@ -98,6 +98,12 @@ pub fn create_anthropic_sse_stream(
         let mut open_tool_block_indices: HashSet<u32> = HashSet::new();
         let mut legacy_function_name: Option<String> = None;
         let mut legacy_function_block_index: Option<u32> = None;
+        // Cache the latest usage chunk; OpenAI sends a trailing choices:[] chunk
+        // with the real token counts when stream_options.include_usage is enabled.
+        let mut cached_usage: Option<Usage> = None;
+        // Defer message_delta until [DONE] so that the trailing usage chunk
+        // (choices:[], usage:{...}) is guaranteed to arrive first.
+        let mut pending_stop_reason: Option<String> = None;
 
         tokio::pin!(stream);
 
@@ -120,6 +126,39 @@ pub fn create_anthropic_sse_stream(
                             };
 
                             if data.trim() == "[DONE]" {
+                                // Emit the deferred message_delta now that all
+                                // trailing chunks (including include_usage) have
+                                // been processed.
+                                if let Some(stop_reason) = pending_stop_reason.take() {
+                                    let effective_usage = cached_usage.take();
+                                    let usage_json = effective_usage.as_ref().map(|usage| {
+                                        let mut u = json!({
+                                            "input_tokens": usage.prompt_tokens,
+                                            "output_tokens": usage.completion_tokens
+                                        });
+                                        if let Some(cached) = extract_cache_read_tokens(usage) {
+                                            u["cache_read_input_tokens"] = json!(cached);
+                                        }
+                                        if let Some(created) = usage.cache_creation_input_tokens {
+                                            u["cache_creation_input_tokens"] = json!(created);
+                                        }
+                                        u
+                                    });
+                                    let delta_event = json!({
+                                        "type": "message_delta",
+                                        "delta": {
+                                            "stop_reason": stop_reason,
+                                            "stop_sequence": null
+                                        },
+                                        "usage": usage_json
+                                    });
+                                    let delta_sse = format!(
+                                        "event: message_delta\ndata: {}\n\n",
+                                        serde_json::to_string(&delta_event).unwrap_or_default()
+                                    );
+                                    yield Ok(Bytes::from(delta_sse));
+                                }
+
                                 let event = json!({"type": "message_stop"});
                                 let sse_data = format!(
                                     "event: message_stop\ndata: {}\n\n",
@@ -138,6 +177,16 @@ pub fn create_anthropic_sse_stream(
                             }
                             if current_model.is_none() {
                                 current_model = Some(chunk.model.clone());
+                            }
+
+                            // OpenAI sends a trailing chunk with choices:[] that
+                            // carries the real usage when include_usage is enabled.
+                            // Cache the usage and skip the rest of the processing.
+                            if chunk.choices.is_empty() {
+                                if let Some(u) = chunk.usage {
+                                    cached_usage = Some(u);
+                                }
+                                continue;
                             }
 
                             let Some(choice) = chunk.choices.first() else {
@@ -582,32 +631,16 @@ pub fn create_anthropic_sse_stream(
                                     open_tool_block_indices.clear();
                                 }
 
-                                let usage_json = chunk.usage.as_ref().map(|usage| {
-                                    let mut usage_json = json!({
-                                        "input_tokens": usage.prompt_tokens,
-                                        "output_tokens": usage.completion_tokens
-                                    });
-                                    if let Some(cached) = extract_cache_read_tokens(usage) {
-                                        usage_json["cache_read_input_tokens"] = json!(cached);
-                                    }
-                                    if let Some(created) = usage.cache_creation_input_tokens {
-                                        usage_json["cache_creation_input_tokens"] = json!(created);
-                                    }
-                                    usage_json
-                                });
-                                let event = json!({
-                                    "type": "message_delta",
-                                    "delta": {
-                                        "stop_reason": map_stop_reason(Some(finish_reason)),
-                                        "stop_sequence": null
-                                    },
-                                    "usage": usage_json
-                                });
-                                let sse_data = format!(
-                                    "event: message_delta\ndata: {}\n\n",
-                                    serde_json::to_string(&event).unwrap_or_default()
-                                );
-                                yield Ok(Bytes::from(sse_data));
+                                // Defer message_delta to [DONE] so the trailing
+                                // include_usage chunk can be captured first.
+                                // Also absorb any inline usage from this chunk as
+                                // a fallback (providers that don't send a trailing
+                                // chunk will still have usage here).
+                                if cached_usage.is_none() {
+                                    cached_usage = chunk.usage;
+                                }
+                                pending_stop_reason =
+                                    Some(map_stop_reason(Some(finish_reason)).unwrap_or_default());
                             }
                         }
                     }
@@ -962,5 +995,29 @@ mod tests {
             text_block_starts.is_empty(),
             "empty content deltas should not open text blocks"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_options_include_usage_trailing_chunk_is_used() {
+        // OpenAI sends a trailing choices:[] chunk with real usage when
+        // stream_options.include_usage is enabled. The finish_reason chunk
+        // itself carries usage:null in this mode.
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_events(input).await;
+        let message_delta = events
+            .iter()
+            .find(|event| event["type"] == "message_delta")
+            .expect("message_delta event");
+
+        assert_eq!(message_delta["usage"]["input_tokens"], 10,
+            "should pick up prompt_tokens from trailing include_usage chunk");
+        assert_eq!(message_delta["usage"]["output_tokens"], 5,
+            "should pick up completion_tokens from trailing include_usage chunk");
     }
 }

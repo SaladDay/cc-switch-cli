@@ -1,7 +1,11 @@
 use crate::proxy::error::ProxyError;
 use serde_json::{json, Value};
 
-pub fn anthropic_to_openai(body: Value, cache_key: Option<&str>) -> Result<Value, ProxyError> {
+pub fn anthropic_to_openai(
+    body: Value,
+    cache_key: Option<&str>,
+    stream_include_usage: bool,
+) -> Result<Value, ProxyError> {
     let mut result = json!({});
 
     if let Some(model) = body.get("model").and_then(|m| m.as_str()) {
@@ -50,6 +54,9 @@ pub fn anthropic_to_openai(body: Value, cache_key: Option<&str>) -> Result<Value
     }
     if let Some(v) = body.get("stream") {
         result["stream"] = v.clone();
+        if stream_include_usage && v.as_bool() == Some(true) {
+            result["stream_options"] = json!({"include_usage": true});
+        }
     }
 
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
@@ -392,7 +399,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}]
         });
 
-        let result = anthropic_to_openai(input, Some("provider-123")).unwrap();
+        let result = anthropic_to_openai(input, Some("provider-123"), false).unwrap();
 
         assert_eq!(result["prompt_cache_key"], "provider-123");
     }
@@ -410,7 +417,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}]
         });
 
-        let result = anthropic_to_openai(input, None).unwrap();
+        let result = anthropic_to_openai(input, None, false).unwrap();
 
         assert_eq!(result["messages"][0]["role"], "system");
         assert_eq!(result["messages"][0]["cache_control"]["type"], "ephemeral");
@@ -431,7 +438,7 @@ mod tests {
             }]
         });
 
-        let result = anthropic_to_openai(input, None).unwrap();
+        let result = anthropic_to_openai(input, None, false).unwrap();
 
         assert!(result["messages"][0]["content"].is_array());
         assert_eq!(
@@ -458,8 +465,53 @@ mod tests {
             }]
         });
 
-        let result = anthropic_to_openai(input, None).unwrap();
+        let result = anthropic_to_openai(input, None, false).unwrap();
 
         assert_eq!(result["tools"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn anthropic_to_openai_injects_stream_options_when_enabled() {
+        let input = json!({
+            "model": "gpt-4",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true
+        });
+
+        let result = anthropic_to_openai(input, None, true).unwrap();
+
+        assert_eq!(result["stream"], true);
+        assert_eq!(result["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn anthropic_to_openai_does_not_inject_stream_options_when_disabled() {
+        let input = json!({
+            "model": "gpt-4",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true
+        });
+
+        let result = anthropic_to_openai(input, None, false).unwrap();
+
+        assert_eq!(result["stream"], true);
+        assert!(result.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn anthropic_to_openai_does_not_inject_stream_options_when_stream_is_false() {
+        let input = json!({
+            "model": "gpt-4",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": false
+        });
+
+        let result = anthropic_to_openai(input, None, true).unwrap();
+
+        assert_eq!(result["stream"], false);
+        assert!(result.get("stream_options").is_none());
     }
 }

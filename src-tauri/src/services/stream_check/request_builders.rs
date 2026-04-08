@@ -46,6 +46,12 @@ impl StreamCheckService {
             }
         };
 
+        let stream_include_usage = provider
+            .settings_config
+            .get("stream_include_usage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let body = if api_format == "openai_responses" {
             json!({
                 "model": model,
@@ -57,12 +63,16 @@ impl StreamCheckService {
                 "stream": true,
             })
         } else {
-            json!({
+            let mut b = json!({
                 "model": model,
                 "max_tokens": 1,
                 "messages": [{ "role": "user", "content": test_prompt }],
                 "stream": true,
-            })
+            });
+            if stream_include_usage {
+                b["stream_options"] = json!({"include_usage": true});
+            }
+            b
         };
 
         let mut request = client

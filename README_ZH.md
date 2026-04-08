@@ -258,6 +258,20 @@ cc-switch provider stream-check <id> # 执行流式健康检查
 cc-switch provider fetch-models <id> # 拉取远端模型列表
 ```
 
+#### OpenAI 兼容供应商选项
+
+使用 OpenAI 兼容供应商（例如第三方中转服务）时，可以在供应商的 Settings Config 中加入 `stream_include_usage`，以开启流式响应中的 token 用量上报：
+
+```json
+{
+  "stream_include_usage": true
+}
+```
+
+开启后，代理会在每次流式请求中自动注入 `"stream_options": {"include_usage": true}`。上游返回流结束后附带的用量 chunk 会被读取，并将真实的 `input_tokens` / `output_tokens` 数值填入 `message_delta` 事件，而不是 `null`。
+
+编辑对应供应商，将上述 JSON 粘贴到 **Settings Config** 字段中即可生效。
+
 ### 🛠️ MCP 服务器管理
 
 跨 Claude、Codex、Gemini 与 OpenCode 管理模型上下文协议服务器。
