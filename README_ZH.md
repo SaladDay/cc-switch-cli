@@ -413,8 +413,8 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 ### 核心设计
 
-- **SQLite 持久化**：核心数据存放在 `~/.cc-switch/cc-switch.db`；旧版 `~/.cc-switch/config.json` 仅保留给兼容与迁移路径使用
-- **Skills SSOT**：技能源文件保存在 `~/.cc-switch/skills/`，安装状态和启用状态由数据库统一记录
+- **SQLite 持久化**：核心数据默认存放在 `~/.cc-switch/cc-switch.db`（若设置 `CC_SWITCH_CONFIG_DIR` 则改为该目录下）；旧版 `config.json` 仅保留给兼容与迁移路径使用
+- **Skills SSOT**：技能源文件默认保存在 `~/.cc-switch/skills/`（若设置 `CC_SWITCH_CONFIG_DIR` 则改为 `$CC_SWITCH_CONFIG_DIR/skills/`），安装状态和启用状态由数据库统一记录
 - **安全 Live 同步（默认）**：若目标应用尚未初始化，将跳过写入 live 文件（避免意外创建 `~/.claude`、`~/.codex`、`~/.gemini`、`~/.config/opencode` 或 `~/.openclaw`）
 - **原子写入**：临时文件 + 重命名模式防止损坏
 - **服务层复用**：100% 复用原 GUI 版本
@@ -422,7 +422,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 ### 配置文件
 
-**CC-Switch 存储：**
+**CC-Switch 存储**（默认：`~/.cc-switch`，可用 `CC_SWITCH_CONFIG_DIR` 覆盖）：
 - `~/.cc-switch/cc-switch.db` - 供应商、MCP、提示词和应用状态的主数据库
 - `~/.cc-switch/settings.json` - 设置
 - `~/.cc-switch/skills/` - 已安装技能源码（SSOT）

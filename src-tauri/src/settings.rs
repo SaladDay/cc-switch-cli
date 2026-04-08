@@ -1,5 +1,5 @@
 use crate::app_config::AppType;
-use crate::config::home_dir;
+use crate::config::{get_app_config_dir, home_dir};
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -390,12 +390,9 @@ impl Default for AppSettings {
 
 impl AppSettings {
     fn settings_path() -> PathBuf {
-        // settings.json 必须使用固定路径，不能被 app_config_dir 覆盖
-        // 否则会造成循环依赖：读取 settings 需要知道路径，但路径在 settings 中
-        home_dir()
-            .expect("无法获取用户主目录")
-            .join(".cc-switch")
-            .join("settings.json")
+        // settings.json 可以跟随 CC_SWITCH_CONFIG_DIR，且不会形成循环依赖：
+        // 路径仅依赖进程环境变量和 HOME，不依赖已持久化的 settings 内容。
+        get_app_config_dir().join("settings.json")
     }
 
     fn normalize_common(&mut self) {

@@ -1,14 +1,40 @@
+use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 
-use cc_switch_lib::{update_settings, AppError, AppSettings, MultiAppConfig};
+use cc_switch_lib::{
+    get_app_config_dir, update_settings, AppError, AppSettings, MultiAppConfig,
+};
 
 mod support;
 use support::{ensure_test_home, lock_test_mutex, reset_test_fs};
 
 fn cfg_path() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME should be set by ensure_test_home");
-    PathBuf::from(home).join(".cc-switch").join("config.json")
+    get_app_config_dir().join("config.json")
+}
+
+struct ConfigDirEnvGuard {
+    original: Option<OsString>,
+}
+
+impl ConfigDirEnvGuard {
+    fn set(value: Option<&str>) -> Self {
+        let original = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+        match value {
+            Some(value) => unsafe { std::env::set_var("CC_SWITCH_CONFIG_DIR", value) },
+            None => unsafe { std::env::remove_var("CC_SWITCH_CONFIG_DIR") },
+        }
+        Self { original }
+    }
+}
+
+impl Drop for ConfigDirEnvGuard {
+    fn drop(&mut self) {
+        match self.original.as_ref() {
+            Some(value) => unsafe { std::env::set_var("CC_SWITCH_CONFIG_DIR", value) },
+            None => unsafe { std::env::remove_var("CC_SWITCH_CONFIG_DIR") },
+        }
+    }
 }
 
 #[test]
@@ -127,6 +153,7 @@ fn update_settings_persists_openclaw_override_dir() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
+    let _config_dir = ConfigDirEnvGuard::set(None);
 
     let mut settings = AppSettings::default();
     settings.openclaw_config_dir = Some("~/custom-openclaw".to_string());
@@ -141,4 +168,30 @@ fn update_settings_persists_openclaw_override_dir() {
             .and_then(|entry| entry.as_str()),
         Some("~/custom-openclaw")
     );
+}
+
+#[test]
+fn update_settings_uses_cc_switch_config_dir_override_for_settings_path() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let override_dir = home.join("custom-config-root");
+    let _config_dir = ConfigDirEnvGuard::set(Some(override_dir.to_string_lossy().as_ref()));
+
+    let mut settings = AppSettings::default();
+    settings.openclaw_config_dir = Some("~/custom-openclaw".to_string());
+    update_settings(settings).expect("save settings with config dir override");
+
+    let override_settings = override_dir.join("settings.json");
+    assert!(override_settings.exists(), "settings.json should be written to override dir");
+    let raw = fs::read_to_string(&override_settings).expect("read overridden settings.json");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("parse overridden settings");
+    assert_eq!(
+        value
+            .get("openclawConfigDir")
+            .and_then(|entry| entry.as_str()),
+        Some("~/custom-openclaw")
+    );
+    let default_settings = home.join(".cc-switch").join("settings.json");
+    assert_ne!(override_settings, default_settings, "override path should differ from default path");
 }

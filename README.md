@@ -412,8 +412,8 @@ cc-switch update --version vX.Y.Z    # Update to a specific version
 
 ### Core Design
 
-- **SQLite-backed state**: Core data lives in `~/.cc-switch/cc-switch.db`; legacy `~/.cc-switch/config.json` is kept only for older import and migration paths
-- **Skills SSOT**: Skill source files live in `~/.cc-switch/skills/`, while install state and app enablement stay in the database
+- **SQLite-backed state**: Core data lives in `~/.cc-switch/cc-switch.db` by default (or under `$CC_SWITCH_CONFIG_DIR/` when set); legacy `config.json` is kept only for older import and migration paths
+- **Skills SSOT**: Skill source files live in `~/.cc-switch/skills/` by default (or under `$CC_SWITCH_CONFIG_DIR/skills/` when set), while install state and app enablement stay in the database
 - **Safe Live Sync (Default)**: Skip writing live files for apps that haven't been initialized yet (prevents creating `~/.claude`, `~/.codex`, `~/.gemini`, `~/.config/opencode`, or `~/.openclaw` unexpectedly)
 - **Atomic Writes**: Temp file + rename pattern prevents corruption
 - **Service Layer Reuse**: 100% reused from original GUI version
@@ -421,7 +421,7 @@ cc-switch update --version vX.Y.Z    # Update to a specific version
 
 ### Configuration Files
 
-**CC-Switch Storage:**
+**CC-Switch Storage** (default: `~/.cc-switch`, override: `CC_SWITCH_CONFIG_DIR`):
 - `~/.cc-switch/cc-switch.db` - Main database for providers, MCP, prompts, and app state
 - `~/.cc-switch/settings.json` - Settings
 - `~/.cc-switch/skills/` - Installed skill sources (SSOT)

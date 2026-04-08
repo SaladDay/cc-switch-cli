@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -67,8 +68,20 @@ pub fn get_claude_settings_path() -> PathBuf {
     settings
 }
 
-/// 获取应用配置目录路径 (~/.cc-switch)
+/// 获取应用配置目录路径（默认 $HOME/.cc-switch，可由 CC_SWITCH_CONFIG_DIR 覆盖）
 pub fn get_app_config_dir() -> PathBuf {
+    if let Some(custom) = env::var_os("CC_SWITCH_CONFIG_DIR") {
+        let custom = PathBuf::from(custom);
+        if custom
+            .to_string_lossy()
+            .trim()
+            .is_empty()
+        {
+            return home_dir().expect("无法获取用户主目录").join(".cc-switch");
+        }
+        return custom;
+    }
+
     // CLI mode: no app store override, always use default
     // if let Some(custom) = crate::app_store::get_app_config_dir_override() {
     //     return custom;
@@ -195,6 +208,32 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
+    use std::ffi::OsString;
+
+    struct ConfigDirEnvGuard {
+        original: Option<OsString>,
+    }
+
+    impl ConfigDirEnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let original = env::var_os("CC_SWITCH_CONFIG_DIR");
+            match value {
+                Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
+                None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
+            }
+            Self { original }
+        }
+    }
+
+    impl Drop for ConfigDirEnvGuard {
+        fn drop(&mut self) {
+            match self.original.as_ref() {
+                Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
+                None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
+            }
+        }
+    }
 
     #[test]
     fn derive_mcp_path_from_override_preserves_folder_name() {
@@ -224,6 +263,48 @@ mod tests {
     fn derive_mcp_path_from_root_like_dir_returns_none() {
         let override_dir = PathBuf::from("/");
         assert!(derive_mcp_path_from_override(&override_dir).is_none());
+    }
+
+    #[test]
+    fn get_app_config_dir_defaults_to_home_dot_cc_switch() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::set(None);
+        set_test_home_override(Some(Path::new("/tmp/cc-switch-home-default")));
+
+        assert_eq!(
+            get_app_config_dir(),
+            PathBuf::from("/tmp/cc-switch-home-default").join(".cc-switch")
+        );
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn get_app_config_dir_uses_env_override_when_set() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::set(Some("/tmp/cc-switch-config-override"));
+        set_test_home_override(Some(Path::new("/tmp/cc-switch-home-ignored")));
+
+        assert_eq!(
+            get_app_config_dir(),
+            PathBuf::from("/tmp/cc-switch-config-override")
+        );
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn get_app_config_dir_ignores_blank_env_override() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::set(Some("   "));
+        set_test_home_override(Some(Path::new("/tmp/cc-switch-home-blank")));
+
+        assert_eq!(
+            get_app_config_dir(),
+            PathBuf::from("/tmp/cc-switch-home-blank").join(".cc-switch")
+        );
+
+        set_test_home_override(None);
     }
 }
 
