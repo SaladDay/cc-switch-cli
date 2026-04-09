@@ -429,6 +429,8 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 - `~/.cc-switch/backups/` - 自动轮换（保留 10 个）
 - `~/.cc-switch/config.json` - 为兼容与导入流程保留的旧版 JSON
 
+设置 `CC_SWITCH_CONFIG_DIR` 后，CC-Switch 会改用该目录作为配置根目录；这不会自动迁移 `~/.cc-switch` 中的现有数据。
+
 **实时配置：**
 - Claude: `~/.claude/settings.json`（供应商 / 通用配置）, `~/.claude.json`（MCP）, `~/.claude/CLAUDE.md`（提示词）
 - Codex: `~/.codex/auth.json`（认证状态）, `~/.codex/config.toml`（供应商 / 通用配置 + MCP）, `~/.codex/AGENTS.md`（提示词）

@@ -428,6 +428,8 @@ cc-switch update --version vX.Y.Z    # Update to a specific version
 - `~/.cc-switch/backups/` - Auto-rotation (keep 10)
 - `~/.cc-switch/config.json` - Legacy JSON kept for compatibility and import flows
 
+When `CC_SWITCH_CONFIG_DIR` is set, CC-Switch uses that directory as its config root; existing data under `~/.cc-switch` is not migrated automatically.
+
 **Live Configs:**
 - Claude: `~/.claude/settings.json` (provider/common config), `~/.claude.json` (MCP), `~/.claude/CLAUDE.md` (prompts)
 - Codex: `~/.codex/auth.json` (auth state), `~/.codex/config.toml` (provider/common config + MCP), `~/.codex/AGENTS.md` (prompts)
