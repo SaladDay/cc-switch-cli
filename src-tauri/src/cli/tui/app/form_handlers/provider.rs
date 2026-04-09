@@ -436,14 +436,6 @@ impl App {
 
         match provider.codex_preview_section {
             form::CodexPreviewSection::Auth => {
-                if provider.is_codex_official_provider() {
-                    self.push_toast(
-                        texts::tui_toast_codex_official_auth_json_disabled(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                }
-
                 let provider_json = provider.to_provider_json_value();
                 let auth_value = provider_json
                     .get("settingsConfig")

@@ -651,7 +651,7 @@ fn provider_add_form_codex_custom_includes_api_key_and_hides_advanced_fields() {
 }
 
 #[test]
-fn provider_add_form_codex_openai_official_sets_website_and_hides_api_key_field() {
+fn provider_add_form_codex_openai_official_sets_website_and_keeps_api_key_field() {
     let mut form = ProviderAddFormState::new(AppType::Codex);
     let existing_ids = Vec::<String>::new();
 
@@ -660,8 +660,8 @@ fn provider_add_form_codex_openai_official_sets_website_and_hides_api_key_field(
     assert_eq!(form.website_url.value, "https://chatgpt.com/codex");
     let fields = form.fields();
     assert!(
-        !fields.contains(&ProviderAddField::CodexApiKey),
-        "official Codex provider should not require API Key input"
+        fields.contains(&ProviderAddField::CodexApiKey),
+        "official Codex provider should still expose API Key input for the stored snapshot"
     );
 }
 

@@ -23,11 +23,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_official_settings_config_omits_auth_and_enables_openai_auth() {
-        let cfg = build_codex_official_settings_config("gpt-4o", "chat");
+    fn codex_official_settings_config_includes_auth_and_enables_openai_auth() {
+        let cfg = build_codex_official_settings_config("sk-test", "gpt-4o", "chat");
         assert!(
-            cfg.get("auth").is_none(),
-            "official Codex provider should not require auth.json"
+            cfg.get("auth").is_some(),
+            "official Codex provider should carry auth like upstream snapshots"
         );
 
         let toml_text = cfg
@@ -110,8 +110,14 @@ fn build_codex_settings_config(
     }
 }
 
-fn build_codex_official_settings_config(model: &str, _wire_api: &str) -> Value {
-    build_codex_settings_config(None, CODEX_OFFICIAL_BASE_URL, model, "responses", "openai")
+fn build_codex_official_settings_config(api_key: &str, model: &str, _wire_api: &str) -> Value {
+    build_codex_settings_config(
+        Some(api_key),
+        CODEX_OFFICIAL_BASE_URL,
+        model,
+        "responses",
+        "openai",
+    )
 }
 
 /// 可选字段集合
@@ -542,10 +548,15 @@ fn prompt_codex_config(current: Option<&Value>) -> Result<Value, AppError> {
     ))
 }
 
-/// Codex 配置输入（官方：不需要 API Key）
+/// Codex 配置输入（官方：仍写入 provider snapshot 的 auth/config）
 fn prompt_codex_official_config(current: Option<&Value>) -> Result<Value, AppError> {
     println!("\n{}", texts::config_codex_header().bright_cyan().bold());
-    println!("\n{}", texts::tui_codex_official_no_api_key_tip().yellow());
+
+    let current_api_key = current
+        .and_then(|v| v.get("auth"))
+        .and_then(|a| a.get("OPENAI_API_KEY"))
+        .and_then(|k| k.as_str())
+        .filter(|s| !s.is_empty());
 
     let current_config_str = current
         .and_then(|v| v.get("config"))
@@ -579,6 +590,20 @@ fn prompt_codex_official_config(current: Option<&Value>) -> Result<Value, AppErr
         }
     }
 
+    let api_key = if let Some(current_key) = current_api_key {
+        Text::new(texts::openai_api_key_label())
+            .with_initial_value(current_key)
+            .with_help_message(texts::api_key_help())
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    } else {
+        Text::new(texts::openai_api_key_label())
+            .with_placeholder("sk-...")
+            .with_help_message(texts::api_key_help())
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    };
+
     let base_url = if let Some(current) = current_base_url.as_deref() {
         Text::new(&format!("{}:", texts::tui_label_base_url()))
             .with_initial_value(current)
@@ -608,7 +633,7 @@ fn prompt_codex_official_config(current: Option<&Value>) -> Result<Value, AppErr
     };
 
     Ok(build_codex_settings_config(
-        None,
+        Some(api_key.trim()),
         base_url.trim(),
         model.trim(),
         "responses",

@@ -6,7 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::codex_config::validate_config_toml;
 use crate::error::AppError;
 use crate::provider::Provider;
-use crate::services::provider::is_codex_official_provider;
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
@@ -169,7 +168,7 @@ where
         let config_path = codex_home.join("config.toml");
         write_secret_file(&config_path, config_text.as_bytes())?;
 
-        if let Some(auth) = auth.filter(|_| !is_codex_official_provider(provider)) {
+        if let Some(auth) = auth {
             let auth_path = codex_home.join("auth.json");
             let auth_text = serde_json::to_vec_pretty(&auth)
                 .map_err(|source| AppError::JsonSerialize { source })?;
@@ -397,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_launch_skips_auth_file_for_official_provider() {
+    fn prepare_launch_writes_auth_file_for_official_provider() {
         let temp_dir = TempDir::new().expect("create temp dir");
         let provider = official_provider_with_auth("model_provider = \"openai\"\n");
 
@@ -406,7 +405,7 @@ mod tests {
         })
         .expect("prepare launch");
 
-        assert!(!prepared.codex_home.join("auth.json").exists());
+        assert!(prepared.codex_home.join("auth.json").exists());
     }
 
     #[test]

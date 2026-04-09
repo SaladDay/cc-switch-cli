@@ -143,23 +143,6 @@ pub(super) fn strip_codex_common_config_from_full_text(
     Ok(doc.to_string())
 }
 
-pub(crate) fn is_codex_official_provider(provider: &Provider) -> bool {
-    provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.codex_official)
-        .unwrap_or(false)
-        || provider
-            .category
-            .as_deref()
-            .is_some_and(|category| category.eq_ignore_ascii_case("official"))
-        || provider
-            .website_url
-            .as_deref()
-            .is_some_and(|url| url.trim().eq_ignore_ascii_case("https://chatgpt.com/codex"))
-        || provider.name.trim().eq_ignore_ascii_case("OpenAI Official")
-}
-
 pub(super) fn merge_json_values(base: &mut Value, overlay: &Value) {
     match (base, overlay) {
         (Value::Object(base_map), Value::Object(overlay_map)) => {

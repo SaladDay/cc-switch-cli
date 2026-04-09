@@ -46,6 +46,13 @@ impl Drop for EnvGuard {
     }
 }
 
+fn codex_settings(config: &str) -> Value {
+    json!({
+        "auth": { "OPENAI_API_KEY": "sk-test" },
+        "config": config,
+    })
+}
+
 fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState) {
     let temp_home = TempDir::new().expect("create temp home");
     let env = EnvGuard::set_home(temp_home.path());
@@ -64,7 +71,7 @@ fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState
             Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
-                json!({ "config": "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n" }),
+                codex_settings("model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
                 None,
             ),
         );
@@ -73,7 +80,7 @@ fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState
             Provider::with_id(
                 "p2".to_string(),
                 "Second".to_string(),
-                json!({ "config": "model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n" }),
+                codex_settings("model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"),
                 None,
             ),
         );
@@ -143,9 +150,7 @@ fn setup_codex_state_with_broken_other_snapshot() -> (TempDir, EnvGuard, AppStat
             Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
-                json!({
-                    "config": "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"
-                }),
+                codex_settings("model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
                 None,
             ),
         );
@@ -154,9 +159,7 @@ fn setup_codex_state_with_broken_other_snapshot() -> (TempDir, EnvGuard, AppStat
             Provider::with_id(
                 "p2".to_string(),
                 "Broken legacy".to_string(),
-                json!({
-                    "config": "stale-config"
-                }),
+                codex_settings("stale-config"),
                 None,
             ),
         );
@@ -186,9 +189,7 @@ fn setup_codex_state_with_db_current_and_broken_fallback_other_snapshot(
     let mut current_provider = Provider::with_id(
         "p1".to_string(),
         "First".to_string(),
-        json!({
-            "config": "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"
-        }),
+        codex_settings("model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
         None,
     );
     current_provider.sort_index = Some(10);
@@ -196,9 +197,7 @@ fn setup_codex_state_with_db_current_and_broken_fallback_other_snapshot(
     let mut broken_fallback_provider = Provider::with_id(
         "p2".to_string(),
         "Broken legacy".to_string(),
-        json!({
-            "config": "stale-config"
-        }),
+        codex_settings("stale-config"),
         None,
     );
     broken_fallback_provider.sort_index = Some(0);
@@ -239,32 +238,19 @@ fn setup_codex_state_with_db_current_and_broken_fallback_other_snapshot(
 }
 
 #[test]
-fn validate_provider_settings_allows_missing_auth_for_codex() {
-    let mut provider = Provider::with_id(
+fn validate_provider_settings_rejects_missing_auth_for_codex() {
+    let provider = Provider::with_id(
         "codex".into(),
         "Codex".into(),
         json!({ "config": "base_url = \"https://example.com\"" }),
         None,
     );
-    provider.meta = Some(crate::provider::ProviderMeta {
-        codex_official: Some(true),
-        ..Default::default()
-    });
-    ProviderService::validate_provider_settings(&AppType::Codex, &provider)
-        .expect("Codex auth is optional for official provider");
-}
-
-#[test]
-fn validate_provider_settings_allows_missing_auth_for_codex_official_by_category() {
-    let mut provider = Provider::with_id(
-        "codex".into(),
-        "Anything".into(),
-        json!({ "config": "base_url = \"https://api.openai.com/v1\"\n" }),
-        None,
+    let err = ProviderService::validate_provider_settings(&AppType::Codex, &provider)
+        .expect_err("missing auth should be rejected");
+    assert!(
+        err.to_string().contains("auth"),
+        "expected auth error, got {err:?}"
     );
-    provider.category = Some("official".to_string());
-    ProviderService::validate_provider_settings(&AppType::Codex, &provider)
-        .expect("Codex auth is optional for official providers (category=official)");
 }
 
 #[test]
@@ -286,7 +272,7 @@ fn set_common_config_snippet_rejects_non_object_opencode_json() {
 
 #[test]
 #[serial]
-fn switch_codex_succeeds_without_auth_json() {
+fn switch_codex_writes_auth_json_when_live_auth_file_is_missing() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
@@ -305,6 +291,7 @@ fn switch_codex_succeeds_without_auth_json() {
                 "p1".to_string(),
                 "Keyring".to_string(),
                 json!({
+                    "auth": { "OPENAI_API_KEY": "sk-keyring" },
                     "config": "model_provider = \"keyring\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.keyring]\nrequires_openai_auth = true\n",
                 }),
                 None,
@@ -316,6 +303,7 @@ fn switch_codex_succeeds_without_auth_json() {
                 "p2".to_string(),
                 "Other".to_string(),
                 json!({
+                    "auth": { "OPENAI_API_KEY": "sk-other" },
                     "config": "model_provider = \"other\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.other]\nrequires_openai_auth = true\n",
                 }),
                 None,
@@ -326,12 +314,14 @@ fn switch_codex_succeeds_without_auth_json() {
     let state = state_from_config(config);
 
     ProviderService::switch(&state, AppType::Codex, "p1")
-        .expect("switch should succeed without auth.json when using credential store");
+        .expect("switch should write auth.json from provider snapshot");
 
     assert!(
-        !get_codex_auth_path().exists(),
-        "auth.json should remain absent when provider has no auth config"
+        get_codex_auth_path().exists(),
+        "auth.json should be created from provider auth"
     );
+    let live_auth: Value = crate::config::read_json_file(&get_codex_auth_path()).expect("read auth");
+    assert_eq!(live_auth["OPENAI_API_KEY"], json!("sk-keyring"));
 
     let live_config_text =
         std::fs::read_to_string(get_codex_config_path()).expect("read live config.toml");
@@ -342,9 +332,13 @@ fn switch_codex_succeeds_without_auth_json() {
         .expect("codex manager after switch");
     assert_eq!(manager.current, "p1", "current provider should update");
     let provider = manager.providers.get("p1").expect("p1 exists");
-    assert!(
-        provider.settings_config.get("auth").is_none(),
-        "snapshot should not inject auth when auth.json is absent"
+    assert_eq!(
+        provider
+            .settings_config
+            .get("auth")
+            .and_then(|value| value.get("OPENAI_API_KEY"))
+            .and_then(Value::as_str),
+        Some("sk-keyring")
     );
     // After the switch, the stored config should match the live config.toml
     let stored_config = provider
@@ -360,7 +354,7 @@ fn switch_codex_succeeds_without_auth_json() {
 
 #[test]
 #[serial]
-fn codex_switch_removes_existing_auth_json_for_openai_official_provider() {
+fn codex_switch_overwrites_existing_auth_json_for_openai_official_provider() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
@@ -395,6 +389,7 @@ fn codex_switch_removes_existing_auth_json_for_openai_official_provider() {
             "p2".to_string(),
             "OpenAI Official".to_string(),
             json!({
+                "auth": { "OPENAI_API_KEY": "sk-openai-official" },
                 "config": "model_provider = \"openai\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
             }),
             None,
@@ -411,23 +406,11 @@ fn codex_switch_removes_existing_auth_json_for_openai_official_provider() {
     ProviderService::switch(&state, AppType::Codex, "p2")
         .expect("switch to official should succeed");
 
-    assert!(
-        !auth_path.exists(),
-        "auth.json should be removed when switching to OpenAI official provider"
-    );
-
-    let backup_exists = std::fs::read_dir(crate::codex_config::get_codex_config_dir())
-        .expect("read codex dir")
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("auth.json.cc-switch.bak.")
-        });
-    assert!(
-        backup_exists,
-        "auth.json should be backed up when removed for OpenAI official provider"
+    let live_auth: Value = crate::config::read_json_file(&auth_path).expect("read auth.json");
+    assert_eq!(
+        live_auth["OPENAI_API_KEY"],
+        json!("sk-openai-official"),
+        "official provider should write its auth snapshot like upstream"
     );
 }
 
@@ -2416,7 +2399,7 @@ fn codex_switch_extracts_common_snippet_preserving_mcp_servers() {
             Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
-                json!({ "config": "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n" }),
+                codex_settings("model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
                 None,
             ),
         );
@@ -2425,7 +2408,7 @@ fn codex_switch_extracts_common_snippet_preserving_mcp_servers() {
             Provider::with_id(
                 "p2".to_string(),
                 "Second".to_string(),
-                json!({ "config": "model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n" }),
+                codex_settings("model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"),
                 None,
             ),
         );
@@ -2731,9 +2714,7 @@ fn codex_switch_auto_extracted_common_normalizes_other_existing_provider_snapsho
             Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
-                json!({
-                    "config": "disable_response_storage = true\nmodel_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"
-                }),
+                codex_settings("disable_response_storage = true\nmodel_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
                 None,
             ),
         );
@@ -2742,9 +2723,7 @@ fn codex_switch_auto_extracted_common_normalizes_other_existing_provider_snapsho
             Provider::with_id(
                 "p2".to_string(),
                 "Second".to_string(),
-                json!({
-                    "config": "disable_response_storage = true\nmodel_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"
-                }),
+                codex_settings("disable_response_storage = true\nmodel_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"),
                 None,
             ),
         );
@@ -2753,9 +2732,7 @@ fn codex_switch_auto_extracted_common_normalizes_other_existing_provider_snapsho
             Provider::with_id(
                 "p3".to_string(),
                 "Third".to_string(),
-                json!({
-                    "config": "disable_response_storage = true\nmodel_provider = \"third\"\nmodel = \"gpt-4\"\n\n[model_providers.third]\nbase_url = \"https://api.three.example/v1\"\n"
-                }),
+                codex_settings("disable_response_storage = true\nmodel_provider = \"third\"\nmodel = \"gpt-4\"\n\n[model_providers.third]\nbase_url = \"https://api.three.example/v1\"\n"),
                 None,
             ),
         );
@@ -2821,9 +2798,7 @@ fn codex_switch_auto_extracted_common_skips_unparseable_other_provider_snapshots
             Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
-                json!({
-                    "config": "disable_response_storage = true\nmodel_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"
-                }),
+                codex_settings("disable_response_storage = true\nmodel_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
                 None,
             ),
         );
@@ -2832,9 +2807,7 @@ fn codex_switch_auto_extracted_common_skips_unparseable_other_provider_snapshots
             Provider::with_id(
                 "p2".to_string(),
                 "Second".to_string(),
-                json!({
-                    "config": "disable_response_storage = true\nmodel_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"
-                }),
+                codex_settings("disable_response_storage = true\nmodel_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"),
                 None,
             ),
         );
@@ -2843,9 +2816,7 @@ fn codex_switch_auto_extracted_common_skips_unparseable_other_provider_snapshots
             Provider::with_id(
                 "p3".to_string(),
                 "Broken legacy".to_string(),
-                json!({
-                    "config": "stale-config"
-                }),
+                codex_settings("stale-config"),
                 None,
             ),
         );
@@ -2921,7 +2892,7 @@ fn common_config_snippet_can_be_disabled_per_provider_for_codex() {
             Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
-                json!({ "config": "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n" }),
+                codex_settings("model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
                 None,
             ),
         );
@@ -2930,7 +2901,10 @@ fn common_config_snippet_can_be_disabled_per_provider_for_codex() {
             serde_json::from_value(json!({
                 "id": "p2",
                 "name": "Second",
-                "settingsConfig": { "config": "model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n" },
+                "settingsConfig": {
+                    "auth": { "OPENAI_API_KEY": "sk-test" },
+                    "config": "model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"
+                },
                 "meta": { "applyCommonConfig": false }
             }))
             .expect("parse provider p2"),
@@ -2976,9 +2950,7 @@ fn updating_common_snippet_removes_stale_fields_from_other_codex_provider_snapsh
             Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
-                json!({
-                    "config": "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"
-                }),
+                codex_settings("model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
                 None,
             ),
         );
@@ -2987,9 +2959,7 @@ fn updating_common_snippet_removes_stale_fields_from_other_codex_provider_snapsh
             Provider::with_id(
                 "p2".to_string(),
                 "Second".to_string(),
-                json!({
-                    "config": "disable_response_storage = true\nmodel_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"
-                }),
+                codex_settings("disable_response_storage = true\nmodel_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"),
                 None,
             ),
         );
@@ -3067,9 +3037,7 @@ fn setting_codex_common_snippet_normalizes_existing_provider_snapshot() {
             Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
-                json!({
-                    "config": "disable_response_storage = true\nmodel_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"
-                }),
+                codex_settings("disable_response_storage = true\nmodel_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
                 None,
             ),
         );
@@ -3131,9 +3099,7 @@ fn replacing_codex_common_snippet_tolerates_invalid_stored_snippet() {
             Provider::with_id(
                 "p1".to_string(),
                 "First".to_string(),
-                json!({
-                    "config": "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"
-                }),
+                codex_settings("model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n"),
                 None,
             ),
         );
@@ -3142,9 +3108,7 @@ fn replacing_codex_common_snippet_tolerates_invalid_stored_snippet() {
             Provider::with_id(
                 "p2".to_string(),
                 "Second".to_string(),
-                json!({
-                    "config": "disable_response_storage = true\nmodel_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"
-                }),
+                codex_settings("disable_response_storage = true\nmodel_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n"),
                 None,
             ),
         );

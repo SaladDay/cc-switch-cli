@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use crate::app_config::{AppType, MultiAppConfig};
 use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 use crate::config::{
-    copy_file, delete_file, get_claude_settings_path, get_provider_config_path, read_json_file,
+    delete_file, get_claude_settings_path, get_provider_config_path, read_json_file,
     write_json_file,
 };
 use crate::error::AppError;
@@ -31,7 +31,6 @@ use crate::store::AppState;
 use gemini_auth::GeminiAuthType;
 use live::LiveSnapshot;
 
-pub(crate) use common::is_codex_official_provider;
 pub use common::migrate_legacy_codex_config;
 use common::{merge_json_values, strip_codex_common_config_from_full_text, strip_common_values};
 
@@ -1829,39 +1828,6 @@ impl ProviderService {
                 let auth = settings.get("auth").cloned();
                 let cfg_text = settings.get("config").and_then(Value::as_str).unwrap_or("");
 
-                let cfg_text_owned;
-                let cfg_text = if is_codex_official_provider(provider)
-                    && !cfg_text.trim().is_empty()
-                {
-                    if let Ok(mut doc) = cfg_text.parse::<toml_edit::DocumentMut>() {
-                        let mp_key = doc
-                            .get("model_provider")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        if let Some(key) = mp_key {
-                            if let Some(section) = doc
-                                .get_mut("model_providers")
-                                .and_then(|v| v.as_table_like_mut())
-                                .and_then(|t| t.get_mut(&key))
-                                .and_then(|v| v.as_table_like_mut())
-                            {
-                                if section.get("wire_api").is_none() {
-                                    section.insert("wire_api", toml_edit::value("responses"));
-                                }
-                                if section.get("requires_openai_auth").is_none() {
-                                    section.insert("requires_openai_auth", toml_edit::value(true));
-                                }
-                            }
-                        }
-                        cfg_text_owned = doc.to_string();
-                        &cfg_text_owned
-                    } else {
-                        cfg_text
-                    }
-                } else {
-                    cfg_text
-                };
-
                 if !cfg_text.trim().is_empty() {
                     crate::codex_config::validate_config_toml(cfg_text)?;
                 }
@@ -2003,65 +1969,34 @@ impl ProviderService {
                     )
                 })?;
 
-                let is_official = is_codex_official_provider(provider);
-
-                // config 字段必须存在且是字符串
-                let config_value = settings.get("config").ok_or_else(|| {
+                let auth = settings.get("auth").ok_or_else(|| {
                     AppError::localized(
-                        "provider.codex.config.missing",
-                        format!("供应商 {} 缺少 config 配置", provider.id),
-                        format!("Provider {} is missing config configuration", provider.id),
+                        "provider.codex.auth.missing",
+                        format!("供应商 {} 缺少 auth 配置", provider.id),
+                        format!("Provider {} is missing auth configuration", provider.id),
                     )
                 })?;
-                if !(config_value.is_string() || config_value.is_null()) {
+                if !auth.is_object() {
                     return Err(AppError::localized(
-                        "provider.codex.config.invalid_type",
-                        "Codex config 字段必须是字符串",
-                        "Codex config field must be a string",
+                        "provider.codex.auth.not_object",
+                        format!("供应商 {} 的 auth 配置必须是 JSON 对象", provider.id),
+                        format!(
+                            "Provider {} auth configuration must be a JSON object",
+                            provider.id
+                        ),
                     ));
                 }
-                if let Some(cfg_text) = config_value.as_str() {
-                    crate::codex_config::validate_config_toml(cfg_text)?;
-                }
 
-                // auth 规则：
-                // - 官方供应商：auth 可选（使用 codex login 保存的凭证）
-                // - 第三方/自定义：必须提供 auth.OPENAI_API_KEY
-                match settings.get("auth") {
-                    Some(auth) => {
-                        let auth_obj = auth.as_object().ok_or_else(|| {
-                            AppError::localized(
-                                "provider.codex.auth.not_object",
-                                format!("供应商 {} 的 auth 配置必须是 JSON 对象", provider.id),
-                                format!(
-                                    "Provider {} auth configuration must be a JSON object",
-                                    provider.id
-                                ),
-                            )
-                        })?;
-                        if !is_official {
-                            let api_key = auth_obj
-                                .get("OPENAI_API_KEY")
-                                .and_then(|v| v.as_str())
-                                .map(str::trim)
-                                .unwrap_or("");
-                            if api_key.is_empty() {
-                                return Err(AppError::localized(
-                                    "provider.codex.api_key.missing",
-                                    format!("供应商 {} 缺少 OPENAI_API_KEY", provider.id),
-                                    format!("Provider {} is missing OPENAI_API_KEY", provider.id),
-                                ));
-                            }
-                        }
+                if let Some(config_value) = settings.get("config") {
+                    if !(config_value.is_string() || config_value.is_null()) {
+                        return Err(AppError::localized(
+                            "provider.codex.config.invalid_type",
+                            "Codex config 字段必须是字符串",
+                            "Codex config field must be a string",
+                        ));
                     }
-                    None => {
-                        if !is_official {
-                            return Err(AppError::localized(
-                                "provider.codex.auth.missing",
-                                format!("供应商 {} 缺少 auth 配置", provider.id),
-                                format!("Provider {} is missing auth configuration", provider.id),
-                            ));
-                        }
+                    if let Some(cfg_text) = config_value.as_str() {
+                        crate::codex_config::validate_config_toml(cfg_text)?;
                     }
                 }
             }

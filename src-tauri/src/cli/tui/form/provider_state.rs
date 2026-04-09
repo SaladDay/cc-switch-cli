@@ -171,9 +171,7 @@ impl ProviderAddFormState {
             AppType::Codex => {
                 fields.push(ProviderAddField::CodexBaseUrl);
                 fields.push(ProviderAddField::CodexModel);
-                if !self.is_codex_official_provider() {
-                    fields.push(ProviderAddField::CodexApiKey);
-                }
+                fields.push(ProviderAddField::CodexApiKey);
             }
             AppType::Gemini => {
                 fields.push(ProviderAddField::GeminiAuthType);

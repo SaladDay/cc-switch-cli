@@ -146,34 +146,30 @@ impl ProviderAddFormState {
                 );
                 settings_obj.insert("config".to_string(), Value::String(config_toml));
 
-                if self.is_codex_official_provider() {
-                    settings_obj.remove("auth");
-                } else {
-                    let api_key = self.codex_api_key.value.trim();
-                    if api_key.is_empty() {
-                        if let Some(auth_obj) = settings_obj
-                            .get_mut("auth")
-                            .and_then(|value| value.as_object_mut())
-                        {
-                            auth_obj.remove("OPENAI_API_KEY");
-                            if auth_obj.is_empty() {
-                                settings_obj.remove("auth");
-                            }
-                        } else {
+                let api_key = self.codex_api_key.value.trim();
+                if api_key.is_empty() {
+                    if let Some(auth_obj) = settings_obj
+                        .get_mut("auth")
+                        .and_then(|value| value.as_object_mut())
+                    {
+                        auth_obj.remove("OPENAI_API_KEY");
+                        if auth_obj.is_empty() {
                             settings_obj.remove("auth");
                         }
                     } else {
-                        let auth_value = settings_obj
-                            .entry("auth".to_string())
-                            .or_insert_with(|| json!({}));
-                        if !auth_value.is_object() {
-                            *auth_value = json!({});
-                        }
-                        let auth_obj = auth_value
-                            .as_object_mut()
-                            .expect("auth must be a JSON object");
-                        auth_obj.insert("OPENAI_API_KEY".to_string(), json!(api_key));
+                        settings_obj.remove("auth");
                     }
+                } else {
+                    let auth_value = settings_obj
+                        .entry("auth".to_string())
+                        .or_insert_with(|| json!({}));
+                    if !auth_value.is_object() {
+                        *auth_value = json!({});
+                    }
+                    let auth_obj = auth_value
+                        .as_object_mut()
+                        .expect("auth must be a JSON object");
+                    auth_obj.insert("OPENAI_API_KEY".to_string(), json!(api_key));
                 }
             }
             AppType::Gemini => {

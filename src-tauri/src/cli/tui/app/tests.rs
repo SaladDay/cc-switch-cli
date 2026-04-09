@@ -2509,7 +2509,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_add_form_codex_official_auth_enter_does_not_open_editor() {
+    fn provider_add_form_codex_official_auth_enter_opens_editor() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -2521,11 +2521,8 @@ mod tests {
         app.on_key(key(KeyCode::Tab), &data); // fields -> preview
 
         app.on_key(key(KeyCode::Enter), &data); // try to edit auth
-        assert!(app.editor.is_none());
-        assert!(
-            app.toast.is_some(),
-            "should show a toast explaining auth is disabled"
-        );
+        assert!(app.editor.is_some());
+        assert!(app.toast.is_none());
     }
 
     #[test]

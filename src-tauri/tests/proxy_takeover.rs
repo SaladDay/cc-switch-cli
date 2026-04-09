@@ -1090,7 +1090,7 @@ fn startup_recovery_handles_active_managed_proxy_without_existing_tokio_runtime(
 
 #[tokio::test]
 #[serial]
-async fn app_state_try_new_restores_codex_from_current_provider_and_removes_stale_auth_json() {
+async fn app_state_try_new_restores_codex_from_current_provider_and_auth_json() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -1100,6 +1100,7 @@ async fn app_state_try_new_restores_codex_from_current_provider_and_removes_stal
         "openai-official".to_string(),
         "OpenAI Official".to_string(),
         json!({
+            "auth": { "OPENAI_API_KEY": "sk-restored" },
             "config": "model_provider = \"openai-official\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.openai-official]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
         }),
         None,
@@ -1146,8 +1147,14 @@ async fn app_state_try_new_restores_codex_from_current_provider_and_removes_stal
         .expect("recreate app state after stale codex takeover");
 
     assert!(
-        !get_codex_auth_path().exists(),
-        "startup recovery should remove stale Codex auth.json when the restored provider does not use auth.json"
+        get_codex_auth_path().exists(),
+        "startup recovery should restore auth.json from the current provider snapshot"
+    );
+    let restored_auth: serde_json::Value =
+        read_json_file(&get_codex_auth_path()).expect("read restored auth.json");
+    assert_eq!(
+        restored_auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
+        Some("sk-restored")
     );
     let restored_config =
         std::fs::read_to_string(get_codex_config_path()).expect("read restored codex config.toml");

@@ -361,47 +361,15 @@ impl ProviderService {
             .as_object()
             .ok_or_else(|| AppError::Config("Codex 配置必须是 JSON 对象".into()))?;
 
-        // auth 字段现在是可选的（Codex 0.64+ 使用环境变量）
-        let auth = settings.get("auth");
-        let auth_is_empty = auth
-            .map(|a| a.as_object().map(|o| o.is_empty()).unwrap_or(true))
-            .unwrap_or(true);
+        let auth = settings
+            .get("auth")
+            .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
 
         // 获取存储的 config TOML 文本
-        let cfg_text = settings.get("config").and_then(Value::as_str).unwrap_or("");
-
-        // For official OpenAI providers, ensure wire_api and requires_openai_auth
-        // have sensible defaults in the model_providers section.
-        let cfg_text_owned;
-        let cfg_text = if is_codex_official_provider(provider) && !cfg_text.trim().is_empty() {
-            if let Ok(mut doc) = cfg_text.parse::<toml_edit::DocumentMut>() {
-                let mp_key = doc
-                    .get("model_provider")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if let Some(key) = mp_key {
-                    if let Some(section) = doc
-                        .get_mut("model_providers")
-                        .and_then(|v| v.as_table_like_mut())
-                        .and_then(|t| t.get_mut(&key))
-                        .and_then(|v| v.as_table_like_mut())
-                    {
-                        if section.get("wire_api").is_none() {
-                            section.insert("wire_api", toml_edit::value("responses"));
-                        }
-                        if section.get("requires_openai_auth").is_none() {
-                            section.insert("requires_openai_auth", toml_edit::value(true));
-                        }
-                    }
-                }
-                cfg_text_owned = doc.to_string();
-                &cfg_text_owned
-            } else {
-                cfg_text
-            }
-        } else {
-            cfg_text
-        };
+        let cfg_text = settings
+            .get("config")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'config' 字段或不是字符串".to_string()))?;
 
         // Validate TOML before writing
         if !cfg_text.trim().is_empty() {
@@ -439,31 +407,8 @@ impl ProviderService {
         }
         crate::config::write_text_file(&config_path, &final_text)?;
 
-        // auth.json handling:
-        //
-        // Codex has two auth modes:
-        // - API Key mode (auth.json): third-party/custom providers that explicitly carry auth.
-        // - Credential store / OpenAI official mode: auth.json must be absent, otherwise it
-        //   overrides the credential store.
-        //
-        // Align with upstream UI behavior:
-        // - If provider has no auth (or is explicitly marked as official), remove existing auth.json.
-        // - Otherwise, write auth.json from provider.auth.
         let auth_path = get_codex_auth_path();
-        let should_remove_auth_json = auth_is_empty || is_codex_official_provider(provider);
-        if should_remove_auth_json {
-            if auth_path.exists() {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-                let backup_path = auth_path.with_file_name(format!("auth.json.cc-switch.bak.{ts}"));
-                copy_file(&auth_path, &backup_path)?;
-                delete_file(&auth_path)?;
-            }
-        } else if let Some(auth_value) = auth {
-            write_json_file(&auth_path, auth_value)?;
-        }
+        write_json_file(&auth_path, auth)?;
 
         Ok(())
     }

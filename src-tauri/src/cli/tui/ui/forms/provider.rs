@@ -94,19 +94,9 @@ pub(crate) fn render_provider_add_form(
     frame.render_widget(fields_block.clone(), body[0]);
     let fields_inner = fields_block.inner(body[0]);
 
-    let show_codex_official_tip = provider.is_codex_official_provider();
-
     let fields_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(if show_codex_official_tip {
-            vec![
-                Constraint::Length(1),
-                Constraint::Min(0),
-                Constraint::Length(3),
-            ]
-        } else {
-            vec![Constraint::Min(0), Constraint::Length(3)]
-        })
+        .constraints(vec![Constraint::Min(0), Constraint::Length(3)])
         .split(fields_inner);
 
     let fields = provider.fields();
@@ -161,22 +151,8 @@ pub(crate) fn render_provider_add_form(
     if !fields.is_empty() {
         state.select(Some(provider.field_idx.min(fields.len() - 1)));
     }
-    let (tip_area, table_area, editor_area) = if show_codex_official_tip {
-        (Some(fields_chunks[0]), fields_chunks[1], fields_chunks[2])
-    } else {
-        (None, fields_chunks[0], fields_chunks[1])
-    };
-
-    if let Some(area) = tip_area {
-        let tip = texts::tui_codex_official_no_api_key_tip();
-        frame.render_widget(
-            Paragraph::new(Line::raw(format!("  {}", tip)))
-                .style(Style::default().fg(theme.warn).add_modifier(Modifier::BOLD))
-                .wrap(Wrap { trim: false }),
-            area,
-        );
-    }
-
+    let table_area = fields_chunks[0];
+    let editor_area = fields_chunks[1];
     frame.render_stateful_widget(table, table_area, &mut state);
 
     // Editor / help line

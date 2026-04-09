@@ -3242,7 +3242,7 @@ fn provider_service_import_openclaw_providers_from_live_preserves_existing_row_w
 }
 
 #[test]
-fn provider_service_switch_codex_missing_auth_is_allowed() {
+fn provider_service_switch_codex_missing_auth_is_rejected() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -3270,29 +3270,27 @@ fn provider_service_switch_codex_missing_auth_is_allowed() {
 
     let state = state_from_config(config);
 
-    ProviderService::switch(&state, AppType::Codex, "invalid")
-        .expect("switching should succeed without auth.json for Codex 0.64+");
+    let err = ProviderService::switch(&state, AppType::Codex, "invalid")
+        .expect_err("switching should fail when provider snapshot has no auth");
 
     assert!(
-        !cc_switch_lib::get_codex_auth_path().exists(),
-        "auth.json should not be written when provider has no auth"
+        err.to_string().contains("auth"),
+        "expected auth-related error, got {err}"
     );
     assert!(
-        cc_switch_lib::get_codex_config_path().exists(),
-        "config.toml should be written"
+        !cc_switch_lib::get_codex_config_path().exists(),
+        "config.toml should not be written on failed switch"
     );
 }
 
 #[test]
-fn provider_service_switch_codex_openai_auth_removes_existing_auth_json() {
+fn provider_service_switch_codex_openai_official_writes_auth_json_from_provider_snapshot() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
 
-    // Mark Codex as initialized so live sync is enabled.
     std::fs::create_dir_all(home.join(".codex")).expect("create codex dir (initialized)");
 
-    // Seed a legacy auth.json that should not survive an OpenAI-auth (credential store) provider.
     let auth_path = cc_switch_lib::get_codex_auth_path();
     std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"stale-key"}"#).expect("seed auth.json");
     assert!(auth_path.exists(), "auth.json should exist before switch");
@@ -3304,20 +3302,19 @@ fn provider_service_switch_codex_openai_auth_removes_existing_auth_json() {
             .expect("codex manager");
         manager.current = "p2".to_string();
 
-        // Target provider: OpenAI auth mode, no auth.json required.
         manager.providers.insert(
             "p1".to_string(),
             Provider::with_id(
                 "p1".to_string(),
                 "OpenAI Official".to_string(),
                 json!({
+                    "auth": { "OPENAI_API_KEY": "sk-official" },
                     "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
                 }),
                 None,
             ),
         );
 
-        // Current provider: uses API key (auth.json).
         manager.providers.insert(
             "p2".to_string(),
             Provider::with_id(
@@ -3335,123 +3332,23 @@ fn provider_service_switch_codex_openai_auth_removes_existing_auth_json() {
     let state = state_from_config(config);
 
     ProviderService::switch(&state, AppType::Codex, "p1")
-        .expect("switch to OpenAI auth provider should succeed");
+        .expect("switch to OpenAI official provider should succeed");
 
-    assert!(
-        !auth_path.exists(),
-        "auth.json should be removed when switching to OpenAI auth mode provider without auth config"
-    );
-    let backup_exists = std::fs::read_dir(home.join(".codex"))
-        .expect("read codex dir")
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("auth.json.cc-switch.bak.")
-        });
-    assert!(
-        backup_exists,
-        "auth.json should be backed up when removed in OpenAI auth mode"
+    let auth_value: serde_json::Value =
+        read_json_file(&auth_path).expect("read auth.json after switch");
+    assert_eq!(
+        auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
+        Some("sk-official"),
+        "auth.json should be overwritten from the provider snapshot"
     );
 }
 
 #[test]
-fn provider_service_switch_codex_openai_auth_removes_existing_auth_json_even_if_provider_has_auth()
-{
+fn provider_service_switch_codex_preserves_missing_wire_api_for_openai_official() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
 
-    // Mark Codex as initialized so live sync is enabled.
-    std::fs::create_dir_all(home.join(".codex")).expect("create codex dir (initialized)");
-
-    // Seed a legacy auth.json that should not survive an OpenAI-auth (credential store) provider,
-    // even when the provider snapshot still carries a legacy API key.
-    let auth_path = cc_switch_lib::get_codex_auth_path();
-    std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"stale-key"}"#).expect("seed auth.json");
-    assert!(auth_path.exists(), "auth.json should exist before switch");
-
-    let mut config = MultiAppConfig::default();
-    {
-        let manager = config
-            .get_manager_mut(&AppType::Codex)
-            .expect("codex manager");
-        manager.current = "p2".to_string();
-
-        // Target provider: OpenAI auth mode, but carries a legacy auth object (e.g. user filled it
-        // previously). This must NOT result in a written auth.json that overrides OAuth.
-        manager.providers.insert(
-            "p1".to_string(),
-            Provider::with_id(
-                "p1".to_string(),
-                "OpenAI Official".to_string(),
-                json!({
-                    "auth": { "OPENAI_API_KEY": "sk-should-not-write" },
-                    "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-                }),
-                None,
-            ),
-        );
-
-        // Current provider: uses API key (auth.json).
-        manager.providers.insert(
-            "p2".to_string(),
-            Provider::with_id(
-                "p2".to_string(),
-                "Other".to_string(),
-                json!({
-                    "auth": { "OPENAI_API_KEY": "sk-other" },
-                    "config": "model_provider = \"p2\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p2]\nbase_url = \"https://api.other.example/v1\"\nwire_api = \"chat\"\nrequires_openai_auth = false\nenv_key = \"OPENAI_API_KEY\"\n"
-                }),
-                None,
-            ),
-        );
-    }
-
-    let state = state_from_config(config);
-
-    ProviderService::switch(&state, AppType::Codex, "p1")
-        .expect("switch to OpenAI auth provider should succeed");
-
-    assert!(
-        !auth_path.exists(),
-        "auth.json should be removed when switching to OpenAI auth mode provider, even if provider has legacy auth"
-    );
-
-    let backup_exists = std::fs::read_dir(home.join(".codex"))
-        .expect("read codex dir")
-        .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("auth.json.cc-switch.bak.")
-        });
-    assert!(
-        backup_exists,
-        "auth.json should be backed up when removed in OpenAI auth mode"
-    );
-
-    let live_text =
-        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
-    assert!(
-        live_text.contains("requires_openai_auth = true"),
-        "config.toml should enable OpenAI auth"
-    );
-    assert!(
-        !live_text.contains("env_key = \"OPENAI_API_KEY\""),
-        "config.toml should not force OPENAI_API_KEY env var in OpenAI auth mode"
-    );
-}
-
-#[test]
-fn provider_service_switch_codex_defaults_wire_api_for_openai_official_when_missing() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let home = ensure_test_home();
-
-    // Mark Codex as initialized so live sync is enabled.
     std::fs::create_dir_all(home.join(".codex")).expect("create codex dir (initialized)");
 
     let mut config = MultiAppConfig::default();
@@ -3466,7 +3363,7 @@ fn provider_service_switch_codex_defaults_wire_api_for_openai_official_when_miss
                 "p1".to_string(),
                 "OpenAI Official".to_string(),
                 json!({
-                    // Intentionally omit wire_api to simulate older/partial configs.
+                    "auth": { "OPENAI_API_KEY": "sk-official" },
                     "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\nrequires_openai_auth = true\n"
                 }),
                 None,
@@ -3481,34 +3378,18 @@ fn provider_service_switch_codex_defaults_wire_api_for_openai_official_when_miss
 
     let live_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
-    let live_value: toml::Value = toml::from_str(&live_text).expect("parse live config.toml");
-    let model_provider = live_value
-        .get("model_provider")
-        .and_then(|v| v.as_str())
-        .expect("model_provider should be set");
-    let providers = live_value
-        .get("model_providers")
-        .and_then(|v| v.as_table())
-        .expect("model_providers should exist");
-    let openai_official = providers
-        .get(model_provider)
-        .and_then(|v| v.as_table())
-        .expect("active provider table should exist");
-
-    assert_eq!(
-        openai_official.get("wire_api").and_then(|v| v.as_str()),
-        Some("responses"),
-        "wire_api should default to 'responses' for OpenAI official when missing from snippet"
+    assert!(
+        !live_text.contains("wire_api = \"responses\""),
+        "live config should preserve the stored snippet instead of defaulting wire_api"
     );
 }
 
 #[test]
-fn provider_service_switch_codex_defaults_requires_openai_auth_for_openai_official_when_missing() {
+fn provider_service_switch_codex_preserves_missing_requires_openai_auth_for_openai_official() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
 
-    // Mark Codex as initialized so live sync is enabled.
     std::fs::create_dir_all(home.join(".codex")).expect("create codex dir (initialized)");
 
     let mut config = MultiAppConfig::default();
@@ -3523,8 +3404,8 @@ fn provider_service_switch_codex_defaults_requires_openai_auth_for_openai_offici
                 "p1".to_string(),
                 "OpenAI Official".to_string(),
                 json!({
-                    // Intentionally omit requires_openai_auth (and wire_api) to simulate older/partial configs.
-                    "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\n"
+                    "auth": { "OPENAI_API_KEY": "sk-official" },
+                    "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\n"
                 }),
                 None,
             ),
@@ -3538,34 +3419,9 @@ fn provider_service_switch_codex_defaults_requires_openai_auth_for_openai_offici
 
     let live_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
-    let live_value: toml::Value = toml::from_str(&live_text).expect("parse live config.toml");
-
-    let model_provider = live_value
-        .get("model_provider")
-        .and_then(|v| v.as_str())
-        .expect("model_provider should be set");
-    let provider_table = live_value
-        .get("model_providers")
-        .and_then(|v| v.as_table())
-        .and_then(|providers| providers.get(model_provider))
-        .and_then(|v| v.as_table())
-        .expect("model_providers.<id> table should exist");
-
-    assert_eq!(
-        provider_table
-            .get("requires_openai_auth")
-            .and_then(|v| v.as_bool()),
-        Some(true),
-        "requires_openai_auth should default to true for OpenAI official base_url when missing"
-    );
-    assert_eq!(
-        provider_table.get("wire_api").and_then(|v| v.as_str()),
-        Some("responses"),
-        "wire_api should default to 'responses' for OpenAI official base_url when missing"
-    );
     assert!(
-        provider_table.get("env_key").is_none(),
-        "env_key should be omitted when defaulting to OpenAI auth mode"
+        !live_text.contains("requires_openai_auth = true"),
+        "live config should preserve the stored snippet instead of defaulting requires_openai_auth"
     );
 }
 

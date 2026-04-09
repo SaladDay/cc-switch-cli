@@ -371,7 +371,7 @@ fn switch_provider_updates_claude_live_and_state() {
 }
 
 #[test]
-fn switch_provider_codex_allows_missing_auth_and_writes_config() {
+fn switch_provider_codex_rejects_missing_auth() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -399,23 +399,27 @@ fn switch_provider_codex_allows_missing_auth_and_writes_config() {
 
     let app_state = state_from_config(config);
 
-    ProviderService::switch(&app_state, AppType::Codex, "invalid")
-        .expect("switching should succeed without auth.json for Codex 0.64+");
+    let err = ProviderService::switch(&app_state, AppType::Codex, "invalid")
+        .expect_err("switching should fail when provider snapshot has no auth");
 
     let locked = app_state.config.read().expect("lock config after failure");
     let manager = locked.get_manager(&AppType::Codex).expect("codex manager");
     assert!(
-        manager.current == "invalid",
-        "current provider should update after successful switch"
+        manager.current != "invalid",
+        "current provider should not update after a failed switch"
+    );
+    assert!(
+        err.to_string().contains("auth"),
+        "expected auth-related error, got {err}"
     );
 
     let auth_path = get_codex_auth_path();
     assert!(
         !auth_path.exists(),
-        "auth.json should not be written when provider has no auth"
+        "auth.json should remain absent on failed switch"
     );
     let cfg_path = get_codex_config_path();
-    assert!(cfg_path.exists(), "config.toml should be written");
+    assert!(!cfg_path.exists(), "config.toml should not be written");
 }
 
 #[tokio::test]
