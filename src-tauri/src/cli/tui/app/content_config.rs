@@ -749,6 +749,7 @@ impl App {
                     Action::None
                 }
                 Some(SettingsItem::Proxy) => self.push_route_and_switch(Route::SettingsProxy),
+                Some(SettingsItem::UpstreamProxy) => self.push_route_and_switch(Route::SettingsUpstreamProxy),
                 Some(SettingsItem::CheckForUpdates) => Action::CheckUpdate,
                 None => Action::None,
             },
@@ -799,6 +800,56 @@ impl App {
                     }
                     None => Action::None,
                 }
+            }
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn on_settings_upstream_proxy_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        // We have two rows: URL (0) and Status (1)
+        match key.code {
+            KeyCode::Up => {
+                self.settings_proxy_idx = self.settings_proxy_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                self.settings_proxy_idx = (self.settings_proxy_idx + 1).min(1); // Only 2 rows
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                match self.settings_proxy_idx {
+                    0 => { // URL row - open text input
+                        let buffer = data.proxy.upstream_proxy_url.clone().unwrap_or_default();
+                        self.overlay = Overlay::TextInput(TextInputState {
+                            title: texts::tui_settings_upstream_proxy_title().to_string(),
+                            prompt: texts::tui_settings_upstream_proxy_url_prompt().to_string(),
+                            buffer,
+                            submit: TextSubmit::SettingsUpstreamProxyUrl,
+                            secret: false,
+                        });
+                        Action::None
+                    }
+                    1 => { // Status row - toggle enabled state
+                        Action::SetUpstreamProxyEnabled {
+                            enabled: !data.proxy.upstream_proxy_enabled
+                        }
+                    }
+                    _ => Action::None,
+                }
+            }
+            KeyCode::Char('e') => {
+                // Edit key - only works for URL row
+                if self.settings_proxy_idx == 0 {
+                    let buffer = data.proxy.upstream_proxy_url.clone().unwrap_or_default();
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_settings_upstream_proxy_title().to_string(),
+                        prompt: texts::tui_settings_upstream_proxy_url_prompt().to_string(),
+                        buffer,
+                        submit: TextSubmit::SettingsUpstreamProxyUrl,
+                        secret: false,
+                    });
+                }
+                Action::None
             }
             _ => Action::None,
         }

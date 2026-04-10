@@ -11,3 +11,4 @@ pub mod proxy;
 pub mod skills;
 pub mod start;
 pub mod update;
+pub mod upstream;

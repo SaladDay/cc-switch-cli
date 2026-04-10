@@ -115,6 +115,23 @@ impl AppState {
     }
 
     fn from_parts(db: Arc<Database>, config: MultiAppConfig) -> Result<Self, AppError> {
+        // Initialize global HTTP client with proxy from database
+        let proxy_enabled = db.get_global_proxy_enabled().unwrap_or(false);
+        let proxy_url = db.get_global_proxy_url().unwrap_or(None);
+
+        if proxy_enabled {
+            if let Some(url) = proxy_url {
+                crate::proxy::http_client::init(Some(&url))
+                    .unwrap_or_else(|e| log::warn!("Failed to initialize global proxy: {}", e));
+            } else {
+                crate::proxy::http_client::init(None)
+                    .unwrap_or_else(|e| log::warn!("Failed to initialize global proxy: {}", e));
+            }
+        } else {
+            crate::proxy::http_client::init(None)
+                .unwrap_or_else(|e| log::warn!("Failed to initialize global proxy: {}", e));
+        }
+
         let proxy_service = ProxyService::new(db.clone());
 
         Ok(Self {

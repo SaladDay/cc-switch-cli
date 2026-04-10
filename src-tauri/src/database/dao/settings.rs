@@ -72,6 +72,9 @@ impl Database {
     /// 全局代理 URL 的存储键名
     const GLOBAL_PROXY_URL_KEY: &'static str = "global_proxy_url";
 
+    /// 全局代理启用状态的存储键名
+    const GLOBAL_PROXY_ENABLED_KEY: &'static str = "global_proxy_enabled";
+
     /// 获取全局出站代理 URL
     ///
     /// 返回 None 表示未配置或已清除代理（直连）
@@ -100,6 +103,22 @@ impl Database {
                 Ok(())
             }
         }
+    }
+
+    /// 获取全局出站代理启用状态
+    ///
+    /// 返回 true 表示代理已启用，false 表示代理已禁用
+    pub fn get_global_proxy_enabled(&self) -> Result<bool, AppError> {
+        match self.get_setting(Self::GLOBAL_PROXY_ENABLED_KEY)? {
+            Some(value) => Ok(value == "true"),
+            None => Ok(false),
+        }
+    }
+
+    /// 设置全局出站代理启用状态
+    pub fn set_global_proxy_enabled(&self, enabled: bool) -> Result<(), AppError> {
+        let value = if enabled { "true" } else { "false" };
+        self.set_setting(Self::GLOBAL_PROXY_ENABLED_KEY, value)
     }
 
     // --- 代理接管状态管理（已废弃，使用 proxy_config.enabled 替代）---

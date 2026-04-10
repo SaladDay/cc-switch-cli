@@ -94,6 +94,9 @@ impl App {
                     ConfirmAction::SettingsSetClaudePluginIntegration { enabled } => {
                         Action::SetClaudePluginIntegration { enabled: *enabled }
                     }
+                    ConfirmAction::SettingsClearUpstreamProxy => {
+                        Action::SetUpstreamProxyUrl { url: None }
+                    }
                     ConfirmAction::ProviderApiFormatProxyNotice => Action::None,
                     ConfirmAction::ProviderSwitchSharedConfigNotice => Action::None,
                     ConfirmAction::OpenClawDailyMemoryDelete { filename } => {
@@ -218,6 +221,9 @@ impl App {
             }
             TextSubmit::SettingsProxyListenPort => {
                 self.handle_settings_proxy_listen_port_submit(data, raw)
+            }
+            TextSubmit::SettingsUpstreamProxyUrl => {
+                self.handle_settings_upstream_proxy_url_submit(data, raw)
             }
             TextSubmit::SettingsOpenClawConfigDir => {
                 let trimmed = raw.trim().to_string();
@@ -424,6 +430,38 @@ impl App {
         }
 
         Action::SetProxyListenPort { port }
+    }
+
+    fn handle_settings_upstream_proxy_url_submit(&mut self, _data: &UiData, raw: String) -> Action {
+        let trimmed = raw.trim().to_string();
+
+        if trimmed.is_empty() {
+            // Clear proxy setting - show confirmation dialog
+            self.overlay = Overlay::Confirm(ConfirmOverlay {
+                title: texts::tui_settings_upstream_proxy_clear_title().to_string(),
+                message: texts::tui_confirm_upstream_proxy_clear().to_string(),
+                action: ConfirmAction::SettingsClearUpstreamProxy,
+            });
+            return Action::None;
+        }
+
+        // Validate URL format (simple validation)
+        if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") && !trimmed.starts_with("socks5://") {
+            self.push_toast(
+                texts::tui_toast_upstream_proxy_url_invalid(),
+                ToastKind::Warning,
+            );
+            self.overlay = Overlay::TextInput(TextInputState {
+                title: texts::tui_settings_upstream_proxy_title().to_string(),
+                prompt: texts::tui_settings_upstream_proxy_url_prompt().to_string(),
+                buffer: trimmed,
+                submit: TextSubmit::SettingsUpstreamProxyUrl,
+                secret: false,
+            });
+            return Action::None;
+        }
+
+        Action::SetUpstreamProxyUrl { url: Some(trimmed) }
     }
 }
 

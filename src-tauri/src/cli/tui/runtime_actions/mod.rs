@@ -292,6 +292,8 @@ pub(crate) fn handle_action(
             );
             Ok(())
         }
+        Action::SetUpstreamProxyUrl { url } => settings::set_upstream_proxy_url(&mut ctx, url),
+        Action::SetUpstreamProxyEnabled { enabled } => settings::set_upstream_proxy_enabled(&mut ctx, enabled),
         Action::SetProxyEnabled { enabled } => settings::set_proxy_enabled(&mut ctx, enabled),
         Action::SetProxyListenAddress { address } => {
             settings::set_proxy_listen_address(&mut ctx, address)
