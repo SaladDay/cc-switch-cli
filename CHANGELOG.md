@@ -7,6 +7,27 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.3.1] - 2026-04-12
+
+### Changed
+
+- **README / Release Notes**: Refresh the README patch highlights for 5.3.1 and add dedicated patch release notes for this release.
+
+### Fixed
+
+- **Codex / Provider Editing**: Preserve official Codex auth snapshots during provider edits and avoid recreating official providers as third-party endpoint configs.
+- **Database / Import**: Accept schema v8 databases, add the v6 -> v7 -> v8 migration path, and keep corrected pricing data aligned between migrated and newly created databases.
+
+### Commits (since v5.3.0)
+
+- b18e8b7 fix(database): support schema v8 imports and staged migrations (#106)
+- 81cd431 fix(codex): preserve official auth snapshots during provider edits (#102)
+
+### Thanks
+
+- Thanks `@saladday` for pushing the backend/database compatibility work across this patch cycle.
+- Thanks `@aldev814` and `@Hatiaa` for the issue reports that surfaced the migration and Codex official-provider regressions early.
+
 ## [5.3.0] - 2026-04-03
 
 ### Added

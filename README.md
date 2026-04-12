@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.3.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.3.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -30,16 +30,16 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 ---
 
-## 🆕 What's New in 5.3.0
+## 🆕 What's New in 5.3.1
 
 <div align="center">
-  <h3><strong>🧭 Multi-window provider launch, deeper MCP env editing, and runtime polish</strong></h3>
+  <h3><strong>🩹 Patch release for Codex official auth safety and newer database imports</strong></h3>
 </div>
 
-- Run different Claude/Codex windows against different providers without disturbing your current global setup.
-- Add richer TUI support for MCP env editing with overlay-based editing, duplicate-key protection, and clearer field summaries.
-- Improve runtime and TUI alignment across temporary launch routing, provider safety flows, and platform-aware affordances.
-- Continue polishing OpenClaw flows, sponsor presets, config routes, and release docs for the current CLI release line.
+- Preserve official Codex auth snapshots during provider edits so switching back to the official path no longer drops stored login state.
+- Support importing and upgrading newer schema v8 databases through the staged migration path now expected by the current backend.
+- Keep corrected pricing data and new tracking tables aligned between migrated databases and freshly initialized local databases.
+- See the patch notes: [release-note-v5.3.1-en.md](docs/release-note-v5.3.1-en.md)
 
 ---
 

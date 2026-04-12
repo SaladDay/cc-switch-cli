@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.3.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.3.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -26,16 +26,16 @@
 
 ---
 
-## 🆕 5.3.0 更新内容
+## 🆕 5.3.1 更新内容
 
 <div align="center">
-  <h3><strong>🧭 多窗口临时启动、更完整的 MCP 环境编辑能力，以及运行时体验打磨</strong></h3>
+  <h3><strong>🩹 面向 Codex 官方认证安全和新版数据库导入的补丁版本</strong></h3>
 </div>
 
-- 支持让不同 Claude / Codex 窗口分别使用不同 provider，而不影响你当前的全局 current provider 设置。
-- 增强 TUI 中的 MCP 环境变量编辑流程，支持 overlay 编辑、重复 key 拦截，以及更清晰的字段摘要展示。
-- 持续打磨运行时与 TUI 的一致性，包括临时启动分发修复、provider 安全流程与平台能力提示对齐。
-- 继续完善 OpenClaw 流程、赞助商预设、配置路由与发布文档，提升当前 CLI 版本线的整体体验。
+- 保留 Codex 官方 provider 的认证快照，避免编辑或切回官方渠道时把已有登录状态写丢。
+- 支持导入并升级更新后的 schema v8 数据库，补齐当前后端所需的分阶段迁移路径。
+- 让迁移后的数据库与新建数据库在定价修正和新增跟踪表上保持一致。
+- 详细补丁说明见：[release-note-v5.3.1-zh.md](docs/release-note-v5.3.1-zh.md)
 
 ---
 
