@@ -288,11 +288,21 @@ impl ProviderAdapter for ClaudeAdapter {
             .and_then(|meta| meta.prompt_cache_key.as_deref())
             .unwrap_or(&provider.id);
 
-        match self.get_api_format(provider) {
+        let api_format = self.get_api_format(provider);
+        let stream_include_usage = provider.stream_include_usage();
+
+        if stream_include_usage {
+            log::info!(
+                "[ClaudeAdapter] Provider '{}' stream_include_usage enabled",
+                provider.name
+            );
+        }
+
+        match api_format {
             "openai_responses" => {
                 super::transform_responses::anthropic_to_responses(body, Some(cache_key))
             }
-            _ => super::transform::anthropic_to_openai(body, Some(cache_key)),
+            _ => super::transform::anthropic_to_openai(body, Some(cache_key), stream_include_usage),
         }
     }
 

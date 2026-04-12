@@ -258,6 +258,20 @@ cc-switch provider stream-check <id> # Run stream health check
 cc-switch provider fetch-models <id> # Fetch remote model list
 ```
 
+#### OpenAI-compatible Provider Options
+
+When using an OpenAI-compatible provider (e.g. a third-party relay), you can enable token usage reporting in streaming responses by adding `stream_include_usage` to the provider's settings config:
+
+```json
+{
+  "stream_include_usage": true
+}
+```
+
+This injects `"stream_options": {"include_usage": true}` into every streaming request sent to the upstream. The proxy then reads the trailing usage chunk that OpenAI-compatible APIs append after `finish_reason`, and surfaces real `input_tokens` / `output_tokens` values in the `message_delta` event instead of `null`.
+
+To apply this, edit the provider and paste the JSON above into the **Settings Config** field.
+
 ### 🛠️ MCP Server Management
 
 Manage Model Context Protocol servers across Claude, Codex, Gemini, and OpenCode.

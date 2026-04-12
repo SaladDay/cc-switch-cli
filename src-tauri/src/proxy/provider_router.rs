@@ -69,6 +69,12 @@ impl ProviderRouter {
         } else {
             if let Some(current) = self.current_provider(app_type)? {
                 total_providers = 1;
+                log::info!(
+                    "[ProviderRouter] [{}] selected provider: {} (stream_include_usage={})",
+                    app_type,
+                    current.name,
+                    current.stream_include_usage()
+                );
                 result.push(current);
             }
         }
