@@ -116,6 +116,7 @@ cc-switch
 ```bash
 cc-switch provider list              # 列出供应商
 cc-switch provider switch <id>       # 切换供应商
+cc-switch provider export <id>       # 导出 Claude 供应商为独立 settings 文件
 cc-switch provider stream-check <id> # 检查供应商流式健康
 cc-switch config webdav show         # 查看 WebDAV 同步设置
 cc-switch env tools                  # 检查本地 CLI 工具
@@ -244,7 +245,7 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode** 与 **OpenClaw** 的 API 配置。
 
-**功能：** 一键切换、多端点支持、API 密钥管理、远端模型发现，以及按应用提供的速度测试、流式健康检查等诊断能力。
+**功能：** 一键切换、Claude 独立 settings 导出、多端点支持、API 密钥管理、远端模型发现，以及按应用提供的速度测试、流式健康检查等诊断能力。
 
 ```bash
 cc-switch provider list              # 列出所有供应商
@@ -254,9 +255,11 @@ cc-switch provider add               # 添加新供应商
 cc-switch provider edit <id>         # 编辑现有供应商
 cc-switch provider duplicate <id>    # 复制供应商
 cc-switch provider delete <id>       # 删除供应商
+cc-switch provider export <id>       # 导出 Claude 供应商为独立 settings.json
 cc-switch provider speedtest <id>    # 测试 API 延迟
 cc-switch provider stream-check <id> # 执行流式健康检查
 cc-switch provider fetch-models <id> # 拉取远端模型列表
+cc-switch provider export <id> --output ~/.claude/settings-demo.json # 自定义导出路径
 ```
 
 ### 🛠️ MCP 服务器管理

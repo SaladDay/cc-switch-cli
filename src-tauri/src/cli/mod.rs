@@ -35,7 +35,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Manage providers (list, switch, speedtest, stream-check, fetch-models, usage)
+    /// Manage providers (list, switch, export, speedtest, stream-check, fetch-models, usage)
     #[command(subcommand)]
     Provider(commands::provider::ProviderCommand),
 
@@ -229,6 +229,48 @@ mod tests {
                 assert_eq!(id, "demo");
             }
             _ => panic!("expected provider fetch-models command"),
+        }
+    }
+
+    #[test]
+    fn parses_provider_export_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "provider", "export", "demo"]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Export {
+                id,
+                output,
+            })) => {
+                assert_eq!(id, "demo");
+                assert_eq!(output, None);
+            }
+            _ => panic!("expected provider export command"),
+        }
+    }
+
+    #[test]
+    fn parses_provider_export_with_output_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "provider",
+            "export",
+            "demo",
+            "--output",
+            "/tmp/provider-settings.json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Export {
+                id,
+                output,
+            })) => {
+                assert_eq!(id, "demo");
+                assert_eq!(
+                    output,
+                    Some(std::path::PathBuf::from("/tmp/provider-settings.json"))
+                );
+            }
+            _ => panic!("expected provider export command with output"),
         }
     }
 

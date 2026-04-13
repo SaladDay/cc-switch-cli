@@ -115,6 +115,7 @@ cc-switch
 ```bash
 cc-switch provider list              # List providers
 cc-switch provider switch <id>       # Switch provider
+cc-switch provider export <id>       # Export a Claude provider to a standalone settings file
 cc-switch provider stream-check <id> # Check provider stream health
 cc-switch config webdav show         # Inspect WebDAV sync settings
 cc-switch env tools                  # Check local CLI tools
@@ -243,7 +244,7 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode**, and **OpenClaw**.
 
-**Features:** One-click switching, multi-endpoint support, API key management, remote model discovery, and per-app diagnostics such as speed testing or stream health checks where supported.
+**Features:** One-click switching, standalone Claude settings export, multi-endpoint support, API key management, remote model discovery, and per-app diagnostics such as speed testing or stream health checks where supported.
 
 ```bash
 cc-switch provider list              # List all providers
@@ -253,9 +254,11 @@ cc-switch provider add               # Add new provider
 cc-switch provider edit <id>         # Edit existing provider
 cc-switch provider duplicate <id>    # Duplicate a provider
 cc-switch provider delete <id>       # Delete provider
+cc-switch provider export <id>       # Export a Claude provider to a standalone settings.json
 cc-switch provider speedtest <id>    # Test API latency
 cc-switch provider stream-check <id> # Run stream health check
 cc-switch provider fetch-models <id> # Fetch remote model list
+cc-switch provider export <id> --output ~/.claude/settings-demo.json # Custom export path
 ```
 
 ### 🛠️ MCP Server Management
