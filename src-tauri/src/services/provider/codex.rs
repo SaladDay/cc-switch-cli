@@ -303,10 +303,7 @@ impl ProviderService {
         let auth = if auth_path.exists() {
             Some(read_json_file::<Value>(&auth_path)?)
         } else {
-            current_provider
-                .settings_config
-                .get("auth")
-                .cloned()
+            current_provider.settings_config.get("auth").cloned()
         };
 
         let settings_config = if config_path.exists() {
@@ -369,7 +366,9 @@ impl ProviderService {
         let cfg_text = settings
             .get("config")
             .and_then(Value::as_str)
-            .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'config' 字段或不是字符串".to_string()))?;
+            .ok_or_else(|| {
+                AppError::Config("Codex 供应商配置缺少 'config' 字段或不是字符串".to_string())
+            })?;
 
         // Validate TOML before writing
         if !cfg_text.trim().is_empty() {

@@ -72,11 +72,7 @@ pub fn get_claude_settings_path() -> PathBuf {
 pub fn get_app_config_dir() -> PathBuf {
     if let Some(custom) = env::var_os("CC_SWITCH_CONFIG_DIR") {
         let custom = PathBuf::from(custom);
-        if custom
-            .to_string_lossy()
-            .trim()
-            .is_empty()
-        {
+        if custom.to_string_lossy().trim().is_empty() {
             return home_dir().expect("无法获取用户主目录").join(".cc-switch");
         }
         return custom;

@@ -1399,7 +1399,14 @@ impl Database {
             ("glm-4.7", "GLM-4.7", "0.39", "1.75", "0.04", "0"),
             ("glm-4.6", "GLM-4.6", "0.28", "1.11", "0.03", "0"),
             // Mimo (小米)
-            ("mimo-v2-flash", "Mimo V2 Flash", "0.09", "0.29", "0.009", "0"),
+            (
+                "mimo-v2-flash",
+                "Mimo V2 Flash",
+                "0.09",
+                "0.29",
+                "0.009",
+                "0",
+            ),
         ];
 
         for (model_id, display_name, input, output, cache_read, cache_creation) in pricing_data {

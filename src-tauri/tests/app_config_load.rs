@@ -2,9 +2,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 
-use cc_switch_lib::{
-    get_app_config_dir, update_settings, AppError, AppSettings, MultiAppConfig,
-};
+use cc_switch_lib::{get_app_config_dir, update_settings, AppError, AppSettings, MultiAppConfig};
 
 mod support;
 use support::{ensure_test_home, lock_test_mutex, reset_test_fs};
@@ -183,7 +181,10 @@ fn update_settings_uses_cc_switch_config_dir_override_for_settings_path() {
     update_settings(settings).expect("save settings with config dir override");
 
     let override_settings = override_dir.join("settings.json");
-    assert!(override_settings.exists(), "settings.json should be written to override dir");
+    assert!(
+        override_settings.exists(),
+        "settings.json should be written to override dir"
+    );
     let raw = fs::read_to_string(&override_settings).expect("read overridden settings.json");
     let value: serde_json::Value = serde_json::from_str(&raw).expect("parse overridden settings");
     assert_eq!(
@@ -193,5 +194,8 @@ fn update_settings_uses_cc_switch_config_dir_override_for_settings_path() {
         Some("~/custom-openclaw")
     );
     let default_settings = home.join(".cc-switch").join("settings.json");
-    assert_ne!(override_settings, default_settings, "override path should differ from default path");
+    assert_ne!(
+        override_settings, default_settings,
+        "override path should differ from default path"
+    );
 }
