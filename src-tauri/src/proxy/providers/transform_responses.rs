@@ -1,7 +1,11 @@
 use crate::proxy::error::ProxyError;
 use serde_json::{json, Value};
 
-pub fn anthropic_to_responses(body: Value, cache_key: Option<&str>) -> Result<Value, ProxyError> {
+pub fn anthropic_to_responses(
+    body: Value,
+    cache_key: Option<&str>,
+    is_codex_oauth: bool,
+) -> Result<Value, ProxyError> {
     let mut result = json!({});
 
     if let Some(model) = body.get("model").and_then(|m| m.as_str()) {
@@ -42,6 +46,14 @@ pub fn anthropic_to_responses(body: Value, cache_key: Option<&str>) -> Result<Va
         result["stream"] = v.clone();
     }
 
+    if let Some(model_name) = body.get("model").and_then(|m| m.as_str()) {
+        if super::transform::supports_reasoning_effort(model_name) {
+            if let Some(effort) = super::transform::resolve_reasoning_effort(&body) {
+                result["reasoning"] = json!({ "effort": effort });
+            }
+        }
+    }
+
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
         let response_tools: Vec<Value> = tools
             .iter()
@@ -69,6 +81,35 @@ pub fn anthropic_to_responses(body: Value, cache_key: Option<&str>) -> Result<Va
 
     if let Some(key) = cache_key {
         result["prompt_cache_key"] = json!(key);
+    }
+
+    if is_codex_oauth {
+        result["store"] = json!(false);
+
+        const REASONING_MARKER: &str = "reasoning.encrypted_content";
+        let mut includes: Vec<Value> = body
+            .get("include")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if !includes
+            .iter()
+            .any(|v| v.as_str() == Some(REASONING_MARKER))
+        {
+            includes.push(json!(REASONING_MARKER));
+        }
+        result["include"] = json!(includes);
+
+        if let Some(obj) = result.as_object_mut() {
+            obj.remove("max_output_tokens");
+            obj.remove("temperature");
+            obj.remove("top_p");
+            obj.entry("instructions".to_string()).or_insert(json!(""));
+            obj.entry("tools".to_string()).or_insert(json!([]));
+            obj.entry("parallel_tool_calls".to_string())
+                .or_insert(json!(false));
+            obj.insert("stream".to_string(), json!(true));
+        }
     }
 
     Ok(result)
@@ -376,4 +417,76 @@ pub fn responses_to_anthropic(body: Value) -> Result<Value, ProxyError> {
         "stop_sequence": null,
         "usage": build_anthropic_usage_from_responses(body.get("usage"))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_to_responses_codex_oauth_sets_required_contract_fields() {
+        let input = json!({
+            "model": "gpt-5-codex",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_responses(input, None, true).expect("transform responses");
+
+        assert_eq!(result["store"], json!(false));
+        assert_eq!(result["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(result["instructions"], json!(""));
+        assert_eq!(result["tools"], json!([]));
+        assert_eq!(result["parallel_tool_calls"], json!(false));
+        assert_eq!(result["stream"], json!(true));
+    }
+
+    #[test]
+    fn anthropic_to_responses_codex_oauth_strips_unsupported_fields() {
+        let input = json!({
+            "model": "gpt-5-codex",
+            "max_tokens": 1024,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_responses(input, None, true).expect("transform responses");
+
+        assert!(result.get("max_output_tokens").is_none());
+        assert!(result.get("temperature").is_none());
+        assert!(result.get("top_p").is_none());
+    }
+
+    #[test]
+    fn anthropic_to_responses_non_codex_keeps_openai_fields() {
+        let input = json!({
+            "model": "gpt-5-codex",
+            "max_tokens": 1024,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_responses(input, None, false).expect("transform responses");
+
+        assert_eq!(result["max_output_tokens"], json!(1024));
+        assert_eq!(result["temperature"], json!(0.7));
+        assert_eq!(result["top_p"], json!(0.9));
+        assert!(result.get("store").is_none());
+    }
+
+    #[test]
+    fn anthropic_to_responses_maps_reasoning_effort_for_gpt5_models() {
+        let input = json!({
+            "model": "gpt-5.4",
+            "max_tokens": 1024,
+            "thinking": {"type": "adaptive"},
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_responses(input, None, false).expect("transform responses");
+
+        assert_eq!(result["reasoning"]["effort"], json!("xhigh"));
+    }
 }

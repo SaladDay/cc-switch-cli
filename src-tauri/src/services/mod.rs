@@ -1,3 +1,5 @@
+pub mod auth;
+pub mod codex_oauth;
 pub mod config;
 pub mod env_checker;
 pub mod env_manager;
@@ -9,9 +11,12 @@ pub mod proxy;
 pub mod skill;
 pub mod speedtest;
 pub mod stream_check;
+pub mod subscription;
 pub mod webdav;
 pub mod webdav_sync;
 
+pub use auth::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus};
+pub use codex_oauth::CodexOAuthService;
 pub use config::ConfigService;
 pub use mcp::McpService;
 pub use prompt::PromptService;
@@ -20,4 +25,5 @@ pub use proxy::ProxyService;
 pub use skill::SkillService;
 pub use speedtest::{EndpointLatency, SpeedtestService};
 pub use stream_check::{HealthStatus, StreamCheckConfig, StreamCheckResult, StreamCheckService};
+pub use subscription::{CredentialStatus, ExtraUsage, QuotaTier, SubscriptionQuota};
 pub use webdav_sync::{SyncDecision, WebDavSyncService, WebDavSyncSummary};

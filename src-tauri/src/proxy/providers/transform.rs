@@ -1,6 +1,52 @@
 use crate::proxy::error::ProxyError;
 use serde_json::{json, Value};
 
+pub fn is_openai_o_series(model: &str) -> bool {
+    model.len() > 1
+        && model.starts_with('o')
+        && model.as_bytes().get(1).is_some_and(|b| b.is_ascii_digit())
+}
+
+pub fn supports_reasoning_effort(model: &str) -> bool {
+    is_openai_o_series(model)
+        || model
+            .to_lowercase()
+            .strip_prefix("gpt-")
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|c| c.is_ascii_digit() && c >= '5')
+}
+
+pub fn resolve_reasoning_effort(body: &Value) -> Option<&'static str> {
+    if let Some(effort) = body
+        .pointer("/output_config/effort")
+        .and_then(|value| value.as_str())
+    {
+        return match effort {
+            "low" => Some("low"),
+            "medium" => Some("medium"),
+            "high" => Some("high"),
+            "max" => Some("xhigh"),
+            _ => None,
+        };
+    }
+
+    let thinking = body.get("thinking")?;
+    match thinking.get("type").and_then(|value| value.as_str()) {
+        Some("adaptive") => Some("xhigh"),
+        Some("enabled") => {
+            let budget = thinking
+                .get("budget_tokens")
+                .and_then(|value| value.as_u64());
+            match budget {
+                Some(budget) if budget < 4_000 => Some("low"),
+                Some(budget) if budget < 16_000 => Some("medium"),
+                Some(_) | None => Some("high"),
+            }
+        }
+        _ => None,
+    }
+}
+
 pub fn anthropic_to_openai(body: Value, cache_key: Option<&str>) -> Result<Value, ProxyError> {
     let mut result = json!({});
 
@@ -34,10 +80,16 @@ pub fn anthropic_to_openai(body: Value, cache_key: Option<&str>) -> Result<Value
         }
     }
 
+    normalize_openai_system_messages(&mut messages);
     result["messages"] = json!(messages);
 
+    let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("");
     if let Some(v) = body.get("max_tokens") {
-        result["max_tokens"] = v.clone();
+        if is_openai_o_series(model) {
+            result["max_completion_tokens"] = v.clone();
+        } else {
+            result["max_tokens"] = v.clone();
+        }
     }
     if let Some(v) = body.get("temperature") {
         result["temperature"] = v.clone();
@@ -50,6 +102,12 @@ pub fn anthropic_to_openai(body: Value, cache_key: Option<&str>) -> Result<Value
     }
     if let Some(v) = body.get("stream") {
         result["stream"] = v.clone();
+    }
+
+    if supports_reasoning_effort(model) {
+        if let Some(effort) = resolve_reasoning_effort(&body) {
+            result["reasoning_effort"] = json!(effort);
+        }
     }
 
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
@@ -86,6 +144,57 @@ pub fn anthropic_to_openai(body: Value, cache_key: Option<&str>) -> Result<Value
     }
 
     Ok(result)
+}
+
+fn normalize_openai_system_messages(messages: &mut Vec<Value>) {
+    let system_count = messages
+        .iter()
+        .filter(|message| message.get("role").and_then(|value| value.as_str()) == Some("system"))
+        .count();
+
+    if system_count == 0 {
+        return;
+    }
+
+    if system_count == 1 {
+        if let Some(index) = messages.iter().position(|message| {
+            message.get("role").and_then(|value| value.as_str()) == Some("system")
+        }) {
+            if index > 0 {
+                let message = messages.remove(index);
+                messages.insert(0, message);
+            }
+        }
+        return;
+    }
+
+    let mut parts = Vec::new();
+    messages.retain(|message| {
+        if message.get("role").and_then(|value| value.as_str()) != Some("system") {
+            return true;
+        }
+
+        match message.get("content") {
+            Some(Value::String(text)) if !text.is_empty() => parts.push(text.clone()),
+            Some(Value::Array(content_parts)) => {
+                let text = content_parts
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    parts.push(text);
+                }
+            }
+            _ => {}
+        }
+
+        false
+    });
+
+    if !parts.is_empty() {
+        messages.insert(0, json!({"role": "system", "content": parts.join("\n")}));
+    }
 }
 
 fn convert_message_to_openai(
@@ -461,5 +570,34 @@ mod tests {
         let result = anthropic_to_openai(input, None).unwrap();
 
         assert_eq!(result["tools"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn anthropic_to_openai_maps_reasoning_effort_for_gpt5() {
+        let input = json!({
+            "model": "gpt-5.4",
+            "max_tokens": 1024,
+            "thinking": {"type": "adaptive"},
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["reasoning_effort"], "xhigh");
+        assert_eq!(result["max_tokens"], 1024);
+    }
+
+    #[test]
+    fn anthropic_to_openai_uses_max_completion_tokens_for_o_series() {
+        let input = json!({
+            "model": "o3-mini",
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["max_completion_tokens"], 2048);
+        assert!(result.get("max_tokens").is_none());
     }
 }

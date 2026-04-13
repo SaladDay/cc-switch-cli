@@ -1,6 +1,7 @@
 use axum::http::HeaderMap;
 use serde_json::Value;
 
+use crate::services::CodexOAuthService;
 use crate::{app_config::AppType, provider::Provider};
 
 use super::super::{
@@ -8,7 +9,7 @@ use super::super::{
     error::ProxyError,
     http_client,
     model_mapper::apply_model_mapping,
-    providers::{get_adapter, ProviderAdapter},
+    providers::{get_adapter, AuthStrategy, ProviderAdapter},
 };
 use super::{ForwardOptions, RequestForwarder};
 
@@ -27,7 +28,7 @@ const HEADER_BLACKLIST: &[&str] = &[
 ];
 
 impl RequestForwarder {
-    pub(super) fn prepare_request(
+    pub(super) async fn prepare_request(
         &self,
         app_type: &AppType,
         provider: &Provider,
@@ -62,7 +63,7 @@ impl RequestForwarder {
         let filtered_body = filter_private_params_with_whitelist(request_body, &[]);
         let client = self.client_for_provider(provider);
 
-        Ok(build_request(
+        build_request(
             &client,
             &*adapter,
             provider,
@@ -72,7 +73,8 @@ impl RequestForwarder {
             headers,
             options,
             is_claude_request,
-        ))
+        )
+        .await
     }
 
     fn client_for_provider(&self, provider: &Provider) -> reqwest::Client {
@@ -85,7 +87,7 @@ impl RequestForwarder {
     }
 }
 
-fn build_request(
+async fn build_request(
     client: &reqwest::Client,
     adapter: &dyn ProviderAdapter,
     provider: &Provider,
@@ -95,7 +97,7 @@ fn build_request(
     headers: &HeaderMap,
     _options: ForwardOptions,
     is_claude_request: bool,
-) -> reqwest::RequestBuilder {
+) -> Result<reqwest::RequestBuilder, ProxyError> {
     let mut request = client.post(adapter.build_url(base_url, endpoint));
 
     for (key, value) in headers {
@@ -134,7 +136,37 @@ fn build_request(
     request = request.header("accept-encoding", "identity");
 
     if let Some(auth) = adapter.extract_auth(provider) {
-        request = adapter.add_auth_headers(request, &auth);
+        let mut effective_auth = auth.clone();
+        if auth.strategy == AuthStrategy::CodexOAuth {
+            let account_id = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.managed_account_id_for("codex_oauth"));
+
+            match match &account_id {
+                Some(id) => CodexOAuthService::get_valid_token_for_account(id).await,
+                None => CodexOAuthService::get_valid_token().await,
+            } {
+                Ok(token) => {
+                    effective_auth.api_key = token;
+                    request = adapter.add_auth_headers(request, &effective_auth);
+                    let resolved_account_id = match account_id {
+                        Some(id) => Some(id),
+                        None => CodexOAuthService::default_account_id().await,
+                    };
+                    if let Some(account_id) = resolved_account_id {
+                        request = request.header("ChatGPT-Account-Id", account_id);
+                    }
+                }
+                Err(error) => {
+                    return Err(ProxyError::AuthError(format!(
+                        "Codex OAuth 认证失败: {error}"
+                    )));
+                }
+            }
+        } else {
+            request = adapter.add_auth_headers(request, &effective_auth);
+        }
     }
 
     if is_claude_request {
@@ -145,7 +177,7 @@ fn build_request(
         request = request.header("anthropic-version", version);
     }
 
-    request.json(request_body)
+    Ok(request.json(request_body))
 }
 
 fn is_bedrock_provider(provider: &Provider) -> bool {

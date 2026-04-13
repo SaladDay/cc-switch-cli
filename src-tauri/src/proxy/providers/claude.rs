@@ -3,19 +3,17 @@ use serde_json::json;
 
 use crate::{provider::Provider, proxy::error::ProxyError};
 
-use super::{AuthInfo, AuthStrategy, ProviderAdapter};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderType {
-    Claude,
-    ClaudeAuth,
-    OpenRouter,
-    GitHubCopilot,
-}
+use super::{AuthInfo, AuthStrategy, ProviderAdapter, ProviderType};
 
 pub struct ClaudeAdapter;
 
 pub fn get_claude_api_format(provider: &Provider) -> &'static str {
+    if let Some(meta) = provider.meta.as_ref() {
+        if meta.provider_type.as_deref() == Some("codex_oauth") {
+            return "openai_responses";
+        }
+    }
+
     if let Some(meta) = provider.meta.as_ref() {
         if let Some(api_format) = meta.api_format.as_deref() {
             return match api_format {
@@ -56,12 +54,45 @@ pub fn get_claude_api_format(provider: &Provider) -> &'static str {
     }
 }
 
+pub fn claude_api_format_needs_transform(api_format: &str) -> bool {
+    matches!(api_format, "openai_chat" | "openai_responses")
+}
+
+pub fn transform_claude_request_for_api_format(
+    body: serde_json::Value,
+    provider: &Provider,
+    api_format: &str,
+) -> Result<serde_json::Value, ProxyError> {
+    let cache_key = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.prompt_cache_key.as_deref())
+        .unwrap_or(&provider.id);
+
+    match api_format {
+        "openai_responses" => super::transform_responses::anthropic_to_responses(
+            body,
+            Some(cache_key),
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref())
+                == Some("codex_oauth"),
+        ),
+        "openai_chat" => super::transform::anthropic_to_openai(body, Some(cache_key)),
+        _ => Ok(body),
+    }
+}
+
 impl ClaudeAdapter {
     pub fn new() -> Self {
         Self
     }
 
     pub fn provider_type(&self, provider: &Provider) -> ProviderType {
+        if self.is_codex_oauth(provider) {
+            return ProviderType::CodexOAuth;
+        }
         if self.is_github_copilot(provider) {
             return ProviderType::GitHubCopilot;
         }
@@ -72,6 +103,15 @@ impl ClaudeAdapter {
             return ProviderType::ClaudeAuth;
         }
         ProviderType::Claude
+    }
+
+    fn is_codex_oauth(&self, provider: &Provider) -> bool {
+        if let Some(meta) = provider.meta.as_ref() {
+            if meta.provider_type.as_deref() == Some("codex_oauth") {
+                return true;
+            }
+        }
+        false
     }
 
     fn is_openrouter(&self, provider: &Provider) -> bool {
@@ -172,6 +212,10 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn extract_base_url(&self, provider: &Provider) -> Result<String, ProxyError> {
+        if self.is_codex_oauth(provider) {
+            return Ok("https://chatgpt.com/backend-api/codex".to_string());
+        }
+
         if let Some(env) = provider.settings_config.get("env") {
             if let Some(url) = env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) {
                 return Ok(url.trim_end_matches('/').to_string());
@@ -217,6 +261,13 @@ impl ProviderAdapter for ClaudeAdapter {
             ));
         }
 
+        if provider_type == ProviderType::CodexOAuth {
+            return Some(AuthInfo::new(
+                "codex_oauth_placeholder".to_string(),
+                AuthStrategy::CodexOAuth,
+            ));
+        }
+
         let strategy = match provider_type {
             ProviderType::OpenRouter => AuthStrategy::Bearer,
             ProviderType::ClaudeAuth => AuthStrategy::ClaudeAuth,
@@ -227,6 +278,11 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn build_url(&self, base_url: &str, endpoint: &str) -> String {
+        if base_url == "https://chatgpt.com/backend-api/codex" {
+            let _ = endpoint;
+            return "https://chatgpt.com/backend-api/codex/responses".to_string();
+        }
+
         let mut base = format!(
             "{}/{}",
             base_url.trim_end_matches('/'),
@@ -260,6 +316,9 @@ impl ProviderAdapter for ClaudeAdapter {
                 .header("Editor-Version", "vscode/1.85.0")
                 .header("Editor-Plugin-Version", "copilot/1.150.0")
                 .header("Copilot-Integration-Id", "vscode-chat"),
+            AuthStrategy::CodexOAuth => request
+                .header("Authorization", format!("Bearer {}", auth.api_key))
+                .header("originator", "cc-switch"),
             AuthStrategy::Bearer | AuthStrategy::Google | AuthStrategy::GoogleOAuth => {
                 request.header("Authorization", format!("Bearer {}", auth.api_key))
             }
@@ -267,14 +326,14 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn needs_transform(&self, provider: &Provider) -> bool {
+        if self.is_codex_oauth(provider) {
+            return true;
+        }
         if self.is_github_copilot(provider) {
             return true;
         }
 
-        matches!(
-            self.get_api_format(provider),
-            "openai_chat" | "openai_responses"
-        )
+        claude_api_format_needs_transform(self.get_api_format(provider))
     }
 
     fn transform_request(
@@ -282,18 +341,7 @@ impl ProviderAdapter for ClaudeAdapter {
         body: serde_json::Value,
         provider: &Provider,
     ) -> Result<serde_json::Value, ProxyError> {
-        let cache_key = provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.prompt_cache_key.as_deref())
-            .unwrap_or(&provider.id);
-
-        match self.get_api_format(provider) {
-            "openai_responses" => {
-                super::transform_responses::anthropic_to_responses(body, Some(cache_key))
-            }
-            _ => super::transform::anthropic_to_openai(body, Some(cache_key)),
-        }
+        transform_claude_request_for_api_format(body, provider, self.get_api_format(provider))
     }
 
     fn transform_response(&self, body: serde_json::Value) -> Result<serde_json::Value, ProxyError> {
@@ -364,6 +412,42 @@ mod tests {
             .extract_auth(&provider)
             .expect("github copilot should resolve auth");
         assert_eq!(format!("{:?}", auth.strategy), "GitHubCopilot");
+        assert!(adapter.needs_transform(&provider));
+    }
+
+    #[test]
+    fn provider_meta_provider_type_codex_oauth_uses_responses_runtime_behavior() {
+        let adapter = ClaudeAdapter::new();
+        let provider: Provider = serde_json::from_value(json!({
+            "id": "codex-oauth-meta",
+            "name": "Codex OAuth",
+            "settingsConfig": {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://relay.example.com",
+                    "ANTHROPIC_AUTH_TOKEN": "token-1"
+                }
+            },
+            "meta": {
+                "providerType": "codex_oauth"
+            }
+        }))
+        .expect("provider should deserialize");
+
+        assert_eq!(get_claude_api_format(&provider), "openai_responses");
+        assert_eq!(
+            format!("{:?}", adapter.provider_type(&provider)),
+            "CodexOAuth"
+        );
+        assert_eq!(
+            adapter
+                .extract_base_url(&provider)
+                .expect("codex oauth base url"),
+            "https://chatgpt.com/backend-api/codex"
+        );
+        let auth = adapter
+            .extract_auth(&provider)
+            .expect("codex oauth should resolve auth");
+        assert_eq!(format!("{:?}", auth.strategy), "CodexOAuth");
         assert!(adapter.needs_transform(&provider));
     }
 }

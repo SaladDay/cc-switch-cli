@@ -613,6 +613,7 @@ impl RequestForwarder {
                     headers,
                     options,
                 )
+                .await
                 .map_err(StreamingRequestError::BeforeResponse)?;
             let mut attempt = 0u32;
 
@@ -761,6 +762,7 @@ impl RequestForwarder {
                     headers,
                     options,
                 )
+                .await
                 .map_err(BufferedRequestError::BeforeResponse)?;
             let mut attempt = 0u32;
 
