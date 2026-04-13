@@ -11,7 +11,9 @@ use cc_switch_lib::{
 
 #[path = "support.rs"]
 mod support;
-use support::{ensure_test_home, lock_test_mutex, reset_test_fs, state_from_config};
+use support::{
+    ensure_test_home, lock_test_mutex, reset_test_fs, state_from_config, CurrentDirGuard,
+};
 
 fn find_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind free local port");
@@ -27,6 +29,8 @@ fn provider_export_writes_merged_claude_settings_to_default_path() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
+    let project_dir = home.join("project-a");
+    let _cwd_guard = CurrentDirGuard::change_to(&project_dir);
 
     let mut config = MultiAppConfig::default();
     config.common_config_snippets.claude = Some(
@@ -64,17 +68,16 @@ fn provider_export_writes_merged_claude_settings_to_default_path() {
     let state = state_from_config(config);
     state.save().expect("persist test config");
 
-    // Use explicit output path to avoid cwd ambiguity and file-exists confirmation prompt
-    let export_path = home.join(".claude").join("settings.local.json");
     cc_switch_lib::cli::commands::provider::execute(
         cc_switch_lib::cli::commands::provider::ProviderCommand::Export {
             id: "demo".to_string(),
-            output: Some(export_path.clone()),
+            output: None,
         },
         Some(AppType::Claude),
     )
     .expect("export command should succeed");
 
+    let export_path = project_dir.join(".claude").join("settings.local.json");
     let exported: serde_json::Value = read_json_file(&export_path).expect("read exported file");
 
     assert_eq!(

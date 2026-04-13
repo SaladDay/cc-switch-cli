@@ -255,11 +255,11 @@ cc-switch provider add               # 添加新供应商
 cc-switch provider edit <id>         # 编辑现有供应商
 cc-switch provider duplicate <id>    # 复制供应商
 cc-switch provider delete <id>       # 删除供应商
-cc-switch provider export <id>       # 导出 Claude 供应商为独立 settings.json
+cc-switch provider export <id>       # 导出到当前目录 ./.claude/settings.local.json 并供 Claude 自动加载
 cc-switch provider speedtest <id>    # 测试 API 延迟
 cc-switch provider stream-check <id> # 执行流式健康检查
 cc-switch provider fetch-models <id> # 拉取远端模型列表
-cc-switch provider export <id> --output ~/.claude/settings-demo.json # 自定义导出路径
+cc-switch provider export <id> --output ~/.claude/settings-demo.json # 自定义 settings 文件路径
 ```
 
 ### 🛠️ MCP 服务器管理

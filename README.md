@@ -254,11 +254,11 @@ cc-switch provider add               # Add new provider
 cc-switch provider edit <id>         # Edit existing provider
 cc-switch provider duplicate <id>    # Duplicate a provider
 cc-switch provider delete <id>       # Delete provider
-cc-switch provider export <id>       # Export a Claude provider to a standalone settings.json
+cc-switch provider export <id>       # Export to ./.claude/settings.local.json for Claude auto-load
 cc-switch provider speedtest <id>    # Test API latency
 cc-switch provider stream-check <id> # Run stream health check
 cc-switch provider fetch-models <id> # Fetch remote model list
-cc-switch provider export <id> --output ~/.claude/settings-demo.json # Custom export path
+cc-switch provider export <id> --output ~/.claude/settings-demo.json # Custom settings file path
 ```
 
 ### 🛠️ MCP Server Management

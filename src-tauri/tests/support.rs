@@ -71,3 +71,24 @@ pub fn state_from_config(config: MultiAppConfig) -> AppState {
         proxy_service: ProxyService::new(db),
     }
 }
+
+#[allow(dead_code)]
+pub struct CurrentDirGuard {
+    previous: PathBuf,
+}
+
+impl CurrentDirGuard {
+    #[allow(dead_code)]
+    pub fn change_to(path: &Path) -> Self {
+        let previous = std::env::current_dir().expect("read current dir");
+        std::fs::create_dir_all(path).expect("create target cwd");
+        std::env::set_current_dir(path).expect("switch current dir");
+        Self { previous }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.previous).expect("restore current dir");
+    }
+}
