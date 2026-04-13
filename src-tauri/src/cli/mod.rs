@@ -35,7 +35,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Manage providers (list, switch, speedtest, stream-check, fetch-models)
+    /// Manage providers (list, switch, speedtest, stream-check, fetch-models, usage)
     #[command(subcommand)]
     Provider(commands::provider::ProviderCommand),
 
