@@ -463,7 +463,7 @@ fn export_provider(app_type: AppType, id: &str, output: Option<PathBuf>) -> Resu
         None => {
             // Default: {cwd}/.claude/settings.local.json (auto-loaded by Claude CLI)
             std::env::current_dir()
-                .expect("无法获取当前工作目录")
+                .map_err(|e| AppError::Message(format!("无法获取当前工作目录: {}", e)))?
                 .join(".claude")
                 .join("settings.local.json")
         }

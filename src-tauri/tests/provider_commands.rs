@@ -64,16 +64,17 @@ fn provider_export_writes_merged_claude_settings_to_default_path() {
     let state = state_from_config(config);
     state.save().expect("persist test config");
 
+    // Use explicit output path to avoid cwd ambiguity and file-exists confirmation prompt
+    let export_path = home.join(".claude").join("settings.local.json");
     cc_switch_lib::cli::commands::provider::execute(
         cc_switch_lib::cli::commands::provider::ProviderCommand::Export {
             id: "demo".to_string(),
-            output: None,
+            output: Some(export_path.clone()),
         },
         Some(AppType::Claude),
     )
     .expect("export command should succeed");
 
-    let export_path = home.join(".claude").join("settings-demo.json");
     let exported: serde_json::Value = read_json_file(&export_path).expect("read exported file");
 
     assert_eq!(
