@@ -7,6 +7,37 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.3.2] - 2026-04-13
+
+### Added
+
+- **Providers / CLI**: Add `provider export` so Claude provider settings can be exported to a standalone `settings.local.json` path with either the default project-local destination or an explicit output override.
+- **Sponsors / Presets**: Expose DDS as a sponsor entry and one-click preset in the provider template flow.
+
+### Changed
+
+- **Rust / CI**: Pin the Rust toolchain to 1.91.1, align release builds to the same compiler baseline, and add a dedicated Rust CI workflow that enforces `cargo fmt --check`.
+- **README**: Carry the current patch highlights forward to 5.3.2 by updating the README version badge and `What's New` title without rewriting the existing section body.
+
+### Fixed
+
+- **Codex OAuth / Backend**: Keep managed multi-account Codex OAuth token resolution, provider-bound account routing, and quota lookup aligned in the backend request path.
+- **Provider / CLI**: Remove the temporary `provider usage` query command path so the CLI surface stays clean and the Rust fmt CI gate no longer fails on that code path.
+
+### Commits (since v5.3.1)
+
+- c0b370b (auth) preserve Codex OAuth account isolation across provider requests
+- b2b0ebc (build) pin Rust formatting and compiler checks to a reproducible baseline
+- bad1d44 Feat/issue 97 provider export (#110)
+- 7f2811c Expose DDS as a sponsor entry and one-click preset
+- 4a1141d (ci) restore Rust fmt checks for provider CLI commands
+
+### Thanks
+
+- Thanks `@huanghuoguoguo` for shipping the provider export workflow in this patch cycle.
+- Thanks `@KKfhfv` for the fast CLI/provider follow-up work and iteration around the usage-query path.
+- Thanks `@saladday` for the Codex OAuth backend alignment, release hardening, and DDS preset work that rounded out this patch release.
+
 ## [5.3.1] - 2026-04-12
 
 ### Changed
