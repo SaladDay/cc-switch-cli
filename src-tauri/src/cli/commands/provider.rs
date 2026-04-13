@@ -73,6 +73,11 @@ pub enum ProviderCommand {
         /// Provider ID to query
         id: String,
     },
+    /// Query usage for a provider (requires usage script configured in provider meta)
+    Usage {
+        /// Provider ID to query
+        id: String,
+    },
 }
 
 pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppError> {
@@ -93,6 +98,7 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
         ProviderCommand::FetchModels { id } => {
             provider_inspect::fetch_models_provider(app_type, &id)
         }
+        ProviderCommand::Usage { id } => provider_inspect::usage_provider(app_type, &id),
     }
 }
 
