@@ -232,6 +232,97 @@ pub(crate) fn stream_check_provider(app_type: AppType, id: &str) -> Result<(), A
     Ok(())
 }
 
+pub(crate) fn usage_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
+    let state = get_state()?;
+    let providers = ProviderService::list(&state, app_type.clone())?;
+    let provider = providers
+        .get(id)
+        .ok_or_else(|| AppError::Message(format!("Provider '{}' not found", id)))?;
+
+    println!(
+        "{}",
+        info(&format!(
+            "Querying usage for '{}' (usage script from CC-Switch / provider meta)...",
+            provider.name
+        ))
+    );
+    println!();
+
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| AppError::Message(format!("Failed to create async runtime: {}", e)))?;
+
+    let result = runtime.block_on(async { ProviderService::query_usage(&state, app_type, id).await })?;
+
+    println!("{}", highlight("Usage"));
+    println!("{}", "═".repeat(60));
+
+    if !result.success {
+        if let Some(msg) = result.error {
+            println!("\n{}", error(&msg));
+        } else {
+            println!("\n{}", error("Usage query failed."));
+        }
+        return Ok(());
+    }
+
+    let rows = match result.data {
+        Some(v) if !v.is_empty() => v,
+        _ => {
+            println!("\n{}", info("No usage rows returned."));
+            return Ok(());
+        }
+    };
+
+    let mut table = create_table();
+    table.set_header(vec![
+        "Plan",
+        "Extra",
+        "Valid",
+        "Total",
+        "Used",
+        "Remaining",
+        "Unit",
+        "Note",
+    ]);
+
+    fn fmt_num(v: Option<f64>) -> String {
+        v.map(|x| format!("{x}"))
+            .unwrap_or_else(|| "—".to_string())
+    }
+
+    fn fmt_valid(v: Option<bool>) -> String {
+        match v {
+            Some(true) => "Y".to_string(),
+            Some(false) => "N".to_string(),
+            None => "—".to_string(),
+        }
+    }
+
+    for row in rows {
+        let note = row
+            .invalid_message
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("—");
+        table.add_row(vec![
+            row.plan_name.unwrap_or_else(|| "—".to_string()),
+            row.extra.unwrap_or_else(|| "—".to_string()),
+            fmt_valid(row.is_valid),
+            fmt_num(row.total),
+            fmt_num(row.used),
+            fmt_num(row.remaining),
+            row.unit.unwrap_or_else(|| "—".to_string()),
+            note.to_string(),
+        ]);
+    }
+
+    println!("\n{}", table);
+    println!();
+    println!("{}", success("Usage query completed."));
+
+    Ok(())
+}
+
 pub(crate) fn fetch_models_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let state = get_state()?;
     let providers = ProviderService::list(&state, app_type.clone())?;
