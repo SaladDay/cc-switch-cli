@@ -1,4 +1,5 @@
 use clap::Subcommand;
+use std::path::PathBuf;
 
 use super::provider_inspect;
 use crate::app_config::AppType;
@@ -78,6 +79,15 @@ pub enum ProviderCommand {
         /// Provider ID to query
         id: String,
     },
+    /// Export a Claude provider to a standalone settings file
+    Export {
+        /// Provider ID to export
+        id: String,
+        /// Output path (default: {cwd}/.claude/settings.local.json)
+        /// If path is a directory, appends settings-{provider-name}.json
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppError> {
@@ -99,6 +109,7 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
             provider_inspect::fetch_models_provider(app_type, &id)
         }
         ProviderCommand::Usage { id } => provider_inspect::usage_provider(app_type, &id),
+        ProviderCommand::Export { id, output } => export_provider(app_type, &id, output),
     }
 }
 
@@ -407,5 +418,121 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
 fn duplicate_provider(_app_type: AppType, id: &str) -> Result<(), AppError> {
     println!("{}", info(&format!("Duplicating provider '{}'...", id)));
     println!("{}", error("Provider duplication is not yet implemented."));
+    Ok(())
+}
+
+fn export_provider(app_type: AppType, id: &str, output: Option<PathBuf>) -> Result<(), AppError> {
+    if !matches!(app_type, AppType::Claude) {
+        return Err(AppError::Message(format!(
+            "Provider export currently supports only Claude standalone settings files. Use --app claude (current app: {}).",
+            app_type.as_str()
+        )));
+    }
+
+    let state = get_state()?;
+
+    // Single lock scope: get provider AND common_config_snippet together
+    let (provider, common_config_snippet) = {
+        let config = state.config.read().map_err(AppError::from)?;
+        let manager = config
+            .get_manager(&app_type)
+            .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
+
+        let provider = manager
+            .providers
+            .get(id)
+            .ok_or_else(|| {
+                let msg = texts::provider_not_found(id);
+                AppError::localized("provider.not_found", msg.clone(), msg)
+            })?
+            .clone();
+
+        (
+            provider,
+            config.common_config_snippets.get(&app_type).cloned(),
+        )
+    };
+
+    let apply_common_config = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.apply_common_config)
+        .unwrap_or(true);
+
+    let output_path = match output {
+        None => {
+            // Default: {cwd}/.claude/settings.local.json (auto-loaded by Claude CLI)
+            std::env::current_dir()
+                .expect("无法获取当前工作目录")
+                .join(".claude")
+                .join("settings.local.json")
+        }
+        Some(path) => {
+            // If path looks like a directory (no .json extension), append settings-{name}.json
+            let path_str = path.to_string_lossy();
+            if path_str.ends_with('/') || path_str.ends_with('\\') || !path_str.ends_with(".json") {
+                path.join(format!(
+                    "settings-{}.json",
+                    crate::config::sanitize_provider_name(&provider.name)
+                ))
+            } else {
+                path
+            }
+        }
+    };
+
+    if output_path.exists() {
+        let confirm = Confirm::new(&format!(
+            "File '{}' already exists. Overwrite?",
+            output_path.display()
+        ))
+        .with_default(false)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+        if !confirm {
+            println!("{}", info(texts::cancelled()));
+            return Ok(());
+        }
+    }
+
+    let settings_content = ProviderService::build_live_backup_snapshot(
+        &app_type,
+        &provider,
+        common_config_snippet.as_deref(),
+        apply_common_config,
+    )?;
+
+    crate::config::write_json_file(&output_path, &settings_content)?;
+
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Exported provider '{}' to {}",
+            id,
+            output_path.display()
+        ))
+    );
+
+    // If output is settings.local.json, Claude CLI will auto-load it
+    if output_path
+        .file_name()
+        .map(|n| n.to_string_lossy() == "settings.local.json")
+        .unwrap_or(false)
+    {
+        println!(
+            "{}",
+            info("Claude CLI will auto-load this config. Just run: claude")
+        );
+    } else {
+        println!(
+            "{}",
+            info(&format!(
+                "Use it with: claude --settings {}",
+                output_path.display()
+            ))
+        );
+    }
+
     Ok(())
 }
