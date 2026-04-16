@@ -2474,6 +2474,70 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_upstream_proxy_title() -> &'static str {
+        if is_chinese() {
+            "上游代理"
+        } else {
+            "Upstream Proxy"
+        }
+    }
+
+    pub fn tui_settings_upstream_proxy_url_label() -> &'static str {
+        if is_chinese() {
+            "代理 URL"
+        } else {
+            "Proxy URL"
+        }
+    }
+
+    pub fn tui_settings_upstream_proxy_url_prompt() -> &'static str {
+        if is_chinese() {
+            "输入上游代理 URL（例如 http://127.0.0.1:7890, socks5://127.0.0.1:1080）"
+        } else {
+            "Enter upstream proxy URL (e.g., http://127.0.0.1:7890, socks5://127.0.0.1:1080)"
+        }
+    }
+
+    pub fn tui_settings_upstream_proxy_clear_title() -> &'static str {
+        if is_chinese() {
+            "清除上游代理"
+        } else {
+            "Clear Upstream Proxy"
+        }
+    }
+
+    pub fn tui_confirm_upstream_proxy_clear() -> &'static str {
+        if is_chinese() {
+            "确定要清除上游代理设置吗？"
+        } else {
+            "Clear upstream proxy setting?"
+        }
+    }
+
+    pub fn tui_toast_upstream_proxy_url_invalid() -> &'static str {
+        if is_chinese() {
+            "URL 无效，请以 http://、https:// 或 socks5:// 开头"
+        } else {
+            "Invalid URL. Must start with http://, https://, or socks5://"
+        }
+    }
+
+    pub fn tui_settings_upstream_proxy_status_enabled() -> &'static str {
+        if is_chinese() {
+            "已启用"
+        } else {
+            "Enabled"
+        }
+    }
+
+    pub fn tui_settings_upstream_proxy_status_disabled() -> &'static str {
+        if is_chinese() {
+            "未启用"
+        } else {
+            "Disabled"
+        }
+    }
+
     pub fn tui_settings_proxy_listen_address_label() -> &'static str {
         if is_chinese() {
             "监听地址"
