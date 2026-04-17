@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::service::StreamCheckService;
-use super::types::{HealthStatus, StreamCheckConfig};
+use super::types::{AuthInfo, AuthStrategy, HealthStatus, StreamCheckConfig};
 
 #[test]
 fn stream_check_default_config_matches_upstream_mvp() {
@@ -80,4 +80,42 @@ fn stream_check_provider_test_config_overrides_global_defaults() {
     assert_eq!(merged.codex_model, "claude-override");
     assert_eq!(merged.gemini_model, "claude-override");
     assert_eq!(merged.test_prompt, "ping");
+}
+
+#[test]
+fn stream_check_detects_github_copilot_auth_strategy() {
+    let provider = crate::provider::Provider {
+        id: "copilot".to_string(),
+        name: "GitHub Copilot".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.githubcopilot.com"
+            }
+        }),
+        website_url: None,
+        category: None,
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: Some(crate::provider::ProviderMeta {
+            provider_type: Some("github_copilot".to_string()),
+            ..Default::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+
+    assert_eq!(
+        StreamCheckService::detect_claude_auth_strategy(&provider, "https://api.githubcopilot.com"),
+        AuthStrategy::GitHubCopilot
+    );
+}
+
+#[test]
+fn stream_check_auth_info_keeps_github_copilot_access_token() {
+    let mut auth = AuthInfo::new("placeholder".to_string(), AuthStrategy::GitHubCopilot);
+    auth.access_token = Some("session-token".to_string());
+
+    assert_eq!(auth.access_token.as_deref(), Some("session-token"));
 }

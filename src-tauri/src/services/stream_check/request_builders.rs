@@ -5,7 +5,6 @@ use serde_json::json;
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::proxy::providers::get_claude_api_format;
-
 use super::service::StreamCheckService;
 use super::types::{AuthInfo, AuthStrategy};
 
@@ -65,9 +64,16 @@ impl StreamCheckService {
             })
         };
 
+        let auth_token = match auth.strategy {
+            AuthStrategy::GitHubCopilot => auth.access_token.clone().ok_or_else(|| {
+                AppError::Message("GitHub Copilot session token is missing".to_string())
+            })?,
+            _ => auth.api_key.clone(),
+        };
+
         let mut request = client
             .post(&url)
-            .header("authorization", format!("Bearer {}", auth.api_key));
+            .header("authorization", format!("Bearer {auth_token}"));
 
         let response = if is_openai_compatible {
             request
@@ -85,6 +91,15 @@ impl StreamCheckService {
             if auth.strategy == AuthStrategy::Anthropic {
                 request = request.header("x-api-key", &auth.api_key);
             }
+
+            let request = if auth.strategy == AuthStrategy::GitHubCopilot {
+                request
+                    .header("Editor-Version", "vscode/1.85.0")
+                    .header("Editor-Plugin-Version", "copilot/1.150.0")
+                    .header("Copilot-Integration-Id", "vscode-chat")
+            } else {
+                request
+            };
 
             request
                 .header("anthropic-version", "2023-06-01")

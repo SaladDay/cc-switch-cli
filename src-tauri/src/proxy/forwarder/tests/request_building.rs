@@ -14,7 +14,7 @@ use crate::{
         forwarder::{ForwardOptions, RequestForwarder},
         types::{OptimizerConfig, RectifierConfig},
     },
-    services::CodexOAuthService,
+    services::{CodexOAuthService, GitHubCopilotOAuthService},
     test_support::lock_test_home_and_settings,
 };
 
@@ -338,6 +338,69 @@ async fn codex_oauth_prepare_request_errors_without_available_account() {
     );
 }
 
+#[tokio::test]
+async fn github_copilot_prepare_request_uses_managed_account_session_token() {
+    let _lock = lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
+    GitHubCopilotOAuthService::reset_for_tests();
+
+    let auth_path = temp.path().join("copilot_auth.json");
+    std::fs::write(
+        &auth_path,
+        serde_json::to_vec_pretty(&json!({
+            "version": 3,
+            "accounts": {
+                "acc-gh": {
+                    "github_token": "ghu-test-token",
+                    "authenticated_at": 123
+                }
+            },
+            "default_account_id": "acc-gh"
+        }))
+        .expect("serialize copilot auth store"),
+    )
+    .expect("write copilot auth store");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind copilot token endpoint");
+    let address = listener.local_addr().expect("copilot token endpoint addr");
+    let server = tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/copilot_internal/v2/token",
+            axum::routing::get(|| async {
+                axum::Json(json!({
+                    "token": "copilot-session-token",
+                    "expires_at": 4102444800i64
+                }))
+            }),
+        );
+        let _ = axum::serve(listener, app).await;
+    });
+    let token_url = format!("http://{address}/copilot_internal/v2/token");
+    let _token_guard = CopilotTokenUrlEnvGuard::set(Some(token_url.as_str()));
+
+    let request = build_request(&AppType::Claude, &github_copilot_provider(None), HeaderMap::new())
+        .await;
+
+    assert_eq!(
+        header_value(&request, "authorization"),
+        Some("Bearer copilot-session-token")
+    );
+    assert_eq!(header_value(&request, "editor-version"), Some("vscode/1.85.0"));
+    assert_eq!(
+        header_value(&request, "editor-plugin-version"),
+        Some("copilot/1.150.0")
+    );
+    assert_eq!(
+        header_value(&request, "copilot-integration-id"),
+        Some("vscode-chat")
+    );
+
+    server.abort();
+}
+
 async fn build_request(
     app_type: &AppType,
     provider: &Provider,
@@ -395,6 +458,59 @@ fn codex_oauth_provider(account_id: Option<&str>) -> Provider {
             auth_binding: Some(AuthBinding {
                 source: AuthBindingSource::ManagedAccount,
                 auth_provider: Some("codex_oauth".to_string()),
+                account_id: account_id.map(str::to_string),
+            }),
+            ..Default::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    }
+}
+
+struct CopilotTokenUrlEnvGuard {
+    original: Option<OsString>,
+}
+
+impl CopilotTokenUrlEnvGuard {
+    fn set(value: Option<&str>) -> Self {
+        let original = env::var_os("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL");
+        match value {
+            Some(value) => unsafe { env::set_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL", value) },
+            None => unsafe { env::remove_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL") },
+        }
+        Self { original }
+    }
+}
+
+impl Drop for CopilotTokenUrlEnvGuard {
+    fn drop(&mut self) {
+        match self.original.as_ref() {
+            Some(value) => unsafe { env::set_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL", value) },
+            None => unsafe { env::remove_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL") },
+        }
+    }
+}
+
+fn github_copilot_provider(account_id: Option<&str>) -> Provider {
+    Provider {
+        id: "github-copilot".to_string(),
+        name: "GitHub Copilot".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.githubcopilot.com"
+            }
+        }),
+        website_url: None,
+        category: None,
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: Some(ProviderMeta {
+            provider_type: Some("github_copilot".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("github_copilot".to_string()),
                 account_id: account_id.map(str::to_string),
             }),
             ..Default::default()

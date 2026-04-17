@@ -87,4 +87,5 @@ pub(crate) enum AuthStrategy {
     Bearer,
     Google,
     GoogleOAuth,
+    GitHubCopilot,
 }

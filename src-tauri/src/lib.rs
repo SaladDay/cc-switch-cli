@@ -54,11 +54,11 @@ pub use mcp::{
 pub use provider::{Provider, ProviderMeta};
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
 pub use services::{
-    AuthService, ConfigService, CredentialStatus, EndpointLatency, ExtraUsage, HealthStatus,
-    ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus, McpService,
-    PromptService, ProviderService, ProxyService, QuotaTier, SkillService, SpeedtestService,
-    StreamCheckConfig, StreamCheckResult, StreamCheckService, SubscriptionQuota, SyncDecision,
-    WebDavSyncService, WebDavSyncSummary,
+    AuthService, ConfigService, CredentialStatus, EndpointLatency, ExtraUsage,
+    GitHubCopilotOAuthService, HealthStatus, ManagedAuthAccount, ManagedAuthDeviceCodeResponse,
+    ManagedAuthStatus, McpService, PromptService, ProviderService, ProxyService, QuotaTier,
+    SkillService, SpeedtestService, StreamCheckConfig, StreamCheckResult, StreamCheckService,
+    SubscriptionQuota, SyncDecision, WebDavSyncService, WebDavSyncSummary,
 };
 pub use settings::{
     get_enable_claude_plugin_integration, get_skip_claude_onboarding, get_webdav_sync_settings,

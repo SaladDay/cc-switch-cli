@@ -109,7 +109,7 @@ impl StreamCheckService {
 
         let start = Instant::now();
         let base_url = Self::extract_base_url(provider, app_type)?;
-        let auth = Self::extract_auth(provider, app_type, &base_url)?;
+        let auth = Self::extract_auth(provider, app_type, &base_url).await?;
         let client = Self::build_client_for_provider(provider)?;
         let request_timeout = std::time::Duration::from_secs(config.timeout_secs);
         let model_to_test = Self::resolve_test_model(app_type, provider, config);

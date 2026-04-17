@@ -1,7 +1,7 @@
 use axum::http::HeaderMap;
 use serde_json::Value;
 
-use crate::services::CodexOAuthService;
+use crate::services::{CodexOAuthService, GitHubCopilotOAuthService};
 use crate::{app_config::AppType, provider::Provider};
 
 use super::super::{
@@ -161,6 +161,26 @@ async fn build_request(
                 Err(error) => {
                     return Err(ProxyError::AuthError(format!(
                         "Codex OAuth 认证失败: {error}"
+                    )));
+                }
+            }
+        } else if auth.strategy == AuthStrategy::GitHubCopilot {
+            let account_id = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.managed_account_id_for("github_copilot"));
+
+            match match &account_id {
+                Some(id) => GitHubCopilotOAuthService::get_valid_token_for_account(id).await,
+                None => GitHubCopilotOAuthService::get_valid_token().await,
+            } {
+                Ok(token) => {
+                    effective_auth.api_key = token;
+                    request = adapter.add_auth_headers(request, &effective_auth);
+                }
+                Err(error) => {
+                    return Err(ProxyError::AuthError(format!(
+                        "GitHub Copilot 认证失败: {error}"
                     )));
                 }
             }

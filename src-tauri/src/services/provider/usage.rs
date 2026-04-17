@@ -3,6 +3,7 @@ use regex::Regex;
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::provider::{Provider, UsageData, UsageResult, UsageScript};
+use crate::services::GitHubCopilotOAuthService;
 use crate::settings;
 use crate::store::AppState;
 use crate::usage_script;
@@ -193,6 +194,15 @@ impl ProviderService {
     fn extract_api_key(provider: &Provider, app_type: &AppType) -> Result<String, AppError> {
         match app_type {
             AppType::Claude => {
+                if provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.provider_type.as_deref())
+                    == Some("github_copilot")
+                {
+                    return Self::resolve_github_copilot_session_token(provider);
+                }
+
                 let env = provider
                     .settings_config
                     .get("env")
@@ -392,15 +402,93 @@ impl ProviderService {
 
         Ok((api_key, base_url))
     }
+
+    fn resolve_github_copilot_session_token(provider: &Provider) -> Result<String, AppError> {
+        let account_id = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.managed_account_id_for("github_copilot"));
+
+        let load_token = move || -> Result<String, AppError> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    AppError::localized(
+                        "provider.claude.github_copilot.runtime_failed",
+                        format!("创建 GitHub Copilot 认证运行时失败: {error}"),
+                        format!("Failed to create GitHub Copilot auth runtime: {error}"),
+                    )
+                })?;
+
+            let result = runtime.block_on(async move {
+                match account_id.as_deref() {
+                    Some(account_id) => {
+                        GitHubCopilotOAuthService::get_valid_token_for_account(account_id).await
+                    }
+                    None => GitHubCopilotOAuthService::get_valid_token().await,
+                }
+            });
+
+            result.map_err(|error| {
+                AppError::localized(
+                    "provider.claude.github_copilot.auth_failed",
+                    format!("GitHub Copilot 认证失败: {error}"),
+                    format!("GitHub Copilot auth failed: {error}"),
+                )
+            })
+        };
+
+        if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::spawn(load_token).join().map_err(|_| {
+                AppError::localized(
+                    "provider.claude.github_copilot.thread_failed",
+                    "GitHub Copilot 认证线程执行失败",
+                    "GitHub Copilot auth worker thread failed",
+                )
+            })?
+        } else {
+            load_token()
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::ProviderService;
     use crate::app_config::{AppType, MultiAppConfig};
-    use crate::provider::{Provider, ProviderMeta, UsageScript};
+    use crate::provider::{AuthBinding, AuthBindingSource, Provider, ProviderMeta, UsageScript};
+    use crate::services::GitHubCopilotOAuthService;
     use axum::{routing::get, Router};
     use serde_json::json;
+    use serial_test::serial;
+    use tempfile::TempDir;
+
+    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
+
+    struct CopilotTokenUrlEnvGuard {
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl CopilotTokenUrlEnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let original = std::env::var_os("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL");
+            match value {
+                Some(value) => std::env::set_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL", value),
+                None => std::env::remove_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL"),
+            }
+            Self { original }
+        }
+    }
+
+    impl Drop for CopilotTokenUrlEnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL", value),
+                None => std::env::remove_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL"),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn query_usage_reads_provider_from_db_when_config_snapshot_is_stale() {
@@ -468,5 +556,86 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn extract_credentials_uses_github_copilot_managed_account_token() {
+        let _lock = lock_test_home_and_settings();
+        let temp_home = TempDir::new().expect("create temp home");
+        set_test_home_override(Some(temp_home.path()));
+        GitHubCopilotOAuthService::reset_for_tests();
+        std::fs::create_dir_all(crate::config::get_app_config_dir())
+            .expect("create cc-switch config dir");
+
+        std::fs::write(
+            crate::config::get_app_config_dir().join("copilot_auth.json"),
+            serde_json::to_vec_pretty(&json!({
+                "version": 3,
+                "accounts": {
+                    "acc-gh": {
+                        "github_token": "ghu-test-token",
+                        "authenticated_at": 123
+                    }
+                },
+                "default_account_id": "acc-gh"
+            }))
+            .expect("serialize copilot auth store"),
+        )
+        .expect("write copilot auth store");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind copilot token endpoint");
+        let address = listener.local_addr().expect("listener local addr");
+        let server = tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/copilot_internal/v2/token",
+                axum::routing::get(|| async {
+                    axum::Json(json!({
+                        "token": "copilot-session-token",
+                        "expires_at": 4102444800i64
+                    }))
+                }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+        let token_url = format!("http://{address}/copilot_internal/v2/token");
+        let _token_guard = CopilotTokenUrlEnvGuard::set(Some(token_url.as_str()));
+
+        let provider = Provider {
+            id: "copilot".to_string(),
+            name: "GitHub Copilot".to_string(),
+            settings_config: json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.githubcopilot.com"
+                }
+            }),
+            website_url: None,
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: Some(ProviderMeta {
+                provider_type: Some("github_copilot".to_string()),
+                auth_binding: Some(AuthBinding {
+                    source: AuthBindingSource::ManagedAccount,
+                    auth_provider: Some("github_copilot".to_string()),
+                    account_id: None,
+                }),
+                ..Default::default()
+            }),
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+
+        let (api_key, base_url) =
+            ProviderService::extract_credentials(&provider, &AppType::Claude).unwrap();
+        assert_eq!(api_key, "copilot-session-token");
+        assert_eq!(base_url, "https://api.githubcopilot.com");
+
+        server.abort();
+        set_test_home_override(None);
     }
 }

@@ -329,9 +329,6 @@ impl ProviderAdapter for ClaudeAdapter {
         if self.is_codex_oauth(provider) {
             return true;
         }
-        if self.is_github_copilot(provider) {
-            return true;
-        }
 
         claude_api_format_needs_transform(self.get_api_format(provider))
     }
@@ -387,7 +384,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn provider_meta_provider_type_github_copilot_uses_upstream_runtime_behavior() {
+    fn provider_meta_provider_type_github_copilot_uses_upstream_anthropic_behavior() {
         let adapter = ClaudeAdapter::new();
         let provider: Provider = serde_json::from_value(json!({
             "id": "copilot-meta",
@@ -412,7 +409,7 @@ mod tests {
             .extract_auth(&provider)
             .expect("github copilot should resolve auth");
         assert_eq!(format!("{:?}", auth.strategy), "GitHubCopilot");
-        assert!(adapter.needs_transform(&provider));
+        assert!(!adapter.needs_transform(&provider));
     }
 
     #[test]

@@ -4,9 +4,11 @@ use std::ffi::OsString;
 use std::path::Path;
 use tempfile::TempDir;
 
+use crate::services::GitHubCopilotOAuthService;
 use crate::test_support::{
     lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
 };
+use crate::{provider::AuthBinding, provider::AuthBindingSource, ProviderMeta};
 
 struct EnvGuard {
     _lock: TestHomeSettingsLock,
@@ -43,6 +45,30 @@ impl Drop for EnvGuard {
         }
         set_test_home_override(self.old_home.as_deref().map(Path::new));
         crate::settings::reload_test_settings();
+    }
+}
+
+struct CopilotTokenUrlEnvGuard {
+    original: Option<OsString>,
+}
+
+impl CopilotTokenUrlEnvGuard {
+    fn set(value: Option<&str>) -> Self {
+        let original = std::env::var_os("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL");
+        match value {
+            Some(value) => std::env::set_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL", value),
+            None => std::env::remove_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL"),
+        }
+        Self { original }
+    }
+}
+
+impl Drop for CopilotTokenUrlEnvGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => std::env::set_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL", value),
+            None => std::env::remove_var("CC_SWITCH_GITHUB_COPILOT_TOKEN_URL"),
+        }
     }
 }
 
@@ -3382,6 +3408,84 @@ fn resolve_usage_script_credentials_does_not_require_provider_api_key_when_scrip
     .expect("should resolve base_url from provider without needing provider api key");
     assert_eq!(api_key, "override");
     assert_eq!(base_url, "https://claude.example");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn extract_credentials_uses_github_copilot_managed_account_token() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    GitHubCopilotOAuthService::reset_for_tests();
+    std::fs::create_dir_all(crate::config::get_app_config_dir()).expect("create cc-switch config dir");
+
+    std::fs::write(
+        crate::config::get_app_config_dir().join("copilot_auth.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 3,
+            "accounts": {
+                "acc-gh": {
+                    "github_token": "ghu-test-token",
+                    "authenticated_at": 123
+                }
+            },
+            "default_account_id": "acc-gh"
+        }))
+        .expect("serialize copilot auth store"),
+    )
+    .expect("write copilot auth store");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind copilot token endpoint");
+    let address = listener.local_addr().expect("listener local addr");
+    let server = tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/copilot_internal/v2/token",
+            axum::routing::get(|| async {
+                axum::Json(json!({
+                    "token": "copilot-session-token",
+                    "expires_at": 4102444800i64
+                }))
+            }),
+        );
+        let _ = axum::serve(listener, app).await;
+    });
+    let token_url = format!("http://{address}/copilot_internal/v2/token");
+    let _token_guard = CopilotTokenUrlEnvGuard::set(Some(token_url.as_str()));
+
+    let provider = Provider {
+        id: "copilot".to_string(),
+        name: "GitHub Copilot".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.githubcopilot.com"
+            }
+        }),
+        website_url: None,
+        category: None,
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: Some(ProviderMeta {
+            provider_type: Some("github_copilot".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("github_copilot".to_string()),
+                account_id: None,
+            }),
+            ..Default::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+
+    let (api_key, base_url) =
+        ProviderService::extract_credentials(&provider, &AppType::Claude).unwrap();
+    assert_eq!(api_key, "copilot-session-token");
+    assert_eq!(base_url, "https://api.githubcopilot.com");
+
+    server.abort();
 }
 
 #[test]

@@ -5,6 +5,7 @@ use crate::{
     app_config::AppType,
     error::AppError,
     provider::{Provider, ProviderProxyConfig},
+    services::GitHubCopilotOAuthService,
 };
 
 use super::service::StreamCheckService;
@@ -178,7 +179,7 @@ impl StreamCheckService {
         }
     }
 
-    pub(crate) fn extract_auth(
+    pub(crate) async fn extract_auth(
         provider: &Provider,
         app_type: &AppType,
         base_url: &str,
@@ -186,6 +187,13 @@ impl StreamCheckService {
         match app_type {
             AppType::Claude => {
                 let strategy = Self::detect_claude_auth_strategy(provider, base_url);
+                if strategy == AuthStrategy::GitHubCopilot {
+                    let access_token = Self::resolve_github_copilot_session_token(provider).await?;
+                    let mut auth = AuthInfo::new("copilot_placeholder".to_string(), strategy);
+                    auth.access_token = Some(access_token);
+                    return Ok(auth);
+                }
+
                 let api_key = Self::extract_claude_key(provider).ok_or_else(|| {
                     AppError::localized(
                         "provider.claude.api_key.missing",
@@ -234,6 +242,16 @@ impl StreamCheckService {
     }
 
     pub(crate) fn detect_claude_auth_strategy(provider: &Provider, base_url: &str) -> AuthStrategy {
+        if provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.provider_type.as_deref())
+            == Some("github_copilot")
+            || base_url.contains("githubcopilot.com")
+        {
+            return AuthStrategy::GitHubCopilot;
+        }
+
         if base_url.contains("openrouter.ai") {
             return AuthStrategy::Bearer;
         }
@@ -254,6 +272,26 @@ impl StreamCheckService {
             Some("bearer_only") => AuthStrategy::ClaudeAuth,
             _ => AuthStrategy::Anthropic,
         }
+    }
+
+    async fn resolve_github_copilot_session_token(provider: &Provider) -> Result<String, AppError> {
+        let account_id = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.managed_account_id_for("github_copilot"));
+
+        let result = match account_id.as_deref() {
+            Some(account_id) => GitHubCopilotOAuthService::get_valid_token_for_account(account_id).await,
+            None => GitHubCopilotOAuthService::get_valid_token().await,
+        };
+
+        result.map_err(|error| {
+            AppError::localized(
+                "provider.claude.github_copilot.auth_failed",
+                format!("GitHub Copilot 认证失败: {error}"),
+                format!("GitHub Copilot auth failed: {error}"),
+            )
+        })
     }
 
     pub(crate) fn extract_claude_key(provider: &Provider) -> Option<String> {
