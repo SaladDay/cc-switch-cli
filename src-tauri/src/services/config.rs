@@ -341,9 +341,15 @@ impl ConfigService {
             fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
-        write_json_file(&settings_path, &provider.settings_config)?;
+        let mut live_to_write = provider.settings_config.clone();
+        ProviderService::normalize_claude_models_in_value(&mut live_to_write);
+        ProviderService::preserve_claude_shared_live_settings(&mut live_to_write)?;
 
-        let live_after = read_json_file::<serde_json::Value>(&settings_path)?;
+        write_json_file(&settings_path, &live_to_write)?;
+
+        let mut live_after = read_json_file::<serde_json::Value>(&settings_path)?;
+        ProviderService::normalize_claude_models_in_value(&mut live_after);
+        ProviderService::strip_preserved_claude_shared_live_settings(&mut live_after);
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
                 target.settings_config = live_after;

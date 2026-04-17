@@ -356,6 +356,7 @@ impl ProviderService {
                         strip_common_values(&mut live_after, &common);
                     }
                 }
+                Self::strip_preserved_claude_shared_live_settings(&mut live_after);
                 {
                     let mut guard = state.config.write().map_err(AppError::from)?;
                     if let Some(manager) = guard.get_manager_mut(app_type) {
