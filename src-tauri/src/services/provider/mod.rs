@@ -1498,6 +1498,12 @@ impl ProviderService {
             }
         }
 
+        if let Err(e) =
+            crate::services::prompt::PromptService::sync_all_active_to_live_best_effort(state)
+        {
+            log::warn!("sync_current_to_live: Prompt 同步失败: {e}");
+        }
+
         if let Err(e) = McpService::sync_all_enabled(state) {
             log::warn!("sync_current_to_live: MCP 同步失败: {e}");
         }

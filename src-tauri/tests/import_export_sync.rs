@@ -1101,6 +1101,24 @@ fn import_config_from_path_overwrites_state_and_creates_backup() {
         Some("p-new"),
         "db should be replaced by imported SQL"
     );
+
+    let cfg = app_state
+        .config
+        .read()
+        .expect("read refreshed config snapshot");
+    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
+    assert_eq!(
+        manager.current, "p-new",
+        "import should refresh the in-memory config snapshot from the imported database"
+    );
+    assert!(
+        manager.providers.contains_key("p-new"),
+        "import should hydrate provider snapshots from the imported database"
+    );
+    assert!(
+        !manager.providers.contains_key("p-old"),
+        "import should drop providers that no longer exist in the imported database"
+    );
 }
 
 #[test]

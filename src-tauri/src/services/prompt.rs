@@ -240,4 +240,61 @@ impl PromptService {
             std::fs::read_to_string(&file_path).map_err(|e| AppError::io(&file_path, e))?;
         Ok(Some(content))
     }
+
+    pub fn sync_all_active_to_live_best_effort(state: &AppState) -> Result<(), AppError> {
+        let active_prompts = {
+            let cfg = state.config.read()?;
+            let mut result = Vec::new();
+
+            for app in AppType::all() {
+                let prompts = match app {
+                    AppType::Claude => &cfg.prompts.claude.prompts,
+                    AppType::Codex => &cfg.prompts.codex.prompts,
+                    AppType::Gemini => &cfg.prompts.gemini.prompts,
+                    AppType::OpenCode => &cfg.prompts.opencode.prompts,
+                    AppType::OpenClaw => &cfg.prompts.openclaw.prompts,
+                };
+
+                if let Some(prompt) = select_active_prompt(prompts) {
+                    result.push((app, prompt.content));
+                }
+            }
+
+            result
+        };
+
+        for (app, content) in active_prompts {
+            if !crate::sync_policy::should_sync_live(&app) {
+                continue;
+            }
+
+            let target_path = match prompt_file_path(&app) {
+                Ok(path) => path,
+                Err(err) => {
+                    log::warn!("同步 {app} 提示词 live 文件时解析路径失败: {err}");
+                    continue;
+                }
+            };
+
+            if let Err(err) = write_text_file(&target_path, &content) {
+                log::warn!("同步 {app} 提示词到 live 文件失败: {err}");
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn select_active_prompt(prompts: &HashMap<String, Prompt>) -> Option<Prompt> {
+    prompts
+        .values()
+        .filter(|prompt| prompt.enabled)
+        .max_by_key(|prompt| {
+            (
+                prompt.updated_at.unwrap_or(prompt.created_at.unwrap_or(0)),
+                prompt.created_at.unwrap_or(0),
+                prompt.id.clone(),
+            )
+        })
+        .cloned()
 }

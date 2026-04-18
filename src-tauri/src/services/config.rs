@@ -241,6 +241,7 @@ impl ConfigService {
 
         // Import SQL into DB (also performs an internal binary snapshot backup).
         state.db.import_sql(file_path)?;
+        state.refresh_config_from_db()?;
 
         Ok(backup_id)
     }

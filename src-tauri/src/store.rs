@@ -114,6 +114,16 @@ impl AppState {
         persist_multi_app_config_to_db_preserving_current_providers(&self.db, &config, app_types)
     }
 
+    /// 用数据库中的最新快照重建内存配置，供导入/恢复后的 live 同步流程复用。
+    pub fn refresh_config_from_db(&self) -> Result<(), AppError> {
+        let mut config = export_db_to_multi_app_config(&self.db)?;
+        migrate_legacy_codex_configs(&self.db, &mut config);
+
+        let mut guard = self.config.write().map_err(AppError::from)?;
+        *guard = config;
+        Ok(())
+    }
+
     fn from_parts(db: Arc<Database>, config: MultiAppConfig) -> Result<Self, AppError> {
         let proxy_service = ProxyService::new(db.clone());
 

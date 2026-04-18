@@ -26,6 +26,24 @@ fn read_openclaw_live_config_json5(path: &std::path::Path) -> serde_json::Value 
     json5::from_str(&source).expect("parse openclaw live config as json5")
 }
 
+fn config_with_prompt_entries(entries: &[(&AppType, &str, &str, bool)]) -> MultiAppConfig {
+    let mut value =
+        serde_json::to_value(MultiAppConfig::default()).expect("serialize default config");
+
+    for (app, id, content, enabled) in entries {
+        value["prompts"][app.as_str()]["prompts"][*id] = json!({
+            "id": *id,
+            "name": format!("Prompt {id}"),
+            "content": *content,
+            "enabled": *enabled,
+            "createdAt": 1,
+            "updatedAt": 2
+        });
+    }
+
+    serde_json::from_value(value).expect("deserialize prompt config")
+}
+
 fn codex_provider(
     id: &str,
     name: &str,
@@ -4232,5 +4250,97 @@ fn provider_service_delete_non_current_provider_succeeds_when_only_config_curren
     assert!(
         !manager.providers.contains_key("delete"),
         "deleted provider should be removed from config snapshot"
+    );
+}
+
+#[test]
+fn provider_service_sync_current_to_live_writes_active_codex_prompt_file() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    std::fs::create_dir_all(home.join(".codex")).expect("create codex dir");
+
+    let config = config_with_prompt_entries(&[(
+        &AppType::Codex,
+        "codex-active",
+        "# codex prompt\nUse the repo conventions.",
+        true,
+    )]);
+    let state = state_from_config(config);
+
+    ProviderService::sync_current_to_live(&state).expect("sync current to live");
+
+    let prompt_path = home.join(".codex").join("AGENTS.md");
+    assert_eq!(
+        std::fs::read_to_string(&prompt_path).expect("read codex prompt"),
+        "# codex prompt\nUse the repo conventions."
+    );
+}
+
+#[test]
+fn provider_service_sync_current_to_live_writes_active_claude_and_gemini_prompt_files() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    std::fs::create_dir_all(home.join(".claude")).expect("create claude dir");
+    std::fs::create_dir_all(home.join(".gemini")).expect("create gemini dir");
+
+    let config = config_with_prompt_entries(&[
+        (&AppType::Claude, "claude-active", "# claude prompt", true),
+        (&AppType::Gemini, "gemini-active", "# gemini prompt", true),
+    ]);
+    let state = state_from_config(config);
+
+    ProviderService::sync_current_to_live(&state).expect("sync current to live");
+
+    assert_eq!(
+        std::fs::read_to_string(home.join(".claude").join("CLAUDE.md"))
+            .expect("read claude prompt"),
+        "# claude prompt"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join(".gemini").join("GEMINI.md"))
+            .expect("read gemini prompt"),
+        "# gemini prompt"
+    );
+}
+
+#[test]
+fn provider_service_sync_current_to_live_skips_prompt_file_for_uninitialized_apps() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let config =
+        config_with_prompt_entries(&[(&AppType::Codex, "codex-active", "# codex prompt", true)]);
+    let state = state_from_config(config);
+
+    ProviderService::sync_current_to_live(&state).expect("sync current to live");
+
+    assert!(
+        !home.join(".codex").join("AGENTS.md").exists(),
+        "prompt sync should skip uninitialized Codex home"
+    );
+}
+
+#[test]
+fn provider_service_sync_current_to_live_keeps_existing_prompt_file_without_active_prompt() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let codex_dir = home.join(".codex");
+    std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+    let prompt_path = codex_dir.join("AGENTS.md");
+    std::fs::write(&prompt_path, "unmanaged prompt").expect("seed unmanaged prompt");
+
+    let config =
+        config_with_prompt_entries(&[(&AppType::Codex, "codex-inactive", "# codex prompt", false)]);
+    let state = state_from_config(config);
+
+    ProviderService::sync_current_to_live(&state).expect("sync current to live");
+
+    assert_eq!(
+        std::fs::read_to_string(&prompt_path).expect("read prompt after sync"),
+        "unmanaged prompt"
     );
 }
