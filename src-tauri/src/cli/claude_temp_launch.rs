@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::AppError;
 use crate::provider::Provider;
+use crate::services::provider::ProviderService;
 use serde_json::json;
 
 #[derive(Debug, Clone)]
@@ -36,18 +37,18 @@ where
     Resolve: FnOnce() -> Result<PathBuf, AppError>,
 {
     let executable = resolve_claude_binary()?;
-    let env = provider
-        .settings_config
-        .get("env")
-        .and_then(|value| value.as_object())
-        .ok_or_else(|| {
-            AppError::localized(
-                "claude.temp_launch_missing_env",
-                format!("供应商 {} 缺少有效的 env 配置。", provider.id),
-                format!("Provider {} is missing a valid env object.", provider.id),
-            )
-        })?;
-    let settings_path = write_temp_settings_file(temp_dir, provider, &json!({ "env": env }))?;
+
+    if provider.settings_config.get("env").and_then(|v| v.as_object()).is_none() {
+        return Err(AppError::localized(
+            "claude.temp_launch_missing_env",
+            format!("供应商 {} 缺少有效的 env 配置。", provider.id),
+            format!("Provider {} is missing a valid env object.", provider.id),
+        ));
+    }
+
+    let mut settings = provider.settings_config.clone();
+    let _ = ProviderService::normalize_claude_models_in_value(&mut settings);
+    let settings_path = write_temp_settings_file(temp_dir, provider, &settings)?;
 
     Ok(PreparedClaudeLaunch {
         executable,
@@ -471,5 +472,105 @@ mod tests {
         .expect_err("missing binary should fail");
 
         assert!(err.to_string().contains("claude"));
+    }
+
+    #[test]
+    fn prepare_launch_writes_model_overrides_to_temp_file() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let provider = Provider::with_id(
+            "glm".to_string(),
+            "GLM".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-glm",
+                    "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/paas/v4",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.1",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.1"
+                }
+            }),
+            None,
+        );
+
+        let prepared = prepare_launch_with(&provider, temp_dir.path(), || {
+            Ok(PathBuf::from("/usr/bin/claude"))
+        })
+        .expect("prepare launch");
+
+        let written: Value = serde_json::from_str(
+            &std::fs::read_to_string(&prepared.settings_path).expect("read temp settings"),
+        )
+        .expect("parse temp settings");
+
+        let env = written.get("env").expect("env exists");
+        assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "glm-5.1");
+        assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "glm-5.1");
+    }
+
+    #[test]
+    fn prepare_launch_migrates_legacy_small_fast_model_key() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let provider = Provider::with_id(
+            "legacy".to_string(),
+            "Legacy".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-legacy",
+                    "ANTHROPIC_BASE_URL": "https://api.example.com",
+                    "ANTHROPIC_SMALL_FAST_MODEL": "my-fast-model"
+                }
+            }),
+            None,
+        );
+
+        let prepared = prepare_launch_with(&provider, temp_dir.path(), || {
+            Ok(PathBuf::from("/usr/bin/claude"))
+        })
+        .expect("prepare launch");
+
+        let written: Value = serde_json::from_str(
+            &std::fs::read_to_string(&prepared.settings_path).expect("read temp settings"),
+        )
+        .expect("parse temp settings");
+
+        let env = written.get("env").expect("env exists");
+        assert!(
+            env.get("ANTHROPIC_SMALL_FAST_MODEL").is_none(),
+            "legacy key should be removed"
+        );
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "my-fast-model");
+    }
+
+    #[test]
+    fn prepare_launch_writes_full_settings_config_not_only_env() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let provider = Provider::with_id(
+            "full".to_string(),
+            "Full".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-full"
+                },
+                "permissions": {
+                    "allow": ["Bash(git*)"]
+                }
+            }),
+            None,
+        );
+
+        let prepared = prepare_launch_with(&provider, temp_dir.path(), || {
+            Ok(PathBuf::from("/usr/bin/claude"))
+        })
+        .expect("prepare launch");
+
+        let written: Value = serde_json::from_str(
+            &std::fs::read_to_string(&prepared.settings_path).expect("read temp settings"),
+        )
+        .expect("parse temp settings");
+
+        assert_eq!(written["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-full");
+        assert_eq!(
+            written["permissions"]["allow"],
+            json!(["Bash(git*)"])
+        );
     }
 }
