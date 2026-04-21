@@ -21,12 +21,7 @@ impl ProviderAddFormState {
         };
 
         let codex_defaults = match app_type {
-            AppType::Codex => (
-                "https://api.openai.com/v1",
-                "gpt-5.2-codex",
-                CodexWireApi::Responses,
-                true,
-            ),
+            AppType::Codex => ("", "gpt-5.4", CodexWireApi::Responses, true),
             _ => ("", "", CodexWireApi::Responses, true),
         };
 
@@ -126,10 +121,6 @@ impl ProviderAddFormState {
 
     pub fn is_id_editable(&self) -> bool {
         !self.mode.is_edit()
-    }
-
-    pub fn has_required_fields(&self) -> bool {
-        !self.name.is_blank()
     }
 
     pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {

@@ -261,7 +261,7 @@ fn build_codex_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
         .model
         .as_deref()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or("gpt-5.2-codex");
+        .unwrap_or("gpt-5.4");
 
     let endpoint = get_primary_endpoint(request)
         .trim()

@@ -11,8 +11,6 @@ use inquire::{Confirm, Select, Text};
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CODEX_OFFICIAL_BASE_URL: &str = "https://api.openai.com/v1";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderAddMode {
     Official,
@@ -41,7 +39,7 @@ mod tests {
                 "access_token": "oauth-token",
                 "refresh_token": "refresh-token"
             },
-            "config": "model_provider = \"openai\"\nmodel = \"gpt-5.2-codex\"\nmodel_reasoning_effort = \"high\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+            "config": "model_provider = \"openai\"\nmodel = \"gpt-5.4\"\nmodel_reasoning_effort = \"high\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
         })))
         .expect("build official settings");
 
@@ -56,6 +54,24 @@ mod tests {
             cfg.get("config").and_then(Value::as_str),
             Some("model_reasoning_effort = \"high\"")
         );
+    }
+
+    #[test]
+    fn build_codex_settings_config_defaults_model_to_gpt_5_4() {
+        let cfg = build_codex_settings_config(
+            Some("sk-test"),
+            "https://api.example.com/v1",
+            "",
+            "responses",
+            "custom",
+        );
+
+        let config = cfg
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config should be present");
+        assert!(config.contains("model = \"gpt-5.4\""));
+        assert!(config.contains("base_url = \"https://api.example.com/v1\""));
     }
 }
 
@@ -86,15 +102,11 @@ fn build_codex_settings_config(
     provider_key: &str,
 ) -> Value {
     let model = if model.trim().is_empty() {
-        "gpt-5.2-codex"
+        "gpt-5.4"
     } else {
         model.trim()
     };
-    let base_url = if base_url.trim().is_empty() {
-        CODEX_OFFICIAL_BASE_URL
-    } else {
-        base_url.trim()
-    };
+    let base_url = base_url.trim();
     let provider_key = clean_codex_provider_key(provider_key);
 
     // Align with upstream: use full config.toml format with [model_providers.<key>]
@@ -555,12 +567,12 @@ fn prompt_codex_config(current: Option<&Value>) -> Result<Value, AppError> {
     let model = if let Some(current) = current_model.as_deref() {
         Text::new(&format!("{}:", texts::model_label()))
             .with_initial_value(current)
-            .with_help_message("Model name (e.g., gpt-5.2-codex, o3)")
+            .with_help_message("Model name (e.g., gpt-5.4, o3)")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     } else {
         Text::new(&format!("{}:", texts::model_label()))
-            .with_placeholder("gpt-5.2-codex")
+            .with_placeholder("gpt-5.4")
             .with_help_message("Model name")
             .prompt()
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?

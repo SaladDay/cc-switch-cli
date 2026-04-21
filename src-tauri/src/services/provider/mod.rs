@@ -68,6 +68,46 @@ struct PostCommitAction {
 }
 
 impl ProviderService {
+    fn is_codex_official_provider(provider: &Provider) -> bool {
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_official)
+            .unwrap_or(false)
+            || provider
+                .category
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("official"))
+    }
+
+    fn codex_config_has_base_url(config_text: &str) -> bool {
+        let Ok(table) = toml::from_str::<toml::Table>(config_text.trim()) else {
+            return false;
+        };
+
+        if table
+            .get("base_url")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return true;
+        }
+
+        let Some(provider_key) = table.get("model_provider").and_then(|value| value.as_str())
+        else {
+            return false;
+        };
+
+        table
+            .get("model_providers")
+            .and_then(|value| value.as_table())
+            .and_then(|providers| providers.get(provider_key))
+            .and_then(|value| value.as_table())
+            .and_then(|provider| provider.get("base_url"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty())
+    }
+
     pub fn sync_openclaw_to_live(state: &AppState) -> Result<(), AppError> {
         let (providers, snippet) = {
             let guard = state.config.read().map_err(AppError::from)?;
@@ -1994,6 +2034,20 @@ impl ProviderService {
                     }
                     if let Some(cfg_text) = config_value.as_str() {
                         crate::codex_config::validate_config_toml(cfg_text)?;
+                    }
+                }
+
+                if !Self::is_codex_official_provider(provider) {
+                    let config_text = settings
+                        .get("config")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if !Self::codex_config_has_base_url(config_text) {
+                        return Err(AppError::localized(
+                            "provider.codex.base_url.missing",
+                            format!("供应商 {} 缺少有效的 Codex Base URL", provider.id),
+                            format!("Provider {} is missing a valid Codex base_url", provider.id),
+                        ));
                     }
                 }
             }

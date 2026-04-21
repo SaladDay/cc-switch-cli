@@ -254,6 +254,67 @@ fn validate_provider_settings_rejects_missing_auth_for_codex() {
 }
 
 #[test]
+fn validate_provider_settings_rejects_missing_base_url_for_non_official_codex() {
+    let provider = Provider::with_id(
+        "codex".into(),
+        "Codex".into(),
+        json!({
+            "auth": {},
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.4\"\n\n[model_providers.custom]\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+        }),
+        None,
+    );
+    let err = ProviderService::validate_provider_settings(&AppType::Codex, &provider)
+        .expect_err("missing base_url should be rejected");
+    assert!(
+        err.to_string().contains("base_url") || err.to_string().contains("Base URL"),
+        "expected base_url error, got {err:?}"
+    );
+}
+
+#[test]
+fn validate_provider_settings_allows_blank_config_for_official_codex() {
+    let mut provider = Provider::with_id(
+        "openai-official".into(),
+        "OpenAI Official".into(),
+        json!({
+            "auth": {},
+            "config": ""
+        }),
+        Some("https://chatgpt.com/codex".to_string()),
+    );
+    provider.category = Some("official".to_string());
+    provider.meta = Some(crate::provider::ProviderMeta {
+        codex_official: Some(true),
+        ..Default::default()
+    });
+
+    ProviderService::validate_provider_settings(&AppType::Codex, &provider)
+        .expect("official Codex provider should not require a base_url");
+}
+
+#[test]
+fn provider_service_add_rejects_non_official_codex_without_base_url() {
+    let state = state_from_config(MultiAppConfig::default());
+    let provider = Provider::with_id(
+        "codex".into(),
+        "Codex".into(),
+        json!({
+            "auth": {},
+            "config": "model_provider = \"custom\"\nmodel = \"gpt-5.4\"\n\n[model_providers.custom]\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+        }),
+        None,
+    );
+
+    let err = ProviderService::add(&state, AppType::Codex, provider)
+        .expect_err("service add should reject missing Codex base_url");
+    assert!(
+        err.to_string().contains("base_url") || err.to_string().contains("Base URL"),
+        "expected base_url error, got {err:?}"
+    );
+}
+
+#[test]
 fn set_common_config_snippet_rejects_non_object_opencode_json() {
     let state = state_from_config(MultiAppConfig::default());
 

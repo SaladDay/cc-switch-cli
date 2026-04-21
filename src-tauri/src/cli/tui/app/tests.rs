@@ -7959,6 +7959,35 @@ mod tests {
     }
 
     #[test]
+    fn provider_add_form_codex_requires_base_url_before_submit() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+
+        if let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = super::super::form::FormFocus::Fields;
+            form.name.set("Codex Provider");
+            form.codex_base_url.set("");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        assert!(matches!(submit, Action::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Warning,
+                message,
+                ..
+            }) if message == texts::base_url_empty_error()
+        ));
+    }
+
+    #[test]
     fn provider_add_form_ctrl_s_rejects_name_that_cannot_generate_id() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;

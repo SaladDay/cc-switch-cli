@@ -163,7 +163,7 @@ fn provider_add_form_dds_template_codex_sets_base_url_and_partner_meta() {
         .as_str()
         .expect("settingsConfig.config should be string");
     assert!(cfg.contains("base_url = \"https://www.ddshub.cc\""));
-    assert!(cfg.contains("model = \"gpt-5.2-codex\""));
+    assert!(cfg.contains("model = \"gpt-5.4\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     let meta = provider["meta"]
@@ -375,7 +375,7 @@ fn provider_add_form_aicodemirror_template_codex_preserves_third_party_auth_beha
         .as_str()
         .expect("settingsConfig.config should be string");
     assert!(cfg.contains("base_url = \"https://api.aicodemirror.com/api/codex/backend-api/codex\""));
-    assert!(cfg.contains("model = \"gpt-5.2-codex\""));
+    assert!(cfg.contains("model = \"gpt-5.4\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     assert_eq!(provider["meta"]["isPartner"], true);
@@ -390,6 +390,14 @@ fn provider_add_form_aicodemirror_template_codex_preserves_third_party_auth_beha
         !fields.contains(&ProviderAddField::CodexEnvKey),
         "Codex env key should stay hidden for sponsor presets"
     );
+}
+
+#[test]
+fn provider_add_form_codex_custom_defaults_to_blank_base_url_and_gpt_5_4() {
+    let form = ProviderAddFormState::new(AppType::Codex);
+
+    assert_eq!(form.codex_base_url.value, "");
+    assert_eq!(form.codex_model.value, "gpt-5.4");
 }
 
 #[test]
@@ -648,7 +656,7 @@ fn provider_add_form_codex_builds_full_toml_config() {
     form.id.set("c1");
     form.name.set("Codex Provider");
     form.codex_base_url.set("https://api.openai.com/v1");
-    form.codex_model.set("gpt-5.2-codex");
+    form.codex_model.set("gpt-5.4");
     form.codex_api_key.set("sk-test");
 
     let provider = form.to_provider_json_value();
@@ -662,7 +670,7 @@ fn provider_add_form_codex_builds_full_toml_config() {
     assert!(cfg.contains("model_provider ="));
     assert!(cfg.contains("[model_providers."));
     assert!(cfg.contains("base_url = \"https://api.openai.com/v1\""));
-    assert!(cfg.contains("model = \"gpt-5.2-codex\""));
+    assert!(cfg.contains("model = \"gpt-5.4\""));
     assert!(cfg.contains("wire_api = \"responses\""));
     assert!(cfg.contains("requires_openai_auth = true"));
     assert!(cfg.contains("disable_response_storage = true"));

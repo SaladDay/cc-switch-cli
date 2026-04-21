@@ -31,7 +31,7 @@ pub fn migrate_legacy_codex_config(cfg_text: &str, provider: &Provider) -> Optio
     let model = table
         .get("model")
         .and_then(|v| v.as_str())
-        .unwrap_or("gpt-5.2-codex")
+        .unwrap_or("gpt-5.4")
         .trim();
     let wire_api = table
         .get("wire_api")

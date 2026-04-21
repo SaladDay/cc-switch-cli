@@ -51,25 +51,35 @@ impl App {
     }
 
     pub(super) fn build_provider_form_save_action(&mut self, data: &UiData) -> Action {
-        let (mode_is_edit, missing_required_fields) = {
+        let validation_message = {
             let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                 return Action::None;
             };
 
-            let can_submit = provider.has_required_fields()
-                && provider.ensure_generated_id(&collect_existing_provider_ids(data));
-            (provider.mode.is_edit(), !can_submit)
+            if provider.name.is_blank() {
+                Some(if provider.mode.is_edit() {
+                    texts::tui_toast_provider_missing_name()
+                } else {
+                    texts::tui_toast_provider_add_missing_fields()
+                })
+            } else if matches!(provider.app_type, crate::app_config::AppType::Codex)
+                && !provider.is_codex_official_provider()
+                && provider.codex_base_url.is_blank()
+            {
+                Some(texts::base_url_empty_error())
+            } else if !provider.ensure_generated_id(&collect_existing_provider_ids(data)) {
+                Some(if provider.mode.is_edit() {
+                    texts::tui_toast_provider_missing_name()
+                } else {
+                    texts::tui_toast_provider_add_missing_fields()
+                })
+            } else {
+                None
+            }
         };
 
-        if missing_required_fields {
-            if mode_is_edit {
-                self.push_toast(texts::tui_toast_provider_missing_name(), ToastKind::Warning);
-            } else {
-                self.push_toast(
-                    texts::tui_toast_provider_add_missing_fields(),
-                    ToastKind::Warning,
-                );
-            }
+        if let Some(message) = validation_message {
+            self.push_toast(message, ToastKind::Warning);
             return Action::None;
         }
 

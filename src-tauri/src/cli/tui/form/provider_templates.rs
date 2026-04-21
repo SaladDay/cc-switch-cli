@@ -338,7 +338,7 @@ impl ProviderAddFormState {
             }
             AppType::Codex => {
                 self.codex_base_url.set(preset.codex_base_url);
-                self.codex_model.set("gpt-5.2-codex");
+                self.codex_model.set("gpt-5.4");
                 self.codex_wire_api = CodexWireApi::Responses;
                 self.codex_requires_openai_auth = true;
             }

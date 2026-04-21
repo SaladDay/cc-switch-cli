@@ -19,6 +19,50 @@ use super::super::form::FormState;
 use super::helpers::{refresh_openclaw_workspace_data, run_external_editor_for_current_editor};
 use super::RuntimeActionContext;
 
+fn is_codex_official_provider(provider: &Provider) -> bool {
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.codex_official)
+        .unwrap_or(false)
+        || provider.category.as_deref() == Some("official")
+        || provider.website_url.as_deref() == Some("https://chatgpt.com/codex")
+        || provider.name.trim().eq_ignore_ascii_case("OpenAI Official")
+}
+
+fn validate_provider_submit(
+    app_type: &AppType,
+    provider: &Provider,
+    is_edit: bool,
+) -> Option<&'static str> {
+    if provider.name.trim().is_empty() {
+        return Some(if is_edit {
+            texts::tui_toast_provider_missing_name()
+        } else {
+            texts::tui_toast_provider_add_missing_fields()
+        });
+    }
+
+    if matches!(app_type, AppType::Codex) && !is_codex_official_provider(provider) {
+        let parsed = crate::cli::tui::form::parse_codex_config_snippet(
+            provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        );
+        if parsed
+            .base_url
+            .as_deref()
+            .is_none_or(|base_url| base_url.trim().is_empty())
+        {
+            return Some(texts::base_url_empty_error());
+        }
+    }
+
+    None
+}
+
 pub(super) fn open_external(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
     ctx.terminal.with_terminal_restored(|| {
         run_external_editor_for_current_editor(ctx.app, crate::cli::editor::open_external_editor)
@@ -478,11 +522,8 @@ fn submit_provider_add(
         }
     };
 
-    if provider.name.trim().is_empty() {
-        ctx.app.push_toast(
-            texts::tui_toast_provider_add_missing_fields(),
-            ToastKind::Warning,
-        );
+    if let Some(message) = validate_provider_submit(&ctx.app.app_type, &provider, false) {
+        ctx.app.push_toast(message, ToastKind::Warning);
         return Ok(());
     }
 
@@ -544,9 +585,8 @@ fn submit_provider_edit(
     };
     provider.id = id.clone();
 
-    if provider.name.trim().is_empty() {
-        ctx.app
-            .push_toast(texts::tui_toast_provider_missing_name(), ToastKind::Warning);
+    if let Some(message) = validate_provider_submit(&ctx.app.app_type, &provider, true) {
+        ctx.app.push_toast(message, ToastKind::Warning);
         return Ok(());
     }
 
@@ -948,6 +988,59 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
+    fn submit_provider_add_rejects_blank_codex_base_url() {
+        let mut fixture = runtime_ctx(AppType::Codex);
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+        };
+
+        submit_provider_add(
+            &mut ctx,
+            r#"{
+  "id": "",
+  "name": "Codex Provider",
+  "settingsConfig": {
+    "auth": {
+      "OPENAI_API_KEY": "sk-test"
+    },
+    "config": "model_provider = \"custom\"\nmodel = \"gpt-5.4\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+  }
+}"#
+            .to_string(),
+        )
+        .expect("submit should return without crashing");
+
+        let refreshed = UiData::load(&AppType::Codex).expect("reload ui data");
+        assert!(
+            refreshed.providers.rows.is_empty(),
+            "runtime submit should reject Codex providers without a base_url"
+        );
+        assert!(matches!(
+            ctx.app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Warning,
+                message,
+                ..
+            }) if message == texts::base_url_empty_error()
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
     fn submit_provider_add_preserves_custom_openclaw_name_after_reload() {
         let home_dir = tempdir().expect("create temp home");
         let openclaw_dir = tempdir().expect("create temp openclaw dir");
@@ -1100,6 +1193,90 @@ mod tests {
                     .map(str::to_string)),
             Some("https://live.new.example/v1".to_string())
         );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_provider_edit_rejects_blank_codex_base_url() {
+        let mut fixture = runtime_ctx(AppType::Codex);
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::Codex)
+                .expect("codex manager");
+            manager.providers.insert(
+                "codex-provider".to_string(),
+                Provider::with_id(
+                    "codex-provider".to_string(),
+                    "Codex Provider".to_string(),
+                    json!({
+                        "auth": { "OPENAI_API_KEY": "sk-test" },
+                        "config": "model_provider = \"custom\"\nmodel = \"gpt-5.4\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.custom]\nname = \"custom\"\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                    }),
+                    None,
+                ),
+            );
+        }
+        state.save().expect("persist codex provider");
+        fixture.data = UiData::load(&AppType::Codex).expect("reload codex data");
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+        };
+
+        submit_provider_edit(
+            &mut ctx,
+            "codex-provider".to_string(),
+            r#"{
+  "id": "codex-provider",
+  "name": "Codex Provider",
+  "settingsConfig": {
+    "auth": {
+      "OPENAI_API_KEY": "sk-test"
+    },
+    "config": "model_provider = \"custom\"\nmodel = \"gpt-5.4\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+  }
+}"#
+            .to_string(),
+        )
+        .expect("submit should return without crashing");
+
+        let refreshed = UiData::load(&AppType::Codex).expect("reload ui data");
+        let row = refreshed
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "codex-provider")
+            .expect("provider should remain present");
+        let config_text = row.provider.settings_config["config"]
+            .as_str()
+            .expect("codex config text should remain present");
+        assert!(
+            config_text.contains("base_url = \"https://api.example.com/v1\""),
+            "failed edit should keep the existing base_url intact"
+        );
+        assert!(matches!(
+            ctx.app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Warning,
+                message,
+                ..
+            }) if message == texts::base_url_empty_error()
+        ));
     }
 
     #[test]

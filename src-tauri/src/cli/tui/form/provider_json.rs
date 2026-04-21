@@ -135,7 +135,7 @@ impl ProviderAddFormState {
                         clean_codex_provider_key(self.id.value.trim(), self.name.value.trim());
                     let base_url = self.codex_base_url.value.trim().trim_end_matches('/');
                     let model = if self.codex_model.is_blank() {
-                        "gpt-5.2-codex"
+                        "gpt-5.4"
                     } else {
                         self.codex_model.value.trim()
                     };
