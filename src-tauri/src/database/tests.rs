@@ -383,6 +383,22 @@ fn schema_create_tables_include_usage_daily_rollups() {
         normalize_default(&data_source.default).as_deref(),
         Some("proxy")
     );
+
+    let mcp_enabled_hermes = get_column_info(&conn, "mcp_servers", "enabled_hermes");
+    assert_eq!(mcp_enabled_hermes.r#type, "BOOLEAN");
+    assert_eq!(mcp_enabled_hermes.notnull, 1);
+    assert_eq!(
+        normalize_default(&mcp_enabled_hermes.default).as_deref(),
+        Some("0")
+    );
+
+    let skill_enabled_hermes = get_column_info(&conn, "skills", "enabled_hermes");
+    assert_eq!(skill_enabled_hermes.r#type, "BOOLEAN");
+    assert_eq!(skill_enabled_hermes.notnull, 1);
+    assert_eq!(
+        normalize_default(&skill_enabled_hermes.default).as_deref(),
+        Some("0")
+    );
 }
 
 #[test]
@@ -718,6 +734,259 @@ fn schema_migration_v7_adds_session_log_tracking_and_corrects_pricing() {
         ("0.28".to_string(), "1.11".to_string(), "0.028".to_string()),
         "v7 -> v8 migration should normalize DeepSeek pricing values"
     );
+}
+
+#[test]
+fn schema_migration_v8_refreshes_model_pricing_and_reaches_v10() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE providers (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            settings_config TEXT NOT NULL,
+            meta TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE skills (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+            enabled_codex BOOLEAN NOT NULL DEFAULT 0,
+            enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
+            enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            installed_at INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE mcp_servers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            server_config TEXT NOT NULL,
+            enabled_claude INTEGER NOT NULL DEFAULT 0,
+            enabled_codex INTEGER NOT NULL DEFAULT 0,
+            enabled_gemini INTEGER NOT NULL DEFAULT 0,
+            enabled_opencode INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE prompts (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            content TEXT NOT NULL,
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE skill_repos (
+            owner TEXT NOT NULL,
+            name TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            PRIMARY KEY (owner, name)
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE proxy_config (app_type TEXT PRIMARY KEY);
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            model TEXT NOT NULL,
+            data_source TEXT NOT NULL DEFAULT 'proxy'
+        );
+        CREATE TABLE stream_check_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id TEXT NOT NULL,
+            provider_name TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            tested_at INTEGER NOT NULL
+        );
+        CREATE TABLE model_pricing (
+            model_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            input_cost_per_million TEXT NOT NULL,
+            output_cost_per_million TEXT NOT NULL,
+            cache_read_cost_per_million TEXT NOT NULL DEFAULT '0',
+            cache_creation_cost_per_million TEXT NOT NULL DEFAULT '0'
+        );
+        INSERT INTO model_pricing (
+            model_id, display_name, input_cost_per_million, output_cost_per_million,
+            cache_read_cost_per_million, cache_creation_cost_per_million
+        ) VALUES ('deepseek-v3', 'DeepSeek V3', '9.99', '9.99', '9.99', '0');
+        CREATE TABLE proxy_live_backup (
+            app_type TEXT PRIMARY KEY,
+            original_config TEXT NOT NULL,
+            backed_up_at TEXT NOT NULL
+        );
+        CREATE TABLE usage_daily_rollups (
+            date TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, app_type, provider_id, model)
+        );
+        CREATE TABLE session_log_sync (
+            file_path TEXT PRIMARY KEY,
+            last_modified INTEGER NOT NULL,
+            last_line_offset INTEGER NOT NULL DEFAULT 0,
+            last_synced_at INTEGER NOT NULL
+        );
+        "#,
+    )
+    .expect("seed v8 schema");
+
+    Database::set_user_version(&conn, 8).expect("set user_version=8");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+
+    let deepseek_v3: (String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million, cache_read_cost_per_million
+             FROM model_pricing WHERE model_id = 'deepseek-v3'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read deepseek-v3 pricing");
+    assert_eq!(
+        deepseek_v3,
+        ("0.28".to_string(), "1.11".to_string(), "0.028".to_string()),
+        "v8 -> v9 migration should fully refresh pricing data"
+    );
+
+    let latest_model_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM model_pricing WHERE model_id = 'gpt-5.4'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count gpt-5.4");
+    assert_eq!(
+        latest_model_count, 1,
+        "latest pricing catalog should be seeded"
+    );
+
+    assert!(
+        Database::has_column(&conn, "mcp_servers", "enabled_hermes")
+            .expect("check mcp enabled_hermes"),
+        "v9 -> v10 should add enabled_hermes to mcp_servers"
+    );
+    assert!(
+        Database::has_column(&conn, "skills", "enabled_hermes")
+            .expect("check skills enabled_hermes"),
+        "v9 -> v10 should add enabled_hermes to skills"
+    );
+}
+
+#[test]
+fn schema_migration_v9_adds_hermes_columns() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE mcp_servers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            server_config TEXT NOT NULL,
+            enabled_claude INTEGER NOT NULL DEFAULT 0,
+            enabled_codex INTEGER NOT NULL DEFAULT 0,
+            enabled_gemini INTEGER NOT NULL DEFAULT 0,
+            enabled_opencode INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE skills (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+            enabled_codex BOOLEAN NOT NULL DEFAULT 0,
+            enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
+            enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            installed_at INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+        "#,
+    )
+    .expect("seed v9 schema");
+
+    Database::set_user_version(&conn, 9).expect("set user_version=9");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+    assert!(
+        Database::has_column(&conn, "mcp_servers", "enabled_hermes")
+            .expect("check mcp enabled_hermes"),
+        "mcp_servers.enabled_hermes should exist after v9 -> v10 migration"
+    );
+    assert!(
+        Database::has_column(&conn, "skills", "enabled_hermes")
+            .expect("check skills enabled_hermes"),
+        "skills.enabled_hermes should exist after v9 -> v10 migration"
+    );
+}
+
+#[test]
+fn mcp_dao_roundtrip_preserves_hermes_enablement() {
+    let db = Database::memory().expect("create memory db");
+
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "INSERT INTO mcp_servers (
+                id, name, server_config, tags,
+                enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes
+            ) VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 0, 1)",
+            params![
+                "remote-hermes",
+                "Remote Hermes",
+                serde_json::to_string(&json!({
+                    "type": "stdio",
+                    "command": "echo"
+                }))
+                .expect("serialize server config"),
+                "[]",
+            ],
+        )
+        .expect("seed hermes-enabled mcp row");
+    }
+
+    let mut servers = db.get_all_mcp_servers().expect("load mcp servers");
+    let mut server = servers
+        .shift_remove("remote-hermes")
+        .expect("find seeded mcp server");
+    assert!(
+        server.apps.hermes,
+        "DAO load should preserve enabled_hermes in memory"
+    );
+
+    server.description = Some("updated".to_string());
+    db.save_mcp_server(&server).expect("save mcp server");
+
+    let enabled_hermes: i64 = {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.query_row(
+            "SELECT enabled_hermes FROM mcp_servers WHERE id = 'remote-hermes'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read enabled_hermes after save")
+    };
+    assert_eq!(enabled_hermes, 1, "save should not clear enabled_hermes");
 }
 
 #[test]

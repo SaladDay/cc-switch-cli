@@ -48,7 +48,7 @@ const DB_BACKUP_RETAIN: usize = 10;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 8;
+pub(crate) const SCHEMA_VERSION: i32 = 10;
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -100,6 +100,22 @@ impl Database {
             runtime_key: format!("file:{}", db_path.display()),
         };
         db.create_tables()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            let version = Self::get_user_version(&conn)?;
+            drop(conn);
+
+            if version > 0 && version < SCHEMA_VERSION {
+                log::info!(
+                    "Creating pre-migration database backup (v{version} -> v{SCHEMA_VERSION})"
+                );
+                if let Err(err) = db.backup_database_file() {
+                    log::warn!("Pre-migration backup failed, continuing migration: {err}");
+                }
+            }
+        }
+
         db.apply_schema_migrations()?;
         db.ensure_model_pricing_seeded()?;
 

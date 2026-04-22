@@ -15,6 +15,8 @@ pub struct McpApps {
     pub gemini: bool,
     #[serde(default)]
     pub opencode: bool,
+    #[serde(default)]
+    pub hermes: bool,
 }
 
 impl McpApps {
@@ -60,7 +62,7 @@ impl McpApps {
 
     /// 检查是否所有应用都未启用
     pub fn is_empty(&self) -> bool {
-        !self.claude && !self.codex && !self.gemini && !self.opencode
+        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes
     }
 }
 
