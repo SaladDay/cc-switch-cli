@@ -1638,14 +1638,9 @@ impl ProviderService {
             AppType::Codex => {
                 Self::write_codex_live(provider, common_config_snippet, apply_common_config)
             }
-            AppType::Claude => Self::write_claude_live(
-                provider,
-                if apply_common_config {
-                    common_config_snippet
-                } else {
-                    None
-                },
-            ),
+            AppType::Claude => {
+                Self::write_claude_live(provider, common_config_snippet, apply_common_config)
+            }
             AppType::Gemini => Self::write_gemini_live(
                 provider,
                 if apply_common_config {
@@ -1782,7 +1777,7 @@ impl ProviderService {
         }
     }
 
-    pub(crate) fn build_live_backup_snapshot(
+    pub(crate) fn build_effective_live_snapshot(
         app_type: &AppType,
         provider: &Provider,
         common_config_snippet: Option<&str>,
@@ -2024,6 +2019,57 @@ impl ProviderService {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn build_live_backup_snapshot(
+        app_type: &AppType,
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        apply_common_config: bool,
+    ) -> Result<Value, AppError> {
+        Self::build_effective_live_snapshot(
+            app_type,
+            provider,
+            common_config_snippet,
+            apply_common_config,
+        )
+    }
+
+    pub(crate) fn build_effective_live_snapshot_from_state(
+        state: &AppState,
+        app_type: AppType,
+        provider: &Provider,
+    ) -> Result<Value, AppError> {
+        let common_config_snippet = {
+            let config = state.config.read().map_err(AppError::from)?;
+            config.common_config_snippets.get(&app_type).cloned()
+        };
+
+        Self::build_effective_live_snapshot(
+            &app_type,
+            provider,
+            common_config_snippet.as_deref(),
+            true,
+        )
+    }
+
+    pub(crate) fn get_provider(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+    ) -> Result<Provider, AppError> {
+        let config = state.config.read().map_err(AppError::from)?;
+        let manager = config
+            .get_manager(&app_type)
+            .ok_or_else(|| Self::app_not_found(&app_type))?;
+
+        manager.providers.get(provider_id).cloned().ok_or_else(|| {
+            AppError::localized(
+                "provider.not_found",
+                format!("供应商不存在: {provider_id}"),
+                format!("Provider not found: {provider_id}"),
+            )
+        })
     }
 
     fn app_not_found(app_type: &AppType) -> AppError {

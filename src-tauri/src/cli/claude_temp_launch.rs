@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::services::provider::ProviderService;
-use serde_json::json;
+use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedClaudeLaunch {
@@ -28,6 +28,14 @@ pub(crate) fn prepare_launch(
     prepare_launch_with(provider, temp_dir, resolve_claude_binary)
 }
 
+pub(crate) fn prepare_launch_from_settings(
+    provider_id: &str,
+    settings: &Value,
+    temp_dir: &Path,
+) -> Result<PreparedClaudeLaunch, AppError> {
+    prepare_launch_from_settings_with(provider_id, settings, temp_dir, resolve_claude_binary)
+}
+
 pub(crate) fn prepare_launch_with<Resolve>(
     provider: &Provider,
     temp_dir: &Path,
@@ -36,19 +44,36 @@ pub(crate) fn prepare_launch_with<Resolve>(
 where
     Resolve: FnOnce() -> Result<PathBuf, AppError>,
 {
+    prepare_launch_from_settings_with(
+        &provider.id,
+        &provider.settings_config,
+        temp_dir,
+        resolve_claude_binary,
+    )
+}
+
+pub(crate) fn prepare_launch_from_settings_with<Resolve>(
+    provider_id: &str,
+    settings: &Value,
+    temp_dir: &Path,
+    resolve_claude_binary: Resolve,
+) -> Result<PreparedClaudeLaunch, AppError>
+where
+    Resolve: FnOnce() -> Result<PathBuf, AppError>,
+{
     let executable = resolve_claude_binary()?;
 
-    if provider.settings_config.get("env").and_then(|v| v.as_object()).is_none() {
+    if settings.get("env").and_then(|v| v.as_object()).is_none() {
         return Err(AppError::localized(
             "claude.temp_launch_missing_env",
-            format!("供应商 {} 缺少有效的 env 配置。", provider.id),
-            format!("Provider {} is missing a valid env object.", provider.id),
+            format!("供应商 {} 缺少有效的 env 配置。", provider_id),
+            format!("Provider {} is missing a valid env object.", provider_id),
         ));
     }
 
-    let mut settings = provider.settings_config.clone();
-    let _ = ProviderService::normalize_claude_models_in_value(&mut settings);
-    let settings_path = write_temp_settings_file(temp_dir, provider, &settings)?;
+    let mut normalized_settings = settings.clone();
+    let _ = ProviderService::normalize_claude_models_in_value(&mut normalized_settings);
+    let settings_path = write_temp_settings_file(temp_dir, provider_id, &normalized_settings)?;
 
     Ok(PreparedClaudeLaunch {
         executable,
@@ -127,15 +152,15 @@ pub(crate) fn exec_prepared_claude(
 
 fn write_temp_settings_file(
     temp_dir: &Path,
-    provider: &Provider,
+    provider_id: &str,
     settings: &serde_json::Value,
 ) -> Result<PathBuf, AppError> {
-    write_temp_settings_file_with(temp_dir, provider, settings, finalize_temp_settings_file)
+    write_temp_settings_file_with(temp_dir, provider_id, settings, finalize_temp_settings_file)
 }
 
 fn write_temp_settings_file_with<Finalize>(
     temp_dir: &Path,
-    provider: &Provider,
+    provider_id: &str,
     settings: &serde_json::Value,
     finalize: Finalize,
 ) -> Result<PathBuf, AppError>
@@ -148,7 +173,7 @@ where
         .as_nanos();
     let filename = format!(
         "cc-switch-claude-{}-{}-{timestamp}.json",
-        sanitize_filename_fragment(&provider.id),
+        sanitize_filename_fragment(provider_id),
         std::process::id()
     );
     let path = temp_dir.join(filename);
@@ -243,6 +268,7 @@ fn sanitize_filename_fragment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_config::AppType;
     use crate::provider::Provider;
     use serde_json::{json, Value};
     #[cfg(unix)]
@@ -379,7 +405,7 @@ mod tests {
 
         let err = write_temp_settings_file_with(
             temp_dir.path(),
-            &provider,
+            &provider.id,
             &json!({
                 "env": {
                     "ANTHROPIC_AUTH_TOKEN": "sk-demo"
@@ -568,9 +594,49 @@ mod tests {
         .expect("parse temp settings");
 
         assert_eq!(written["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-full");
+        assert_eq!(written["permissions"]["allow"], json!(["Bash(git*)"]));
+    }
+
+    #[test]
+    fn prepare_launch_from_settings_writes_exact_effective_snapshot() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let provider = Provider::with_id(
+            "demo".to_string(),
+            "Demo".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-demo",
+                    "ANTHROPIC_BASE_URL": "https://provider.example"
+                },
+                "permissions": {
+                    "allow": ["Bash(git status)"]
+                },
+                "includeCoAuthoredBy": true
+            }),
+            None,
+        );
+
+        let effective = ProviderService::build_effective_live_snapshot(
+            &AppType::Claude,
+            &provider,
+            Some(
+                r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1,"ANTHROPIC_BASE_URL":"https://common.example"},"permissions":{"allow":["Bash(ls)"]},"includeCoAuthoredBy":false}"#,
+            ),
+            true,
+        )
+        .expect("build effective snapshot");
+
+        let prepared = prepare_launch_from_settings(&provider.id, &effective, temp_dir.path())
+            .expect("prepare launch from effective settings");
+
+        let written: Value = serde_json::from_str(
+            &std::fs::read_to_string(&prepared.settings_path).expect("read temp settings"),
+        )
+        .expect("parse temp settings");
+
         assert_eq!(
-            written["permissions"]["allow"],
-            json!(["Bash(git*)"])
+            written, effective,
+            "temp launch settings should exactly match the canonical effective snapshot"
         );
     }
 }

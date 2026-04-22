@@ -5,7 +5,8 @@ use indexmap::IndexMap;
 
 use crate::app_config::AppType;
 use crate::cli::claude_temp_launch::{
-    ensure_temp_launch_supported, exec_prepared_claude, prepare_launch, PreparedClaudeLaunch,
+    ensure_temp_launch_supported, exec_prepared_claude, prepare_launch_from_settings,
+    PreparedClaudeLaunch,
 };
 use crate::cli::codex_temp_launch::{
     ensure_temp_launch_supported as ensure_codex_temp_launch_supported, exec_prepared_codex,
@@ -68,19 +69,13 @@ fn get_state() -> Result<AppState, AppError> {
 
 fn start_claude(selector: &str, native_args: &[OsString]) -> Result<(), AppError> {
     reject_reserved_native_args(native_args, "Claude", CLAUDE_RESERVED_NATIVE_ARGS)?;
-    start_with(
-        selector,
-        "Claude",
-        || {
-            let state = get_state()?;
-            ProviderService::list(&state, AppType::Claude)
-        },
-        |provider| {
-            ensure_temp_launch_supported()?;
-            let prepared = prepare_launch(provider, &std::env::temp_dir())?;
-            handoff_claude_and_cleanup(&prepared, native_args)
-        },
-    )
+    let state = get_state()?;
+    let providers = ProviderService::list(&state, AppType::Claude)?;
+    let provider = resolve_provider_selector(&providers, selector, "Claude")?;
+
+    ensure_temp_launch_supported()?;
+    let prepared = prepare_claude_launch_with(&state, &provider, &std::env::temp_dir())?;
+    handoff_claude_and_cleanup(&prepared, native_args)
 }
 
 fn start_codex(selector: &str, native_args: &[OsString]) -> Result<(), AppError> {
@@ -146,6 +141,19 @@ where
     let providers = load_providers()?;
     let provider = resolve_provider_selector(&providers, selector, app_name)?;
     launch_provider(&provider)
+}
+
+fn prepare_claude_launch_with(
+    state: &AppState,
+    provider: &Provider,
+    temp_dir: &std::path::Path,
+) -> Result<PreparedClaudeLaunch, AppError> {
+    let settings = ProviderService::build_effective_live_snapshot_from_state(
+        state,
+        AppType::Claude,
+        provider,
+    )?;
+    prepare_launch_from_settings(&provider.id, &settings, temp_dir)
 }
 
 fn handoff_claude_and_cleanup(
@@ -254,6 +262,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::ffi::OsString;
+    use tempfile::TempDir;
 
     fn provider(id: &str, name: &str) -> Provider {
         Provider::with_id(
@@ -266,6 +275,17 @@ mod tests {
             }),
             None,
         )
+    }
+
+    fn state_from_config(config: crate::app_config::MultiAppConfig) -> AppState {
+        let db = std::sync::Arc::new(crate::Database::memory().expect("create memory database"));
+        db.migrate_from_json(&config)
+            .expect("seed memory database from config");
+        AppState {
+            db: db.clone(),
+            config: std::sync::RwLock::new(config),
+            proxy_service: crate::ProxyService::new(db),
+        }
     }
 
     #[test]
@@ -373,6 +393,51 @@ mod tests {
         .expect("start command should launch matching provider");
 
         assert_eq!(launched.into_inner().as_deref(), Some("demo"));
+    }
+
+    #[test]
+    fn prepare_claude_launch_with_writes_effective_snapshot_from_state() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let mut config = crate::app_config::MultiAppConfig::default();
+        config.ensure_app(&AppType::Claude);
+        config.common_config_snippets.claude = Some(
+            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1,"ANTHROPIC_BASE_URL":"https://common.example"},"includeCoAuthoredBy":false,"permissions":{"allow":["Bash(ls)"]}}"#
+                .to_string(),
+        );
+        let state = state_from_config(config);
+        let provider = Provider::with_id(
+            "demo".to_string(),
+            "Claude Demo".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-demo",
+                    "ANTHROPIC_BASE_URL": "https://provider.example"
+                },
+                "includeCoAuthoredBy": true,
+                "permissions": {
+                    "allow": ["Bash(git status)"]
+                }
+            }),
+            None,
+        );
+
+        let prepared =
+            prepare_claude_launch_with(&state, &provider, temp_dir.path()).expect("prepare launch");
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&prepared.settings_path).expect("read temp settings"),
+        )
+        .expect("parse temp settings");
+        let expected = ProviderService::build_effective_live_snapshot_from_state(
+            &state,
+            AppType::Claude,
+            &provider,
+        )
+        .expect("build effective snapshot");
+
+        assert_eq!(
+            written, expected,
+            "CLI temp launch should write the canonical effective snapshot"
+        );
     }
 
     #[test]

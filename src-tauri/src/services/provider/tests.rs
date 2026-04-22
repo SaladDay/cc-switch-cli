@@ -1252,6 +1252,106 @@ fn common_config_snippet_is_merged_into_claude_settings_on_write() {
 }
 
 #[test]
+fn build_effective_live_snapshot_merges_claude_common_config_with_provider_precedence() {
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token",
+                "ANTHROPIC_BASE_URL": "https://provider.example"
+            },
+            "includeCoAuthoredBy": true,
+            "permissions": {
+                "allow": ["Bash(git status)"]
+            }
+        }),
+        None,
+    );
+
+    let effective = ProviderService::build_effective_live_snapshot(
+        &AppType::Claude,
+        &provider,
+        Some(
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://common.example","CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false,"permissions":{"allow":["Bash(ls)"]}}"#,
+        ),
+        true,
+    )
+    .expect("build effective snapshot");
+
+    assert_eq!(
+        effective["env"]["ANTHROPIC_AUTH_TOKEN"],
+        json!("token"),
+        "provider auth token should be preserved"
+    );
+    assert_eq!(
+        effective["env"]["ANTHROPIC_BASE_URL"],
+        json!("https://provider.example"),
+        "provider env should override common config"
+    );
+    assert_eq!(
+        effective["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+        json!(1),
+        "common env values should still be merged"
+    );
+    assert_eq!(
+        effective["includeCoAuthoredBy"],
+        json!(true),
+        "provider top-level settings should override common config"
+    );
+    assert_eq!(
+        effective["permissions"]["allow"],
+        json!(["Bash(git status)"]),
+        "provider top-level objects should override common config"
+    );
+}
+
+#[test]
+fn build_effective_live_snapshot_skips_claude_common_config_when_disabled() {
+    let mut provider = Provider::with_id(
+        "p1".to_string(),
+        "First".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token",
+                "ANTHROPIC_BASE_URL": "https://provider.example"
+            }
+        }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        apply_common_config: Some(false),
+        ..Default::default()
+    });
+
+    let effective = ProviderService::build_effective_live_snapshot(
+        &AppType::Claude,
+        &provider,
+        Some(
+            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#,
+        ),
+        true,
+    )
+    .expect("build effective snapshot");
+
+    assert!(
+        effective.get("includeCoAuthoredBy").is_none(),
+        "common top-level settings should be skipped when disabled"
+    );
+    assert!(
+        effective["env"]
+            .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+            .is_none(),
+        "common env settings should be skipped when disabled"
+    );
+    assert_eq!(
+        effective["env"]["ANTHROPIC_BASE_URL"],
+        json!("https://provider.example"),
+        "provider settings should remain untouched"
+    );
+}
+
+#[test]
 #[serial]
 fn common_config_snippet_can_be_disabled_per_provider_for_claude() {
     let temp_home = TempDir::new().expect("create temp home");

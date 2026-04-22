@@ -3,11 +3,13 @@ use std::path::Path;
 
 use crate::app_config::AppType;
 use crate::cli::claude_temp_launch::{
-    ensure_temp_launch_supported, exec_prepared_claude, prepare_launch, PreparedClaudeLaunch,
+    ensure_temp_launch_supported, exec_prepared_claude, prepare_launch_from_settings,
+    PreparedClaudeLaunch,
 };
 use crate::cli::i18n::texts;
+use crate::cli::tui::data::load_state;
 use crate::error::AppError;
-use crate::provider::Provider;
+use crate::services::ProviderService;
 
 use super::super::app::ToastKind;
 use super::super::terminal::TuiTerminal;
@@ -19,9 +21,20 @@ pub(super) fn launch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
         id,
         &std::env::temp_dir(),
         ensure_temp_launch_supported,
-        prepare_launch,
+        prepare_claude_launch,
         handoff_to_claude,
     )
+}
+
+fn prepare_claude_launch(id: &str, temp_dir: &Path) -> Result<PreparedClaudeLaunch, AppError> {
+    let state = load_state()?;
+    let provider = ProviderService::get_provider(&state, AppType::Claude, id)?;
+    let settings = ProviderService::build_effective_live_snapshot_from_state(
+        &state,
+        AppType::Claude,
+        &provider,
+    )?;
+    prepare_launch_from_settings(&provider.id, &settings, temp_dir)
 }
 
 fn launch_with<Support, Prepare, Handoff>(
@@ -34,7 +47,7 @@ fn launch_with<Support, Prepare, Handoff>(
 ) -> Result<(), AppError>
 where
     Support: FnOnce() -> Result<(), AppError>,
-    Prepare: FnOnce(&Provider, &Path) -> Result<PreparedClaudeLaunch, AppError>,
+    Prepare: FnOnce(&str, &Path) -> Result<PreparedClaudeLaunch, AppError>,
     Handoff: FnOnce(&mut TuiTerminal, &PreparedClaudeLaunch) -> Result<(), AppError>,
 {
     if !matches!(ctx.app.app_type, AppType::Claude) {
@@ -68,26 +81,12 @@ fn try_launch_with<Support, Prepare, Handoff>(
 ) -> Result<(), AppError>
 where
     Support: FnOnce() -> Result<(), AppError>,
-    Prepare: FnOnce(&Provider, &Path) -> Result<PreparedClaudeLaunch, AppError>,
+    Prepare: FnOnce(&str, &Path) -> Result<PreparedClaudeLaunch, AppError>,
     Handoff: FnOnce(&mut TuiTerminal, &PreparedClaudeLaunch) -> Result<(), AppError>,
 {
     ensure_supported()?;
 
-    let provider = ctx
-        .data
-        .providers
-        .rows
-        .iter()
-        .find(|row| row.id == id)
-        .map(|row| row.provider.clone())
-        .ok_or_else(|| {
-            AppError::localized(
-                "claude.temp_launch_provider_not_found",
-                format!("未找到选中的供应商: {id}"),
-                format!("Selected provider not found: {id}"),
-            )
-        })?;
-    let prepared = prepare(&provider, temp_dir)?;
+    let prepared = prepare(id, temp_dir)?;
     let handoff_result = handoff(ctx.terminal, &prepared);
     let cleanup_result = prepared.cleanup_settings_file();
 
@@ -114,8 +113,14 @@ mod tests {
     use crate::cli::tui::data::{ProviderRow, ProvidersSnapshot, UiData};
     use crate::cli::tui::runtime_systems::RequestTracker;
     use crate::provider::Provider;
+    use crate::test_support::{
+        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
+    };
     use serde_json::{json, Value};
+    use serial_test::serial;
     use std::cell::Cell;
+    use std::ffi::OsString;
+    use std::path::Path;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -166,6 +171,44 @@ mod tests {
         }
     }
 
+    struct EnvGuard {
+        _lock: TestHomeSettingsLock,
+        old_home: Option<OsString>,
+        old_userprofile: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_home(home: &Path) -> Self {
+            let lock = lock_test_home_and_settings();
+            let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
+            Self {
+                _lock: lock,
+                old_home,
+                old_userprofile,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.old_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
+        }
+    }
+
     fn provider_row(id: &str, env: Value) -> ProviderRow {
         ProviderRow {
             id: id.to_string(),
@@ -213,8 +256,18 @@ mod tests {
             "candidate".to_string(),
             temp_dir.path(),
             ensure_temp_launch_supported,
-            |provider, temp_dir| {
-                prepare_launch_with(provider, temp_dir, || Ok(PathBuf::from("/usr/bin/claude")))
+            |id, temp_dir| {
+                let provider = Provider::with_id(
+                    id.to_string(),
+                    format!("Provider {id}"),
+                    json!({
+                        "env": {
+                            "ANTHROPIC_AUTH_TOKEN": format!("sk-{id}")
+                        }
+                    }),
+                    None,
+                );
+                prepare_launch_with(&provider, temp_dir, || Ok(PathBuf::from("/usr/bin/claude")))
             },
             |_, prepared| {
                 captured_settings_path.replace(Some(prepared.settings_path.clone()));
@@ -263,8 +316,18 @@ mod tests {
             "candidate".to_string(),
             temp_dir.path(),
             ensure_temp_launch_supported,
-            |provider, temp_dir| {
-                prepare_launch_with(provider, temp_dir, || Ok(PathBuf::from("/usr/bin/claude")))
+            |id, temp_dir| {
+                let provider = Provider::with_id(
+                    id.to_string(),
+                    format!("Provider {id}"),
+                    json!({
+                        "env": {
+                            "ANTHROPIC_AUTH_TOKEN": format!("sk-{id}")
+                        }
+                    }),
+                    None,
+                );
+                prepare_launch_with(&provider, temp_dir, || Ok(PathBuf::from("/usr/bin/claude")))
             },
             |_, _| {
                 handoff_called.set(true);
@@ -310,9 +373,19 @@ mod tests {
                         .to_string(),
                 ))
             },
-            |provider, temp_dir| {
+            |id, temp_dir| {
                 prepare_called.set(true);
-                prepare_launch_with(provider, temp_dir, || Ok(PathBuf::from("/usr/bin/claude")))
+                let provider = Provider::with_id(
+                    id.to_string(),
+                    format!("Provider {id}"),
+                    json!({
+                        "env": {
+                            "ANTHROPIC_AUTH_TOKEN": format!("sk-{id}")
+                        }
+                    }),
+                    None,
+                );
+                prepare_launch_with(&provider, temp_dir, || Ok(PathBuf::from("/usr/bin/claude")))
             },
             |_, _| Ok(()),
         )
@@ -332,6 +405,87 @@ mod tests {
                 .next()
                 .is_none(),
             "unsupported platforms should not create a temp settings file"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn launch_uses_effective_snapshot_from_realtime_state() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        std::fs::create_dir_all(crate::config::get_claude_config_dir())
+            .expect("create ~/.claude (initialized)");
+
+        let state = crate::store::AppState::try_new().expect("create state");
+        ProviderService::set_common_config_snippet(
+            &state,
+            AppType::Claude,
+            Some(
+                r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#
+                    .to_string(),
+            ),
+        )
+        .expect("set common config snippet");
+
+        let provider = Provider::with_id(
+            "candidate".to_string(),
+            "Candidate".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-state",
+                    "ANTHROPIC_BASE_URL": "https://state.example"
+                },
+                "permissions": {
+                    "allow": ["Bash(git status)"]
+                }
+            }),
+            None,
+        );
+        ProviderService::add(&state, AppType::Claude, provider.clone()).expect("add provider");
+
+        let expected = ProviderService::build_effective_live_snapshot_from_state(
+            &state,
+            AppType::Claude,
+            &provider,
+        )
+        .expect("build effective snapshot");
+
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let mut fixture = LaunchFixture::new(
+            AppType::Claude,
+            "candidate",
+            vec![provider_row(
+                "candidate",
+                json!({
+                    "ANTHROPIC_AUTH_TOKEN": "sk-stale"
+                }),
+            )],
+        );
+        let captured_settings = std::cell::RefCell::new(None::<Value>);
+
+        launch_with(
+            &mut fixture.ctx(),
+            "candidate".to_string(),
+            temp_dir.path(),
+            ensure_temp_launch_supported,
+            prepare_claude_launch,
+            |_, prepared| {
+                let written: Value = serde_json::from_str(
+                    &std::fs::read_to_string(&prepared.settings_path).expect("read temp settings"),
+                )
+                .expect("parse temp settings");
+                captured_settings.replace(Some(written));
+                Err(AppError::Message("launch exploded".to_string()))
+            },
+        )
+        .expect("launch failure should stay in the TUI");
+
+        assert_eq!(
+            captured_settings
+                .into_inner()
+                .expect("capture written settings"),
+            expected,
+            "TUI temp launch should use the realtime state's effective snapshot"
         );
     }
 }
