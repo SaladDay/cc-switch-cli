@@ -1415,6 +1415,130 @@ fn build_effective_live_snapshot_skips_claude_common_config_when_disabled() {
 
 #[test]
 #[serial]
+fn switch_claude_preserves_shared_live_settings_without_persisting_them_into_provider_snapshots() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    write_json_file(
+        &get_claude_settings_path(),
+        &json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token1",
+                "ANTHROPIC_BASE_URL": "https://claude.one"
+            },
+            "statusLine": {
+                "type": "command",
+                "command": "oh-my-claudecode statusline"
+            },
+            "hooks": {
+                "Stop": [{
+                    "type": "command",
+                    "command": "oh-my-claudecode cleanup"
+                }]
+            },
+            "permissions": {
+                "allow": ["Bash(git status)"]
+            }
+        }),
+    )
+    .expect("seed existing live settings");
+
+    let state = state_from_config(config);
+
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch should succeed");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert_eq!(
+        live.pointer("/statusLine/command").and_then(Value::as_str),
+        Some("oh-my-claudecode statusline"),
+        "shared statusLine config should be preserved across provider switch"
+    );
+    assert_eq!(
+        live.pointer("/hooks/Stop/0/command")
+            .and_then(Value::as_str),
+        Some("oh-my-claudecode cleanup"),
+        "shared hooks config should be preserved across provider switch"
+    );
+    assert_eq!(
+        live.pointer("/permissions/allow/0").and_then(Value::as_str),
+        Some("Bash(git status)"),
+        "shared permissions config should be preserved across provider switch"
+    );
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token2"),
+        "provider auth should still switch to the target provider"
+    );
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.two"),
+        "provider base URL should still switch to the target provider"
+    );
+
+    let cfg = state.config.read().expect("read config");
+    let previous = cfg
+        .get_manager(&AppType::Claude)
+        .expect("claude manager")
+        .providers
+        .get("p1")
+        .expect("p1 exists");
+    assert!(
+        previous.settings_config.get("statusLine").is_none(),
+        "shared statusLine config should not be backfilled into provider snapshots"
+    );
+    assert!(
+        previous.settings_config.get("hooks").is_none(),
+        "shared hooks config should not be backfilled into provider snapshots"
+    );
+    assert!(
+        previous.settings_config.get("permissions").is_none(),
+        "shared permissions config should not be backfilled into provider snapshots"
+    );
+}
+
+#[test]
+#[serial]
 fn common_config_snippet_can_be_disabled_per_provider_for_claude() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());

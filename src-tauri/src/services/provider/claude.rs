@@ -1,6 +1,21 @@
 use super::*;
 
 impl ProviderService {
+    const CLAUDE_PRESERVED_SHARED_LIVE_KEYS: &[&str] = &[
+        "allowedHttpHookUrls",
+        "disableAllHooks",
+        "enabledMcpjsonServers",
+        "disabledMcpjsonServers",
+        "enableAllProjectMcpServers",
+        "extraKnownMarketplaces",
+        "fileSuggestion",
+        "hooks",
+        "httpHookAllowedEnvVars",
+        "permissions",
+        "respectGitignore",
+        "statusLine",
+    ];
+
     pub(super) fn parse_common_claude_config_snippet(snippet: &str) -> Result<Value, AppError> {
         let value: Value = serde_json::from_str(snippet).map_err(|e| {
             AppError::localized(
@@ -133,6 +148,39 @@ impl ProviderService {
         Ok(())
     }
 
+    pub(crate) fn strip_preserved_claude_shared_live_settings(value: &mut Value) {
+        let Some(obj) = value.as_object_mut() else {
+            return;
+        };
+        for key in Self::CLAUDE_PRESERVED_SHARED_LIVE_KEYS {
+            obj.remove(*key);
+        }
+    }
+
+    pub(crate) fn preserve_claude_shared_live_settings(value: &mut Value) -> Result<(), AppError> {
+        let settings_path = get_claude_settings_path();
+        if !settings_path.exists() {
+            return Ok(());
+        }
+
+        let existing = read_json_file::<Value>(&settings_path)?;
+        let (Some(existing_obj), Some(target_obj)) = (existing.as_object(), value.as_object_mut())
+        else {
+            return Ok(());
+        };
+
+        for key in Self::CLAUDE_PRESERVED_SHARED_LIVE_KEYS {
+            if target_obj.contains_key(*key) {
+                continue;
+            }
+            if let Some(existing_value) = existing_obj.get(*key) {
+                target_obj.insert((*key).to_string(), existing_value.clone());
+            }
+        }
+
+        Ok(())
+    }
+
     pub(super) fn prepare_switch_claude(
         config: &mut MultiAppConfig,
         provider_id: &str,
@@ -186,6 +234,7 @@ impl ProviderService {
                 strip_common_values(&mut live, &common);
             }
         }
+        Self::strip_preserved_claude_shared_live_settings(&mut live);
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
             if let Some(current) = manager.providers.get_mut(&current_id) {
                 current.settings_config = live;
@@ -239,6 +288,9 @@ impl ProviderService {
             common_config_snippet,
             apply_common_config,
         )?;
+
+        let mut content_to_write = content_to_write;
+        Self::preserve_claude_shared_live_settings(&mut content_to_write)?;
 
         write_json_file(&settings_path, &content_to_write)?;
         Ok(())
