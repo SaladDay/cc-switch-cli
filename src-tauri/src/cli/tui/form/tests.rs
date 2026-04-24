@@ -822,7 +822,7 @@ fn provider_add_form_claude_official_save_preserves_existing_env_keys_like_upstr
     let env = out["settingsConfig"]["env"]
         .as_object()
         .expect("settingsConfig.env should be object");
-    let meta = out["meta"].as_object().expect("meta should be object");
+    let meta = out.get("meta").and_then(|value| value.as_object());
 
     assert_eq!(
         env.get("ANTHROPIC_AUTH_TOKEN")
@@ -843,7 +843,10 @@ fn provider_add_form_claude_official_save_preserves_existing_env_keys_like_upstr
             .and_then(|value| value.as_str()),
         Some("model-sonnet")
     );
-    assert!(meta.get("apiFormat").is_none());
+    assert!(
+        meta.is_none_or(|meta| meta.get("apiFormat").is_none()),
+        "official Claude provider should not serialize a default apiFormat"
+    );
     assert_eq!(out["category"], "official");
 }
 
@@ -1266,8 +1269,8 @@ fn provider_add_form_common_config_json_merges_into_preview_but_not_raw_submit_p
     assert_eq!(settings["alwaysThinkingEnabled"], false);
     assert_eq!(settings["env"]["COMMON_FLAG"], "1");
     assert_eq!(
-        settings["env"]["ANTHROPIC_BASE_URL"], "https://provider.example",
-        "provider field should override common snippet value"
+        settings["env"]["ANTHROPIC_BASE_URL"], "https://common.example",
+        "common config should follow backend merge precedence"
     );
     assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-provider");
     assert_eq!(merged["meta"]["commonConfigEnabled"], true);
@@ -1353,6 +1356,73 @@ fn provider_add_form_apply_provider_json_updates_fields_and_preserves_include_to
     );
     assert_eq!(form.extra["category"], "custom");
     assert_eq!(form.extra["settingsConfig"]["alwaysThinkingEnabled"], false);
+}
+
+#[test]
+fn provider_edit_form_preserves_missing_common_config_meta_until_toggle() {
+    let provider = Provider::with_id(
+        "legacy-provider".to_string(),
+        "Legacy Provider".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://provider.example"
+            }
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    let raw = form.to_provider_json_value();
+    assert!(
+        raw.get("meta")
+            .and_then(|meta| meta.get("commonConfigEnabled"))
+            .is_none(),
+        "editing a missing-meta provider should preserve upstream missing-meta semantics"
+    );
+
+    form.name.set("Renamed Provider");
+    let renamed = form.to_provider_json_value();
+    assert!(
+        renamed
+            .get("meta")
+            .and_then(|meta| meta.get("commonConfigEnabled"))
+            .is_none(),
+        "unrelated edits must not force commonConfigEnabled=true"
+    );
+
+    form.toggle_include_common_config(
+        r#"{"env":{"ANTHROPIC_BASE_URL":"https://provider.example"}}"#,
+    )
+    .expect("toggle should succeed");
+    let toggled = form.to_provider_json_value();
+    assert_eq!(toggled["meta"]["commonConfigEnabled"], false);
+}
+
+#[test]
+fn provider_edit_form_preserves_other_meta_without_forcing_common_config_meta() {
+    let mut provider = Provider::with_id(
+        "provider-with-meta".to_string(),
+        "Provider With Meta".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://provider.example"
+            }
+        }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        endpoint_auto_select: Some(true),
+        ..Default::default()
+    });
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    let raw = form.to_provider_json_value();
+
+    assert_eq!(raw["meta"]["endpointAutoSelect"], true);
+    assert!(
+        raw["meta"].get("commonConfigEnabled").is_none(),
+        "preserving unrelated meta should not synthesize commonConfigEnabled"
+    );
 }
 
 #[test]

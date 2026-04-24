@@ -24,6 +24,10 @@ impl AppState {
             let db = Arc::new(Database::init()?);
             let mut config = export_db_to_multi_app_config(&db)?;
             migrate_legacy_codex_configs(&db, &mut config);
+            crate::services::provider::ProviderService::migrate_common_config_upstream_semantics_if_needed(
+                &db,
+                &mut config,
+            )?;
             return Self::from_parts(db, config);
         }
 
@@ -78,6 +82,10 @@ impl AppState {
 
         let mut config = export_db_to_multi_app_config(&db)?;
         migrate_legacy_codex_configs(&db, &mut config);
+        crate::services::provider::ProviderService::migrate_common_config_upstream_semantics_if_needed(
+            &db,
+            &mut config,
+        )?;
         Self::from_parts(db, config)
     }
 
@@ -118,6 +126,10 @@ impl AppState {
     pub fn refresh_config_from_db(&self) -> Result<(), AppError> {
         let mut config = export_db_to_multi_app_config(&self.db)?;
         migrate_legacy_codex_configs(&self.db, &mut config);
+        crate::services::provider::ProviderService::migrate_common_config_upstream_semantics_if_needed(
+            &self.db,
+            &mut config,
+        )?;
 
         let mut guard = self.config.write().map_err(AppError::from)?;
         *guard = config;

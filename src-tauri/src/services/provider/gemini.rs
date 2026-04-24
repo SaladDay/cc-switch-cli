@@ -51,25 +51,11 @@ impl ProviderService {
         provider: &mut Provider,
         common_config_snippet: Option<&str>,
     ) -> Result<(), AppError> {
-        let apply_common_config = provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(true);
-        if !apply_common_config {
-            return Ok(());
-        }
-
-        let Some(snippet) = common_config_snippet.map(str::trim) else {
-            return Ok(());
-        };
-        if snippet.is_empty() {
-            return Ok(());
-        }
-
-        let common = Self::parse_common_gemini_config_snippet(snippet)?;
-        strip_common_values(&mut provider.settings_config, &common);
-        Ok(())
+        common_config::normalize_provider_common_config_for_storage(
+            &AppType::Gemini,
+            provider,
+            common_config_snippet,
+        )
     }
 
     pub(super) fn migrate_gemini_common_config_snippet(
@@ -219,20 +205,12 @@ impl ProviderService {
             return Ok(());
         }
 
-        let provider_content = provider.settings_config.clone();
-        let content_to_write = if let Some(snippet) = common_config_snippet {
-            let snippet = snippet.trim();
-            if snippet.is_empty() {
-                provider_content
-            } else {
-                let common = Self::parse_common_gemini_config_snippet(snippet)?;
-                let mut merged = common;
-                merge_json_values(&mut merged, &provider_content);
-                merged
-            }
-        } else {
-            provider_content
-        };
+        let content_to_write = Self::build_effective_live_snapshot(
+            &AppType::Gemini,
+            provider,
+            common_config_snippet,
+            true,
+        )?;
 
         let mut env_map = json_to_env(&content_to_write)?;
 

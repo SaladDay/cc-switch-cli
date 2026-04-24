@@ -1,9 +1,9 @@
 use crate::app_config::AppType;
+use crate::services::ProviderService;
 use serde_json::{json, Value};
 
 use super::codex_config::{
-    build_codex_provider_config_toml, clean_codex_provider_key, merge_codex_common_config_snippet,
-    strip_codex_common_config_snippet, update_codex_config_snippet,
+    build_codex_provider_config_toml, clean_codex_provider_key, update_codex_config_snippet,
 };
 use super::{
     ClaudeApiFormat, GeminiAuthType, ProviderAddFormState, OPENCLAW_DEFAULT_API_PROTOCOL,
@@ -27,40 +27,7 @@ impl ProviderAddFormState {
         );
         upsert_optional_trimmed(&mut provider_obj, "notes", self.notes.value.as_str());
 
-        let meta_value = provider_obj
-            .entry("meta".to_string())
-            .or_insert_with(|| json!({}));
-        if !meta_value.is_object() {
-            *meta_value = json!({});
-        }
-        if let Some(meta_obj) = meta_value.as_object_mut() {
-            // Normalize the legacy alias before inserting the upstream field name.
-            meta_obj.remove("applyCommonConfig");
-            meta_obj.insert(
-                "commonConfigEnabled".to_string(),
-                json!(if matches!(self.app_type, AppType::OpenClaw) {
-                    false
-                } else {
-                    self.include_common_config
-                }),
-            );
-            if matches!(self.app_type, AppType::Claude) {
-                match self.claude_api_format {
-                    _ if self.is_claude_official_provider() => {
-                        meta_obj.remove("apiFormat");
-                    }
-                    ClaudeApiFormat::Anthropic => {
-                        meta_obj.remove("apiFormat");
-                    }
-                    ClaudeApiFormat::OpenAiChat => {
-                        meta_obj.insert("apiFormat".to_string(), json!("openai_chat"));
-                    }
-                    ClaudeApiFormat::OpenAiResponses => {
-                        meta_obj.insert("apiFormat".to_string(), json!("openai_responses"));
-                    }
-                }
-            }
-        }
+        self.update_provider_meta(&mut provider_obj);
 
         let settings_value = provider_obj
             .entry("settingsConfig".to_string())
@@ -431,54 +398,114 @@ impl ProviderAddFormState {
         common_snippet: &str,
     ) -> Result<Value, String> {
         let mut provider_value = self.to_provider_json_value();
-        if matches!(self.app_type, AppType::OpenClaw) || !self.include_common_config {
-            return Ok(provider_value);
-        }
-
         let snippet = common_snippet.trim();
         if snippet.is_empty() {
             return Ok(provider_value);
         }
+        if matches!(self.app_type, AppType::OpenCode | AppType::OpenClaw) {
+            return Ok(provider_value);
+        }
 
-        let Some(settings_value) = provider_value
+        let provider: crate::provider::Provider = serde_json::from_value(provider_value.clone())
+            .map_err(|e| crate::cli::i18n::texts::tui_toast_invalid_json(&e.to_string()))?;
+        let effective_settings = ProviderService::build_effective_live_snapshot(
+            &self.app_type,
+            &provider,
+            Some(snippet),
+            true,
+        )
+        .map_err(|e| e.to_string())?;
+
+        if let Some(settings_value) = provider_value
             .as_object_mut()
             .and_then(|obj| obj.get_mut("settingsConfig"))
-        else {
-            return Ok(provider_value);
-        };
-
-        match self.app_type {
-            AppType::Claude | AppType::Gemini => {
-                let mut common: Value = serde_json::from_str(snippet).map_err(|e| {
-                    crate::cli::i18n::texts::common_config_snippet_invalid_json(&e.to_string())
-                })?;
-                if !common.is_object() {
-                    return Err(
-                        crate::cli::i18n::texts::common_config_snippet_not_object().to_string()
-                    );
-                }
-
-                merge_json_values(&mut common, settings_value);
-                *settings_value = common;
-            }
-            AppType::OpenCode | AppType::OpenClaw => {}
-            AppType::Codex => {
-                if !settings_value.is_object() {
-                    *settings_value = json!({});
-                }
-                let settings_obj = settings_value
-                    .as_object_mut()
-                    .expect("settingsConfig must be a JSON object");
-                let base_config = settings_obj
-                    .get("config")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                let merged_config = merge_codex_common_config_snippet(base_config, snippet)?;
-                settings_obj.insert("config".to_string(), Value::String(merged_config));
-            }
+        {
+            *settings_value = effective_settings;
         }
 
         Ok(provider_value)
+    }
+
+    fn update_provider_meta(&self, provider_obj: &mut serde_json::Map<String, Value>) {
+        let should_write_common_config_meta = self.should_write_common_config_meta();
+        let should_write_claude_api_format = matches!(
+            self.claude_api_format,
+            ClaudeApiFormat::OpenAiChat | ClaudeApiFormat::OpenAiResponses
+        ) && matches!(self.app_type, AppType::Claude)
+            && !self.is_claude_official_provider();
+
+        if !should_write_common_config_meta
+            && !should_write_claude_api_format
+            && !provider_obj.get("meta").is_some_and(Value::is_object)
+        {
+            return;
+        }
+
+        let meta_value = provider_obj
+            .entry("meta".to_string())
+            .or_insert_with(|| json!({}));
+        if !meta_value.is_object() {
+            *meta_value = json!({});
+        }
+
+        let Some(meta_obj) = meta_value.as_object_mut() else {
+            return;
+        };
+
+        meta_obj.remove("applyCommonConfig");
+        if should_write_common_config_meta {
+            meta_obj.insert(
+                "commonConfigEnabled".to_string(),
+                json!(if matches!(self.app_type, AppType::OpenClaw) {
+                    false
+                } else {
+                    self.include_common_config
+                }),
+            );
+        } else {
+            meta_obj.remove("commonConfigEnabled");
+        }
+
+        if matches!(self.app_type, AppType::Claude) {
+            match self.claude_api_format {
+                _ if self.is_claude_official_provider() => {
+                    meta_obj.remove("apiFormat");
+                }
+                ClaudeApiFormat::Anthropic => {
+                    meta_obj.remove("apiFormat");
+                }
+                ClaudeApiFormat::OpenAiChat => {
+                    meta_obj.insert("apiFormat".to_string(), json!("openai_chat"));
+                }
+                ClaudeApiFormat::OpenAiResponses => {
+                    meta_obj.insert("apiFormat".to_string(), json!("openai_responses"));
+                }
+            }
+        }
+
+        if meta_obj.is_empty() {
+            provider_obj.remove("meta");
+        }
+    }
+
+    pub(crate) fn should_strip_common_config_from_applied_settings_json(&self) -> bool {
+        self.include_common_config && self.should_write_common_config_meta()
+    }
+
+    fn should_write_common_config_meta(&self) -> bool {
+        matches!(self.app_type, AppType::OpenClaw)
+            || !self.mode.is_edit()
+            || self.include_common_config_touched
+            || self.has_common_config_meta()
+    }
+
+    fn has_common_config_meta(&self) -> bool {
+        self.extra
+            .get("meta")
+            .and_then(Value::as_object)
+            .is_some_and(|meta| {
+                meta.contains_key("commonConfigEnabled") || meta.contains_key("applyCommonConfig")
+            })
     }
 }
 
@@ -522,29 +549,21 @@ pub(crate) fn strip_common_config_from_settings(
 
     match app_type {
         AppType::Claude | AppType::Gemini => {
-            let common: Value = serde_json::from_str(snippet).map_err(|e| {
-                crate::cli::i18n::texts::common_config_snippet_invalid_json(&e.to_string())
-            })?;
-            if !common.is_object() {
-                return Err(crate::cli::i18n::texts::common_config_snippet_not_object().to_string());
-            }
-
-            strip_common_json_values(settings_value, &common);
+            *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
+                app_type,
+                settings_value,
+                snippet,
+            )
+            .map_err(|e| e.to_string())?;
         }
         AppType::OpenCode | AppType::OpenClaw => {}
         AppType::Codex => {
-            if !settings_value.is_object() {
-                return Ok(());
-            }
-            let settings_obj = settings_value
-                .as_object_mut()
-                .expect("settingsConfig must be a JSON object");
-            let current_config = settings_obj
-                .get("config")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            let stripped = strip_codex_common_config_snippet(current_config, snippet)?;
-            settings_obj.insert("config".to_string(), Value::String(stripped));
+            *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
+                app_type,
+                settings_value,
+                snippet,
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
 
@@ -611,60 +630,5 @@ fn set_or_remove_u64(obj: &mut serde_json::Map<String, Value>, key: &str, raw: &
         obj.insert(key.to_string(), json!(value));
     } else {
         obj.remove(key);
-    }
-}
-
-fn strip_common_json_values(target: &mut Value, common: &Value) {
-    if let (Value::Object(target_obj), Value::Object(common_obj)) = (target, common) {
-        let keys_to_remove = common_obj
-            .iter()
-            .filter_map(|(key, common_value)| {
-                let Some(target_value) = target_obj.get_mut(key) else {
-                    return None;
-                };
-
-                if value_matches_common(target_value, common_value) {
-                    return Some(key.clone());
-                }
-
-                if target_value.is_object() && common_value.is_object() {
-                    strip_common_json_values(target_value, common_value);
-                    if target_value
-                        .as_object()
-                        .map(|obj| obj.is_empty())
-                        .unwrap_or(false)
-                    {
-                        return Some(key.clone());
-                    }
-                }
-                None
-            })
-            .collect::<Vec<_>>();
-
-        for key in keys_to_remove {
-            target_obj.remove(&key);
-        }
-    }
-}
-
-fn value_matches_common(value: &Value, common: &Value) -> bool {
-    match (value, common) {
-        (Value::Object(value_obj), Value::Object(common_obj)) => {
-            value_obj.len() == common_obj.len()
-                && common_obj.iter().all(|(key, common_value)| {
-                    value_obj
-                        .get(key)
-                        .map(|value_item| value_matches_common(value_item, common_value))
-                        .unwrap_or(false)
-                })
-        }
-        (Value::Array(value_arr), Value::Array(common_arr)) => {
-            value_arr.len() == common_arr.len()
-                && value_arr
-                    .iter()
-                    .zip(common_arr.iter())
-                    .all(|(value_item, common_item)| value_matches_common(value_item, common_item))
-        }
-        _ => value == common,
     }
 }

@@ -342,8 +342,8 @@ command = "echo"
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("disable_response_storage = true"),
-        "common snippet should still be present after add"
+        !config_text.contains("disable_response_storage = true"),
+        "new missing-meta providers should not apply common config implicitly after migration"
     );
     assert!(
         config_text.contains("[mcp_servers.echo-server]"),

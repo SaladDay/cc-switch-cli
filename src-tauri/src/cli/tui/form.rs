@@ -287,6 +287,7 @@ pub struct ProviderAddFormState {
     pub website_url: TextInput,
     pub notes: TextInput,
     pub include_common_config: bool,
+    include_common_config_touched: bool,
     pub json_scroll: usize,
     pub codex_preview_section: CodexPreviewSection,
     pub codex_auth_scroll: usize,
