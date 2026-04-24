@@ -314,10 +314,17 @@ cc-switch skills sync-method [m]     # Show/set sync method (auto|symlink|copy)
 cc-switch skills scan-unmanaged      # Scan unmanaged skills in app dirs
 cc-switch skills import-from-apps    # Import unmanaged skills into SSOT
 cc-switch skills repos list          # List skill repositories
-cc-switch skills repos add <repo>    # Add repo (owner/name[@branch] or GitHub URL)
+cc-switch skills repos add <repo> [--token-env ENV] # Add repo (owner/name[@branch] or GitHub URL)
 cc-switch skills repos remove <repo> # Remove repo (owner/name or GitHub URL)
 cc-switch skills repos enable <repo> # Enable repo without changing branch
 cc-switch skills repos disable <repo> # Disable repo without changing branch
+```
+
+Private GitHub repo example:
+
+```bash
+export GITHUB_TOKEN_WORK=ghp_xxx
+cc-switch skills repos add your-org/private-skills@main --token-env GITHUB_TOKEN_WORK
 ```
 
 ### ⚙️ Configuration Management

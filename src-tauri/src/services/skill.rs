@@ -40,6 +40,8 @@ pub struct SkillRepo {
     pub name: String,
     /// 分支 (默认 "main")
     pub branch: String,
+    /// GitHub token 对应的环境变量名（可选）
+    pub token_env: Option<String>,
     /// 是否启用
     pub enabled: bool,
 }
@@ -73,24 +75,28 @@ impl Default for SkillStore {
                     owner: "anthropics".to_string(),
                     name: "skills".to_string(),
                     branch: "main".to_string(),
+                    token_env: None,
                     enabled: true,
                 },
                 SkillRepo {
                     owner: "ComposioHQ".to_string(),
                     name: "awesome-claude-skills".to_string(),
                     branch: "master".to_string(),
+                    token_env: None,
                     enabled: true,
                 },
                 SkillRepo {
                     owner: "cexll".to_string(),
                     name: "myclaude".to_string(),
                     branch: "master".to_string(),
+                    token_env: None,
                     enabled: true,
                 },
                 SkillRepo {
                     owner: "JimLiu".to_string(),
                     name: "baoyu-skills".to_string(),
                     branch: "main".to_string(),
+                    token_env: None,
                     enabled: true,
                 },
             ],
@@ -365,11 +371,45 @@ fn merge_repos_from_lock(
                     owner: info.owner.clone(),
                     name: info.repo.clone(),
                     branch: info.branch.clone().unwrap_or_else(|| "HEAD".to_string()),
+                    token_env: None,
                     enabled: true,
                 });
             }
         }
     }
+}
+
+fn merge_repo_update(existing: &SkillRepo, incoming: SkillRepo) -> SkillRepo {
+    SkillRepo {
+        token_env: incoming.token_env.or_else(|| existing.token_env.clone()),
+        ..incoming
+    }
+}
+
+fn repo_for_discoverable(repos: &[SkillRepo], discoverable: &DiscoverableSkill) -> SkillRepo {
+    repos
+        .iter()
+        .find(|repo| {
+            repo.owner == discoverable.repo_owner
+                && repo.name == discoverable.repo_name
+                && repo.branch == discoverable.repo_branch
+        })
+        .cloned()
+        .or_else(|| {
+            repos
+                .iter()
+                .find(|repo| {
+                    repo.owner == discoverable.repo_owner && repo.name == discoverable.repo_name
+                })
+                .cloned()
+        })
+        .unwrap_or_else(|| SkillRepo {
+            owner: discoverable.repo_owner.clone(),
+            name: discoverable.repo_name.clone(),
+            branch: discoverable.repo_branch.clone(),
+            token_env: None,
+            enabled: true,
+        })
 }
 
 // ============================================================================
@@ -853,7 +893,8 @@ impl SkillService {
             .iter()
             .position(|r| r.owner == repo.owner && r.name == repo.name)
         {
-            index.repos[pos] = repo;
+            let existing = index.repos[pos].clone();
+            index.repos[pos] = merge_repo_update(&existing, repo);
         } else {
             index.repos.push(repo);
         }
@@ -1023,12 +1064,7 @@ impl SkillService {
         let ssot_dir = Self::get_ssot_dir()?;
         let dest = ssot_dir.join(&install_name);
         if !dest.exists() {
-            let repo = SkillRepo {
-                owner: discoverable.repo_owner.clone(),
-                name: discoverable.repo_name.clone(),
-                branch: discoverable.repo_branch.clone(),
-                enabled: true,
-            };
+            let repo = repo_for_discoverable(&index.repos, &discoverable);
 
             let temp_dir = timeout(
                 std::time::Duration::from_secs(60),
@@ -1318,5 +1354,77 @@ impl SkillService {
         Self::deduplicate_skills(&mut out);
         out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_repo_update, repo_for_discoverable, DiscoverableSkill, SkillRepo};
+
+    fn sample_repo(token_env: Option<&str>, branch: &str) -> SkillRepo {
+        SkillRepo {
+            owner: "foo".to_string(),
+            name: "bar".to_string(),
+            branch: branch.to_string(),
+            token_env: token_env.map(ToString::to_string),
+            enabled: true,
+        }
+    }
+
+    fn sample_discoverable(branch: &str) -> DiscoverableSkill {
+        DiscoverableSkill {
+            key: format!("foo/bar:skill-{branch}"),
+            name: "skill".to_string(),
+            description: String::new(),
+            directory: "skill".to_string(),
+            readme_url: None,
+            repo_owner: "foo".to_string(),
+            repo_name: "bar".to_string(),
+            repo_branch: branch.to_string(),
+        }
+    }
+
+    #[test]
+    fn merge_repo_update_preserves_existing_token_env_when_new_value_missing() {
+        let existing = sample_repo(Some("GITHUB_TOKEN_WORK"), "main");
+        let incoming = sample_repo(None, "release");
+
+        let merged = merge_repo_update(&existing, incoming);
+
+        assert_eq!(merged.branch, "release");
+        assert_eq!(merged.token_env.as_deref(), Some("GITHUB_TOKEN_WORK"));
+    }
+
+    #[test]
+    fn merge_repo_update_replaces_existing_token_env_when_new_value_present() {
+        let existing = sample_repo(Some("OLD_TOKEN"), "main");
+        let incoming = sample_repo(Some("NEW_TOKEN"), "main");
+
+        let merged = merge_repo_update(&existing, incoming);
+
+        assert_eq!(merged.token_env.as_deref(), Some("NEW_TOKEN"));
+    }
+
+    #[test]
+    fn repo_for_discoverable_prefers_exact_branch_match_with_token_env() {
+        let repos = vec![
+            sample_repo(Some("TOKEN_MAIN"), "main"),
+            sample_repo(None, "dev"),
+        ];
+
+        let repo = repo_for_discoverable(&repos, &sample_discoverable("main"));
+
+        assert_eq!(repo.branch, "main");
+        assert_eq!(repo.token_env.as_deref(), Some("TOKEN_MAIN"));
+    }
+
+    #[test]
+    fn repo_for_discoverable_falls_back_to_same_repo_when_branch_differs() {
+        let repos = vec![sample_repo(Some("TOKEN_MAIN"), "main")];
+
+        let repo = repo_for_discoverable(&repos, &sample_discoverable("release"));
+
+        assert_eq!(repo.branch, "main");
+        assert_eq!(repo.token_env.as_deref(), Some("TOKEN_MAIN"));
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use reqwest::header::{HeaderValue, ACCEPT};
 
 impl SkillService {
     pub(super) fn merge_local_ssot_skills(
@@ -223,12 +224,7 @@ impl SkillService {
 
         let mut last_error: Option<AppError> = None;
         for branch in branches {
-            let url = format!(
-                "https://github.com/{}/{}/archive/refs/heads/{}.zip",
-                repo.owner, repo.name, branch
-            );
-
-            match self.download_and_extract(&url, &temp_path).await {
+            match self.download_and_extract(repo, branch, &temp_path).await {
                 Ok(()) => return Ok(temp_path),
                 Err(e) => {
                     last_error = Some(e);
@@ -248,10 +244,32 @@ impl SkillService {
 
     pub(super) async fn download_and_extract(
         &self,
-        url: &str,
+        repo: &SkillRepo,
+        branch: &str,
         dest: &Path,
     ) -> Result<(), AppError> {
-        let response = self.http_client.get(url).send().await.map_err(|e| {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/zipball/{}",
+            repo.owner, repo.name, branch
+        );
+
+        let mut request = self
+            .http_client
+            .get(&url)
+            .header(
+                ACCEPT,
+                HeaderValue::from_static("application/vnd.github+json"),
+            )
+            .header(
+                "X-GitHub-Api-Version",
+                HeaderValue::from_static("2022-11-28"),
+            );
+
+        if let Some(token) = Self::resolve_repo_token(repo)? {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await.map_err(|e| {
             AppError::localized(
                 "skills.download_failed",
                 format!("下载失败: {e}"),
@@ -341,6 +359,33 @@ impl SkillService {
         }
 
         Ok(())
+    }
+
+    fn resolve_repo_token(repo: &SkillRepo) -> Result<Option<String>, AppError> {
+        let Some(token_env) = repo
+            .token_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+
+        let token = std::env::var(token_env).map_err(|_| {
+            AppError::InvalidInput(format!(
+                "仓库 {}/{} 需要环境变量 {}，但当前未设置",
+                repo.owner, repo.name, token_env
+            ))
+        })?;
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(AppError::InvalidInput(format!(
+                "环境变量 {} 已设置，但内容为空",
+                token_env
+            )));
+        }
+
+        Ok(Some(token))
     }
 
     pub(super) fn scan_skill_dirs(root: &Path) -> Result<Vec<PathBuf>, AppError> {

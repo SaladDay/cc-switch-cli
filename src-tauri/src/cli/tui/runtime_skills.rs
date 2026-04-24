@@ -108,6 +108,7 @@ pub(crate) fn parse_repo_spec(raw: &str) -> Result<SkillRepo, AppError> {
         owner: owner.to_string(),
         name: name.to_string(),
         branch: branch.unwrap_or("main").to_string(),
+        token_env: None,
         enabled: true,
     })
 }

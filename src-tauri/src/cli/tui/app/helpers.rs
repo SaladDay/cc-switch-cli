@@ -1029,6 +1029,10 @@ pub(crate) fn visible_skills_repos<'a>(
                 repo.owner.to_lowercase().contains(q)
                     || repo.name.to_lowercase().contains(q)
                     || repo.branch.to_lowercase().contains(q)
+                    || repo
+                        .token_env
+                        .as_deref()
+                        .is_some_and(|token_env| token_env.to_lowercase().contains(q))
             }
         })
         .collect()

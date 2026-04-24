@@ -201,6 +201,7 @@ fn schema_migration_adds_missing_columns_for_providers() {
         ("prompts", "updated_at"),
         ("skills", "installed_at"),
         ("skill_repos", "enabled"),
+        ("skill_repos", "token_env"),
     ] {
         assert!(
             Database::has_column(&conn, table, column).expect("check column"),
@@ -265,6 +266,10 @@ fn schema_migration_aligns_column_defaults_and_types() {
         normalize_default(&skill_repo_enabled.default).as_deref(),
         Some("1")
     );
+
+    let token_env = get_column_info(&conn, "skill_repos", "token_env");
+    assert_eq!(token_env.r#type, "TEXT");
+    assert_eq!(token_env.notnull, 0);
 }
 
 #[test]

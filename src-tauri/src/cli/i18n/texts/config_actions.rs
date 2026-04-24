@@ -165,9 +165,9 @@ pub fn tui_skills_repos_title() -> &'static str {
 
 pub fn tui_skills_repos_hint() -> &'static str {
     if is_chinese() {
-        "技能发现会从这里已启用的仓库加载列表。"
+        "技能发现会从这里已启用的仓库加载列表。私有 GitHub 仓库请使用 CLI 绑定 token 环境变量：cc-switch skills repos add <repo> --token-env ENV"
     } else {
-        "Skill discovery loads results from the repositories enabled here."
+        "Skill discovery loads results from the repositories enabled here. Use the CLI to bind a token env var for private GitHub repos: cc-switch skills repos add <repo> --token-env ENV"
     }
 }
 
@@ -189,9 +189,9 @@ pub fn tui_skills_repos_add_title() -> &'static str {
 
 pub fn tui_skills_repos_add_prompt() -> &'static str {
     if is_chinese() {
-        "输入 GitHub 仓库（owner/name，可选 @branch）或完整 URL："
+        "输入 GitHub 仓库（owner/name，可选 @branch）或完整 URL：\n私有仓库的 token_env 仅支持 CLI：cc-switch skills repos add <repo> --token-env ENV"
     } else {
-        "Enter a GitHub repository (owner/name, optional @branch) or a full URL:"
+        "Enter a GitHub repository (owner/name, optional @branch) or a full URL:\nPrivate repos must bind token_env via CLI: cc-switch skills repos add <repo> --token-env ENV"
     }
 }
 

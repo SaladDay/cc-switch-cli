@@ -55,6 +55,10 @@ pub(super) fn render_skills_repos(
                 repo.owner.to_lowercase().contains(q)
                     || repo.name.to_lowercase().contains(q)
                     || repo.branch.to_lowercase().contains(q)
+                    || repo
+                        .token_env
+                        .as_deref()
+                        .is_some_and(|token_env| token_env.to_lowercase().contains(q))
             }
         })
         .collect::<Vec<_>>();
@@ -73,11 +77,17 @@ pub(super) fn render_skills_repos(
         Cell::from(""),
         Cell::from(texts::tui_header_repo()),
         Cell::from(texts::tui_header_branch()),
+        Cell::from(texts::tui_header_auth()),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     let rows = visible.iter().map(|repo| {
         let repo_name = format!("{}/{}", repo.owner, repo.name);
+        let auth = repo
+            .token_env
+            .as_deref()
+            .map(|token_env| format!("env:{token_env}"))
+            .unwrap_or_default();
         Row::new(vec![
             Cell::from(if repo.enabled {
                 texts::tui_marker_active()
@@ -86,6 +96,7 @@ pub(super) fn render_skills_repos(
             }),
             Cell::from(repo_name),
             Cell::from(repo.branch.clone()),
+            Cell::from(auth),
         ])
     });
 
@@ -93,7 +104,8 @@ pub(super) fn render_skills_repos(
         rows,
         [
             Constraint::Length(2),
-            Constraint::Percentage(70),
+            Constraint::Percentage(55),
+            Constraint::Percentage(15),
             Constraint::Percentage(30),
         ],
     )
