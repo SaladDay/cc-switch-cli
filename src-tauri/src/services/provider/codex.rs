@@ -21,6 +21,11 @@ impl ProviderService {
         root.remove("base_url");
         // Remove entire model_providers table (provider-specific configuration)
         root.remove("model_providers");
+        // Codex writes trust decisions for local workspaces at runtime. These
+        // must stay with the provider snapshot being backfilled, not become
+        // common config that is merged into every provider.
+        root.remove("projects");
+        root.remove("trusted_workspaces");
 
         // Clean up multiple empty lines (keep at most one blank line).
         let mut cleaned = String::new();
@@ -247,6 +252,7 @@ impl ProviderService {
     pub(super) fn prepare_switch_codex(
         config: &mut MultiAppConfig,
         provider_id: &str,
+        effective_current_provider: Option<&str>,
     ) -> Result<Provider, AppError> {
         let provider = config
             .get_manager(&AppType::Codex)
@@ -262,7 +268,7 @@ impl ProviderService {
                 )
             })?;
 
-        Self::backfill_codex_current(config, provider_id)?;
+        Self::backfill_codex_current(config, provider_id, effective_current_provider)?;
 
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             manager.current = provider_id.to_string();
@@ -274,11 +280,9 @@ impl ProviderService {
     pub(super) fn backfill_codex_current(
         config: &mut MultiAppConfig,
         next_provider: &str,
+        effective_current_provider: Option<&str>,
     ) -> Result<(), AppError> {
-        let current_id = config
-            .get_manager(&AppType::Codex)
-            .map(|m| m.current.clone())
-            .unwrap_or_default();
+        let current_id = effective_current_provider.unwrap_or_default();
 
         if current_id.is_empty() || current_id == next_provider {
             return Ok(());
@@ -292,7 +296,7 @@ impl ProviderService {
 
         let current_provider = config
             .get_manager(&AppType::Codex)
-            .and_then(|manager| manager.providers.get(&current_id))
+            .and_then(|manager| manager.providers.get(current_id))
             .cloned();
         let Some(current_provider) = current_provider else {
             return Ok(());
@@ -331,7 +335,7 @@ impl ProviderService {
         };
 
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
-            if let Some(current) = manager.providers.get_mut(&current_id) {
+            if let Some(current) = manager.providers.get_mut(current_id) {
                 current.settings_config = settings_config;
             }
         }

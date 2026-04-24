@@ -22,6 +22,7 @@ impl ProviderService {
     pub(super) fn prepare_switch_gemini(
         config: &mut MultiAppConfig,
         provider_id: &str,
+        effective_current_provider: Option<&str>,
     ) -> Result<Provider, AppError> {
         let provider = config
             .get_manager(&AppType::Gemini)
@@ -37,7 +38,7 @@ impl ProviderService {
                 )
             })?;
 
-        Self::backfill_gemini_current(config, provider_id)?;
+        Self::backfill_gemini_current(config, provider_id, effective_current_provider)?;
 
         if let Some(manager) = config.get_manager_mut(&AppType::Gemini) {
             manager.current = provider_id.to_string();
@@ -128,6 +129,7 @@ impl ProviderService {
     pub(super) fn backfill_gemini_current(
         config: &mut MultiAppConfig,
         next_provider: &str,
+        effective_current_provider: Option<&str>,
     ) -> Result<(), AppError> {
         use crate::gemini_config::{
             env_to_json, get_gemini_env_path, get_gemini_settings_path, read_gemini_env,
@@ -138,17 +140,14 @@ impl ProviderService {
             return Ok(());
         }
 
-        let current_id = config
-            .get_manager(&AppType::Gemini)
-            .map(|m| m.current.clone())
-            .unwrap_or_default();
+        let current_id = effective_current_provider.unwrap_or_default();
         if current_id.is_empty() || current_id == next_provider {
             return Ok(());
         }
 
         let current_provider = config
             .get_manager(&AppType::Gemini)
-            .and_then(|manager| manager.providers.get(&current_id))
+            .and_then(|manager| manager.providers.get(current_id))
             .cloned();
         let Some(current_provider) = current_provider else {
             return Ok(());
@@ -174,7 +173,7 @@ impl ProviderService {
         )?;
 
         if let Some(manager) = config.get_manager_mut(&AppType::Gemini) {
-            if let Some(current) = manager.providers.get_mut(&current_id) {
+            if let Some(current) = manager.providers.get_mut(current_id) {
                 current.settings_config = live;
             }
         }

@@ -1599,6 +1599,11 @@ impl ProviderService {
 
         let app_type_clone = app_type.clone();
         let provider_id_owned = provider_id.to_string();
+        let effective_current_provider = if app_type.is_additive_mode() {
+            None
+        } else {
+            crate::settings::get_effective_current_provider(&state.db, &app_type)?
+        };
 
         Self::run_transaction(state, move |config| {
             if app_type_clone.is_additive_mode() {
@@ -1634,9 +1639,21 @@ impl ProviderService {
 
             let backup = Self::capture_live_snapshot(&app_type_clone)?;
             let provider = match app_type_clone {
-                AppType::Codex => Self::prepare_switch_codex(config, &provider_id_owned)?,
-                AppType::Claude => Self::prepare_switch_claude(config, &provider_id_owned)?,
-                AppType::Gemini => Self::prepare_switch_gemini(config, &provider_id_owned)?,
+                AppType::Codex => Self::prepare_switch_codex(
+                    config,
+                    &provider_id_owned,
+                    effective_current_provider.as_deref(),
+                )?,
+                AppType::Claude => Self::prepare_switch_claude(
+                    config,
+                    &provider_id_owned,
+                    effective_current_provider.as_deref(),
+                )?,
+                AppType::Gemini => Self::prepare_switch_gemini(
+                    config,
+                    &provider_id_owned,
+                    effective_current_provider.as_deref(),
+                )?,
                 AppType::OpenCode => unreachable!("additive mode handled above"),
                 AppType::OpenClaw => unreachable!("additive mode handled above"),
             };

@@ -554,6 +554,133 @@ fn codex_switch_preserves_base_url_and_wire_api_across_multiple_switches() {
     );
 }
 
+#[test]
+#[serial]
+fn codex_switch_backfills_effective_current_and_preserves_runtime_projects() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "p2".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-one-stale" },
+                    "config": "model_provider = \"one\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.one]\nbase_url = \"https://api.one.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Provider Two".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-two" },
+                    "config": "model_provider = \"two\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.two]\nbase_url = \"https://api.two.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state
+        .db
+        .set_current_provider(AppType::Codex.as_str(), "p1")
+        .expect("set db current provider to p1");
+
+    crate::config::write_json_file(
+        &get_codex_auth_path(),
+        &json!({ "OPENAI_API_KEY": "sk-one-live" }),
+    )
+    .expect("seed live auth.json");
+    std::fs::write(
+        get_codex_config_path(),
+        r#"model_provider = "one"
+model = "gpt-5.2-codex"
+
+[model_providers.one]
+base_url = "https://api.one-live.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[projects."/tmp/codex-project-a"]
+trust_level = "trusted"
+"#,
+    )
+    .expect("seed live config.toml with runtime project trust");
+
+    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
+
+    let cfg = state.config.read().expect("read config after switch");
+    let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
+    let p1_stored = manager
+        .providers
+        .get("p1")
+        .expect("p1 exists")
+        .settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .expect("p1 config should be string");
+    assert!(
+        p1_stored.contains("[projects.\"/tmp/codex-project-a\"]"),
+        "effective current provider should receive runtime project trust"
+    );
+    assert!(
+        p1_stored.contains("base_url = \"https://api.one-live.example/v1\""),
+        "effective current provider should receive live provider settings"
+    );
+    assert!(
+        cfg.common_config_snippets
+            .codex
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty(),
+        "runtime project trust should not be auto-extracted as common config"
+    );
+    drop(cfg);
+
+    let db_p1 = state
+        .db
+        .get_provider_by_id("p1", AppType::Codex.as_str())
+        .expect("read p1 from db")
+        .expect("p1 should exist in db");
+    let db_p1_config = db_p1
+        .settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .expect("db p1 config should be string");
+    assert!(
+        db_p1_config.contains("[projects.\"/tmp/codex-project-a\"]"),
+        "state.save should not overwrite the effective-current backfill with stale memory"
+    );
+
+    let p2_live = std::fs::read_to_string(get_codex_config_path()).expect("read p2 live config");
+    assert!(
+        !p2_live.contains("/tmp/codex-project-a"),
+        "target provider live config should not absorb source provider runtime project trust"
+    );
+
+    ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
+    let p1_live = std::fs::read_to_string(get_codex_config_path()).expect("read p1 live config");
+    assert!(
+        p1_live.contains("[projects.\"/tmp/codex-project-a\"]"),
+        "runtime project trust should survive switching away and back"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn switch_updates_running_proxy_takeover_target_without_restart() {

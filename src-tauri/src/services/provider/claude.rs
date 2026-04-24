@@ -136,6 +136,7 @@ impl ProviderService {
     pub(super) fn prepare_switch_claude(
         config: &mut MultiAppConfig,
         provider_id: &str,
+        effective_current_provider: Option<&str>,
     ) -> Result<Provider, AppError> {
         let provider = config
             .get_manager(&AppType::Claude)
@@ -151,7 +152,7 @@ impl ProviderService {
                 )
             })?;
 
-        Self::backfill_claude_current(config, provider_id)?;
+        Self::backfill_claude_current(config, provider_id, effective_current_provider)?;
 
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
             manager.current = provider_id.to_string();
@@ -163,16 +164,14 @@ impl ProviderService {
     pub(super) fn backfill_claude_current(
         config: &mut MultiAppConfig,
         next_provider: &str,
+        effective_current_provider: Option<&str>,
     ) -> Result<(), AppError> {
         let settings_path = get_claude_settings_path();
         if !settings_path.exists() {
             return Ok(());
         }
 
-        let current_id = config
-            .get_manager(&AppType::Claude)
-            .map(|m| m.current.clone())
-            .unwrap_or_default();
+        let current_id = effective_current_provider.unwrap_or_default();
         if current_id.is_empty() || current_id == next_provider {
             return Ok(());
         }
@@ -187,7 +186,7 @@ impl ProviderService {
             }
         }
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
-            if let Some(current) = manager.providers.get_mut(&current_id) {
+            if let Some(current) = manager.providers.get_mut(current_id) {
                 current.settings_config = live;
             }
         }
