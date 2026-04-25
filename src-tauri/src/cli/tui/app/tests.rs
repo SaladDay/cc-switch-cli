@@ -919,6 +919,38 @@ mod tests {
     }
 
     #[test]
+    fn opencode_providers_s_key_adds_or_removes_live_config_membership() {
+        let mut app = App::new(Some(AppType::OpenCode));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"options":{"baseURL":"https://example.com"}}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: false,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("main".to_string()),
+            default_model_id: None,
+        });
+
+        let add_action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(add_action, Action::ProviderSwitch { id } if id == "p1"));
+
+        data.providers.rows[0].is_in_config = true;
+        let remove_action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(remove_action, Action::ProviderRemoveFromConfig { id } if id == "p1"));
+    }
+
+    #[test]
     fn openclaw_providers_e_key_allows_editing_saved_only_provider() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Providers;

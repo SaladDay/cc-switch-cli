@@ -264,34 +264,43 @@ fn header_openclaw_truncates_long_default_model_without_fake_proxy_gap() {
 }
 
 #[test]
-fn header_opencode_hides_proxy_badge_and_keeps_current_provider_badge() {
+fn header_opencode_hides_proxy_badge_and_reports_config_membership() {
     let _ctx = TestContext::new();
     let _lang = use_test_language(Language::English);
     let _no_color = super::tests::EnvGuard::remove("NO_COLOR");
 
     let app = App::new(Some(AppType::OpenCode));
     let mut data = super::tests::minimal_data(&app.app_type);
-    data.providers.rows[0].is_current = true;
+    data.providers.current_id.clear();
+    data.providers.rows[0].is_current = false;
+    data.providers.rows[0].is_in_config = true;
 
     let header = super::tests::line_at(&super::tests::render(&app, &data), 1);
 
-    assert!(header.contains("Provider: Demo Provider"), "{header}");
+    assert!(
+        header.contains("OpenCode Config: 1/1 in config"),
+        "{header}"
+    );
     assert_proxy_hidden_en(&header);
 }
 
 #[test]
-fn header_opencode_hides_proxy_badge_and_keeps_none_provider_badge() {
+fn header_opencode_hides_proxy_badge_and_reports_empty_config_membership() {
     let _ctx = TestContext::new();
     let _lang = use_test_language(Language::English);
     let _no_color = super::tests::EnvGuard::remove("NO_COLOR");
 
     let app = App::new(Some(AppType::OpenCode));
-    let header = super::tests::line_at(
-        &super::tests::render(&app, &super::tests::minimal_data(&app.app_type)),
-        1,
-    );
+    let mut data = super::tests::minimal_data(&app.app_type);
+    data.providers.current_id.clear();
+    data.providers.rows[0].is_current = false;
+    data.providers.rows[0].is_in_config = false;
+    let header = super::tests::line_at(&super::tests::render(&app, &data), 1);
 
-    assert!(header.contains("Provider: None"), "{header}");
+    assert!(
+        header.contains("OpenCode Config: 0/1 in config"),
+        "{header}"
+    );
     assert_proxy_hidden_en(&header);
 }
 

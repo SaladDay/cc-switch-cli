@@ -206,6 +206,14 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
     } else {
         HashSet::new()
     };
+    let opencode_live_ids = if matches!(app_type, AppType::OpenCode) {
+        crate::opencode_config::get_providers()?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
     let openclaw_default_model = if matches!(app_type, AppType::OpenClaw) {
         crate::openclaw_config::get_default_model()?
     } else {
@@ -230,6 +238,7 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
                 api_url: extract_api_url(&provider.settings_config, app_type),
                 is_current: id == current_id,
                 is_in_config: match app_type {
+                    AppType::OpenCode => opencode_live_ids.contains(&id),
                     AppType::OpenClaw => openclaw_live_ids.contains(&id),
                     _ => true,
                 },
@@ -723,6 +732,14 @@ mod tests {
     }
 
     impl SettingsGuard {
+        fn with_opencode_dir(path: &Path) -> Self {
+            let previous = get_settings();
+            let mut settings = AppSettings::default();
+            settings.opencode_config_dir = Some(path.display().to_string());
+            update_settings(settings).expect("set opencode override dir");
+            Self { previous }
+        }
+
         fn with_openclaw_dir(path: &Path) -> Self {
             let previous = get_settings();
             let mut settings = AppSettings::default();
@@ -780,6 +797,87 @@ mod tests {
         assert_eq!(
             extract_api_url(&settings, &AppType::OpenCode),
             Some("https://opencode.example".to_string())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_opencode_marks_live_config_membership() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let opencode_dir = temp.path().join("opencode");
+        std::fs::create_dir_all(&opencode_dir).expect("create opencode dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_opencode_dir(&opencode_dir);
+
+        crate::opencode_config::set_provider(
+            "in-config",
+            json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "baseURL": "https://live.example.com/v1"
+                },
+                "models": {
+                    "main": {"name": "Main"}
+                }
+            }),
+        )
+        .expect("seed live opencode provider");
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenCode)
+                .expect("opencode manager");
+            manager.providers.insert(
+                "in-config".to_string(),
+                Provider::with_id(
+                    "in-config".to_string(),
+                    "In Config".to_string(),
+                    json!({
+                        "options": {
+                            "baseURL": "https://saved-live.example.com/v1"
+                        }
+                    }),
+                    None,
+                ),
+            );
+            manager.providers.insert(
+                "saved-only".to_string(),
+                Provider::with_id(
+                    "saved-only".to_string(),
+                    "Saved Only".to_string(),
+                    json!({
+                        "options": {
+                            "baseURL": "https://saved.example.com/v1"
+                        }
+                    }),
+                    None,
+                ),
+            );
+        }
+        state.save().expect("persist opencode providers");
+
+        let snapshot = load_providers(&state, &AppType::OpenCode).expect("load opencode rows");
+        let in_config = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "in-config")
+            .expect("in-config provider row");
+        let saved_only = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "saved-only")
+            .expect("saved-only provider row");
+
+        assert!(in_config.is_in_config);
+        assert!(!in_config.is_current);
+        assert!(!saved_only.is_in_config);
+        assert!(saved_only.is_saved);
+        assert_eq!(
+            saved_only.api_url.as_deref(),
+            Some("https://saved.example.com/v1")
         );
     }
 

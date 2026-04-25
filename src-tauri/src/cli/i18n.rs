@@ -565,9 +565,9 @@ pub mod texts {
 
     pub fn tui_help_text() -> &'static str {
         if is_chinese() {
-            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，s 切换，a 添加，e 编辑，d 删除，t 测速，c 健康检查\n- 供应商详情：s 切换，e 编辑，t 测速，c 健康检查\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：Enter 查看，a 激活，x 取消激活(当前)，e 编辑，d 删除\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
+            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，s 切换/添加移除，a 添加，e 编辑，d 删除，t 测速，c 健康检查\n- 供应商详情：s 切换/添加移除，e 编辑，t 测速，c 健康检查\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：Enter 查看，a 激活，x 取消激活(当前)，e 编辑，d 删除\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
         } else {
-            "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, s switch, a add, e edit, d delete, t speedtest, c stream check\n- Provider Detail: s switch, e edit, t speedtest, c stream check\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: Enter view, a activate, x deactivate active, e edit, d delete\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
+            "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, s switch/add-remove, a add, e edit, d delete, t speedtest, c stream check\n- Provider Detail: s switch/add-remove, e edit, t speedtest, c stream check\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: Enter view, a activate, x deactivate active, e edit, d delete\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
         }
     }
 
@@ -1403,6 +1403,54 @@ pub mod texts {
             "状态"
         } else {
             "Status"
+        }
+    }
+
+    pub fn tui_opencode_config_status_label() -> &'static str {
+        if is_chinese() {
+            "OpenCode 配置"
+        } else {
+            "OpenCode Config"
+        }
+    }
+
+    pub fn tui_label_provider_config_status() -> &'static str {
+        if is_chinese() {
+            "配置状态"
+        } else {
+            "Config Status"
+        }
+    }
+
+    pub fn tui_provider_config_count(in_config: usize, total: usize) -> String {
+        if is_chinese() {
+            format!("{in_config}/{total} 已添加")
+        } else {
+            format!("{in_config}/{total} in config")
+        }
+    }
+
+    pub fn tui_provider_status_in_config() -> &'static str {
+        if is_chinese() {
+            "已添加到配置"
+        } else {
+            "in config"
+        }
+    }
+
+    pub fn tui_provider_status_saved_only() -> &'static str {
+        if is_chinese() {
+            "仅已保存"
+        } else {
+            "saved only"
+        }
+    }
+
+    pub fn tui_provider_status_untracked() -> &'static str {
+        if is_chinese() {
+            "未跟踪"
+        } else {
+            "untracked"
         }
     }
 
@@ -4062,6 +4110,22 @@ pub mod texts {
             "已从当前 OpenClaw 配置中移除该供应商。"
         } else {
             "Provider removed from the current OpenClaw config."
+        }
+    }
+
+    pub fn tui_toast_provider_added_to_app_config(app: &str) -> String {
+        if is_chinese() {
+            format!("已将该供应商添加到当前 {app} 配置。")
+        } else {
+            format!("Provider added to the current {app} config.")
+        }
+    }
+
+    pub fn tui_toast_provider_removed_from_app_config(app: &str) -> String {
+        if is_chinese() {
+            format!("已从当前 {app} 配置中移除该供应商。")
+        } else {
+            format!("Provider removed from the current {app} config.")
         }
     }
 
@@ -8532,7 +8596,7 @@ mod tests {
 
         let help = texts::tui_help_text();
         assert!(help.contains("供应商：Enter 详情"));
-        assert!(help.contains("供应商详情：s 切换"));
+        assert!(help.contains("供应商详情：s 切换/添加移除"));
         assert!(help.contains("提示词：Enter 查看"));
         assert!(help.contains("技能：Enter 详情"));
         assert!(help.contains("配置：Enter 打开/执行"));

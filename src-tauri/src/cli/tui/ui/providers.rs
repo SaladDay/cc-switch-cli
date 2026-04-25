@@ -14,6 +14,16 @@ fn openclaw_status_label(row: &ProviderRow) -> &'static str {
     }
 }
 
+fn opencode_status_label(row: &ProviderRow) -> &'static str {
+    if row.is_in_config {
+        texts::tui_provider_status_in_config()
+    } else if row.is_saved {
+        texts::tui_provider_status_saved_only()
+    } else {
+        texts::tui_provider_status_untracked()
+    }
+}
+
 pub(super) fn provider_rows_filtered<'a>(app: &App, data: &'a UiData) -> Vec<&'a ProviderRow> {
     let query = app.filter.query_lower();
     data.providers
@@ -59,7 +69,10 @@ pub(super) fn render_providers(
 
     if app.focus == Focus::Content {
         let mut keys = vec![("Enter", texts::tui_key_details())];
-        if matches!(app.app_type, crate::app_config::AppType::OpenClaw) {
+        if matches!(
+            app.app_type,
+            crate::app_config::AppType::OpenCode | crate::app_config::AppType::OpenClaw
+        ) {
             keys.extend([
                 ("s", texts::tui_key_add_remove()),
                 ("a", texts::tui_key_add()),
@@ -68,9 +81,13 @@ pub(super) fn render_providers(
             ]);
             if let Some(row) = visible.get(app.provider_idx) {
                 keys.push(("e", texts::tui_key_edit()));
-                if row.is_in_config {
+                if matches!(app.app_type, crate::app_config::AppType::OpenClaw) && row.is_in_config
+                {
                     keys.push(("x", texts::tui_key_set_default()));
                 }
+            }
+            if matches!(app.app_type, crate::app_config::AppType::OpenCode) {
+                keys.push(("c", texts::tui_key_stream_check()));
             }
         } else {
             keys.extend([
@@ -100,6 +117,12 @@ pub(super) fn render_providers(
             if row.is_default_model {
                 "*"
             } else if row.is_in_config {
+                "+"
+            } else {
+                ""
+            }
+        } else if matches!(app.app_type, crate::app_config::AppType::OpenCode) {
+            if row.is_in_config {
                 "+"
             } else {
                 ""
@@ -173,7 +196,10 @@ pub(super) fn render_provider_detail(
         .split(inner);
 
     if app.focus == Focus::Content {
-        let mut keys = if matches!(app.app_type, crate::app_config::AppType::OpenClaw) {
+        let mut keys = if matches!(
+            app.app_type,
+            crate::app_config::AppType::OpenCode | crate::app_config::AppType::OpenClaw
+        ) {
             let keys = vec![
                 ("s", texts::tui_key_add_remove()),
                 ("e", texts::tui_key_edit()),
@@ -189,7 +215,12 @@ pub(super) fn render_provider_detail(
         };
         if matches!(app.app_type, crate::app_config::AppType::OpenClaw) && row.is_in_config {
             keys.push(("x", texts::tui_key_set_default()));
-        } else if !matches!(app.app_type, crate::app_config::AppType::OpenClaw) {
+        } else if matches!(app.app_type, crate::app_config::AppType::OpenCode) {
+            keys.push(("c", texts::tui_key_stream_check()));
+        } else if !matches!(
+            app.app_type,
+            crate::app_config::AppType::OpenCode | crate::app_config::AppType::OpenClaw
+        ) {
             if matches!(
                 app.app_type,
                 crate::app_config::AppType::Claude | crate::app_config::AppType::Codex
@@ -250,6 +281,18 @@ pub(super) fn render_provider_detail(
                 Span::raw(model_id),
             ]));
         }
+    }
+
+    if matches!(app.app_type, crate::app_config::AppType::OpenCode) {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                texts::tui_label_provider_config_status(),
+                Style::default().fg(theme.accent),
+            ),
+            Span::raw(": "),
+            Span::raw(opencode_status_label(row)),
+        ]));
     }
 
     if matches!(app.app_type, crate::app_config::AppType::Claude) {

@@ -35,6 +35,13 @@ impl App {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
+                if matches!(self.app_type, AppType::OpenCode) {
+                    if row.is_in_config {
+                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
+                    }
+
+                    return Action::ProviderSwitch { id: row.id.clone() };
+                }
                 if matches!(self.app_type, AppType::OpenClaw) {
                     if row.is_in_config {
                         if row.is_default_model {
@@ -156,6 +163,13 @@ impl App {
             }
             KeyCode::Enter => Action::None,
             KeyCode::Char('s') => {
+                if matches!(self.app_type, AppType::OpenCode) {
+                    if row.is_in_config {
+                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
+                    }
+
+                    return Action::ProviderSwitch { id: row.id.clone() };
+                }
                 if matches!(self.app_type, AppType::OpenClaw) {
                     if row.is_in_config {
                         if row.is_default_model {
