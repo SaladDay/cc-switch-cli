@@ -69,6 +69,7 @@ struct PostCommitAction {
     sync_mcp: bool,
     refresh_snapshot: bool,
     common_config_snippet: Option<String>,
+    previous_common_config_snippet: Option<String>,
     takeover_active: bool,
 }
 
@@ -135,7 +136,13 @@ impl ProviderService {
         };
 
         for provider in &providers {
-            Self::write_live_snapshot(&AppType::OpenClaw, provider, snippet.as_deref(), true)?;
+            Self::write_live_snapshot(
+                &AppType::OpenClaw,
+                provider,
+                snippet.as_deref(),
+                None,
+                true,
+            )?;
         }
 
         Ok(())
@@ -389,6 +396,7 @@ impl ProviderService {
                 &action.app_type,
                 &action.provider,
                 action.common_config_snippet.as_deref(),
+                action.previous_common_config_snippet.as_deref(),
                 apply_common_config,
             )?;
         }
@@ -456,7 +464,10 @@ impl ProviderService {
                     let mut guard = state.config.write().map_err(AppError::from)?;
                     if let Some(manager) = guard.get_manager_mut(app_type) {
                         if let Some(target) = manager.providers.get_mut(provider_id) {
-                            target.settings_config = live_after;
+                            Self::merge_claude_provider_owned_values_from_live(
+                                &mut target.settings_config,
+                                &live_after,
+                            );
                         }
                     }
                 }
@@ -729,6 +740,7 @@ impl ProviderService {
         config: &MultiAppConfig,
         app_type: &AppType,
         current_provider_id: Option<&str>,
+        previous_common_config_snippet: Option<String>,
         takeover_active: bool,
     ) -> Result<Option<PostCommitAction>, AppError> {
         if app_type.is_additive_mode() {
@@ -743,6 +755,7 @@ impl ProviderService {
             config,
             app_type,
             &current_provider_id,
+            previous_common_config_snippet,
             takeover_active,
         )
     }
@@ -751,6 +764,7 @@ impl ProviderService {
         config: &MultiAppConfig,
         app_type: &AppType,
         current_provider_id: &str,
+        previous_common_config_snippet: Option<String>,
         takeover_active: bool,
     ) -> Result<Option<PostCommitAction>, AppError> {
         let provider = config
@@ -768,6 +782,7 @@ impl ProviderService {
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
             refresh_snapshot: false,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
+            previous_common_config_snippet,
             takeover_active,
         }))
     }
@@ -1026,6 +1041,7 @@ impl ProviderService {
                     config,
                     &app_type_clone,
                     effective_current_provider.as_deref(),
+                    old_snippet,
                     takeover_active,
                 )?;
                 Ok(((), action))
@@ -1134,6 +1150,7 @@ impl ProviderService {
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
                     refresh_snapshot: false,
                     common_config_snippet,
+                    previous_common_config_snippet: None,
                     takeover_active: false,
                 })
             } else {
@@ -1247,6 +1264,7 @@ impl ProviderService {
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
                     refresh_snapshot: false,
                     common_config_snippet,
+                    previous_common_config_snippet: None,
                     takeover_active: false,
                 })
             } else {
@@ -1672,7 +1690,8 @@ impl ProviderService {
                 continue;
             }
 
-            if let Err(e) = Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)
+            if let Err(e) =
+                Self::write_live_snapshot(app_type, provider, snippet.as_deref(), None, true)
             {
                 log::warn!("sync_current_to_live: 写入 {app_type} live 配置失败: {e}");
             }
@@ -1774,6 +1793,7 @@ impl ProviderService {
                         .common_config_snippets
                         .get(&app_type_clone)
                         .cloned(),
+                    previous_common_config_snippet: None,
                     takeover_active: false,
                 };
 
@@ -1808,6 +1828,7 @@ impl ProviderService {
                 sync_mcp: true, // v3.7.0: 所有应用切换时都同步 MCP，防止配置丢失
                 refresh_snapshot: true,
                 common_config_snippet: config.common_config_snippets.get(&app_type_clone).cloned(),
+                previous_common_config_snippet: None,
                 takeover_active: false,
             };
 
@@ -1825,6 +1846,7 @@ impl ProviderService {
         app_type: &AppType,
         provider: &Provider,
         common_config_snippet: Option<&str>,
+        previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
         let apply_common_config = Self::resolve_live_apply_common_config(
@@ -1838,9 +1860,12 @@ impl ProviderService {
             AppType::Codex => {
                 Self::write_codex_live(provider, common_config_snippet, apply_common_config)
             }
-            AppType::Claude => {
-                Self::write_claude_live(provider, common_config_snippet, apply_common_config)
-            }
+            AppType::Claude => Self::write_claude_live(
+                provider,
+                common_config_snippet,
+                previous_common_config_snippet,
+                apply_common_config,
+            ),
             AppType::Gemini => Self::write_gemini_live(
                 provider,
                 if apply_common_config {
