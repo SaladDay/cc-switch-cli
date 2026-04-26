@@ -141,10 +141,7 @@ pub(crate) fn exec_prepared_codex(
     // and let Windows resolve it from PATH. For the direct-binary path we
     // pass the fully-resolved executable so the exact path is launched even
     // if PATH later changes.
-    let exec_str = prepared.executable.to_string_lossy();
-    let is_cmd_shim =
-        exec_str.ends_with(".cmd") || exec_str.ends_with(".bat");
-    let application_name: Option<&std::path::Path> = if is_cmd_shim {
+    let application_name: Option<&std::path::Path> = if is_cmd_shim(&prepared.executable) {
         None
     } else {
         Some(program.as_path())
@@ -205,12 +202,35 @@ pub(crate) fn exec_prepared_codex(
 }
 
 #[cfg(windows)]
+fn is_cmd_shim(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+        .unwrap_or(false)
+}
+
+/// Returns true when `quote_windows_arg_for_cmd` would wrap `s` in double
+/// quotes. We mirror its predicate (sans the `"` case, which is rejected by
+/// the caller before this is consulted) so callers can decide whether a
+/// trailing `\` is dangerous: only quoted args risk the trailing `\`
+/// escaping the closing `"`. Plain Windows paths like `C:\work\` pass
+/// through unquoted and are safe.
+#[cfg(windows)]
+fn arg_requires_cmd_quote(s: &str) -> bool {
+    const CMD_SPECIAL: &[char] = &['&', '|', '<', '>', '^', '%', '!', '(', ')'];
+    s.is_empty()
+        || s.contains(' ')
+        || s.contains('\t')
+        || s.contains('\n')
+        || s.chars().any(|c| CMD_SPECIAL.contains(&c))
+}
+
+#[cfg(windows)]
 fn build_command_windows(
     prepared: &PreparedCodexLaunch,
     native_args: &[OsString],
 ) -> Result<(std::path::PathBuf, Vec<OsString>), AppError> {
-    let exec_str = prepared.executable.to_string_lossy();
-    if exec_str.ends_with(".cmd") || exec_str.ends_with(".bat") {
+    if is_cmd_shim(&prepared.executable) {
         // cmd.exe expands %VAR% and !VAR! (delayed expansion) even inside
         // double quotes. There is no standard escape for these in a /c
         // command line. Without refactoring to bypass cmd.exe /c entirely
@@ -218,9 +238,12 @@ fn build_command_windows(
         // directly), this expansion cannot be fully avoided. Log a warning
         // so users are aware.
         //
-        // Additionally, cmd.exe does not treat backslash as a quote escape,
-        // so arguments containing a literal double quote cannot be safely
-        // passed through cmd.exe /c. We reject such arguments.
+        // cmd.exe does not treat backslash as a quote escape, so a literal
+        // double quote inside an arg cannot be safely escaped — reject. A
+        // trailing backslash only becomes unsafe when the arg itself would
+        // be wrapped in `"..."` by cmd quoting, because then the `\` would
+        // escape the closing quote. Plain paths like `C:\work\` need no
+        // quoting and pass through verbatim.
         for arg in native_args {
             let s = arg.to_string_lossy();
             if s.contains('%') || s.contains('!') {
@@ -243,15 +266,15 @@ fn build_command_windows(
                     ),
                 ));
             }
-            if s.ends_with('\\') {
+            if s.ends_with('\\') && arg_requires_cmd_quote(&s) {
                 return Err(AppError::localized(
                     "codex.temp_launch_unsafe_cmd_trailing_backslash",
                     format!(
-                        "参数以反斜杠结尾，无法安全地通过 cmd.exe /c 传递: {}",
+                        "参数同时需要 cmd.exe 加引号且以反斜杠结尾，无法安全传递: {}",
                         s
                     ),
                     format!(
-                        "Native arg ends with a backslash which cannot be safely passed through cmd.exe /c: {}",
+                        "Native arg both requires cmd.exe quoting and ends with a backslash, which cannot be safely passed through cmd.exe /c: {}",
                         s
                     ),
                 ));
@@ -918,6 +941,103 @@ mod tests {
     #[test]
     fn quote_windows_arg_handles_newlines() {
         assert_eq!(quote_windows_arg("foo\nbar"), "\"foo\nbar\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn is_cmd_shim_matches_cmd_and_bat_case_insensitive() {
+        assert!(is_cmd_shim(std::path::Path::new("C:/tools/codex.cmd")));
+        assert!(is_cmd_shim(std::path::Path::new("C:/tools/codex.CMD")));
+        assert!(is_cmd_shim(std::path::Path::new("C:/tools/codex.bat")));
+        assert!(is_cmd_shim(std::path::Path::new("C:/tools/codex.BaT")));
+        assert!(!is_cmd_shim(std::path::Path::new("C:/tools/codex.exe")));
+        assert!(!is_cmd_shim(std::path::Path::new("C:/tools/codex")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn arg_requires_cmd_quote_recognizes_unsafe_inputs() {
+        assert!(arg_requires_cmd_quote(""));
+        assert!(arg_requires_cmd_quote("a b"));
+        assert!(arg_requires_cmd_quote("a\tb"));
+        assert!(arg_requires_cmd_quote("a&b"));
+        assert!(arg_requires_cmd_quote("a%b"));
+        assert!(!arg_requires_cmd_quote("plain"));
+        assert!(!arg_requires_cmd_quote("C:\\work\\"));
+        assert!(!arg_requires_cmd_quote("--project-dir=C:\\tmp\\"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_command_windows_accepts_plain_trailing_backslash_paths() {
+        let prepared = PreparedCodexLaunch {
+            executable: PathBuf::from("C:/tools/codex.cmd"),
+            codex_home: PathBuf::from("C:/tmp/cc-switch-codex-home"),
+        };
+        let native_args = vec![
+            OsString::from("--project-dir=C:\\tmp\\"),
+            OsString::from("C:\\work\\"),
+        ];
+
+        let (program, args) =
+            build_command_windows(&prepared, &native_args).expect("plain trailing backslash paths must pass");
+
+        assert_eq!(program, PathBuf::from("cmd.exe"));
+        assert!(args.iter().any(|a| a == "C:\\work\\"));
+        assert!(args
+            .iter()
+            .any(|a| a == "--project-dir=C:\\tmp\\"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_command_windows_rejects_trailing_backslash_when_quoting_required() {
+        let prepared = PreparedCodexLaunch {
+            executable: PathBuf::from("C:/tools/codex.cmd"),
+            codex_home: PathBuf::from("C:/tmp/cc-switch-codex-home"),
+        };
+        let native_args = vec![OsString::from("C:\\Program Files\\dir\\")];
+
+        let err = build_command_windows(&prepared, &native_args)
+            .expect_err("space + trailing backslash must be rejected for cmd.exe /c");
+
+        assert!(err
+            .to_string()
+            .contains("C:\\Program Files\\dir\\"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_command_windows_rejects_trailing_backslash_with_special_char() {
+        let prepared = PreparedCodexLaunch {
+            executable: PathBuf::from("C:/tools/codex.cmd"),
+            codex_home: PathBuf::from("C:/tmp/cc-switch-codex-home"),
+        };
+        let native_args = vec![OsString::from("a&b\\")];
+
+        let err = build_command_windows(&prepared, &native_args)
+            .expect_err("cmd-special char + trailing backslash must be rejected for cmd.exe /c");
+
+        assert!(err.to_string().contains("a&b\\"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_command_windows_passes_through_for_direct_binary() {
+        let prepared = PreparedCodexLaunch {
+            executable: PathBuf::from("C:/tools/codex.exe"),
+            codex_home: PathBuf::from("C:/tmp/cc-switch-codex-home"),
+        };
+        let native_args = vec![
+            OsString::from("C:\\Program Files\\dir\\"),
+            OsString::from("--project-dir=C:\\tmp\\"),
+        ];
+
+        let (program, args) = build_command_windows(&prepared, &native_args)
+            .expect("direct-binary path must not apply cmd.exe restrictions");
+
+        assert_eq!(program, PathBuf::from("C:/tools/codex.exe"));
+        assert_eq!(args, native_args);
     }
 
     #[cfg(unix)]

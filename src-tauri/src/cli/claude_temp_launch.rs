@@ -275,12 +275,36 @@ impl Drop for Job {
 }
 
 #[cfg(windows)]
+fn is_cmd_shim(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+        .unwrap_or(false)
+}
+
+/// Returns true when `quote_windows_arg_for_cmd` would wrap `s` in double
+/// quotes. We mirror its predicate (sans the `"` case, which is rejected by
+/// the caller before this is consulted) so callers can decide whether a
+/// trailing `\` is dangerous: only quoted args risk the trailing `\`
+/// escaping the closing `"`. Plain Windows paths like `C:\work\` pass
+/// through unquoted and are safe.
+#[cfg(windows)]
+fn arg_requires_cmd_quote(s: &str) -> bool {
+    const CMD_SPECIAL: &[char] = &['&', '|', '<', '>', '^', '%', '!', '(', ')'];
+    s.is_empty()
+        || s.contains(' ')
+        || s.contains('\t')
+        || s.contains('\n')
+        || s.chars().any(|c| CMD_SPECIAL.contains(&c))
+}
+
+#[cfg(windows)]
 fn build_windows_cmdline(
     prepared: &PreparedClaudeLaunch,
     native_args: &[OsString],
 ) -> Result<Vec<u16>, AppError> {
     let exe_str = prepared.executable.to_string_lossy();
-    let is_cmd = exe_str.ends_with(".cmd") || exe_str.ends_with(".bat");
+    let is_cmd = is_cmd_shim(&prepared.executable);
 
     let mut cmdline = String::new();
 
@@ -294,9 +318,12 @@ fn build_windows_cmdline(
         // binary directly), this expansion cannot be fully avoided. Log a
         // warning so users are aware.
         //
-        // Additionally, cmd.exe does not treat backslash as a quote escape,
-        // so arguments containing a literal double quote cannot be safely
-        // passed through cmd.exe /c. We reject such arguments.
+        // cmd.exe does not treat backslash as a quote escape, so a literal
+        // double quote inside an arg cannot be safely escaped — reject. A
+        // trailing backslash only becomes unsafe when the arg itself would
+        // be wrapped in `"..."` by cmd quoting, because then the `\` would
+        // escape the closing quote. Plain paths like `C:\work\` need no
+        // quoting and pass through verbatim.
         for arg in native_args {
             let s = arg.to_string_lossy();
             if s.contains('%') || s.contains('!') {
@@ -319,15 +346,15 @@ fn build_windows_cmdline(
                     ),
                 ));
             }
-            if s.ends_with('\\') {
+            if s.ends_with('\\') && arg_requires_cmd_quote(&s) {
                 return Err(AppError::localized(
                     "claude.temp_launch_unsafe_cmd_trailing_backslash",
                     format!(
-                        "参数以反斜杠结尾，无法安全地通过 cmd.exe /c 传递: {}",
+                        "参数同时需要 cmd.exe 加引号且以反斜杠结尾，无法安全传递: {}",
                         s
                     ),
                     format!(
-                        "Native arg ends with a backslash which cannot be safely passed through cmd.exe /c: {}",
+                        "Native arg both requires cmd.exe quoting and ends with a backslash, which cannot be safely passed through cmd.exe /c: {}",
                         s
                     ),
                 ));
@@ -463,10 +490,7 @@ pub(crate) fn exec_prepared_claude(
 
     let mut cmdline_wide = build_windows_cmdline(prepared, native_args)?;
 
-    let exe_str = prepared.executable.to_string_lossy();
-    let is_cmd = exe_str.ends_with(".cmd") || exe_str.ends_with(".bat");
-
-    let application_name_wide: Option<Vec<u16>> = if is_cmd {
+    let application_name_wide: Option<Vec<u16>> = if is_cmd_shim(&prepared.executable) {
         None
     } else {
         Some(
@@ -1191,6 +1215,106 @@ mod tests {
     #[test]
     fn quote_windows_arg_for_cmd_handles_empty_string() {
         assert_eq!(quote_windows_arg_for_cmd(""), "\"\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn is_cmd_shim_matches_cmd_and_bat_case_insensitive() {
+        assert!(is_cmd_shim(std::path::Path::new("C:\\bin\\claude.cmd")));
+        assert!(is_cmd_shim(std::path::Path::new("C:\\bin\\claude.CMD")));
+        assert!(is_cmd_shim(std::path::Path::new("C:\\bin\\claude.bat")));
+        assert!(is_cmd_shim(std::path::Path::new("C:\\bin\\claude.BAT")));
+        assert!(!is_cmd_shim(std::path::Path::new("C:\\bin\\claude.exe")));
+        assert!(!is_cmd_shim(std::path::Path::new("C:\\bin\\claude")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn arg_requires_cmd_quote_recognizes_unsafe_inputs() {
+        assert!(arg_requires_cmd_quote(""));
+        assert!(arg_requires_cmd_quote("foo bar"));
+        assert!(arg_requires_cmd_quote("foo\tbar"));
+        assert!(arg_requires_cmd_quote("a&b"));
+        assert!(arg_requires_cmd_quote("a|b"));
+        assert!(arg_requires_cmd_quote("a%b"));
+        assert!(arg_requires_cmd_quote("a!b"));
+        assert!(arg_requires_cmd_quote("a(b"));
+        assert!(arg_requires_cmd_quote("a)b"));
+        assert!(!arg_requires_cmd_quote("plain"));
+        assert!(!arg_requires_cmd_quote("C:\\work\\"));
+        assert!(!arg_requires_cmd_quote("--project-dir=C:\\tmp\\"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_windows_cmdline_accepts_plain_trailing_backslash_paths() {
+        let prepared = PreparedClaudeLaunch {
+            executable: PathBuf::from("C:\\bin\\claude.cmd"),
+            settings_path: PathBuf::from("C:\\tmp\\settings.json"),
+        };
+        let native_args = vec![
+            OsString::from("C:\\work\\"),
+            OsString::from("--project-dir=C:\\tmp\\"),
+        ];
+
+        let cmdline = build_windows_cmdline(&prepared, &native_args)
+            .expect("plain trailing backslash should be allowed");
+
+        let cmdline_str = String::from_utf16_lossy(&cmdline);
+        assert!(cmdline_str.contains("cmd.exe /c"));
+        assert!(cmdline_str.contains("C:\\work\\"));
+        assert!(cmdline_str.contains("--project-dir=C:\\tmp\\"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_windows_cmdline_rejects_trailing_backslash_when_quoting_required() {
+        let prepared = PreparedClaudeLaunch {
+            executable: PathBuf::from("C:\\bin\\claude.cmd"),
+            settings_path: PathBuf::from("C:\\tmp\\settings.json"),
+        };
+        let native_args = vec![OsString::from("C:\\Program Files\\dir\\")];
+
+        let err = build_windows_cmdline(&prepared, &native_args)
+            .expect_err("space + trailing backslash must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("backslash") || msg.contains("反斜杠"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_windows_cmdline_rejects_trailing_backslash_with_special_char() {
+        let prepared = PreparedClaudeLaunch {
+            executable: PathBuf::from("C:\\bin\\claude.cmd"),
+            settings_path: PathBuf::from("C:\\tmp\\settings.json"),
+        };
+        let native_args = vec![OsString::from("a&b\\")];
+
+        let err = build_windows_cmdline(&prepared, &native_args)
+            .expect_err("special char + trailing backslash must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("backslash") || msg.contains("反斜杠"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_windows_cmdline_passes_through_for_direct_binary() {
+        let prepared = PreparedClaudeLaunch {
+            executable: PathBuf::from("C:\\bin\\claude.exe"),
+            settings_path: PathBuf::from("C:\\tmp\\settings.json"),
+        };
+        // Direct .exe path skips cmd quoting; trailing backslash is fine even
+        // alongside chars that would normally require quoting.
+        let native_args = vec![
+            OsString::from("C:\\work\\"),
+            OsString::from("--project-dir=C:\\Program Files\\dir\\"),
+        ];
+
+        let cmdline = build_windows_cmdline(&prepared, &native_args)
+            .expect("direct .exe must accept trailing backslash regardless of quoting");
+        let cmdline_str = String::from_utf16_lossy(&cmdline);
+        assert!(cmdline_str.contains("C:\\work\\"));
+        assert!(cmdline_str.contains("Program Files"));
     }
 
     #[test]
