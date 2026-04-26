@@ -113,6 +113,26 @@ impl AppError {
             format!("CreateProcessW failed with Win32 error code: {code}"),
         )
     }
+
+    /// 错误：创建 Job Object 失败。
+    /// i18n key: `windows.create_job_object_failed`
+    pub fn windows_create_job_object_failed(code: u32) -> Self {
+        Self::localized(
+            "windows.create_job_object_failed",
+            format!("创建 Job Object 失败，Win32 错误码: {code}"),
+            format!("Failed to create Job Object, Win32 error: {code}"),
+        )
+    }
+
+    /// 错误：设置 Job Object 信息失败。
+    /// i18n key: `windows.set_job_information_failed`
+    pub fn windows_set_job_information_failed(code: u32) -> Self {
+        Self::localized(
+            "windows.set_job_information_failed",
+            format!("设置 Job Object 信息失败，Win32 错误码: {code}"),
+            format!("Failed to set Job Object information, Win32 error: {code}"),
+        )
+    }
 }
 
 impl<T> From<PoisonError<T>> for AppError {

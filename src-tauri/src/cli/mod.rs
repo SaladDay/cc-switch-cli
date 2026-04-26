@@ -4,6 +4,8 @@ use std::io::Write;
 
 mod claude_temp_launch;
 mod codex_temp_launch;
+#[cfg(windows)]
+mod windows_temp_launch;
 pub mod commands;
 pub mod editor;
 pub mod i18n;
