@@ -136,7 +136,22 @@ pub(crate) fn exec_prepared_codex(
 
     let env_block = build_env_block_with_override("CODEX_HOME", prepared.codex_home.as_os_str());
 
-    let (process_handle, thread_handle) = spawn_suspended_createprocessw(&program, &args, Some(&env_block))?;
+    // CreateProcessW does not search PATH when lpApplicationName is non-NULL,
+    // so for the cmd.exe shim path (unqualified `cmd.exe`) we must pass NULL
+    // and let Windows resolve it from PATH. For the direct-binary path we
+    // pass the fully-resolved executable so the exact path is launched even
+    // if PATH later changes.
+    let exec_str = prepared.executable.to_string_lossy();
+    let is_cmd_shim =
+        exec_str.ends_with(".cmd") || exec_str.ends_with(".bat");
+    let application_name: Option<&std::path::Path> = if is_cmd_shim {
+        None
+    } else {
+        Some(program.as_path())
+    };
+
+    let (process_handle, thread_handle) =
+        spawn_suspended_createprocessw(&program, &args, Some(&env_block), application_name)?;
 
     let job = Job::create_with_kill_on_close()?;
 
@@ -365,11 +380,20 @@ fn spawn_suspended_createprocessw(
     program: &std::path::Path,
     args: &[OsString],
     env_block: Option<&[u16]>,
+    application_name: Option<&std::path::Path>,
 ) -> Result<(HANDLE, HANDLE), AppError> {
-    let program_wide: Vec<u16> = std::ffi::OsStr::new(program)
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+    // When `application_name` is `Some`, it is passed verbatim as
+    // `lpApplicationName` to `CreateProcessW`. In that mode CreateProcessW does
+    // NOT search PATH — the caller must supply a fully-resolved path. When
+    // `application_name` is `None` we pass NULL, which lets Windows parse the
+    // program name from the start of the command line and search PATH/PATHEXT
+    // (required for unqualified names like `cmd.exe`).
+    let application_name_wide: Option<Vec<u16>> = application_name.map(|p| {
+        std::ffi::OsStr::new(p)
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    });
 
     let mut command_line = build_windows_command_line(std::ffi::OsStr::new(program), args);
 
@@ -382,9 +406,14 @@ fn spawn_suspended_createprocessw(
         .map(|b| b.as_ptr() as *mut _)
         .unwrap_or(ptr::null_mut());
 
+    let app_name_ptr = application_name_wide
+        .as_ref()
+        .map(|s| s.as_ptr())
+        .unwrap_or(ptr::null());
+
     let result = unsafe {
         CreateProcessW(
-            program_wide.as_ptr(),
+            app_name_ptr,
             command_line.as_mut_ptr(),
             ptr::null_mut(),
             ptr::null_mut(),
