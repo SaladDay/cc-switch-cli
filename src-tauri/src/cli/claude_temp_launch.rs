@@ -234,11 +234,6 @@ impl Job {
             Ok(())
         }
     }
-
-    unsafe fn terminate(&self) {
-        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-        let _ = TerminateJobObject(self.handle, 1);
-    }
 }
 
 #[cfg(windows)]
@@ -536,7 +531,11 @@ pub(crate) fn exec_prepared_claude(
     let resume_result = unsafe { ResumeThread(h_thread) };
     if resume_result == u32::MAX {
         unsafe {
-            job.terminate();
+            // Use explicit TerminateProcess instead of job.terminate(): if the
+            // earlier try_assign warned-and-continued, the process is not in
+            // the job, so TerminateJobObject would do nothing and the
+            // suspended child would leak. TerminateProcess kills it directly.
+            let _ = windows_sys::Win32::System::Threading::TerminateProcess(h_process, 1);
             CloseHandle(h_thread);
             CloseHandle(h_process);
         }
