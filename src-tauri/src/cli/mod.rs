@@ -556,6 +556,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_skills_repo_add_with_token_env() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "skills",
+            "repos",
+            "add",
+            "foo/bar",
+            "--token-env",
+            "GITHUB_TOKEN_WORK",
+        ]);
+
+        match cli.command {
+            Some(Commands::Skills(super::commands::skills::SkillsCommand::Repos(
+                super::commands::skills::SkillReposCommand::Add { url, token_env },
+            ))) => {
+                assert_eq!(url, "foo/bar");
+                assert_eq!(token_env.as_deref(), Some("GITHUB_TOKEN_WORK"));
+            }
+            _ => panic!("expected skills repos add command with token env"),
+        }
+    }
+
+    #[test]
     fn parses_completions_bash_generator_path() {
         let cli = Cli::parse_from(["cc-switch", "completions", "bash"]);
 

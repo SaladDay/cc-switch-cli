@@ -1247,6 +1247,14 @@ pub fn tui_header_branch() -> &'static str {
     }
 }
 
+pub fn tui_header_auth() -> &'static str {
+    if is_chinese() {
+        "认证"
+    } else {
+        "Auth"
+    }
+}
+
 pub fn tui_header_path() -> &'static str {
     if is_chinese() {
         "路径"

@@ -315,10 +315,17 @@ cc-switch skills sync-method [m]     # 查看/设置同步方式（auto|symlink|
 cc-switch skills scan-unmanaged      # 扫描未管理技能
 cc-switch skills import-from-apps    # 导入未管理技能到 SSOT
 cc-switch skills repos list          # 查看仓库列表
-cc-switch skills repos add <repo>    # 添加仓库（owner/name[@branch] 或 GitHub URL）
+cc-switch skills repos add <repo> [--token-env ENV] # 添加仓库（owner/name[@branch] 或 GitHub URL）
 cc-switch skills repos remove <repo> # 移除仓库（owner/name 或 GitHub URL）
 cc-switch skills repos enable <repo> # 启用仓库但保留当前分支
 cc-switch skills repos disable <repo> # 禁用仓库但保留当前分支
+```
+
+私有 GitHub 仓库示例：
+
+```bash
+export GITHUB_TOKEN_WORK=ghp_xxx
+cc-switch skills repos add your-org/private-skills@main --token-env GITHUB_TOKEN_WORK
 ```
 
 ### ⚙️ 配置管理

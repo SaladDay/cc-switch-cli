@@ -100,6 +100,7 @@ impl Database {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS skill_repos (
             owner TEXT NOT NULL, name TEXT NOT NULL, branch TEXT NOT NULL DEFAULT 'main',
+            token_env TEXT,
             enabled BOOLEAN NOT NULL DEFAULT 1, PRIMARY KEY (owner, name)
         )",
             [],
@@ -420,6 +421,11 @@ impl Database {
                         log::info!("迁移数据库从 v9 到 v10（添加 Hermes Agent 支持）");
                         Self::migrate_v9_to_v10(conn)?;
                         Self::set_user_version(conn, 10)?;
+                    }
+                    10 => {
+                        log::info!("迁移数据库从 v10 到 v11（Skill 仓库 token_env 支持）");
+                        Self::migrate_v10_to_v11(conn)?;
+                        Self::set_user_version(conn, 11)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1156,6 +1162,16 @@ impl Database {
         }
 
         log::info!("v9 -> v10 迁移完成：已添加 Hermes Agent 支持");
+        Ok(())
+    }
+
+    /// v10 -> v11 迁移：为 skill_repos 添加 GitHub token 环境变量字段
+    fn migrate_v10_to_v11(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "skill_repos")? {
+            Self::add_column_if_missing(conn, "skill_repos", "token_env", "TEXT")?;
+        }
+
+        log::info!("v10 -> v11 迁移完成：已添加 skill_repos.token_env");
         Ok(())
     }
 

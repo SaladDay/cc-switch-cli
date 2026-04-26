@@ -2344,6 +2344,7 @@ fn skills_repos_page_renders_repo_rows() {
         owner: "anthropics".to_string(),
         name: "skills".to_string(),
         branch: "main".to_string(),
+        token_env: Some("GITHUB_TOKEN_WORK".to_string()),
         enabled: true,
     }];
 
@@ -2351,6 +2352,7 @@ fn skills_repos_page_renders_repo_rows() {
     let all = all_text(&buf);
 
     assert!(all.contains("anthropics/skills"));
+    assert!(all.contains("env:GITHUB_TOKEN_WORK"));
 }
 
 #[test]

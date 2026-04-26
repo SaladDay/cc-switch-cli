@@ -70,6 +70,9 @@ pub enum SkillReposCommand {
     Add {
         /// Repository (GitHub URL or owner/name[@branch])
         url: String,
+        /// Environment variable name for GitHub token
+        #[arg(long = "token-env")]
+        token_env: Option<String>,
     },
     /// Remove a repository
     Remove {
@@ -277,7 +280,7 @@ fn show_skill_info(spec: &str) -> Result<(), AppError> {
 fn execute_repos(cmd: SkillReposCommand) -> Result<(), AppError> {
     match cmd {
         SkillReposCommand::List => list_repos(),
-        SkillReposCommand::Add { url } => add_repo(&url),
+        SkillReposCommand::Add { url, token_env } => add_repo(&url, token_env.as_deref()),
         SkillReposCommand::Remove { url } => remove_repo(&url),
         SkillReposCommand::Enable { url } => set_repo_enabled(&url, true),
         SkillReposCommand::Disable { url } => set_repo_enabled(&url, false),
@@ -293,34 +296,37 @@ fn list_repos() -> Result<(), AppError> {
     }
 
     let mut table = create_table();
-    table.set_header(vec!["Enabled", "Repo", "Branch"]);
+    table.set_header(vec!["Enabled", "Repo", "Branch", "Auth"]);
     for repo in repos {
         table.add_row(vec![
             if repo.enabled { "✓" } else { " " }.to_string(),
             format!("{}/{}", repo.owner, repo.name),
             repo.branch,
+            repo.token_env
+                .map(|token_env| format!("env:{token_env}"))
+                .unwrap_or_default(),
         ]);
     }
     println!("{}", table);
     Ok(())
 }
 
-fn add_repo(_url: &str) -> Result<(), AppError> {
-    let repo = parse_repo_spec(_url)?;
+fn add_repo(_url: &str, token_env: Option<&str>) -> Result<(), AppError> {
+    let repo = parse_repo_spec(_url, token_env)?;
     SkillService::upsert_repo(repo)?;
     println!("{}", success("✓ Repository added."));
     Ok(())
 }
 
 fn remove_repo(_url: &str) -> Result<(), AppError> {
-    let repo = parse_repo_spec(_url)?;
+    let repo = parse_repo_spec(_url, None)?;
     SkillService::remove_repo(&repo.owner, &repo.name)?;
     println!("{}", success("✓ Repository removed."));
     Ok(())
 }
 
 fn set_repo_enabled(url: &str, enabled: bool) -> Result<(), AppError> {
-    let repo = parse_repo_spec(url)?;
+    let repo = parse_repo_spec(url, None)?;
     let existing = SkillService::list_repos()?
         .into_iter()
         .find(|candidate| candidate.owner == repo.owner && candidate.name == repo.name)
@@ -365,7 +371,7 @@ fn sync_method(method: Option<SyncMethod>) -> Result<(), AppError> {
     Ok(())
 }
 
-fn parse_repo_spec(raw: &str) -> Result<SkillRepo, AppError> {
+fn parse_repo_spec(raw: &str, token_env: Option<&str>) -> Result<SkillRepo, AppError> {
     let raw = raw.trim().trim_end_matches('/');
     if raw.is_empty() {
         return Err(AppError::InvalidInput(
@@ -397,6 +403,10 @@ fn parse_repo_spec(raw: &str) -> Result<SkillRepo, AppError> {
         owner: owner.to_string(),
         name: name.to_string(),
         branch: branch.unwrap_or("main").to_string(),
+        token_env: token_env
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
         enabled: true,
     })
 }
@@ -408,21 +418,35 @@ mod tests {
 
     #[test]
     fn parse_repo_spec_supports_plain_owner_repo() {
-        let repo = parse_repo_spec("foo/bar").expect("plain owner/repo should parse");
+        let repo = parse_repo_spec("foo/bar", None).expect("plain owner/repo should parse");
 
         assert_eq!(repo.owner, "foo");
         assert_eq!(repo.name, "bar");
         assert_eq!(repo.branch, "main");
+        assert_eq!(repo.token_env, None);
         assert!(repo.enabled);
     }
 
     #[test]
     fn parse_repo_spec_supports_branch_suffix() {
-        let repo = parse_repo_spec("foo/bar@dev").expect("branch suffix should parse");
+        let repo = parse_repo_spec("foo/bar@dev", None).expect("branch suffix should parse");
 
         assert_eq!(repo.owner, "foo");
         assert_eq!(repo.name, "bar");
         assert_eq!(repo.branch, "dev");
+        assert_eq!(repo.token_env, None);
+        assert!(repo.enabled);
+    }
+
+    #[test]
+    fn parse_repo_spec_supports_token_env() {
+        let repo =
+            parse_repo_spec("foo/bar", Some("GITHUB_TOKEN_WORK")).expect("token env should parse");
+
+        assert_eq!(repo.owner, "foo");
+        assert_eq!(repo.name, "bar");
+        assert_eq!(repo.branch, "main");
+        assert_eq!(repo.token_env.as_deref(), Some("GITHUB_TOKEN_WORK"));
         assert!(repo.enabled);
     }
 
@@ -432,6 +456,7 @@ mod tests {
             owner: "foo".to_string(),
             name: "bar".to_string(),
             branch: "release".to_string(),
+            token_env: Some("GITHUB_TOKEN_WORK".to_string()),
             enabled: true,
         };
 
@@ -440,6 +465,7 @@ mod tests {
         assert_eq!(updated.owner, "foo");
         assert_eq!(updated.name, "bar");
         assert_eq!(updated.branch, "release");
+        assert_eq!(updated.token_env.as_deref(), Some("GITHUB_TOKEN_WORK"));
         assert!(!updated.enabled);
     }
 }
