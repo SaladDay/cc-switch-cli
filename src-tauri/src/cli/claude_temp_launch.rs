@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(windows))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -606,8 +607,10 @@ where
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LAUNCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let filename = format!(
-        "cc-switch-claude-{}-{}-{timestamp}.json",
+        "cc-switch-claude-{}-{seq:08x}-{}-{timestamp}.json",
         sanitize_filename_fragment(provider_id),
         std::process::id()
     );
@@ -979,6 +982,34 @@ mod tests {
             leftover_files.is_empty(),
             "temporary settings file should be removed on failure, found: {leftover_files:?}"
         );
+    }
+
+    #[test]
+    fn write_temp_settings_file_uses_unique_filename_per_call() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let settings = json!({
+            "env": { "ANTHROPIC_AUTH_TOKEN": "sk-demo" }
+        });
+
+        let path1 = write_temp_settings_file_with(temp_dir.path(), "demo", &settings, |_| Ok(()))
+            .expect("first write must succeed");
+        let path2 = write_temp_settings_file_with(temp_dir.path(), "demo", &settings, |_| Ok(()))
+            .expect("second write must succeed");
+
+        assert_ne!(
+            path1, path2,
+            "two consecutive launches in the same process must not collide on filename"
+        );
+        let name1 = path1
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("path1 has utf8 filename");
+        let name2 = path2
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("path2 has utf8 filename");
+        assert!(name1.starts_with("cc-switch-claude-demo-"));
+        assert!(name2.starts_with("cc-switch-claude-demo-"));
     }
 
     #[test]

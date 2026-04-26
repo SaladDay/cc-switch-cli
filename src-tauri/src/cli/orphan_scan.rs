@@ -261,6 +261,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_claude_filename_with_launch_seq_segment() {
+        // New format inserts an 8-hex launch-seq segment before pid; parser
+        // must still extract pid (second-to-last) and nanos (last).
+        let info = parse_cc_switch_name(
+            "cc-switch-claude-demo-0000002a-12345-1714137600000000000.json",
+            PathBuf::from("/tmp/test"),
+        )
+        .unwrap();
+        assert_eq!(info.pid, 12345);
+        assert_eq!(info.nanos, 1714137600000000000);
+    }
+
+    #[test]
+    fn parse_codex_dirname_with_launch_seq_segment() {
+        let info = parse_cc_switch_name(
+            "cc-switch-codex-demo-0000002a-12345-1714137600000000000",
+            PathBuf::from("/tmp/test"),
+        )
+        .unwrap();
+        assert_eq!(info.pid, 12345);
+        assert_eq!(info.nanos, 1714137600000000000);
+    }
+
+    #[test]
     fn parse_rejects_non_cc_switch() {
         assert!(parse_cc_switch_name("some-other-file.json", PathBuf::from("/tmp/test")).is_none());
     }

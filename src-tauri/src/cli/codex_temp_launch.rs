@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(windows))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -663,8 +664,10 @@ where
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LAUNCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let dir_name = format!(
-        "cc-switch-codex-{}-{}-{timestamp}",
+        "cc-switch-codex-{}-{seq:08x}-{}-{timestamp}",
         sanitize_filename_fragment(&provider.id),
         std::process::id()
     );
