@@ -152,7 +152,17 @@ pub(crate) fn exec_prepared_codex(
     let (process_handle, thread_handle) =
         spawn_suspended_createprocessw(&program, &args, Some(&env_block), application_name)?;
 
-    let job = Job::create_with_kill_on_close()?;
+    let job = match Job::create_with_kill_on_close() {
+        Ok(job) => job,
+        Err(e) => {
+            unsafe {
+                let _ = TerminateProcess(process_handle, 1);
+                CloseHandle(thread_handle);
+                CloseHandle(process_handle);
+            }
+            return Err(e);
+        }
+    };
 
     if let Err(e) = job.try_assign(process_handle) {
         log::warn!("{}", AppError::windows_job_assign_failed_fallback(&e));
