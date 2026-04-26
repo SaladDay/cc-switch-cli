@@ -226,6 +226,22 @@ fn cmd_arg_error_to_app_error(_app_label: &str, err: crate::cli::windows_temp_la
                 arg
             ),
         ),
+        CmdArgError::Percent(arg) => AppError::localized(
+            "claude.temp_launch_unsafe_cmd_percent",
+            format!("参数包含百分号，cmd.exe 会将其作为环境变量扩展，无法安全传递: {}", arg),
+            format!(
+                "Native arg contains a percent sign which cmd.exe expands as an environment variable, cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
+        CmdArgError::Exclamation(arg) => AppError::localized(
+            "claude.temp_launch_unsafe_cmd_exclamation",
+            format!("参数包含感叹号，cmd.exe 会将其作为延迟环境变量扩展，无法安全传递: {}", arg),
+            format!(
+                "Native arg contains an exclamation mark which cmd.exe expands as a delayed environment variable, cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
     }
 }
 

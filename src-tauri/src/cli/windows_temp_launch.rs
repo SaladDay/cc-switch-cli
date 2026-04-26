@@ -57,6 +57,8 @@ pub(crate) fn arg_requires_cmd_quote(s: &str) -> bool {
 pub(crate) enum CmdArgError {
     DoubleQuote(String),
     UnsafeTrailingBackslash(String),
+    Percent(String),
+    Exclamation(String),
 }
 
 impl std::fmt::Display for CmdArgError {
@@ -68,22 +70,28 @@ impl std::fmt::Display for CmdArgError {
             CmdArgError::UnsafeTrailingBackslash(arg) => {
                 write!(f, "trailing backslash in quoted cmd.exe arg: {}", arg)
             }
+            CmdArgError::Percent(arg) => {
+                write!(f, "percent sign in cmd.exe arg (cmd.exe expands env vars): {}", arg)
+            }
+            CmdArgError::Exclamation(arg) => {
+                write!(f, "exclamation mark in cmd.exe arg (cmd.exe expands delayed vars): {}", arg)
+            }
         }
     }
 }
 
 /// Validates a single argument for safety when passed through `cmd.exe /c`.
-/// Returns `Ok(())` if safe, `Err(CmdArgError)` if the argument contains a
-/// double quote or an unsafe trailing backslash. Prints a warning to stderr
-/// when `%` or `!` are present (which cmd.exe may expand) so users are
-/// notified even when the log level is set to `error`.
+/// Returns `Ok(())` if safe, `Err(CmdArgError)` if the argument contains
+/// characters that cmd.exe treats specially: double quotes, percent signs
+/// (environment variable expansion), exclamation marks (delayed expansion),
+/// or an unsafe trailing backslash inside a quoted segment.
 #[cfg(windows)]
 pub(crate) fn validate_cmd_arg(arg: &str) -> Result<(), CmdArgError> {
-    if arg.contains('%') || arg.contains('!') {
-        eprintln!(
-            "cc-switch warning: argument contains % or ! which cmd.exe may expand: {}",
-            arg
-        );
+    if arg.contains('%') {
+        return Err(CmdArgError::Percent(arg.to_string()));
+    }
+    if arg.contains('!') {
+        return Err(CmdArgError::Exclamation(arg.to_string()));
     }
     if arg.contains('"') {
         return Err(CmdArgError::DoubleQuote(arg.to_string()));
@@ -607,8 +615,8 @@ pub(crate) fn create_secret_file_with_acl(path: &Path) -> Result<File, AppError>
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Security::{
-        InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SECURITY_DESCRIPTOR,
-        SECURITY_ATTRIBUTES,
+        InitializeSecurityDescriptor, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+        SECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
@@ -625,6 +633,17 @@ pub(crate) fn create_secret_file_with_acl(path: &Path) -> Result<File, AppError>
     }
 
     let result = unsafe { SetSecurityDescriptorDacl(&mut sd as *mut _ as *mut _, 1, acl, 0) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let result = unsafe {
+        SetSecurityDescriptorControl(
+            &mut sd as *mut _ as *mut _,
+            SE_DACL_PROTECTED,
+            SE_DACL_PROTECTED,
+        )
+    };
     if result == 0 {
         return Err(AppError::io(path, std::io::Error::last_os_error()));
     }
@@ -667,8 +686,8 @@ pub(crate) fn create_secret_dir_with_acl(path: &Path) -> Result<(), AppError> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Security::{
-        InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SECURITY_DESCRIPTOR,
-        SECURITY_ATTRIBUTES,
+        InitializeSecurityDescriptor, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+        SECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED,
     };
     use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
 
@@ -682,6 +701,17 @@ pub(crate) fn create_secret_dir_with_acl(path: &Path) -> Result<(), AppError> {
     }
 
     let result = unsafe { SetSecurityDescriptorDacl(&mut sd as *mut _ as *mut _, 1, acl, 0) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let result = unsafe {
+        SetSecurityDescriptorControl(
+            &mut sd as *mut _ as *mut _,
+            SE_DACL_PROTECTED,
+            SE_DACL_PROTECTED,
+        )
+    };
     if result == 0 {
         return Err(AppError::io(path, std::io::Error::last_os_error()));
     }
@@ -798,6 +828,23 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn validate_cmd_arg_rejects_percent_and_exclamation() {
+        assert!(
+            matches!(validate_cmd_arg("foo%bar"), Err(CmdArgError::Percent(s)) if s == "foo%bar")
+        );
+        assert!(
+            matches!(validate_cmd_arg("foo!bar"), Err(CmdArgError::Exclamation(s)) if s == "foo!bar")
+        );
+        assert!(
+            matches!(validate_cmd_arg("%CCSWITCH_TEST%"), Err(CmdArgError::Percent(s)) if s == "%CCSWITCH_TEST%")
+        );
+        // Plain args should still pass
+        assert!(validate_cmd_arg("plain").is_ok());
+        assert!(validate_cmd_arg("C:\\path\\file.exe").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn build_windows_command_line_quotes_after_c_for_cmd() {
         let line = build_windows_command_line(
             OsStr::new("cmd.exe"),
@@ -811,6 +858,71 @@ mod tests {
         // Should contain quoted foo&bar but not normal
         assert!(s.contains("\"foo&bar\""));
         assert!(s.contains("normal"));
+    }
+
+    /// Verify that `create_secret_file_with_acl` creates a file with an
+    /// owner-only DACL and no inherited ACEs (SE_DACL_PROTECTED).
+    #[cfg(windows)]
+    #[test]
+    fn create_secret_file_with_acl_has_protected_dacl() {
+        use std::ffi::OsStr;
+        use std::io::Write;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Security::Authorization::{
+            GetNamedSecurityInfoW, SE_FILE_OBJECT,
+        };
+        use windows_sys::Win32::Security::{
+            GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+            DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        };
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("secret.txt");
+        let mut file = create_secret_file_with_acl(&path).unwrap();
+        file.write_all(b"secret").unwrap();
+        drop(file);
+
+        let path_wide: Vec<u16> =
+            OsStr::new(&path).encode_wide().chain(std::iter::once(0)).collect();
+
+        let mut psec_desc: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let result = unsafe {
+            GetNamedSecurityInfoW(
+                path_wide.as_ptr() as *mut _,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut psec_desc,
+            )
+        };
+        assert_eq!(result, 0, "GetNamedSecurityInfoW should succeed");
+
+        let mut control: u16 = 0;
+        let mut revision: u32 = 0;
+        let result = unsafe {
+            GetSecurityDescriptorControl(psec_desc as *mut _, &mut control, &mut revision)
+        };
+        assert_eq!(result, 1, "GetSecurityDescriptorControl should succeed");
+        assert!(
+            control & SE_DACL_PROTECTED as u16 != 0,
+            "DACL should be protected (no inherited ACEs)"
+        );
+
+        let mut present: i32 = 0;
+        let mut defaulted: i32 = 0;
+        let mut pacl: *mut windows_sys::Win32::Security::ACL = std::ptr::null_mut();
+        let result = unsafe {
+            GetSecurityDescriptorDacl(psec_desc as *mut _, &mut present, &mut pacl, &mut defaulted)
+        };
+        assert_eq!(result, 1, "GetSecurityDescriptorDacl should succeed");
+        assert!(present != 0, "DACL should be present");
+        assert!(!pacl.is_null(), "DACL pointer should not be null");
+        // psec_desc is allocated by GetNamedSecurityInfoW and would normally
+        // be freed with LocalFree; we skip the free in this test since the
+        // process exit will reclaim the memory.
     }
 
     /// Smoke test: spawn a real child process via the shared Windows path,
