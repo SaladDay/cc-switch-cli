@@ -3168,6 +3168,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     #[serial(home_settings)]
     fn openclaw_workspace_open_failure_is_localized() {
@@ -3293,6 +3294,7 @@ mod tests {
         assert_eq!(editor.text(), "late content");
     }
 
+    #[cfg(unix)]
     #[test]
     #[serial(home_settings)]
     fn openclaw_daily_memory_save_failure_is_localized() {

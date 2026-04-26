@@ -4,6 +4,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::services::provider::ProviderService;
@@ -96,14 +99,9 @@ pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
-    Err(AppError::localized(
-        "claude.temp_launch_unsupported_platform",
-        "当前平台暂不支持在当前终端临时启动 Claude。".to_string(),
-        "Temporary Claude launch in the current terminal is not supported on this platform."
-            .to_string(),
-    ))
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -137,17 +135,451 @@ pub(crate) fn exec_prepared_claude(
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn build_command_windows(
+    prepared: &PreparedClaudeLaunch,
+    native_args: &[OsString],
+) -> std::process::Command {
+    let exe_str = prepared.executable.to_string_lossy();
+    let is_cmd = exe_str.ends_with(".cmd") || exe_str.ends_with(".bat");
+
+    if is_cmd {
+        let mut cmd = std::process::Command::new("cmd.exe");
+        cmd.arg("/c");
+        cmd.arg(&prepared.executable);
+        cmd.arg("--settings");
+        cmd.arg(&prepared.settings_path);
+        cmd.args(native_args);
+        cmd
+    } else {
+        let mut cmd = std::process::Command::new(&prepared.executable);
+        cmd.arg("--settings");
+        cmd.arg(&prepared.settings_path);
+        cmd.args(native_args);
+        cmd
+    }
+}
+
+#[cfg(windows)]
+struct ScopedConsoleCtrlHandler;
+
+#[cfg(windows)]
+impl ScopedConsoleCtrlHandler {
+    fn install() -> Result<Self, AppError> {
+        unsafe {
+            let result = windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+                Some(ctrl_handler_swallow),
+                1,
+            );
+            if result == 0 {
+                return Err(AppError::localized(
+                    "windows.console_ctrl_handler_failed",
+                    "安装控制台 Ctrl+C 处理器失败".to_string(),
+                    "Failed to install console Ctrl+C handler.".to_string(),
+                ));
+            }
+        }
+        Ok(ScopedConsoleCtrlHandler)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ScopedConsoleCtrlHandler {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+                Some(ctrl_handler_swallow),
+                0,
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn ctrl_handler_swallow(_dw_ctrl_type: u32) -> i32 {
+    1
+}
+
+#[cfg(windows)]
+struct Job {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Job {
+    unsafe fn create_with_kill_on_close() -> Result<Self, AppError> {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(AppError::localized(
+                "windows.create_job_object_failed",
+                "创建 Job Object 失败".to_string(),
+                "Failed to create Job Object.".to_string(),
+            ));
+        }
+
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        let result = SetInformationJobObject(
+            handle,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+
+        if result == 0 {
+            CloseHandle(handle);
+            return Err(AppError::localized(
+                "windows.set_job_info_failed",
+                "设置 Job Object 信息失败".to_string(),
+                "Failed to set Job Object information.".to_string(),
+            ));
+        }
+
+        Ok(Job { handle })
+    }
+
+    unsafe fn try_assign(
+        &self,
+        process: windows_sys::Win32::Foundation::HANDLE,
+    ) -> Result<(), std::io::Error> {
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        let result = AssignProcessToJobObject(self.handle, process);
+        if result == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    unsafe fn terminate(&self) {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        let _ = TerminateJobObject(self.handle, 1);
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn build_windows_cmdline(
+    prepared: &PreparedClaudeLaunch,
+    native_args: &[OsString],
+) -> Result<Vec<u16>, AppError> {
+    let exe_str = prepared.executable.to_string_lossy();
+    let is_cmd = exe_str.ends_with(".cmd") || exe_str.ends_with(".bat");
+
+    let mut cmdline = String::new();
+
+    if is_cmd {
+        // cmd.exe expands %VAR% and !VAR! (delayed expansion) even inside
+        // double quotes. There is no standard escape for these in a /c
+        // command line. We quote the argument to prevent command injection
+        // from & | < > ^ ( ), but % and ! remain a best-effort limitation
+        // of the cmd.exe shell. Without refactoring to bypass cmd.exe /c
+        // entirely (e.g. parse the .cmd shim and invoke the underlying
+        // binary directly), this expansion cannot be fully avoided. Log a
+        // warning so users are aware.
+        //
+        // Additionally, cmd.exe does not treat backslash as a quote escape,
+        // so arguments containing a literal double quote cannot be safely
+        // passed through cmd.exe /c. We reject such arguments.
+        for arg in native_args {
+            let s = arg.to_string_lossy();
+            if s.contains('%') || s.contains('!') {
+                log::warn!(
+                    target: "claude_temp_launch",
+                    "Native arg contains % or ! which cmd.exe may expand: {}",
+                    s
+                );
+            }
+            if s.contains('"') {
+                return Err(AppError::localized(
+                    "claude.temp_launch_unsafe_cmd_quote",
+                    format!(
+                        "参数包含双引号，无法安全地通过 cmd.exe /c 传递: {}",
+                        s
+                    ),
+                    format!(
+                        "Native arg contains a double quote which cannot be safely passed through cmd.exe /c: {}",
+                        s
+                    ),
+                ));
+            }
+            if s.ends_with('\\') {
+                return Err(AppError::localized(
+                    "claude.temp_launch_unsafe_cmd_trailing_backslash",
+                    format!(
+                        "参数以反斜杠结尾，无法安全地通过 cmd.exe /c 传递: {}",
+                        s
+                    ),
+                    format!(
+                        "Native arg ends with a backslash which cannot be safely passed through cmd.exe /c: {}",
+                        s
+                    ),
+                ));
+            }
+        }
+        cmdline.push_str("cmd.exe /c ");
+        cmdline.push_str(&quote_windows_arg_for_cmd(&exe_str));
+        cmdline.push_str(" --settings ");
+        cmdline.push_str(&quote_windows_arg_for_cmd(
+            &prepared.settings_path.to_string_lossy(),
+        ));
+        for arg in native_args {
+            cmdline.push(' ');
+            cmdline.push_str(&quote_windows_arg_for_cmd(&arg.to_string_lossy()));
+        }
+    } else {
+        cmdline.push_str(&quote_windows_arg(&exe_str));
+        cmdline.push_str(" --settings ");
+        cmdline.push_str(&quote_windows_arg(
+            &prepared.settings_path.to_string_lossy(),
+        ));
+        for arg in native_args {
+            cmdline.push(' ');
+            cmdline.push_str(&quote_windows_arg(&arg.to_string_lossy()));
+        }
+    }
+
+    Ok(cmdline.encode_utf16().chain(std::iter::once(0)).collect())
+}
+
+#[cfg(windows)]
+fn quote_windows_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && !arg.contains(' ')
+        && !arg.contains('\t')
+        && !arg.contains('\n')
+        && !arg.contains('"')
+    {
+        return arg.to_string();
+    }
+
+    let mut result = String::with_capacity(arg.len() + 2);
+    result.push('"');
+
+    let mut chars = arg.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            result.push('\\');
+            result.push('"');
+        } else if ch == '\\' {
+            let mut count = 1;
+            while chars.peek() == Some(&'\\') {
+                count += 1;
+                chars.next();
+            }
+            if chars.peek() == Some(&'"') || chars.peek().is_none() {
+                // Double backslashes when followed by a quote or end of string
+                for _ in 0..count * 2 {
+                    result.push('\\');
+                }
+            } else {
+                for _ in 0..count {
+                    result.push('\\');
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result.push('"');
+    result
+}
+
+#[cfg(windows)]
+fn quote_windows_arg_for_cmd(arg: &str) -> String {
+    const CMD_SPECIAL: &[char] = &['&', '|', '<', '>', '^', '%', '!', '(', ')'];
+    let needs_quote = arg.is_empty()
+        || arg.contains(' ')
+        || arg.contains('\t')
+        || arg.contains('\n')
+        || arg.contains('"')
+        || arg.chars().any(|c| CMD_SPECIAL.contains(&c));
+
+    if !needs_quote {
+        return arg.to_string();
+    }
+
+    let mut result = String::with_capacity(arg.len() + 2);
+    result.push('"');
+
+    let mut chars = arg.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            result.push('\\');
+            result.push('"');
+        } else if ch == '\\' {
+            let mut count = 1;
+            while chars.peek() == Some(&'\\') {
+                count += 1;
+                chars.next();
+            }
+            if chars.peek() == Some(&'"') || chars.peek().is_none() {
+                for _ in 0..count * 2 {
+                    result.push('\\');
+                }
+            } else {
+                for _ in 0..count {
+                    result.push('\\');
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result.push('"');
+    result
+}
+
+#[cfg(windows)]
 pub(crate) fn exec_prepared_claude(
-    _prepared: &PreparedClaudeLaunch,
-    _native_args: &[OsString],
+    prepared: &PreparedClaudeLaunch,
+    native_args: &[OsString],
 ) -> Result<(), AppError> {
-    Err(AppError::localized(
-        "claude.temp_launch_unsupported_platform",
-        "当前平台暂不支持在当前终端临时启动 Claude。".to_string(),
-        "Temporary Claude launch in the current terminal is not supported on this platform."
-            .to_string(),
-    ))
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, GetExitCodeProcess, ResumeThread, WaitForSingleObject, INFINITE,
+        PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    let _ctrl_guard = ScopedConsoleCtrlHandler::install()?;
+
+    let mut cmdline_wide = build_windows_cmdline(prepared, native_args)?;
+
+    let exe_str = prepared.executable.to_string_lossy();
+    let is_cmd = exe_str.ends_with(".cmd") || exe_str.ends_with(".bat");
+
+    let application_name_wide: Option<Vec<u16>> = if is_cmd {
+        None
+    } else {
+        Some(
+            std::ffi::OsStr::new(&*prepared.executable)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect(),
+        )
+    };
+
+    let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+
+    let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+    let app_name_ptr = application_name_wide
+        .as_ref()
+        .map(|s| s.as_ptr())
+        .unwrap_or(std::ptr::null());
+
+    let create_result = unsafe {
+        CreateProcessW(
+            app_name_ptr,
+            cmdline_wide.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            FALSE,
+            0x00000004,
+            std::ptr::null(),
+            std::ptr::null(),
+            &startup_info,
+            &mut process_info,
+        )
+    };
+
+    if create_result == 0 {
+        return Err(AppError::localized(
+            "windows.create_process_failed",
+            "创建进程失败".to_string(),
+            format!(
+                "Failed to create process: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+
+    let h_process = process_info.hProcess;
+    let h_thread = process_info.hThread;
+
+    let job = match unsafe { Job::create_with_kill_on_close() } {
+        Ok(job) => job,
+        Err(e) => {
+            unsafe {
+                let _ = windows_sys::Win32::System::Threading::TerminateProcess(h_process, 1);
+                CloseHandle(h_thread);
+                CloseHandle(h_process);
+            }
+            return Err(e);
+        }
+    };
+
+    if let Err(e) = unsafe { job.try_assign(h_process) } {
+        log::warn!(target: "windows.job_assign_failed_fallback", "{}", e);
+    }
+
+    let resume_result = unsafe { ResumeThread(h_thread) };
+    if resume_result == u32::MAX {
+        unsafe {
+            job.terminate();
+            CloseHandle(h_thread);
+            CloseHandle(h_process);
+        }
+        return Err(AppError::localized(
+            "windows.resume_thread_failed",
+            "恢复线程失败".to_string(),
+            format!(
+                "Failed to resume thread: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+
+    unsafe {
+        WaitForSingleObject(h_process, INFINITE);
+    }
+
+    let mut exit_code: u32 = 0;
+    let get_exit_result = unsafe { GetExitCodeProcess(h_process, &mut exit_code) };
+
+    unsafe {
+        CloseHandle(h_thread);
+        CloseHandle(h_process);
+    }
+
+    if get_exit_result == 0 {
+        return Err(AppError::localized(
+            "windows.get_exit_code_failed",
+            "获取进程退出码失败".to_string(),
+            format!(
+                "Failed to get exit code: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+
+    if exit_code != 0 {
+        return Err(AppError::Message(format!(
+            "Claude exited with code {}",
+            exit_code
+        )));
+    }
+
+    Ok(())
 }
 
 fn write_temp_settings_file(
@@ -167,6 +599,9 @@ fn write_temp_settings_file_with<Finalize>(
 where
     Finalize: FnOnce(&Path) -> Result<(), AppError>,
 {
+    #[cfg(windows)]
+    let timestamp = crate::cli::orphan_scan::current_process_creation_time_nanos();
+    #[cfg(not(windows))]
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -217,7 +652,11 @@ fn finalize_temp_settings_file(path: &Path) -> Result<(), AppError> {
 }
 
 #[cfg(not(unix))]
-fn finalize_temp_settings_file(_path: &Path) -> Result<(), AppError> {
+fn finalize_temp_settings_file(path: &Path) -> Result<(), AppError> {
+    #[cfg(windows)]
+    {
+        restrict_to_owner(path, false)?;
+    }
     Ok(())
 }
 
@@ -235,11 +674,123 @@ fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
 
 #[cfg(not(unix))]
 fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|err| AppError::io(path, err))
+        .map_err(|err| AppError::io(path, err))?;
+    #[cfg(windows)]
+    {
+        restrict_to_owner(path, false)?;
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn restrict_to_owner(path: &Path, inherit: bool) -> Result<(), AppError> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE};
+    use windows_sys::Win32::Security::Authorization::{
+        SetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, AddAccessAllowedAceEx, DACL_SECURITY_INFORMATION,
+        GetLengthSid, GetTokenInformation, InitializeAcl,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+        TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    const NO_INHERITANCE: u32 = 0;
+    const OBJECT_INHERIT_ACE: u32 = 0x1;
+    const CONTAINER_INHERIT_ACE: u32 = 0x2;
+    const FILE_ALL_ACCESS: u32 = 0x1F01FF;
+    const ACL_REVISION: u32 = 2;
+
+    // Open current process token to get the user SID
+    let mut token: HANDLE = std::ptr::null_mut();
+    let result = unsafe {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+    };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    // Get token user info (first call to get size)
+    let mut size = 0u32;
+    unsafe {
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut size);
+    }
+
+    let mut buffer = vec![0u8; size as usize];
+    let result = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buffer.as_mut_ptr() as *mut _,
+            size,
+            &mut size,
+        )
+    };
+    if result == 0 {
+        unsafe { CloseHandle(token) };
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let token_user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
+    let user_sid = token_user.User.Sid;
+
+    unsafe { CloseHandle(token) };
+
+    let sid_len = unsafe { GetLengthSid(user_sid) };
+
+    // ACL size = ACL header + ACCESS_ALLOWED_ACE without SidStart + SID length
+    // ACL header = 8 bytes, ACE header+Mask = 8 bytes, SidStart = 4 bytes
+    let acl_size = (std::mem::size_of::<ACL>() + 8 + sid_len as usize) as u32;
+    let mut acl_buffer = vec![0u8; acl_size as usize];
+    let acl = acl_buffer.as_mut_ptr() as *mut ACL;
+
+    let result = unsafe { InitializeAcl(acl, acl_size, ACL_REVISION) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let ace_flags = if inherit {
+        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+    } else {
+        NO_INHERITANCE
+    };
+
+    let result = unsafe {
+        AddAccessAllowedAceEx(acl, ACL_REVISION, ace_flags, FILE_ALL_ACCESS, user_sid)
+    };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let path_wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let result = unsafe {
+        SetNamedSecurityInfoW(
+            path_wide.as_ptr() as *mut _,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if result != ERROR_SUCCESS {
+        return Err(AppError::io(path, std::io::Error::from_raw_os_error(result as i32)));
+    }
+
+    Ok(())
 }
 
 fn cleanup_temp_settings_file(path: &Path) -> Result<(), AppError> {
@@ -595,6 +1146,51 @@ mod tests {
 
         assert_eq!(written["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-full");
         assert_eq!(written["permissions"]["allow"], json!(["Bash(git*)"]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_windows_arg_for_cmd_quotes_special_chars() {
+        assert_eq!(quote_windows_arg_for_cmd("foo&bar"), "\"foo&bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo|bar"), "\"foo|bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo<bar"), "\"foo<bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo>bar"), "\"foo>bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo^bar"), "\"foo^bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo%bar"), "\"foo%bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo!bar"), "\"foo!bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo(bar"), "\"foo(bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo)bar"), "\"foo)bar\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_windows_arg_for_cmd_escapes_quotes() {
+        assert_eq!(
+            quote_windows_arg_for_cmd("foo\"bar"),
+            "\"foo\\\"bar\""
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_windows_arg_for_cmd_quotes_spaces_and_specials() {
+        assert_eq!(
+            quote_windows_arg_for_cmd("foo & bar"),
+            "\"foo & bar\""
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_windows_arg_for_cmd_leaves_plain_args_unchanged() {
+        assert_eq!(quote_windows_arg_for_cmd("normal"), "normal");
+        assert_eq!(quote_windows_arg_for_cmd("C:\\path\\file.exe"), "C:\\path\\file.exe");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_windows_arg_for_cmd_handles_empty_string() {
+        assert_eq!(quote_windows_arg_for_cmd(""), "\"\"");
     }
 
     #[test]
