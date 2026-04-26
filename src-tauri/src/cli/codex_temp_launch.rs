@@ -11,9 +11,6 @@ use crate::error::AppError;
 use crate::provider::Provider;
 use serde_json::Value;
 
-#[cfg(windows)]
-use windows_sys::Win32::System::Threading::TerminateProcess;
-
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedCodexLaunch {
     pub(crate) executable: PathBuf,
@@ -116,11 +113,9 @@ pub(crate) fn exec_prepared_codex(
     native_args: &[OsString],
 ) -> Result<(), AppError> {
     use crate::cli::windows_temp_launch::{
-        build_env_block_with_override, is_cmd_shim, Job, ScopedConsoleCtrlHandler,
-        spawn_suspended_createprocessw, wait_for_child,
+        build_env_block_with_override, is_cmd_shim, run_suspended_child,
+        ScopedConsoleCtrlHandler,
     };
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::ResumeThread;
 
     let _ctrl_guard = ScopedConsoleCtrlHandler::install()?;
 
@@ -139,46 +134,12 @@ pub(crate) fn exec_prepared_codex(
         Some(program.as_path())
     };
 
-    let (process_handle, thread_handle) =
-        spawn_suspended_createprocessw(&program, &args, Some(&env_block), application_name)?;
-
-    let job = match Job::create_with_kill_on_close() {
-        Ok(job) => job,
-        Err(e) => {
-            unsafe {
-                let _ = TerminateProcess(process_handle, 1);
-                CloseHandle(thread_handle);
-                CloseHandle(process_handle);
-            }
-            return Err(e);
-        }
-    };
-
-    if let Err(e) = job.try_assign(process_handle) {
-        log::warn!("{}", AppError::windows_job_assign_failed_fallback(&e));
-    }
-
-    let resume_result = unsafe { ResumeThread(thread_handle) };
-    if resume_result == u32::MAX {
-        let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-        unsafe {
-            let _ = TerminateProcess(process_handle, 1);
-            CloseHandle(thread_handle);
-            CloseHandle(process_handle);
-        }
-        return Err(AppError::windows_resume_thread_failed(code));
-    }
-
-    unsafe { CloseHandle(thread_handle) };
-
-    let exit_code = match wait_for_child(process_handle) {
-        Ok(code) => code,
-        Err(e) => {
-            unsafe { CloseHandle(process_handle) };
-            return Err(e);
-        }
-    };
-    unsafe { CloseHandle(process_handle) };
+    let exit_code = run_suspended_child(
+        &program,
+        &args,
+        Some(&env_block),
+        application_name,
+    )?;
 
     if exit_code != 0 {
         return Err(AppError::localized(
@@ -208,56 +169,18 @@ fn build_command_windows(
     prepared: &PreparedCodexLaunch,
     native_args: &[OsString],
 ) -> Result<(std::path::PathBuf, Vec<OsString>), AppError> {
-    use crate::cli::windows_temp_launch::{arg_requires_cmd_quote, is_cmd_shim};
+    use crate::cli::windows_temp_launch::{is_cmd_shim, validate_cmd_arg};
 
     if is_cmd_shim(&prepared.executable) {
-        // cmd.exe expands %VAR% and !VAR! (delayed expansion) even inside
-        // double quotes. There is no standard escape for these in a /c
-        // command line. Without refactoring to bypass cmd.exe /c entirely
-        // (e.g. parse the .cmd shim and invoke the underlying binary
-        // directly), this expansion cannot be fully avoided. Log a warning
-        // so users are aware.
-        //
-        // cmd.exe does not treat backslash as a quote escape, so a literal
-        // double quote inside an arg cannot be safely escaped — reject. A
-        // trailing backslash only becomes unsafe when the arg itself would
-        // be wrapped in `"..."` by cmd quoting, because then the `\` would
-        // escape the closing quote. Plain paths like `C:\work\` need no
-        // quoting and pass through verbatim.
+        // Validate internally-constructed arguments that also flow through
+        // cmd.exe /c (executable path).
+        if let Err(e) = validate_cmd_arg(&prepared.executable.to_string_lossy()) {
+            return Err(cmd_arg_error_to_app_error("codex", e));
+        }
+
         for arg in native_args {
-            let s = arg.to_string_lossy();
-            if s.contains('%') || s.contains('!') {
-                log::warn!(
-                    target: "codex_temp_launch",
-                    "Native arg contains % or ! which cmd.exe may expand: {}",
-                    s
-                );
-            }
-            if s.contains('"') {
-                return Err(AppError::localized(
-                    "codex.temp_launch_unsafe_cmd_quote",
-                    format!(
-                        "参数包含双引号，无法安全地通过 cmd.exe /c 传递: {}",
-                        s
-                    ),
-                    format!(
-                        "Native arg contains a double quote which cannot be safely passed through cmd.exe /c: {}",
-                        s
-                    ),
-                ));
-            }
-            if s.ends_with('\\') && arg_requires_cmd_quote(&s) {
-                return Err(AppError::localized(
-                    "codex.temp_launch_unsafe_cmd_trailing_backslash",
-                    format!(
-                        "参数同时需要 cmd.exe 加引号且以反斜杠结尾，无法安全传递: {}",
-                        s
-                    ),
-                    format!(
-                        "Native arg both requires cmd.exe quoting and ends with a backslash, which cannot be safely passed through cmd.exe /c: {}",
-                        s
-                    ),
-                ));
+            if let Err(e) = validate_cmd_arg(&arg.to_string_lossy()) {
+                return Err(cmd_arg_error_to_app_error("codex", e));
             }
         }
         let mut args = vec![OsString::from("/c"), OsString::from(&prepared.executable)];
@@ -265,6 +188,32 @@ fn build_command_windows(
         Ok((std::path::PathBuf::from("cmd.exe"), args))
     } else {
         Ok((prepared.executable.clone(), native_args.to_vec()))
+    }
+}
+
+#[cfg(windows)]
+fn cmd_arg_error_to_app_error(_app_label: &str, err: crate::cli::windows_temp_launch::CmdArgError) -> AppError {
+    use crate::cli::windows_temp_launch::CmdArgError;
+    match err {
+        CmdArgError::DoubleQuote(arg) => AppError::localized(
+            "codex.temp_launch_unsafe_cmd_quote",
+            format!("参数包含双引号，无法安全地通过 cmd.exe /c 传递: {}", arg),
+            format!(
+                "Native arg contains a double quote which cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
+        CmdArgError::UnsafeTrailingBackslash(arg) => AppError::localized(
+            "codex.temp_launch_unsafe_cmd_trailing_backslash",
+            format!(
+                "参数同时需要 cmd.exe 加引号且以反斜杠结尾，无法安全传递: {}",
+                arg
+            ),
+            format!(
+                "Native arg both requires cmd.exe quoting and ends with a backslash, which cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
     }
 }
 
@@ -333,6 +282,9 @@ where
     let codex_home = temp_dir.join(dir_name);
 
     let write_result = (|| {
+        #[cfg(windows)]
+        crate::cli::windows_temp_launch::create_secret_dir_all_with_acl(&codex_home)?;
+        #[cfg(not(windows))]
         fs::create_dir_all(&codex_home).map_err(|err| AppError::io(&codex_home, err))?;
         finalize(&codex_home)?;
 

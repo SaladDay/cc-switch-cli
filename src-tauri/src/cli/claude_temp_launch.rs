@@ -140,60 +140,21 @@ pub(crate) fn exec_prepared_claude(
     native_args: &[OsString],
 ) -> Result<(), AppError> {
     use crate::cli::windows_temp_launch::{
-        Job, ScopedConsoleCtrlHandler, spawn_suspended_createprocessw, wait_for_child,
+        run_suspended_child, ScopedConsoleCtrlHandler,
     };
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::ResumeThread;
 
     let _ctrl_guard = ScopedConsoleCtrlHandler::install()?;
 
     let (program, args, application_name) = build_claude_command_windows(prepared, native_args)?;
 
-    let (h_process, h_thread) =
-        spawn_suspended_createprocessw(&program, &args, None, application_name.as_deref())?;
-
-    let job = match Job::create_with_kill_on_close() {
-        Ok(job) => job,
-        Err(e) => {
-            unsafe {
-                let _ = windows_sys::Win32::System::Threading::TerminateProcess(h_process, 1);
-                CloseHandle(h_thread);
-                CloseHandle(h_process);
-            }
-            return Err(e);
-        }
-    };
-
-    if let Err(e) = job.try_assign(h_process) {
-        log::warn!(target: "windows.job_assign_failed_fallback", "{}", e);
-    }
-
-    let resume_result = unsafe { ResumeThread(h_thread) };
-    if resume_result == u32::MAX {
-        unsafe {
-            let _ = windows_sys::Win32::System::Threading::TerminateProcess(h_process, 1);
-            CloseHandle(h_thread);
-            CloseHandle(h_process);
-        }
-        return Err(AppError::windows_resume_thread_failed(unsafe {
-            windows_sys::Win32::Foundation::GetLastError()
-        }));
-    }
-
-    unsafe {
-        CloseHandle(h_thread);
-    }
-
-    let exit_code = wait_for_child(h_process)?;
-    unsafe {
-        CloseHandle(h_process);
-    }
+    let exit_code = run_suspended_child(&program, &args, None, application_name.as_deref())?;
 
     if exit_code != 0 {
-        return Err(AppError::Message(format!(
-            "Claude exited with code {}",
-            exit_code
-        )));
+        return Err(AppError::localized(
+            "claude.temp_launch_exit_nonzero",
+            format!("Claude 进程退出码非零: {exit_code}"),
+            format!("Claude process exited with non-zero code: {exit_code}"),
+        ));
     }
 
     Ok(())
@@ -204,46 +165,24 @@ fn build_claude_command_windows(
     prepared: &PreparedClaudeLaunch,
     native_args: &[OsString],
 ) -> Result<(PathBuf, Vec<OsString>, Option<PathBuf>), AppError> {
-    use crate::cli::windows_temp_launch::{arg_requires_cmd_quote, is_cmd_shim};
+    use crate::cli::windows_temp_launch::{is_cmd_shim, validate_cmd_arg};
 
     let exe_str = prepared.executable.to_string_lossy();
     let is_cmd = is_cmd_shim(&prepared.executable);
 
     if is_cmd {
+        // Validate internally-constructed arguments that also flow through
+        // cmd.exe /c (executable path and settings path).
+        if let Err(e) = validate_cmd_arg(&exe_str) {
+            return Err(cmd_arg_error_to_app_error("claude", e));
+        }
+        if let Err(e) = validate_cmd_arg(&prepared.settings_path.to_string_lossy()) {
+            return Err(cmd_arg_error_to_app_error("claude", e));
+        }
+
         for arg in native_args {
-            let s = arg.to_string_lossy();
-            if s.contains('%') || s.contains('!') {
-                log::warn!(
-                    target: "claude_temp_launch",
-                    "Native arg contains % or ! which cmd.exe may expand: {}",
-                    s
-                );
-            }
-            if s.contains('"') {
-                return Err(AppError::localized(
-                    "claude.temp_launch_unsafe_cmd_quote",
-                    format!(
-                        "参数包含双引号，无法安全地通过 cmd.exe /c 传递: {}",
-                        s
-                    ),
-                    format!(
-                        "Native arg contains a double quote which cannot be safely passed through cmd.exe /c: {}",
-                        s
-                    ),
-                ));
-            }
-            if s.ends_with('\\') && arg_requires_cmd_quote(&s) {
-                return Err(AppError::localized(
-                    "claude.temp_launch_unsafe_cmd_trailing_backslash",
-                    format!(
-                        "参数同时需要 cmd.exe 加引号且以反斜杠结尾，无法安全传递: {}",
-                        s
-                    ),
-                    format!(
-                        "Native arg both requires cmd.exe quoting and ends with a backslash, which cannot be safely passed through cmd.exe /c: {}",
-                        s
-                    ),
-                ));
+            if let Err(e) = validate_cmd_arg(&arg.to_string_lossy()) {
+                return Err(cmd_arg_error_to_app_error("claude", e));
             }
         }
         let mut args = vec![
@@ -261,6 +200,32 @@ fn build_claude_command_windows(
         ];
         args.extend_from_slice(native_args);
         Ok((prepared.executable.clone(), args, Some(prepared.executable.clone())))
+    }
+}
+
+#[cfg(windows)]
+fn cmd_arg_error_to_app_error(_app_label: &str, err: crate::cli::windows_temp_launch::CmdArgError) -> AppError {
+    use crate::cli::windows_temp_launch::CmdArgError;
+    match err {
+        CmdArgError::DoubleQuote(arg) => AppError::localized(
+            "claude.temp_launch_unsafe_cmd_quote",
+            format!("参数包含双引号，无法安全地通过 cmd.exe /c 传递: {}", arg),
+            format!(
+                "Native arg contains a double quote which cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
+        CmdArgError::UnsafeTrailingBackslash(arg) => AppError::localized(
+            "claude.temp_launch_unsafe_cmd_trailing_backslash",
+            format!(
+                "参数同时需要 cmd.exe 加引号且以反斜杠结尾，无法安全传递: {}",
+                arg
+            ),
+            format!(
+                "Native arg both requires cmd.exe quoting and ends with a backslash, which cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
     }
 }
 

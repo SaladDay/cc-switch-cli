@@ -1,5 +1,5 @@
 use std::ffi::{OsStr, OsString};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::path::Path;
 
 use crate::error::AppError;
@@ -19,7 +19,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, GetExitCodeProcess, ResumeThread, WaitForSingleObject,
+    CreateProcessW, GetExitCodeProcess, WaitForSingleObject,
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
@@ -49,6 +49,49 @@ pub(crate) fn arg_requires_cmd_quote(s: &str) -> bool {
         || s.contains('\t')
         || s.contains('\n')
         || s.chars().any(|c| CMD_SPECIAL.contains(&c))
+}
+
+/// Result of validating a single argument for `cmd.exe /c` safety.
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+pub(crate) enum CmdArgError {
+    DoubleQuote(String),
+    UnsafeTrailingBackslash(String),
+}
+
+impl std::fmt::Display for CmdArgError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CmdArgError::DoubleQuote(arg) => {
+                write!(f, "double quote in cmd.exe arg: {}", arg)
+            }
+            CmdArgError::UnsafeTrailingBackslash(arg) => {
+                write!(f, "trailing backslash in quoted cmd.exe arg: {}", arg)
+            }
+        }
+    }
+}
+
+/// Validates a single argument for safety when passed through `cmd.exe /c`.
+/// Returns `Ok(())` if safe, `Err(CmdArgError)` if the argument contains a
+/// double quote or an unsafe trailing backslash. Prints a warning to stderr
+/// when `%` or `!` are present (which cmd.exe may expand) so users are
+/// notified even when the log level is set to `error`.
+#[cfg(windows)]
+pub(crate) fn validate_cmd_arg(arg: &str) -> Result<(), CmdArgError> {
+    if arg.contains('%') || arg.contains('!') {
+        eprintln!(
+            "cc-switch warning: argument contains % or ! which cmd.exe may expand: {}",
+            arg
+        );
+    }
+    if arg.contains('"') {
+        return Err(CmdArgError::DoubleQuote(arg.to_string()));
+    }
+    if arg.ends_with('\\') && arg_requires_cmd_quote(arg) {
+        return Err(CmdArgError::UnsafeTrailingBackslash(arg.to_string()));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -171,22 +214,26 @@ pub(crate) fn build_windows_command_line(program: &OsStr, args: &[OsString]) -> 
 pub(crate) fn build_env_block_with_override(key: &str, value: &OsStr) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
 
+    let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .filter(|(k, _)| !k.to_string_lossy().eq_ignore_ascii_case(key))
+        .collect();
+    // Add our override
+    vars.push((std::ffi::OsString::from(key), value.to_os_string()));
+    // Windows docs say caller-supplied environment blocks should be sorted.
+    // Sort by key case-insensitively to match Windows conventions.
+    vars.sort_by(|(a, _), (b, _)| {
+        a.to_string_lossy()
+            .to_lowercase()
+            .cmp(&b.to_string_lossy().to_lowercase())
+    });
+
     let mut result = Vec::new();
-    for (k, v) in std::env::vars_os() {
-        // Windows environment variable names are case-insensitive.
-        if k.to_string_lossy().eq_ignore_ascii_case(key) {
-            continue;
-        }
+    for (k, v) in vars {
         result.extend(k.encode_wide());
         result.push(b'=' as u16);
         result.extend(v.encode_wide());
         result.push(0);
     }
-    // Add our override
-    result.extend(key.encode_utf16());
-    result.push(b'=' as u16);
-    result.extend(value.encode_wide());
-    result.push(0);
     // Double-null terminate the block
     result.push(0);
     result
@@ -370,23 +417,115 @@ pub(crate) fn wait_for_child(process_handle: HANDLE) -> Result<u32, AppError> {
     }
 }
 
+/// Shared Windows child-process lifecycle: spawn suspended, create a Job
+/// Object with KILL_ON_JOB_CLOSE, assign the process, resume the main
+/// thread, wait for termination, and return the exit code. All handles are
+/// cleaned up regardless of success or failure.
+#[cfg(windows)]
+pub(crate) fn run_suspended_child(
+    program: &std::path::Path,
+    args: &[OsString],
+    env_block: Option<&[u16]>,
+    application_name: Option<&std::path::Path>,
+) -> Result<u32, AppError> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::ResumeThread;
+
+    let (h_process, h_thread) =
+        spawn_suspended_createprocessw(program, args, env_block, application_name)?;
+
+    let job = match Job::create_with_kill_on_close() {
+        Ok(job) => job,
+        Err(e) => {
+            unsafe {
+                let _ = windows_sys::Win32::System::Threading::TerminateProcess(h_process, 1);
+                CloseHandle(h_thread);
+                CloseHandle(h_process);
+            }
+            return Err(e);
+        }
+    };
+
+    if let Err(e) = job.try_assign(h_process) {
+        log::warn!(target: "windows.job_assign_failed_fallback", "{}", e);
+    }
+
+    let resume_result = unsafe { ResumeThread(h_thread) };
+    if resume_result == u32::MAX {
+        let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        unsafe {
+            let _ = windows_sys::Win32::System::Threading::TerminateProcess(h_process, 1);
+            CloseHandle(h_thread);
+            CloseHandle(h_process);
+        }
+        return Err(AppError::windows_resume_thread_failed(code));
+    }
+
+    unsafe {
+        CloseHandle(h_thread);
+    }
+
+    let exit_code = match wait_for_child(h_process) {
+        Ok(code) => code,
+        Err(e) => {
+            unsafe { CloseHandle(h_process) };
+            return Err(e);
+        }
+    };
+    unsafe { CloseHandle(h_process) };
+
+    Ok(exit_code)
+}
+
 // ── ACL / file security ──────────────────────────────────────────────
 
 #[cfg(windows)]
-pub(crate) fn restrict_to_owner(path: &Path, inherit: bool) -> Result<(), AppError> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE};
-    use windows_sys::Win32::Security::Authorization::{
-        SetNamedSecurityInfoW, SE_FILE_OBJECT,
-    };
+fn get_current_user_sid() -> Result<Vec<u8>, AppError> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Security::{
-        ACL, AddAccessAllowedAceEx, DACL_SECURITY_INFORMATION,
-        GetLengthSid, GetTokenInformation, InitializeAcl,
-        PROTECTED_DACL_SECURITY_INFORMATION,
-        TOKEN_QUERY, TOKEN_USER, TokenUser,
+        GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    let result = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+    if result == 0 {
+        return Err(AppError::io("token", std::io::Error::last_os_error()));
+    }
+
+    let mut size = 0u32;
+    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut size); }
+
+    let mut buffer = vec![0u8; size as usize];
+    let result = unsafe {
+        GetTokenInformation(token, TokenUser, buffer.as_mut_ptr() as *mut _, size, &mut size)
+    };
+    if result == 0 {
+        unsafe { CloseHandle(token) };
+        return Err(AppError::io("token", std::io::Error::last_os_error()));
+    }
+
+    let token_user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
+    let sid = token_user.User.Sid;
+    let sid_len = unsafe { GetLengthSid(sid) };
+
+    let mut sid_buffer = vec![0u8; sid_len as usize];
+    unsafe {
+        std::ptr::copy_nonoverlapping(sid as *const u8, sid_buffer.as_mut_ptr(), sid_len as usize);
+    }
+
+    unsafe { CloseHandle(token) };
+    Ok(sid_buffer)
+}
+
+#[cfg(windows)]
+fn build_owner_only_acl(inherit: bool) -> Result<Vec<u8>, AppError> {
+    use windows_sys::Win32::Security::{
+        ACL, AddAccessAllowedAceEx, GetLengthSid, InitializeAcl,
+    };
+
+    let sid = get_current_user_sid()?;
+    let sid_ptr = sid.as_ptr() as *mut _;
 
     const NO_INHERITANCE: u32 = 0;
     const OBJECT_INHERIT_ACE: u32 = 0x1;
@@ -394,50 +533,14 @@ pub(crate) fn restrict_to_owner(path: &Path, inherit: bool) -> Result<(), AppErr
     const FILE_ALL_ACCESS: u32 = 0x1F01FF;
     const ACL_REVISION: u32 = 2;
 
-    // Open current process token to get the user SID
-    let mut token: HANDLE = std::ptr::null_mut();
-    let result = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
-    if result == 0 {
-        return Err(AppError::io(path, std::io::Error::last_os_error()));
-    }
-
-    // Get token user info (first call to get size)
-    let mut size = 0u32;
-    unsafe {
-        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut size);
-    }
-
-    let mut buffer = vec![0u8; size as usize];
-    let result = unsafe {
-        GetTokenInformation(
-            token,
-            TokenUser,
-            buffer.as_mut_ptr() as *mut _,
-            size,
-            &mut size,
-        )
-    };
-    if result == 0 {
-        unsafe { CloseHandle(token) };
-        return Err(AppError::io(path, std::io::Error::last_os_error()));
-    }
-
-    let token_user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
-    let user_sid = token_user.User.Sid;
-
-    unsafe { CloseHandle(token) };
-
-    let sid_len = unsafe { GetLengthSid(user_sid) };
-
-    // ACL size = ACL header + ACCESS_ALLOWED_ACE without SidStart + SID length
-    // ACL header = 8 bytes, ACE header+Mask = 8 bytes, SidStart = 4 bytes
+    let sid_len = unsafe { GetLengthSid(sid_ptr) };
     let acl_size = (std::mem::size_of::<ACL>() + 8 + sid_len as usize) as u32;
     let mut acl_buffer = vec![0u8; acl_size as usize];
     let acl = acl_buffer.as_mut_ptr() as *mut ACL;
 
     let result = unsafe { InitializeAcl(acl, acl_size, ACL_REVISION) };
     if result == 0 {
-        return Err(AppError::io(path, std::io::Error::last_os_error()));
+        return Err(AppError::io("acl", std::io::Error::last_os_error()));
     }
 
     let ace_flags = if inherit {
@@ -447,11 +550,29 @@ pub(crate) fn restrict_to_owner(path: &Path, inherit: bool) -> Result<(), AppErr
     };
 
     let result = unsafe {
-        AddAccessAllowedAceEx(acl, ACL_REVISION, ace_flags, FILE_ALL_ACCESS, user_sid)
+        AddAccessAllowedAceEx(acl, ACL_REVISION, ace_flags, FILE_ALL_ACCESS, sid_ptr)
     };
     if result == 0 {
-        return Err(AppError::io(path, std::io::Error::last_os_error()));
+        return Err(AppError::io("acl", std::io::Error::last_os_error()));
     }
+
+    Ok(acl_buffer)
+}
+
+#[cfg(windows)]
+pub(crate) fn restrict_to_owner(path: &Path, inherit: bool) -> Result<(), AppError> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::Security::Authorization::{
+        SetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    let acl_buffer = build_owner_only_acl(inherit)?;
+    let acl = acl_buffer.as_ptr() as *mut _;
 
     let path_wide: Vec<u16> = OsStr::new(path)
         .encode_wide()
@@ -477,15 +598,126 @@ pub(crate) fn restrict_to_owner(path: &Path, inherit: bool) -> Result<(), AppErr
     Ok(())
 }
 
+/// Create a file atomically with an owner-only DACL, eliminating the
+/// TOCTOU window between creation and ACL restriction.
+#[cfg(windows)]
+pub(crate) fn create_secret_file_with_acl(path: &Path) -> Result<File, AppError> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Security::{
+        InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SECURITY_DESCRIPTOR,
+        SECURITY_ATTRIBUTES,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, CREATE_NEW,
+    };
+
+    let mut acl_buffer = build_owner_only_acl(false)?;
+    let acl = acl_buffer.as_mut_ptr() as *mut _;
+
+    let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let result = unsafe { InitializeSecurityDescriptor(&mut sd as *mut _ as *mut _, 1) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let result = unsafe { SetSecurityDescriptorDacl(&mut sd as *mut _ as *mut _, 1, acl, 0) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: &mut sd as *mut _ as *mut _,
+        bInheritHandle: 0,
+    };
+
+    let path_wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let handle = unsafe {
+        CreateFileW(
+            path_wide.as_ptr(),
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &sa,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let file = unsafe { File::from_raw_handle(handle as _) };
+    Ok(file)
+}
+
+/// Create a directory atomically with an owner-only DACL, eliminating the
+/// TOCTOU window between creation and ACL restriction.
+#[cfg(windows)]
+pub(crate) fn create_secret_dir_with_acl(path: &Path) -> Result<(), AppError> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::{
+        InitializeSecurityDescriptor, SetSecurityDescriptorDacl, SECURITY_DESCRIPTOR,
+        SECURITY_ATTRIBUTES,
+    };
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    let mut acl_buffer = build_owner_only_acl(true)?;
+    let acl = acl_buffer.as_mut_ptr() as *mut _;
+
+    let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let result = unsafe { InitializeSecurityDescriptor(&mut sd as *mut _ as *mut _, 1) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let result = unsafe { SetSecurityDescriptorDacl(&mut sd as *mut _ as *mut _, 1, acl, 0) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: &mut sd as *mut _ as *mut _,
+        bInheritHandle: 0,
+    };
+
+    let path_wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let result = unsafe { CreateDirectoryW(path_wide.as_ptr(), &sa) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    Ok(())
+}
+
 #[cfg(windows)]
 pub(crate) fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|err| AppError::io(path, err))?;
-    restrict_to_owner(path, false)?;
-    Ok(file)
+    create_secret_file_with_acl(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn create_secret_dir_all_with_acl(path: &Path) -> Result<(), AppError> {
+    // Ensure parent directories exist with default permissions.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| AppError::io(parent, err))?;
+    }
+    // Create the leaf directory atomically with owner-only ACL.
+    create_secret_dir_with_acl(path)
 }
 
 #[cfg(test)]
@@ -586,6 +818,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_smoke_test_spawn_job_wait_exit_code() {
+        use windows_sys::Win32::System::Threading::ResumeThread;
         let (h_process, h_thread) = spawn_suspended_createprocessw(
             std::path::Path::new("cmd.exe"),
             &[
