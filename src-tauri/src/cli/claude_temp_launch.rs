@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
@@ -133,31 +134,6 @@ pub(crate) fn exec_prepared_claude(
         format!("启动 Claude 失败: {exec_err}"),
         format!("Failed to launch Claude: {exec_err}"),
     ))
-}
-
-#[cfg(windows)]
-pub(crate) fn build_command_windows(
-    prepared: &PreparedClaudeLaunch,
-    native_args: &[OsString],
-) -> std::process::Command {
-    let exe_str = prepared.executable.to_string_lossy();
-    let is_cmd = exe_str.ends_with(".cmd") || exe_str.ends_with(".bat");
-
-    if is_cmd {
-        let mut cmd = std::process::Command::new("cmd.exe");
-        cmd.arg("/c");
-        cmd.arg(&prepared.executable);
-        cmd.arg("--settings");
-        cmd.arg(&prepared.settings_path);
-        cmd.args(native_args);
-        cmd
-    } else {
-        let mut cmd = std::process::Command::new(&prepared.executable);
-        cmd.arg("--settings");
-        cmd.arg(&prepared.settings_path);
-        cmd.args(native_args);
-        cmd
-    }
 }
 
 #[cfg(windows)]

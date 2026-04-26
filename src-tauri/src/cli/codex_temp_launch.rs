@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::codex_config::validate_config_toml;
