@@ -133,6 +133,32 @@ function Get-ExePath {
     return $null
 }
 
+function Get-DescendantPids {
+    <#
+    .SYNOPSIS
+        Recursively collect all descendant PIDs of a root PID using CIM.
+        Required because npm .cmd shims spawn node.exe (not "claude"),
+        so Get-Process -Name "claude" misses the real child process.
+    #>
+    param([Parameter(Mandatory)] [int]$RootPid)
+    $all = Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |
+           Select-Object -Property ProcessId, ParentProcessId
+    $descendants = [System.Collections.Generic.HashSet[int]]::new()
+    $queue = [System.Collections.Generic.Queue[int]]::new()
+    [void]$queue.Enqueue($RootPid)
+    while ($queue.Count -gt 0) {
+        $current = $queue.Dequeue()
+        foreach ($proc in $all) {
+            if ($proc.ParentProcessId -eq $current -and $proc.ProcessId -ne $current) {
+                if ($descendants.Add($proc.ProcessId)) {
+                    [void]$queue.Enqueue($proc.ProcessId)
+                }
+            }
+        }
+    }
+    return $descendants
+}
+
 function Build-StubExe {
     <#
     .SYNOPSIS
@@ -338,15 +364,22 @@ if ($LASTEXITCODE -ne 0) {
     } else {
         Write-Host "  Temp entry appeared: $tempEntry"
 
+        # Snapshot descendants BEFORE killing parent (npm .cmd shim → node.exe)
+        $descendants = Get-DescendantPids -RootPid $proc.Id
+
         # Kill the parent
         taskkill /F /PID $proc.Id 2>$null | Out-Null
         Start-Sleep -Seconds 1
 
-        # Check if child claude processes are still alive
-        $claudeProcs = Get-Process -Name "claude" -ErrorAction SilentlyContinue
-        if ($claudeProcs) {
-            Record-Fail "Claude child process(es) still alive after parent taskkill"
-            $claudeProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+        # Verify every captured descendant is dead (catches node.exe etc.)
+        $alive = $descendants | Where-Object {
+            $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue)
+        }
+        if ($alive) {
+            Record-Fail "Child process(es) still alive after parent taskkill: $($alive -join ', ')"
+            $alive | ForEach-Object {
+                Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+            }
         } else {
             Record-Pass "Claude child process terminated along with parent (Job Object)"
         }

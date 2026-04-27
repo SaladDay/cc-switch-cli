@@ -140,6 +140,7 @@ pub(crate) fn exec_prepared_codex(
         &args,
         Some(&env_block),
         application_name.as_deref(),
+        Some(&prepared.codex_home),
     )?;
 
     if exit_code != 0 {
@@ -375,6 +376,11 @@ fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
 }
 
 fn cleanup_temp_codex_home(path: &Path) -> Result<(), AppError> {
+    // Best-effort: remove the orphan-scan sidecar regardless of how the
+    // directory removal goes. The sidecar lives next to the temp dir, so a
+    // stranded sidecar without its main entry would otherwise wait for the
+    // periodic orphan-sidecar reap.
+    crate::cli::orphan_scan::remove_sidecar_for(path);
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),

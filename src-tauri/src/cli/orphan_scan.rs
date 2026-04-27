@@ -1,11 +1,67 @@
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Suffix for the sidecar metadata file that records the actual *child*
+/// process PID and creation time. The sidecar is written by the launcher
+/// after the child has been spawned (Windows only), and lets the orphan
+/// scanner judge liveness by the child instead of the launcher. This is
+/// what keeps a still-running Codex/Claude session safe when the launcher
+/// dies in the nested-job fallback path.
+pub(crate) const SIDECAR_SUFFIX: &str = ".child-meta";
 
 /// Information extracted from a temp file/directory name.
 struct TempEntryInfo {
     path: PathBuf,
     pid: u32,
     nanos: u128,
+}
+
+/// Compute the sidecar path for a given temp entry path by appending the
+/// `SIDECAR_SUFFIX`. Works for both files (claude .json) and directories
+/// (codex CODEX_HOME) — the sidecar always lives next to the entry.
+pub(crate) fn sidecar_path_for(temp_path: &Path) -> PathBuf {
+    let mut s: OsString = temp_path.as_os_str().to_owned();
+    s.push(SIDECAR_SUFFIX);
+    PathBuf::from(s)
+}
+
+/// Write the sidecar metadata file with the child's PID and creation
+/// time in nanos. Uses an atomic create-then-rename so a crash mid-write
+/// cannot leave a partial sidecar that the scanner would treat as authoritative.
+pub(crate) fn write_child_sidecar(
+    temp_path: &Path,
+    child_pid: u32,
+    creation_nanos: u128,
+) -> std::io::Result<()> {
+    let sidecar = sidecar_path_for(temp_path);
+    let tmp = {
+        let mut s: OsString = sidecar.as_os_str().to_owned();
+        s.push(".tmp");
+        PathBuf::from(s)
+    };
+    let content = format!("{child_pid}:{creation_nanos}");
+    // Best-effort: remove any leftover .tmp from a previous failed attempt.
+    let _ = fs::remove_file(&tmp);
+    fs::write(&tmp, content.as_bytes())?;
+    fs::rename(&tmp, &sidecar)
+}
+
+/// Best-effort removal of the sidecar associated with `temp_path`. Errors
+/// are intentionally swallowed: a stray sidecar will eventually be reaped
+/// by the orphan-sidecar pass on the next scan.
+pub(crate) fn remove_sidecar_for(temp_path: &Path) {
+    let sidecar = sidecar_path_for(temp_path);
+    let _ = fs::remove_file(sidecar);
+}
+
+fn parse_sidecar(sidecar: &Path) -> Option<(u32, u128)> {
+    let content = fs::read_to_string(sidecar).ok()?;
+    let trimmed = content.trim();
+    let mut parts = trimmed.splitn(2, ':');
+    let pid = parts.next()?.parse::<u32>().ok()?;
+    let nanos = parts.next()?.parse::<u128>().ok()?;
+    Some((pid, nanos))
 }
 
 /// Scan the temp directory for orphaned cc-switch temp files/directories
@@ -33,7 +89,44 @@ pub fn scan_and_clean(temp_dir: &Path) -> usize {
         }
     }
 
+    // Reap sidecars whose main entry is gone (e.g., a previous run already
+    // removed the entry but failed to remove the sidecar). This is what
+    // bounds long-term sidecar accumulation.
+    cleanup_orphan_sidecars(temp_dir);
+
     cleaned
+}
+
+fn cleanup_orphan_sidecars(temp_dir: &Path) {
+    let dir = match fs::read_dir(temp_dir) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let stem = if let Some(s) = name_str.strip_suffix(SIDECAR_SUFFIX) {
+            Some(s)
+        } else if let Some(s) = name_str.strip_suffix(".child-meta.tmp") {
+            Some(s)
+        } else {
+            None
+        };
+        if let Some(stem) = stem {
+            // Only consider sidecars that belong to a cc-switch entry; ignore
+            // any unrelated `.child-meta` file a user might have left behind.
+            if !(stem.starts_with("cc-switch-claude-") || stem.starts_with("cc-switch-codex-")) {
+                continue;
+            }
+            let main_path = temp_dir.join(stem);
+            if !main_path.exists() {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 fn collect_cc_switch_entries(temp_dir: &Path) -> Result<Vec<TempEntryInfo>, std::io::Error> {
@@ -47,6 +140,12 @@ fn collect_cc_switch_entries(temp_dir: &Path) -> Result<Vec<TempEntryInfo>, std:
             Some(s) => s,
             None => continue,
         };
+
+        // Sidecars are reaped separately so the scanner only inspects
+        // primary temp entries here.
+        if name_str.ends_with(SIDECAR_SUFFIX) {
+            continue;
+        }
 
         if let Some(info) = parse_cc_switch_name(name_str, entry.path()) {
             entries.push(info);
@@ -73,8 +172,15 @@ fn parse_cc_switch_name(name: &str, path: PathBuf) -> Option<TempEntryInfo> {
 }
 
 fn should_clean(entry: &TempEntryInfo) -> bool {
-    // Living PID = leave alone. Dead PID = clean immediately: the file's
-    // owner process is gone, so the file is a true orphan regardless of age.
+    // Sidecar takes precedence: it records the *actual* child process. This
+    // is what makes the nested-job fallback safe — the launcher's PID being
+    // dead no longer implies the user-visible Codex/Claude session is dead.
+    let sidecar = sidecar_path_for(&entry.path);
+    if let Some((child_pid, child_nanos)) = parse_sidecar(&sidecar) {
+        return !is_pid_alive(child_pid, child_nanos);
+    }
+    // Legacy / pre-spawn entries: fall back to the launcher PID stored in
+    // the filename. Same semantics as before this fix landed.
     !is_pid_alive(entry.pid, entry.nanos)
 }
 
@@ -203,7 +309,74 @@ fn is_pid_alive(pid: u32, file_nanos: u128) -> bool {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn read_pid_start_time_nanos(pid: u32) -> Option<u128> {
+    // Boot time (Unix epoch seconds). Stays constant for the life of the
+    // kernel, so reading it on every call is cheap.
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let btime_secs: u64 = stat
+        .lines()
+        .find_map(|line| line.strip_prefix("btime ").and_then(|s| s.trim().parse().ok()))?;
+
+    // Process stat. The `comm` field is wrapped in parens and may itself
+    // contain spaces, parens, or commas, so we anchor on the LAST `)`
+    // before splitting the rest of the line by whitespace.
+    let proc_stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close_paren = proc_stat.rfind(')')?;
+    let after_comm = &proc_stat[close_paren + 1..];
+    // Fields after `comm`: state ppid pgrp session tty_nr tpgid flags
+    // minflt cminflt majflt cmajflt utime stime cutime cstime priority
+    // nice num_threads itrealvalue starttime ...
+    // starttime is the 20th token (0-indexed: 19).
+    let starttime_ticks: u64 = after_comm
+        .split_whitespace()
+        .nth(19)
+        .and_then(|s| s.parse().ok())?;
+
+    let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if clk_tck <= 0 {
+        return None;
+    }
+    let clk_tck = clk_tck as u128;
+    // ticks → nanos: starttime / clk_tck * 1e9, computed without losing
+    // precision for large starttimes.
+    let start_nanos_since_boot = (starttime_ticks as u128).saturating_mul(1_000_000_000u128) / clk_tck;
+    let btime_nanos = (btime_secs as u128).saturating_mul(1_000_000_000u128);
+    Some(btime_nanos.saturating_add(start_nanos_since_boot))
+}
+
+#[cfg(target_os = "linux")]
+fn is_pid_alive(pid: u32, file_nanos: u128) -> bool {
+    // Liveness probe: if kill(pid, 0) reports ESRCH the PID is unused.
+    // EPERM means the PID exists but belongs to another user — treat as
+    // alive and let the start-time check below decide on PID reuse.
+    let kill_result = unsafe { libc::kill(pid as i32, 0) };
+    if kill_result != 0 {
+        let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if err != libc::EPERM as i32 {
+            return false;
+        }
+    }
+
+    // Start-time probe via /proc. The launcher always created the temp
+    // file *after* it started, so a process whose start time is later than
+    // file_nanos (with a small tolerance for clock-tick precision) must be
+    // a different process that has reused the PID.
+    if let Some(start_nanos) = read_pid_start_time_nanos(pid) {
+        // 2 s tolerance covers the worst-case CLK_TCK quantum (10 ms) plus
+        // any clock skew between SystemTime::now() and the proc clock.
+        const TOLERANCE_NANOS: u128 = 2_000_000_000;
+        if start_nanos > file_nanos.saturating_add(TOLERANCE_NANOS) {
+            return false;
+        }
+    }
+    // /proc unreadable or start time consistent: prefer false-positive
+    // "still alive" over false-positive "dead", since the latter would
+    // delete user state.
+    true
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn is_pid_alive(pid: u32, _file_nanos: u128) -> bool {
     unsafe {
         let result = libc::kill(pid as i32, 0);
@@ -356,13 +529,13 @@ mod tests {
         assert!(!should_clean(&entry));
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     #[test]
     fn alive_pid_old_file_no_clean() {
-        // On Windows, is_pid_alive also validates creation time, so an old
-        // nanos with the current PID would be treated as PID reuse and
-        // correctly considered dead. This test is Unix-only because kill(0)
-        // does not check creation time.
+        // On non-Linux Unix (macOS, BSD), is_pid_alive uses kill(pid, 0)
+        // only and does not validate process start time, so an old nanos
+        // with a live PID is *not* treated as PID reuse. /proc-based
+        // start-time validation is Linux-only.
         let old_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -374,6 +547,85 @@ mod tests {
             nanos: old_nanos,
         };
         assert!(!should_clean(&entry));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_pid_reuse_detected_by_start_time() {
+        // Linux is_pid_alive validates start time via /proc/<pid>/stat,
+        // so a live PID with a clearly-older file_nanos (test process
+        // started long after the file was supposedly created) must be
+        // treated as PID reuse. Mirrors the Windows test.
+        let old_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .saturating_sub(25 * 60 * 60 * 1_000_000_000u128);
+        let entry = TempEntryInfo {
+            path: PathBuf::from("/tmp/cc-switch-claude-demo-1-0.json"),
+            pid: std::process::id(),
+            nanos: old_nanos,
+        };
+        // Test process start_time >> old_nanos, so PID reuse must clean
+        assert!(should_clean(&entry));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_alive_pid_with_recent_file_no_clean() {
+        // Conversely: a file_nanos *after* the live process started must
+        // NOT be considered PID reuse. The launcher always wrote the file
+        // after the process started, so this is the normal "still alive"
+        // path.
+        let recent_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let entry = TempEntryInfo {
+            path: PathBuf::from("/tmp/cc-switch-claude-demo-1-0.json"),
+            pid: std::process::id(),
+            nanos: recent_nanos,
+        };
+        assert!(!should_clean(&entry));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_dead_pid_returns_false_immediately() {
+        // PID 1 is init, always alive. PID 99999 is virtually never alive
+        // in a CI container or a developer machine. Probing it must return
+        // false without hitting /proc.
+        assert!(!is_pid_alive(99999, 0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_read_pid_start_time_handles_comm_with_spaces_and_parens() {
+        // The /proc/<pid>/stat parser must anchor on the LAST `)` so a
+        // comm like "(My (Process))" with embedded parens still works.
+        // We verify by reading the current process's start time, which is
+        // the only PID we know exists.
+        let pid = std::process::id();
+        let nanos = read_pid_start_time_nanos(pid);
+        assert!(
+            nanos.is_some(),
+            "must read start time for current process, got None"
+        );
+        let nanos = nanos.unwrap();
+        let now_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        assert!(
+            nanos <= now_nanos,
+            "start_time {nanos} must be <= now {now_nanos}"
+        );
+        // Sanity: start time should be within the last day for a test run
+        let one_day_ago = now_nanos.saturating_sub(24 * 60 * 60 * 1_000_000_000u128);
+        assert!(
+            nanos >= one_day_ago,
+            "start_time {nanos} should be within the last 24h of {now_nanos}"
+        );
     }
 
     #[cfg(windows)]
@@ -446,5 +698,124 @@ mod tests {
         let cleaned = scan_and_clean(temp.path());
         assert_eq!(cleaned, 1);
         assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn sidecar_dead_child_triggers_clean_even_when_launcher_alive() {
+        // Sidecar precedence: a sidecar pointing at a dead child PID must
+        // beat a still-alive launcher PID in the filename. This is the core
+        // invariant for the nested-job fallback path — the launcher can be
+        // alive while the user-visible Codex/Claude session has died.
+        let temp = TempDir::new().expect("create temp dir");
+        let recent_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let entry_path = temp
+            .path()
+            .join(format!("cc-switch-claude-demo-{}-{recent_nanos}.json", std::process::id()));
+        std::fs::write(&entry_path, "{}").expect("write entry");
+
+        // Sidecar references a guaranteed-dead PID with arbitrary nanos.
+        write_child_sidecar(&entry_path, 99999, 0).expect("write sidecar");
+
+        let entry = TempEntryInfo {
+            path: entry_path.clone(),
+            // Launcher PID = current process (still alive) and recent nanos
+            pid: std::process::id(),
+            nanos: recent_nanos,
+        };
+        assert!(
+            should_clean(&entry),
+            "sidecar's dead child PID must override the alive launcher PID"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_alive_child_blocks_clean_even_when_launcher_filename_old() {
+        // Inverse of the test above: a sidecar pointing at a still-alive
+        // child PID must keep the entry around even if the launcher PID's
+        // filename nanos look stale. This protects the running Codex
+        // session in the nested-job fallback path. Unix-only because on
+        // Windows is_pid_alive cross-validates creation time, which the
+        // synthetic file_nanos in this test would not match.
+        let temp = TempDir::new().expect("create temp dir");
+        let old_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .saturating_sub(25 * 60 * 60 * 1_000_000_000u128);
+        let entry_path = temp
+            .path()
+            .join(format!("cc-switch-codex-demo-99999-{old_nanos}"));
+        std::fs::create_dir(&entry_path).expect("create entry");
+
+        // Sidecar points at this very test process, which is obviously
+        // alive. The Unix is_pid_alive ignores nanos, so any nanos works.
+        write_child_sidecar(&entry_path, std::process::id(), 0).expect("write sidecar");
+
+        let entry = TempEntryInfo {
+            path: entry_path.clone(),
+            // Launcher PID would otherwise look dead
+            pid: 99999,
+            nanos: old_nanos,
+        };
+        assert!(
+            !should_clean(&entry),
+            "sidecar's alive child PID must keep the entry even if launcher PID is stale"
+        );
+    }
+
+    #[test]
+    fn sidecar_orphan_is_reaped_when_main_entry_missing() {
+        // A sidecar without its main entry must be cleaned by the
+        // orphan-sidecar reap pass; otherwise sidecars accumulate forever
+        // when the launcher crashes mid-cleanup.
+        let temp = TempDir::new().expect("create temp dir");
+        let entry_path = temp.path().join("cc-switch-claude-demo-99999-0.json");
+        write_child_sidecar(&entry_path, 99999, 0).expect("write sidecar");
+        // Note: we never create the main entry.
+        let sidecar = sidecar_path_for(&entry_path);
+        assert!(sidecar.exists(), "sidecar must exist before reap");
+
+        let _ = scan_and_clean(temp.path());
+        assert!(!sidecar.exists(), "orphan sidecar must be reaped");
+    }
+
+    #[test]
+    fn sidecar_unrelated_child_meta_files_are_preserved() {
+        // Reaper must only touch sidecars that belong to cc-switch entries,
+        // not arbitrary `.child-meta` files a user might leave behind.
+        let temp = TempDir::new().expect("create temp dir");
+        let unrelated = temp.path().join("not-cc-switch.child-meta");
+        std::fs::write(&unrelated, "12345:0").expect("write unrelated sidecar");
+
+        let _ = scan_and_clean(temp.path());
+        assert!(
+            unrelated.exists(),
+            "unrelated .child-meta files must not be touched"
+        );
+    }
+
+    #[test]
+    fn sidecar_atomic_write_replaces_existing() {
+        // Sequential writes must atomically replace the previous content;
+        // the rename-over-existing must not leave stale .tmp files.
+        let temp = TempDir::new().expect("create temp dir");
+        let entry_path = temp.path().join("cc-switch-claude-demo-1-0.json");
+
+        write_child_sidecar(&entry_path, 1234, 100).expect("first write");
+        write_child_sidecar(&entry_path, 5678, 200).expect("second write");
+
+        let sidecar = sidecar_path_for(&entry_path);
+        let content = std::fs::read_to_string(&sidecar).expect("read sidecar");
+        assert_eq!(content, "5678:200", "second write must replace first");
+
+        // No .tmp leftover
+        let mut s: OsString = sidecar.as_os_str().to_owned();
+        s.push(".tmp");
+        let tmp_path = PathBuf::from(s);
+        assert!(!tmp_path.exists(), "no stale .tmp must remain");
     }
 }

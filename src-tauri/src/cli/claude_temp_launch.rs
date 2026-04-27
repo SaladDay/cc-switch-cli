@@ -149,7 +149,13 @@ pub(crate) fn exec_prepared_claude(
 
     let (program, args, application_name) = build_claude_command_windows(prepared, native_args)?;
 
-    let exit_code = run_suspended_child(&program, &args, None, application_name.as_deref())?;
+    let exit_code = run_suspended_child(
+        &program,
+        &args,
+        None,
+        application_name.as_deref(),
+        Some(&prepared.settings_path),
+    )?;
 
     if exit_code != 0 {
         return Err(AppError::localized(
@@ -348,6 +354,11 @@ fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
 }
 
 fn cleanup_temp_settings_file(path: &Path) -> Result<(), AppError> {
+    // Best-effort: remove the orphan-scan sidecar regardless of how the
+    // settings file removal goes. The sidecar lives next to the temp file,
+    // so a stranded sidecar without its main entry would otherwise wait for
+    // the periodic orphan-sidecar reap.
+    crate::cli::orphan_scan::remove_sidecar_for(path);
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),

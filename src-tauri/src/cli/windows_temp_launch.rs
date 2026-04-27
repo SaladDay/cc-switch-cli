@@ -412,7 +412,7 @@ pub(crate) fn spawn_suspended_createprocessw(
     args: &[OsString],
     env_block: Option<&[u16]>,
     application_name: Option<&std::path::Path>,
-) -> Result<(HANDLE, HANDLE), AppError> {
+) -> Result<(HANDLE, HANDLE, u32), AppError> {
     use std::ptr;
 
     let application_name_wide: Option<Vec<u16>> = application_name.map(|p| {
@@ -458,7 +458,56 @@ pub(crate) fn spawn_suspended_createprocessw(
         return Err(AppError::windows_create_process_failed(code));
     }
 
-    Ok((process_info.hProcess, process_info.hThread))
+    Ok((
+        process_info.hProcess,
+        process_info.hThread,
+        process_info.dwProcessId,
+    ))
+}
+
+/// Read the creation time of the process referenced by `handle` and convert
+/// it to nanos-since-Unix-epoch. Used to record the child PID + creation
+/// time pair in the orphan-scan sidecar so the next scan can detect PID
+/// reuse independently of the launcher's own lifetime.
+#[cfg(windows)]
+unsafe fn process_creation_time_nanos(handle: HANDLE) -> Option<u128> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+    let mut creation_time = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exit_time = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut kernel_time = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut user_time = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+
+    let ok = GetProcessTimes(
+        handle,
+        &mut creation_time,
+        &mut exit_time,
+        &mut kernel_time,
+        &mut user_time,
+    );
+
+    if ok == 0 {
+        return None;
+    }
+
+    let low = creation_time.dwLowDateTime as u64;
+    let high = creation_time.dwHighDateTime as u64;
+    let intervals = (high << 32) | low;
+    let nanos_since_1601 = intervals as u128 * 100;
+    Some(nanos_since_1601.saturating_sub(11644473600_000_000_000u128))
 }
 
 #[cfg(windows)]
@@ -492,18 +541,60 @@ pub(crate) fn wait_for_child(process_handle: HANDLE) -> Result<u32, AppError> {
 /// Object with KILL_ON_JOB_CLOSE, assign the process, resume the main
 /// thread, wait for termination, and return the exit code. All handles are
 /// cleaned up regardless of success or failure.
+///
+/// `temp_path`, when supplied, is the path to the temp settings file (claude)
+/// or temp CODEX_HOME directory (codex) that the child will be reading from.
+/// After the suspended child is created we record its PID + creation time
+/// next to that path as an `.child-meta` sidecar. The orphan scanner then
+/// uses the *child* liveness (via the sidecar) instead of the launcher PID
+/// to decide whether the temp entry is safe to delete. This is what makes
+/// the nested-job fallback path safe: even if the launcher dies but the
+/// child Codex/Claude session keeps running, the temp dir is *not* deleted.
 #[cfg(windows)]
 pub(crate) fn run_suspended_child(
     program: &std::path::Path,
     args: &[OsString],
     env_block: Option<&[u16]>,
     application_name: Option<&std::path::Path>,
+    temp_path: Option<&std::path::Path>,
 ) -> Result<u32, AppError> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::ResumeThread;
 
-    let (h_process, h_thread) =
+    let (h_process, h_thread, child_pid) =
         spawn_suspended_createprocessw(program, args, env_block, application_name)?;
+
+    // Write the sidecar before resuming the main thread, so even if
+    // ResumeThread or the wait loop crashes the launcher between here and
+    // the cleanup call, a future orphan scan trusts the *child* PID rather
+    // than the (now-dead) launcher PID. Failure to write the sidecar is
+    // non-fatal: we just lose the precise child-PID liveness check and
+    // fall back to the legacy launcher-PID heuristic on the next scan.
+    if let Some(path) = temp_path {
+        let creation_nanos = unsafe { process_creation_time_nanos(h_process) };
+        match creation_nanos {
+            Some(nanos) => {
+                if let Err(e) =
+                    crate::cli::orphan_scan::write_child_sidecar(path, child_pid, nanos)
+                {
+                    log::warn!(
+                        target: "windows_temp_launch",
+                        "Failed to write child sidecar for {}: {}. Orphan scan will fall back to launcher PID.",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+            None => {
+                log::warn!(
+                    target: "windows_temp_launch",
+                    "GetProcessTimes failed for child PID {}; orphan scan will fall back to launcher PID for {}.",
+                    child_pid,
+                    path.display()
+                );
+            }
+        }
+    }
 
     let job = match Job::create_with_kill_on_close() {
         Ok(job) => job,
@@ -523,6 +614,8 @@ pub(crate) fn run_suspended_child(
             // Expected nested-job fallback: the parent is already in a job
             // that does not allow nested assignments. We degrade gracefully
             // but warn the user visibly since KILL_ON_JOB_CLOSE is lost.
+            // The sidecar above ensures orphan_scan still detects when the
+            // *child* exits, so a stuck temp dir does not leak indefinitely.
             eprintln!(
                 "cc-switch warning: cannot assign child to Job Object (already in a nested job). \
                  Child cleanup will rely on orphan scan instead of automatic parent-death termination."
@@ -1066,7 +1159,7 @@ mod tests {
     #[test]
     fn windows_smoke_test_spawn_job_wait_exit_code() {
         use windows_sys::Win32::System::Threading::ResumeThread;
-        let (h_process, h_thread) = spawn_suspended_createprocessw(
+        let (h_process, h_thread, _pid) = spawn_suspended_createprocessw(
             std::path::Path::new("cmd.exe"),
             &[
                 OsString::from("/c"),
