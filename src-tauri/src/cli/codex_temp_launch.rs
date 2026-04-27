@@ -129,18 +129,17 @@ pub(crate) fn exec_prepared_codex(
     // CreateProcessW does not search the current directory (which would
     // allow executable hijacking). For direct binaries we already have
     // the fully-resolved path.
-    let cmd_exe = crate::cli::windows_temp_launch::resolve_system_cmd_exe()?;
-    let application_name: Option<&std::path::Path> = if is_cmd_shim(&prepared.executable) {
-        Some(cmd_exe.as_path())
+    let application_name: Option<std::path::PathBuf> = if is_cmd_shim(&prepared.executable) {
+        Some(crate::cli::windows_temp_launch::resolve_system_cmd_exe()?)
     } else {
-        Some(program.as_path())
+        Some(program.clone())
     };
 
     let exit_code = run_suspended_child(
         &program,
         &args,
         Some(&env_block),
-        application_name,
+        application_name.as_deref(),
     )?;
 
     if exit_code != 0 {

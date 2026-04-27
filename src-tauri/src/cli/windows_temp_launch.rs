@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::error::AppError;
 
 #[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, FALSE, HANDLE, INVALID_HANDLE_VALUE, TRUE,
@@ -17,6 +17,8 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
     SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
+#[cfg(windows)]
+use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, WaitForSingleObject,
@@ -189,22 +191,35 @@ pub(crate) fn quote_windows_arg_for_cmd(arg: &str) -> String {
     result
 }
 
-/// Resolve the system `cmd.exe` to an absolute path so `CreateProcessW`
-/// does not search the current directory (which would allow executable
-/// hijacking). Falls back to `%ComSpec%` if `which` fails.
+/// Resolve the system `cmd.exe` to an absolute path via
+/// `GetSystemDirectoryW` so `CreateProcessW` does not search the current
+/// directory (which would allow executable hijacking). This is strictly more
+/// trustworthy than `which` or `%ComSpec%` because it asks the OS for the
+/// system directory directly.
 #[cfg(windows)]
 pub(crate) fn resolve_system_cmd_exe() -> Result<PathBuf, AppError> {
-    which::which("cmd.exe").or_else(|_| {
-        std::env::var("ComSpec")
-            .map(PathBuf::from)
-            .map_err(|_| {
-                AppError::localized(
-                    "windows.resolve_cmd_exe_failed",
-                    "无法定位系统 cmd.exe 路径".to_string(),
-                    "Could not locate system cmd.exe path.".to_string(),
-                )
-            })
-    })
+    let mut buffer = vec![0u16; 512];
+    let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if len == 0 {
+        return Err(AppError::localized(
+            "windows.resolve_cmd_exe_failed",
+            "无法定位系统 cmd.exe 路径".to_string(),
+            "Could not locate system cmd.exe path.".to_string(),
+        ));
+    }
+    if len as usize >= buffer.len() {
+        buffer.resize(len as usize + 1, 0);
+        let len2 = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if len2 == 0 || len2 as usize >= buffer.len() {
+            return Err(AppError::localized(
+                "windows.resolve_cmd_exe_failed",
+                "无法定位系统 cmd.exe 路径".to_string(),
+                "Could not locate system cmd.exe path.".to_string(),
+            ));
+        }
+    }
+    let system_dir = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len as usize]));
+    Ok(system_dir.join("cmd.exe"))
 }
 
 // ── command line construction ────────────────────────────────────────
