@@ -255,26 +255,56 @@ pub(crate) fn build_windows_command_line(program: &OsStr, args: &[OsString]) -> 
 pub(crate) fn build_env_block_with_override(key: &str, value: &OsStr) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
 
-    let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
-        .filter(|(k, _)| !k.to_string_lossy().eq_ignore_ascii_case(key))
-        .collect();
+    // When lpEnvironment is non-null, CreateProcessW does not automatically
+    // propagate the hidden "=X:" per-drive current-directory entries.
+    // Microsoft docs say callers must preserve them explicitly.
+    // See: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw
+    let mut drive_vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
+    let mut regular_vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
+
+    for (k, v) in std::env::vars_os() {
+        let k_str = k.to_string_lossy();
+        if k_str.starts_with('=')
+            && k_str.len() >= 2
+            && k_str.as_bytes()[1].is_ascii_alphabetic()
+        {
+            // Per-drive current-directory variable (e.g., "=C:", "=D:")
+            drive_vars.push((k, v));
+        } else if !k_str.eq_ignore_ascii_case(key) {
+            regular_vars.push((k, v));
+        }
+    }
+
     // Add our override
-    vars.push((std::ffi::OsString::from(key), value.to_os_string()));
-    // Windows docs say caller-supplied environment blocks should be sorted.
-    // Sort by key case-insensitively to match Windows conventions.
-    vars.sort_by(|(a, _), (b, _)| {
+    regular_vars.push((std::ffi::OsString::from(key), value.to_os_string()));
+
+    // Sort regular variables alphabetically (case-insensitively).
+    // Drive vars are kept in their original order (they are not required to
+    // be sorted, and typically appear first in GetEnvironmentStringsW).
+    regular_vars.sort_by(|(a, _), (b, _)| {
         a.to_string_lossy()
             .to_lowercase()
             .cmp(&b.to_string_lossy().to_lowercase())
     });
 
     let mut result = Vec::new();
-    for (k, v) in vars {
+
+    // Write drive vars first (must be present in a custom block)
+    for (k, v) in drive_vars {
         result.extend(k.encode_wide());
         result.push(b'=' as u16);
         result.extend(v.encode_wide());
         result.push(0);
     }
+
+    // Write sorted regular vars
+    for (k, v) in regular_vars {
+        result.extend(k.encode_wide());
+        result.push(b'=' as u16);
+        result.extend(v.encode_wide());
+        result.push(0);
+    }
+
     // Double-null terminate the block
     result.push(0);
     result
@@ -956,6 +986,57 @@ mod tests {
         // psec_desc is allocated by GetNamedSecurityInfoW and would normally
         // be freed with LocalFree; we skip the free in this test since the
         // process exit will reclaim the memory.
+    }
+
+    /// Verify that `build_env_block_with_override` produces a sorted,
+    /// double-null-terminated block containing the override and preserving
+    /// existing variables (including per-drive current-directory entries).
+    #[cfg(windows)]
+    #[test]
+    fn build_env_block_with_override_sorted_and_terminated() {
+        let block = build_env_block_with_override("CC_SWITCH_TEST_VAR", OsStr::new("override_value"));
+        // Convert back to strings for inspection
+        let mut entries = Vec::new();
+        let mut start = 0usize;
+        for (i, &ch) in block.iter().enumerate() {
+            if ch == 0 {
+                if i == start {
+                    // Double-null terminator
+                    break;
+                }
+                let s = String::from_utf16_lossy(&block[start..i]);
+                entries.push(s);
+                start = i + 1;
+            }
+        }
+        // Must end with a double-null (we broke at the second null)
+        assert!(
+            block.len() >= 2 && block[block.len() - 1] == 0 && block[block.len() - 2] == 0,
+            "block must be double-null terminated"
+        );
+        // Must contain our override
+        assert!(
+            entries.iter().any(|e| e == "CC_SWITCH_TEST_VAR=override_value"),
+            "override must be present in block"
+        );
+        // Must not contain duplicate keys (the original CC_SWITCH_TEST_VAR if it existed)
+        let count = entries
+            .iter()
+            .filter(|e| e.starts_with("CC_SWITCH_TEST_VAR="))
+            .count();
+        assert_eq!(count, 1, "override must replace any pre-existing key");
+        // Regular vars (excluding drive vars that start with '=') must be sorted
+        let regular: Vec<&String> = entries.iter().filter(|e| !e.starts_with('=')).collect();
+        let mut sorted = regular.clone();
+        sorted.sort_by(|a, b| {
+            let a_key = a.split('=').next().unwrap_or("").to_lowercase();
+            let b_key = b.split('=').next().unwrap_or("").to_lowercase();
+            a_key.cmp(&b_key)
+        });
+        assert_eq!(
+            regular, sorted,
+            "regular environment variables must be sorted case-insensitively"
+        );
     }
 
     /// Smoke test: spawn a real child process via the shared Windows path,
