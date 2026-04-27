@@ -518,7 +518,28 @@ pub(crate) fn run_suspended_child(
     };
 
     if let Err(e) = job.try_assign(h_process) {
-        log::warn!(target: "windows.job_assign_failed_fallback", "{}", e);
+        let code = e.raw_os_error().unwrap_or(0);
+        if code == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32 {
+            // Expected nested-job fallback: the parent is already in a job
+            // that does not allow nested assignments. We degrade gracefully
+            // but warn the user visibly since KILL_ON_JOB_CLOSE is lost.
+            eprintln!(
+                "cc-switch warning: cannot assign child to Job Object (already in a nested job). \
+                 Child cleanup will rely on orphan scan instead of automatic parent-death termination."
+            );
+        } else {
+            // Unexpected assignment failure: clean up and fail hard.
+            unsafe {
+                let _ = windows_sys::Win32::System::Threading::TerminateProcess(h_process, 1);
+                CloseHandle(h_thread);
+                CloseHandle(h_process);
+            }
+            return Err(AppError::localized(
+                "windows.job_assign_failed",
+                format!("无法将子进程分配到 Job Object: {e}"),
+                format!("Failed to assign child process to Job Object: {e}"),
+            ));
+        }
     }
 
     let resume_result = unsafe { ResumeThread(h_thread) };
