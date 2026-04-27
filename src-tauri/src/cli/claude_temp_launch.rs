@@ -194,7 +194,10 @@ fn build_claude_command_windows(
             OsString::from(&prepared.settings_path),
         ];
         args.extend_from_slice(native_args);
-        Ok((PathBuf::from("cmd.exe"), args, None))
+        // Pass the absolute system cmd.exe as lpApplicationName so
+        // CreateProcessW does not search the current directory.
+        let cmd_exe = crate::cli::windows_temp_launch::resolve_system_cmd_exe()?;
+        Ok((PathBuf::from("cmd.exe"), args, Some(cmd_exe)))
     } else {
         let mut args = vec![
             OsString::from("--settings"),

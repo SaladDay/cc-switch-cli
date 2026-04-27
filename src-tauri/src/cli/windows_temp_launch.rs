@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::AppError;
 
@@ -187,6 +187,24 @@ pub(crate) fn quote_windows_arg_for_cmd(arg: &str) -> String {
 
     result.push('"');
     result
+}
+
+/// Resolve the system `cmd.exe` to an absolute path so `CreateProcessW`
+/// does not search the current directory (which would allow executable
+/// hijacking). Falls back to `%ComSpec%` if `which` fails.
+#[cfg(windows)]
+pub(crate) fn resolve_system_cmd_exe() -> Result<PathBuf, AppError> {
+    which::which("cmd.exe").or_else(|_| {
+        std::env::var("ComSpec")
+            .map(PathBuf::from)
+            .map_err(|_| {
+                AppError::localized(
+                    "windows.resolve_cmd_exe_failed",
+                    "无法定位系统 cmd.exe 路径".to_string(),
+                    "Could not locate system cmd.exe path.".to_string(),
+                )
+            })
+    })
 }
 
 // ── command line construction ────────────────────────────────────────

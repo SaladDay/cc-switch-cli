@@ -125,13 +125,13 @@ pub(crate) fn exec_prepared_codex(
 
     let env_block = build_env_block_with_override("CODEX_HOME", prepared.codex_home.as_os_str());
 
-    // CreateProcessW does not search PATH when lpApplicationName is non-NULL,
-    // so for the cmd.exe shim path (unqualified `cmd.exe`) we must pass NULL
-    // and let Windows resolve it from PATH. For the direct-binary path we
-    // pass the fully-resolved executable so the exact path is launched even
-    // if PATH later changes.
+    // Pass the absolute system cmd.exe as lpApplicationName so
+    // CreateProcessW does not search the current directory (which would
+    // allow executable hijacking). For direct binaries we already have
+    // the fully-resolved path.
+    let cmd_exe = crate::cli::windows_temp_launch::resolve_system_cmd_exe()?;
     let application_name: Option<&std::path::Path> = if is_cmd_shim(&prepared.executable) {
-        None
+        Some(cmd_exe.as_path())
     } else {
         Some(program.as_path())
     };
