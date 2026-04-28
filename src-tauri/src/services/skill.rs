@@ -398,7 +398,7 @@ impl SkillService {
     pub fn new() -> Result<Self, AppError> {
         let http_client = Client::builder()
             .user_agent("cc-switch")
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|e| {
                 AppError::localized(

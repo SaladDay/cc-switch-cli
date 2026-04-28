@@ -320,6 +320,26 @@ cc-switch skills repos enable <repo> # Enable repo without changing branch
 cc-switch skills repos disable <repo> # Disable repo without changing branch
 ```
 
+**Private GitHub skill repositories:** Repo records only store `owner/name/branch/enabled`; tokens are never persisted. When downloading GitHub ZIP archives, `cc-switch` reads tokens from environment variables in this priority order:
+
+```text
+CC_SWITCH_SKILLS_GITHUB_TOKEN_OWNER_REPO
+CC_SWITCH_SKILLS_GITHUB_TOKEN_OWNER
+CC_SWITCH_SKILLS_GITHUB_TOKEN
+GITHUB_TOKEN
+GH_TOKEN
+```
+
+`OWNER` and `REPO` are uppercased, and non-alphanumeric characters become `_`. For example, `acme/private-skills` can use:
+
+```bash
+export CC_SWITCH_SKILLS_GITHUB_TOKEN_ACME_PRIVATE_SKILLS="ghp_xxx"
+cc-switch skills repos add acme/private-skills@main
+cc-switch skills discover
+```
+
+The token needs at least repository contents read access. Do not write tokens into config files or commit them to the repository.
+
 ### ⚙️ Configuration Management
 
 Manage configuration backups, imports, and exports.
