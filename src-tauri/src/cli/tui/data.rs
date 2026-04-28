@@ -13,6 +13,7 @@ use crate::openclaw_config::{
 use crate::prompt::Prompt;
 use crate::provider::Provider;
 use crate::services::config::BackupInfo;
+use crate::services::SubscriptionQuota;
 use crate::services::{ConfigService, McpService, PromptService, ProviderService, SkillService};
 use crate::store::AppState;
 
@@ -27,6 +28,123 @@ pub struct ProviderRow {
     pub is_default_model: bool,
     pub primary_model_id: Option<String>,
     pub default_model_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum QuotaTargetKind {
+    SubscriptionTool { tool: String },
+    CodexOAuth { account_id: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QuotaTarget {
+    pub(crate) app_type: AppType,
+    pub(crate) provider_id: String,
+    pub(crate) provider_name: String,
+    pub(crate) kind: QuotaTargetKind,
+}
+
+impl QuotaTarget {
+    pub(crate) fn cache_key(&self) -> String {
+        let kind = match &self.kind {
+            QuotaTargetKind::SubscriptionTool { tool } => format!("subscription:{tool}"),
+            QuotaTargetKind::CodexOAuth { account_id } => {
+                format!("codex_oauth:{}", account_id.as_deref().unwrap_or("default"))
+            }
+        };
+        format!("{}:{}:{kind}", self.app_type.as_str(), self.provider_id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProviderQuotaState {
+    pub(crate) target: QuotaTarget,
+    pub(crate) loading: bool,
+    pub(crate) manual: bool,
+    pub(crate) quota: Option<SubscriptionQuota>,
+    pub(crate) last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct QuotaSnapshot {
+    by_provider: HashMap<String, ProviderQuotaState>,
+}
+
+impl QuotaSnapshot {
+    pub(crate) fn mark_loading(&mut self, target: QuotaTarget, manual: bool) {
+        let provider_id = target.provider_id.clone();
+        match self.by_provider.get_mut(&provider_id) {
+            Some(state) if state.target == target => {
+                state.loading = true;
+                state.manual = state.manual || manual;
+                state.last_error = None;
+            }
+            _ => {
+                self.by_provider.insert(
+                    provider_id,
+                    ProviderQuotaState {
+                        target,
+                        loading: true,
+                        manual,
+                        quota: None,
+                        last_error: None,
+                    },
+                );
+            }
+        }
+    }
+
+    pub(crate) fn finish(&mut self, target: QuotaTarget, quota: SubscriptionQuota) {
+        self.by_provider.insert(
+            target.provider_id.clone(),
+            ProviderQuotaState {
+                target,
+                loading: false,
+                manual: false,
+                quota: Some(quota),
+                last_error: None,
+            },
+        );
+    }
+
+    pub(crate) fn finish_error(&mut self, target: QuotaTarget, error: String) {
+        let provider_id = target.provider_id.clone();
+        match self.by_provider.get_mut(&provider_id) {
+            Some(state) if state.target == target => {
+                state.loading = false;
+                state.manual = false;
+                state.last_error = Some(error);
+            }
+            _ => {
+                self.by_provider.insert(
+                    provider_id,
+                    ProviderQuotaState {
+                        target,
+                        loading: false,
+                        manual: false,
+                        quota: None,
+                        last_error: Some(error),
+                    },
+                );
+            }
+        }
+    }
+
+    pub(crate) fn state_for(&self, provider_id: &str) -> Option<&ProviderQuotaState> {
+        self.by_provider.get(provider_id)
+    }
+
+    pub(crate) fn has_manual_loading(&self, target: &QuotaTarget) -> bool {
+        self.by_provider
+            .get(&target.provider_id)
+            .is_some_and(|state| &state.target == target && state.loading && state.manual)
+    }
+
+    pub(crate) fn target_is_current(&self, target: &QuotaTarget) -> bool {
+        self.by_provider
+            .get(&target.provider_id)
+            .is_some_and(|state| &state.target == target)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -141,6 +259,7 @@ pub struct UiData {
     pub config: ConfigSnapshot,
     pub skills: SkillsSnapshot,
     pub proxy: ProxySnapshot,
+    pub(crate) quota: QuotaSnapshot,
 }
 
 pub(crate) fn load_state() -> Result<AppState, AppError> {
@@ -165,6 +284,7 @@ impl UiData {
             config,
             skills,
             proxy,
+            quota: QuotaSnapshot::default(),
         })
     }
 
@@ -187,6 +307,196 @@ pub(crate) fn provider_display_name(app_type: &AppType, row: &ProviderRow) -> St
     row.provider.name.clone()
 }
 
+pub(crate) fn quota_target_for_current_provider(
+    app_type: &AppType,
+    data: &UiData,
+) -> Option<QuotaTarget> {
+    data.providers
+        .rows
+        .iter()
+        .find(|row| row.is_current)
+        .and_then(|row| quota_target_for_provider(app_type, row))
+}
+
+pub(crate) fn quota_target_for_provider(
+    app_type: &AppType,
+    row: &ProviderRow,
+) -> Option<QuotaTarget> {
+    if is_codex_oauth_provider(row) {
+        return Some(QuotaTarget {
+            app_type: app_type.clone(),
+            provider_id: row.id.clone(),
+            provider_name: provider_display_name(app_type, row),
+            kind: QuotaTargetKind::CodexOAuth {
+                account_id: row
+                    .provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.managed_account_id_for("codex_oauth")),
+            },
+        });
+    }
+
+    let tool = match app_type {
+        AppType::Claude if is_claude_official_provider(row) => "claude",
+        AppType::Codex if is_codex_official_provider(row) => "codex",
+        AppType::Gemini if is_gemini_official_provider(row) => "gemini",
+        _ => return None,
+    };
+
+    Some(QuotaTarget {
+        app_type: app_type.clone(),
+        provider_id: row.id.clone(),
+        provider_name: provider_display_name(app_type, row),
+        kind: QuotaTargetKind::SubscriptionTool {
+            tool: tool.to_string(),
+        },
+    })
+}
+
+fn is_codex_oauth_provider(row: &ProviderRow) -> bool {
+    row.provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        .is_some_and(|value| value == "codex_oauth")
+}
+
+fn is_claude_official_provider(row: &ProviderRow) -> bool {
+    row.provider
+        .category
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("official"))
+}
+
+fn is_codex_official_provider(row: &ProviderRow) -> bool {
+    if row
+        .provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.codex_official)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    if row
+        .provider
+        .category
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("official"))
+    {
+        return true;
+    }
+
+    let legacy_official_identity = row
+        .provider
+        .website_url
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("https://chatgpt.com/codex"))
+        || row
+            .provider
+            .name
+            .trim()
+            .eq_ignore_ascii_case("OpenAI Official");
+
+    if !legacy_official_identity {
+        return false;
+    }
+
+    let api_key_blank = row
+        .provider
+        .settings_config
+        .get("auth")
+        .and_then(|auth| auth.get("OPENAI_API_KEY"))
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.trim().is_empty());
+
+    api_key_blank && !codex_config_has_base_url(&row.provider.settings_config)
+}
+
+fn is_gemini_official_provider(row: &ProviderRow) -> bool {
+    if row
+        .provider
+        .category
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("official"))
+    {
+        return true;
+    }
+
+    if row
+        .provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.partner_promotion_key.as_deref())
+        .is_some_and(|value| value.eq_ignore_ascii_case("google-official"))
+    {
+        return true;
+    }
+
+    let legacy_google_identity = row.provider.website_url.as_deref().is_some_and(|value| {
+        let value = value.trim_end_matches('/');
+        value.eq_ignore_ascii_case("https://ai.google.dev")
+            || value.eq_ignore_ascii_case("https://aistudio.google.com")
+    }) || matches!(
+        row.provider.name.trim().to_ascii_lowercase().as_str(),
+        "google" | "google official" | "google oauth"
+    );
+
+    if !legacy_google_identity {
+        return false;
+    }
+
+    let api_key_blank = row
+        .provider
+        .settings_config
+        .get("env")
+        .and_then(|env| env.get("GEMINI_API_KEY"))
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.trim().is_empty());
+    let base_url_blank = extract_api_url(&row.provider.settings_config, &AppType::Gemini)
+        .is_none_or(|value| value.trim().is_empty());
+
+    api_key_blank && base_url_blank
+}
+
+fn codex_config_has_base_url(settings_config: &Value) -> bool {
+    let Some(config_text) = settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+
+    let Ok(table) = toml::from_str::<toml::Table>(config_text) else {
+        return false;
+    };
+
+    if table
+        .get("base_url")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return true;
+    }
+
+    let Some(provider_key) = table.get("model_provider").and_then(|value| value.as_str()) else {
+        return false;
+    };
+
+    table
+        .get("model_providers")
+        .and_then(|value| value.as_table())
+        .and_then(|providers| providers.get(provider_key))
+        .and_then(|value| value.as_table())
+        .and_then(|provider| provider.get("base_url"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
 fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnapshot, AppError> {
     if matches!(app_type, AppType::OpenClaw) {
         ProviderService::sync_openclaw_providers_from_live(state)?;
@@ -203,6 +513,14 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
     };
     let openclaw_live_ids = if matches!(app_type, AppType::OpenClaw) {
         ProviderService::valid_openclaw_live_provider_ids()?.unwrap_or_default()
+    } else {
+        HashSet::new()
+    };
+    let opencode_live_ids = if matches!(app_type, AppType::OpenCode) {
+        crate::opencode_config::get_providers()?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<HashSet<_>>()
     } else {
         HashSet::new()
     };
@@ -230,6 +548,7 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
                 api_url: extract_api_url(&provider.settings_config, app_type),
                 is_current: id == current_id,
                 is_in_config: match app_type {
+                    AppType::OpenCode => opencode_live_ids.contains(&id),
                     AppType::OpenClaw => openclaw_live_ids.contains(&id),
                     _ => true,
                 },
@@ -675,6 +994,7 @@ fn load_skills_snapshot() -> Result<SkillsSnapshot, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
     use serde_json::json;
     use serial_test::serial;
     use std::path::Path;
@@ -723,6 +1043,14 @@ mod tests {
     }
 
     impl SettingsGuard {
+        fn with_opencode_dir(path: &Path) -> Self {
+            let previous = get_settings();
+            let mut settings = AppSettings::default();
+            settings.opencode_config_dir = Some(path.display().to_string());
+            update_settings(settings).expect("set opencode override dir");
+            Self { previous }
+        }
+
         fn with_openclaw_dir(path: &Path) -> Self {
             let previous = get_settings();
             let mut settings = AppSettings::default();
@@ -736,6 +1064,152 @@ mod tests {
         fn drop(&mut self) {
             update_settings(self.previous.clone()).expect("restore previous settings");
         }
+    }
+
+    fn test_provider_row(id: &str, name: &str, settings_config: serde_json::Value) -> ProviderRow {
+        ProviderRow {
+            id: id.to_string(),
+            provider: Provider::with_id(id.to_string(), name.to_string(), settings_config, None),
+            api_url: None,
+            is_current: true,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        }
+    }
+
+    #[test]
+    fn quota_target_detects_official_claude_by_explicit_category() {
+        let mut official = test_provider_row("official", "Claude Official", json!({"env": {}}));
+        official.provider.category = Some("official".to_string());
+        let stripped_custom = test_provider_row("stripped-custom", "Custom", json!({"env": {}}));
+        let custom = test_provider_row(
+            "custom",
+            "Claude Custom",
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
+        );
+
+        assert!(matches!(
+            quota_target_for_provider(&AppType::Claude, &official).map(|target| target.kind),
+            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "claude"
+        ));
+        assert!(quota_target_for_provider(&AppType::Claude, &stripped_custom).is_none());
+        assert!(quota_target_for_provider(&AppType::Claude, &custom).is_none());
+    }
+
+    #[test]
+    fn quota_target_detects_codex_official_and_skips_api_key_providers() {
+        let missing_key = test_provider_row("official", "OpenAI Official", json!({"auth": {}}));
+        let no_key_custom_base_url = test_provider_row(
+            "base-url",
+            "OpenAI Official",
+            json!({
+                "auth": {},
+                "config": r#"base_url = "https://api.example.com/v1""#
+            }),
+        );
+        let mut metadata_official = test_provider_row(
+            "metadata",
+            "Codex Official",
+            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
+        );
+        metadata_official.provider.meta = Some(ProviderMeta {
+            codex_official: Some(true),
+            ..ProviderMeta::default()
+        });
+        let api_key = test_provider_row(
+            "api-key",
+            "Custom OpenAI",
+            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
+        );
+
+        assert!(matches!(
+            quota_target_for_provider(&AppType::Codex, &missing_key).map(|target| target.kind),
+            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "codex"
+        ));
+        assert!(matches!(
+            quota_target_for_provider(&AppType::Codex, &metadata_official)
+                .map(|target| target.kind),
+            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "codex"
+        ));
+        assert!(quota_target_for_provider(&AppType::Codex, &no_key_custom_base_url).is_none());
+        assert!(quota_target_for_provider(&AppType::Codex, &api_key).is_none());
+    }
+
+    #[test]
+    fn quota_target_detects_gemini_official_and_skips_api_key_providers() {
+        let mut explicit_official =
+            test_provider_row("google-official", "Google Official", json!({"env": {}}));
+        explicit_official.provider.category = Some("official".to_string());
+
+        let google_oauth = test_provider_row(
+            "google-oauth",
+            "Google OAuth",
+            json!({"env": {}, "config": {}}),
+        );
+        let mut partner_official = test_provider_row(
+            "partner",
+            "Gemini",
+            json!({"env": {"GEMINI_API_KEY": "sk"}}),
+        );
+        partner_official.provider.meta = Some(ProviderMeta {
+            partner_promotion_key: Some("google-official".to_string()),
+            ..ProviderMeta::default()
+        });
+        let api_key = test_provider_row(
+            "api-key",
+            "Google OAuth",
+            json!({"env": {"GEMINI_API_KEY": "sk-custom"}}),
+        );
+        let base_url = test_provider_row(
+            "base-url",
+            "Google OAuth",
+            json!({"env": {"GOOGLE_GEMINI_BASE_URL": "https://api.example.com"}}),
+        );
+        let stripped_custom = test_provider_row("custom", "Custom Gemini", json!({"env": {}}));
+
+        assert!(matches!(
+            quota_target_for_provider(&AppType::Gemini, &explicit_official)
+                .map(|target| target.kind),
+            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
+        ));
+        assert!(matches!(
+            quota_target_for_provider(&AppType::Gemini, &google_oauth).map(|target| target.kind),
+            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
+        ));
+        assert!(matches!(
+            quota_target_for_provider(&AppType::Gemini, &partner_official)
+                .map(|target| target.kind),
+            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
+        ));
+        assert!(quota_target_for_provider(&AppType::Gemini, &api_key).is_none());
+        assert!(quota_target_for_provider(&AppType::Gemini, &base_url).is_none());
+        assert!(quota_target_for_provider(&AppType::Gemini, &stripped_custom).is_none());
+    }
+
+    #[test]
+    fn quota_target_detects_codex_oauth_managed_account() {
+        let mut row = test_provider_row("codex-oauth", "Codex OAuth", json!({}));
+        row.provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("codex_oauth".to_string()),
+                account_id: Some("acct-1".to_string()),
+            }),
+            ..ProviderMeta::default()
+        });
+
+        let target =
+            quota_target_for_provider(&AppType::Claude, &row).expect("codex oauth quota target");
+
+        assert_eq!(target.provider_id, "codex-oauth");
+        assert!(matches!(
+            target.kind,
+            QuotaTargetKind::CodexOAuth { account_id } if account_id.as_deref() == Some("acct-1")
+        ));
     }
 
     #[test]
@@ -780,6 +1254,87 @@ mod tests {
         assert_eq!(
             extract_api_url(&settings, &AppType::OpenCode),
             Some("https://opencode.example".to_string())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_opencode_marks_live_config_membership() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let opencode_dir = temp.path().join("opencode");
+        std::fs::create_dir_all(&opencode_dir).expect("create opencode dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_opencode_dir(&opencode_dir);
+
+        crate::opencode_config::set_provider(
+            "in-config",
+            json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "baseURL": "https://live.example.com/v1"
+                },
+                "models": {
+                    "main": {"name": "Main"}
+                }
+            }),
+        )
+        .expect("seed live opencode provider");
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenCode)
+                .expect("opencode manager");
+            manager.providers.insert(
+                "in-config".to_string(),
+                Provider::with_id(
+                    "in-config".to_string(),
+                    "In Config".to_string(),
+                    json!({
+                        "options": {
+                            "baseURL": "https://saved-live.example.com/v1"
+                        }
+                    }),
+                    None,
+                ),
+            );
+            manager.providers.insert(
+                "saved-only".to_string(),
+                Provider::with_id(
+                    "saved-only".to_string(),
+                    "Saved Only".to_string(),
+                    json!({
+                        "options": {
+                            "baseURL": "https://saved.example.com/v1"
+                        }
+                    }),
+                    None,
+                ),
+            );
+        }
+        state.save().expect("persist opencode providers");
+
+        let snapshot = load_providers(&state, &AppType::OpenCode).expect("load opencode rows");
+        let in_config = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "in-config")
+            .expect("in-config provider row");
+        let saved_only = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "saved-only")
+            .expect("saved-only provider row");
+
+        assert!(in_config.is_in_config);
+        assert!(!in_config.is_current);
+        assert!(!saved_only.is_in_config);
+        assert!(saved_only.is_saved);
+        assert_eq!(
+            saved_only.api_url.as_deref(),
+            Some("https://saved.example.com/v1")
         );
     }
 

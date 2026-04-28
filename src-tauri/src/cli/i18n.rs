@@ -565,9 +565,9 @@ pub mod texts {
 
     pub fn tui_help_text() -> &'static str {
         if is_chinese() {
-            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，s 切换，a 添加，e 编辑，d 删除，t 测速，c 健康检查\n- 供应商详情：s 切换，e 编辑，t 测速，c 健康检查\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：Enter 查看，a 激活，x 取消激活(当前)，e 编辑，d 删除\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
+            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，s 切换/添加移除，a 添加，e 编辑，d 删除，t 测速，c 健康检查\n- 供应商详情：s 切换/添加移除，e 编辑，t 测速，c 健康检查\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：Enter 查看，a 激活，x 取消激活(当前)，e 编辑，d 删除\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
         } else {
-            "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, s switch, a add, e edit, d delete, t speedtest, c stream check\n- Provider Detail: s switch, e edit, t speedtest, c stream check\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: Enter view, a activate, x deactivate active, e edit, d delete\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
+            "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, s switch/add-remove, a add, e edit, d delete, t speedtest, c stream check\n- Provider Detail: s switch/add-remove, e edit, t speedtest, c stream check\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: Enter view, a activate, x deactivate active, e edit, d delete\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
         }
     }
 
@@ -1163,6 +1163,204 @@ pub mod texts {
         }
     }
 
+    pub fn tui_header_quota() -> &'static str {
+        if is_chinese() {
+            "额度"
+        } else {
+            "Quota"
+        }
+    }
+
+    pub fn tui_label_quota() -> &'static str {
+        if is_chinese() {
+            "额度"
+        } else {
+            "Quota"
+        }
+    }
+
+    pub fn tui_quota_loading() -> &'static str {
+        if is_chinese() {
+            "查询中…"
+        } else {
+            "checking…"
+        }
+    }
+
+    pub fn tui_quota_not_available() -> &'static str {
+        if is_chinese() {
+            "不可用"
+        } else {
+            "not available"
+        }
+    }
+
+    pub fn tui_quota_parse_error() -> &'static str {
+        if is_chinese() {
+            "凭据解析失败"
+        } else {
+            "credential parse failed"
+        }
+    }
+
+    pub fn tui_quota_expired() -> &'static str {
+        if is_chinese() {
+            "登录过期"
+        } else {
+            "login expired"
+        }
+    }
+
+    pub fn tui_quota_query_failed() -> &'static str {
+        if is_chinese() {
+            "查询失败"
+        } else {
+            "query failed"
+        }
+    }
+
+    pub fn tui_quota_not_queried() -> &'static str {
+        if is_chinese() {
+            "未查询"
+        } else {
+            "not queried"
+        }
+    }
+
+    pub fn tui_quota_refresh_hint() -> &'static str {
+        if is_chinese() {
+            "按 r 刷新"
+        } else {
+            "press r to refresh"
+        }
+    }
+
+    pub fn tui_quota_ok() -> &'static str {
+        if is_chinese() {
+            "已获取"
+        } else {
+            "ok"
+        }
+    }
+
+    pub fn tui_quota_last_checked() -> &'static str {
+        if is_chinese() {
+            "更新于"
+        } else {
+            "checked"
+        }
+    }
+
+    pub fn tui_quota_resets_in(time: &str) -> String {
+        if is_chinese() {
+            format!("{time} 后重置")
+        } else {
+            format!("resets in {time}")
+        }
+    }
+
+    pub fn tui_quota_just_now() -> &'static str {
+        if is_chinese() {
+            "刚刚"
+        } else {
+            "just now"
+        }
+    }
+
+    pub fn tui_quota_minutes_ago(count: i64) -> String {
+        if is_chinese() {
+            format!("{count} 分钟前")
+        } else if count == 1 {
+            "1 minute ago".to_string()
+        } else {
+            format!("{count} minutes ago")
+        }
+    }
+
+    pub fn tui_quota_hours_ago(count: i64) -> String {
+        if is_chinese() {
+            format!("{count} 小时前")
+        } else if count == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{count} hours ago")
+        }
+    }
+
+    pub fn tui_quota_days_ago(count: i64) -> String {
+        if is_chinese() {
+            format!("{count} 天前")
+        } else if count == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{count} days ago")
+        }
+    }
+
+    pub fn tui_quota_extra_usage() -> &'static str {
+        if is_chinese() {
+            "额外用量"
+        } else {
+            "Extra usage"
+        }
+    }
+
+    pub fn tui_quota_tier_five_hour() -> &'static str {
+        if is_chinese() {
+            "5小时"
+        } else {
+            "5h"
+        }
+    }
+
+    pub fn tui_quota_tier_seven_day() -> &'static str {
+        if is_chinese() {
+            "7天"
+        } else {
+            "7d"
+        }
+    }
+
+    pub fn tui_quota_tier_seven_day_opus() -> &'static str {
+        if is_chinese() {
+            "7天 Opus"
+        } else {
+            "7d Opus"
+        }
+    }
+
+    pub fn tui_quota_tier_seven_day_sonnet() -> &'static str {
+        if is_chinese() {
+            "7天 Sonnet"
+        } else {
+            "7d Sonnet"
+        }
+    }
+
+    pub fn tui_quota_tier_weekly_limit() -> &'static str {
+        if is_chinese() {
+            "周额度"
+        } else {
+            "weekly"
+        }
+    }
+
+    pub fn tui_quota_tier_premium() -> &'static str {
+        "premium"
+    }
+
+    pub fn tui_quota_tier_gemini_pro() -> &'static str {
+        "Gemini Pro"
+    }
+
+    pub fn tui_quota_tier_gemini_flash() -> &'static str {
+        "Gemini Flash"
+    }
+
+    pub fn tui_quota_tier_gemini_flash_lite() -> &'static str {
+        "Gemini Flash Lite"
+    }
+
     pub fn tui_header_id() -> &'static str {
         "ID"
     }
@@ -1403,6 +1601,54 @@ pub mod texts {
             "状态"
         } else {
             "Status"
+        }
+    }
+
+    pub fn tui_opencode_config_status_label() -> &'static str {
+        if is_chinese() {
+            "OpenCode 配置"
+        } else {
+            "OpenCode Config"
+        }
+    }
+
+    pub fn tui_label_provider_config_status() -> &'static str {
+        if is_chinese() {
+            "配置状态"
+        } else {
+            "Config Status"
+        }
+    }
+
+    pub fn tui_provider_config_count(in_config: usize, total: usize) -> String {
+        if is_chinese() {
+            format!("{in_config}/{total} 已添加")
+        } else {
+            format!("{in_config}/{total} in config")
+        }
+    }
+
+    pub fn tui_provider_status_in_config() -> &'static str {
+        if is_chinese() {
+            "已添加到配置"
+        } else {
+            "in config"
+        }
+    }
+
+    pub fn tui_provider_status_saved_only() -> &'static str {
+        if is_chinese() {
+            "仅已保存"
+        } else {
+            "saved only"
+        }
+    }
+
+    pub fn tui_provider_status_untracked() -> &'static str {
+        if is_chinese() {
+            "未跟踪"
+        } else {
+            "untracked"
         }
     }
 
@@ -4065,6 +4311,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_provider_added_to_app_config(app: &str) -> String {
+        if is_chinese() {
+            format!("已将该供应商添加到当前 {app} 配置。")
+        } else {
+            format!("Provider added to the current {app} config.")
+        }
+    }
+
+    pub fn tui_toast_provider_removed_from_app_config(app: &str) -> String {
+        if is_chinese() {
+            format!("已从当前 {app} 配置中移除该供应商。")
+        } else {
+            format!("Provider removed from the current {app} config.")
+        }
+    }
+
     pub fn tui_toast_provider_set_as_default(model: &str) -> String {
         if is_chinese() {
             format!("已设为默认模型: {}", model)
@@ -4618,6 +4880,46 @@ pub mod texts {
             format!("健康检查请求失败: {err}")
         } else {
             format!("Failed to enqueue stream check: {err}")
+        }
+    }
+
+    pub fn tui_toast_quota_not_available() -> &'static str {
+        if is_chinese() {
+            "当前供应商没有官方额度查询。"
+        } else {
+            "This provider has no official quota query."
+        }
+    }
+
+    pub fn tui_toast_quota_worker_unavailable(err: &str) -> String {
+        if is_chinese() {
+            format!("额度查询后台任务不可用: {err}")
+        } else {
+            format!("Quota worker unavailable: {err}")
+        }
+    }
+
+    pub fn tui_toast_quota_refresh_started(provider: &str) -> String {
+        if is_chinese() {
+            format!("正在刷新额度: {provider}")
+        } else {
+            format!("Refreshing quota: {provider}")
+        }
+    }
+
+    pub fn tui_toast_quota_refresh_finished(provider: &str) -> String {
+        if is_chinese() {
+            format!("额度已刷新: {provider}")
+        } else {
+            format!("Quota refreshed: {provider}")
+        }
+    }
+
+    pub fn tui_toast_quota_refresh_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("额度刷新失败: {err}")
+        } else {
+            format!("Quota refresh failed: {err}")
         }
     }
 
@@ -5879,6 +6181,14 @@ pub mod texts {
             format!("✓ 已切换到供应商 '{}'", id)
         } else {
             format!("✓ Switched to provider '{}'", id)
+        }
+    }
+
+    pub fn provider_added_to_app_config(id: &str, app: &str) -> String {
+        if is_chinese() {
+            format!("✓ 已将供应商 '{}' 添加到 {} 配置", id, app)
+        } else {
+            format!("✓ Added provider '{}' to {} config", id, app)
         }
     }
 
@@ -7911,9 +8221,9 @@ pub mod texts {
 
     pub fn common_config_snippet_applied() -> &'static str {
         if is_chinese() {
-            "✓ 已应用到 live 配置（请重启对应客户端）"
+            "✓ 已在适用时刷新 live 配置（请重启对应客户端）"
         } else {
-            "✓ Applied to live config (restart the client)"
+            "✓ Refreshed live config when applicable (restart the client)"
         }
     }
 
@@ -8532,7 +8842,7 @@ mod tests {
 
         let help = texts::tui_help_text();
         assert!(help.contains("供应商：Enter 详情"));
-        assert!(help.contains("供应商详情：s 切换"));
+        assert!(help.contains("供应商详情：s 切换/添加移除"));
         assert!(help.contains("提示词：Enter 查看"));
         assert!(help.contains("技能：Enter 详情"));
         assert!(help.contains("配置：Enter 打开/执行"));

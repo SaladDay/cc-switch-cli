@@ -134,6 +134,13 @@ fn do_switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppEr
         }
     }
 
+    if matches!(ctx.app.app_type, crate::app_config::AppType::OpenCode) {
+        ctx.app.push_toast(
+            texts::tui_toast_provider_added_to_app_config(ctx.app.app_type.as_str()),
+            ToastKind::Success,
+        );
+    }
+
     Ok(())
 }
 
@@ -326,9 +333,20 @@ pub(super) fn remove_from_config(
                     "Cannot remove the OpenClaw provider referenced by the current default model from config",
                 ));
             }
-            crate::openclaw_config::remove_provider(&id)?;
+            let state = load_state()?;
+            ProviderService::remove_from_live_config(&state, ctx.app.app_type.clone(), &id)?;
             ctx.app.push_toast(
                 texts::tui_toast_provider_removed_from_config(),
+                ToastKind::Success,
+            );
+            *ctx.data = UiData::load(&ctx.app.app_type)?;
+            Ok(())
+        }
+        crate::app_config::AppType::OpenCode => {
+            let state = load_state()?;
+            ProviderService::remove_from_live_config(&state, ctx.app.app_type.clone(), &id)?;
+            ctx.app.push_toast(
+                texts::tui_toast_provider_removed_from_app_config(ctx.app.app_type.as_str()),
                 ToastKind::Success,
             );
             *ctx.data = UiData::load(&ctx.app.app_type)?;
@@ -586,6 +604,14 @@ mod tests {
     }
 
     impl SettingsGuard {
+        fn with_opencode_dir(path: &Path) -> Self {
+            let previous = get_settings();
+            let mut settings = AppSettings::default();
+            settings.opencode_config_dir = Some(path.display().to_string());
+            update_settings(settings).expect("set opencode override dir");
+            Self { previous }
+        }
+
         fn with_openclaw_dir(path: &Path) -> Self {
             let previous = get_settings();
             let mut settings = AppSettings::default();
@@ -923,6 +949,125 @@ mod tests {
 
         assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(matches!(fixture.app.overlay, Overlay::None));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn opencode_switch_toggles_config_membership_without_current_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let opencode_dir = temp_home.path().join("opencode");
+        std::fs::create_dir_all(&opencode_dir).expect("create opencode dir");
+        let _settings = SettingsGuard::with_opencode_dir(&opencode_dir);
+
+        let mut config = MultiAppConfig::default();
+        let manager = config
+            .get_manager_mut(&AppType::OpenCode)
+            .expect("opencode manager");
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "OpenCode Provider".to_string(),
+                json!({
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {
+                        "baseURL": "https://opencode.example.com/v1"
+                    },
+                    "models": {
+                        "main": {"name": "Main"}
+                    }
+                }),
+                None,
+            ),
+        );
+        config.save().expect("persist opencode provider");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::OpenCode));
+        let mut data = UiData::load(&AppType::OpenCode).expect("load initial opencode data");
+        assert_eq!(data.providers.current_id, "");
+        assert!(
+            data.providers
+                .rows
+                .iter()
+                .any(|row| row.id == "p1" && !row.is_in_config),
+            "precondition: saved provider should start outside OpenCode config"
+        );
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        switch(&mut ctx, "p1".to_string()).expect("add opencode provider to config");
+
+        assert_eq!(ctx.data.providers.current_id, "");
+        assert!(crate::opencode_config::get_providers()
+            .expect("read opencode providers")
+            .contains_key("p1"));
+        assert!(ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .any(|row| row.id == "p1" && row.is_in_config && !row.is_current));
+        let added_row = ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "p1")
+            .expect("added provider should remain saved");
+        assert_eq!(
+            added_row
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.live_config_managed),
+            Some(true)
+        );
+        assert!(matches!(ctx.app.toast, Some(_)));
+
+        remove_from_config(&mut ctx, "p1".to_string())
+            .expect("remove opencode provider from config");
+
+        assert_eq!(ctx.data.providers.current_id, "");
+        assert!(!crate::opencode_config::get_providers()
+            .expect("read opencode providers after remove")
+            .contains_key("p1"));
+        let removed_row = ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "p1")
+            .expect("removed provider should remain saved");
+        assert!(!removed_row.is_in_config);
+        assert!(!removed_row.is_current);
+        assert!(removed_row.is_saved);
+        assert_eq!(
+            removed_row
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.live_config_managed),
+            Some(false)
+        );
     }
 
     #[test]
@@ -1614,6 +1759,14 @@ mod tests {
             .expect("removed provider should remain visible after reload for re-adding");
         assert!(!removed_row.is_in_config);
         assert!(removed_row.is_saved);
+        assert_eq!(
+            removed_row
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.live_config_managed),
+            Some(false)
+        );
     }
 
     #[test]

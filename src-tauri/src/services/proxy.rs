@@ -3256,7 +3256,7 @@ base_url = "https://new.example/v1"
         .expect("set codex common config snippet");
 
         let service = ProxyService::new(db.clone());
-        let provider = Provider::with_id(
+        let mut provider = Provider::with_id(
             "codex-provider".to_string(),
             "Codex Provider".to_string(),
             json!({
@@ -3272,6 +3272,10 @@ base_url = "https://api.example/v1"
             }),
             None,
         );
+        provider.meta = Some(ProviderMeta {
+            apply_common_config: Some(true),
+            ..Default::default()
+        });
         db.save_provider("codex", &provider)
             .expect("save codex provider");
         db.set_current_provider("codex", &provider.id)

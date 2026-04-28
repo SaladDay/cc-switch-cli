@@ -9,9 +9,9 @@ use super::super::data::load_state;
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, LocalEnvMsg, LocalEnvReq,
     LocalEnvSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg, ProxyReq,
-    ProxySystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg,
-    StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem, WebDavDone, WebDavErr,
-    WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
+    ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg,
+    SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq,
+    UpdateSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 pub(crate) fn start_proxy_system() -> Result<ProxySystem, AppError> {
@@ -477,6 +477,59 @@ fn local_env_worker_loop(rx: mpsc::Receiver<LocalEnvReq>, tx: mpsc::Sender<Local
                 let _ = tx.send(LocalEnvMsg::Finished { result });
             }
         }
+    }
+}
+
+pub(crate) fn start_quota_system() -> Result<QuotaSystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<QuotaMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<QuotaReq>();
+
+    let handle = std::thread::Builder::new()
+        .name("cc-switch-quota".to_string())
+        .spawn(move || quota_worker_loop(req_rx, result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn quota worker thread".to_string(),
+            source: e,
+        })?;
+
+    Ok(QuotaSystem {
+        req_tx,
+        result_rx,
+        _handle: handle,
+    })
+}
+
+fn quota_worker_loop(rx: mpsc::Receiver<QuotaReq>, tx: mpsc::Sender<QuotaMsg>) {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let err = e.to_string();
+            while let Ok(req) = rx.recv() {
+                let QuotaReq::Refresh { target } = req;
+                let _ = tx.send(QuotaMsg::Finished {
+                    target,
+                    result: Err(err.clone()),
+                });
+            }
+            return;
+        }
+    };
+
+    while let Ok(req) = rx.recv() {
+        let QuotaReq::Refresh { target } = req;
+        let result = match &target.kind {
+            crate::cli::tui::data::QuotaTargetKind::SubscriptionTool { tool } => {
+                rt.block_on(crate::services::subscription::get_subscription_quota(tool))
+            }
+            crate::cli::tui::data::QuotaTargetKind::CodexOAuth { account_id } => Ok(rt.block_on(
+                crate::services::CodexOAuthService::get_quota(account_id.as_deref()),
+            )),
+        };
+
+        let _ = tx.send(QuotaMsg::Finished { target, result });
     }
 }
 

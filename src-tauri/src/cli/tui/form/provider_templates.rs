@@ -305,6 +305,12 @@ impl ProviderAddFormState {
                     self.codex_env_key.set("");
                 }
                 ProviderTemplateId::GoogleOAuth => {
+                    self.extra = json!({
+                        "category": "official",
+                        "meta": {
+                            "partnerPromotionKey": "google-official",
+                        }
+                    });
                     self.name.set("Google OAuth");
                     self.website_url.set("https://ai.google.dev");
                     self.gemini_auth_type = GeminiAuthType::OAuth;

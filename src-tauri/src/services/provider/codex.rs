@@ -21,6 +21,11 @@ impl ProviderService {
         root.remove("base_url");
         // Remove entire model_providers table (provider-specific configuration)
         root.remove("model_providers");
+        // Codex writes trust decisions for local workspaces at runtime. These
+        // must stay with the provider snapshot being backfilled, not become
+        // common config that is merged into every provider.
+        root.remove("projects");
+        root.remove("trusted_workspaces");
 
         // Clean up multiple empty lines (keep at most one blank line).
         let mut cleaned = String::new();
@@ -156,38 +161,11 @@ impl ProviderService {
         provider: &mut Provider,
         common_config_snippet: Option<&str>,
     ) -> Result<(), AppError> {
-        let apply_common_config = provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(true);
-        if !apply_common_config {
-            return Ok(());
-        }
-
-        let Some(snippet) = common_config_snippet.map(str::trim) else {
-            return Ok(());
-        };
-        if snippet.is_empty() {
-            return Ok(());
-        }
-
-        let settings = provider
-            .settings_config
-            .as_object_mut()
-            .ok_or_else(|| AppError::Config("Codex 配置必须是 JSON 对象".into()))?;
-        let Some(config_value) = settings.get_mut("config") else {
-            return Ok(());
-        };
-        if config_value.is_null() {
-            return Ok(());
-        }
-
-        let cfg_text = config_value
-            .as_str()
-            .ok_or_else(|| AppError::Config("Codex config 字段必须是字符串".into()))?;
-        *config_value = Value::String(strip_codex_common_config_from_full_text(cfg_text, snippet)?);
-        Ok(())
+        common_config::normalize_provider_common_config_for_storage(
+            &AppType::Codex,
+            provider,
+            common_config_snippet,
+        )
     }
 
     pub(super) fn migrate_codex_common_config_snippet(
@@ -247,6 +225,7 @@ impl ProviderService {
     pub(super) fn prepare_switch_codex(
         config: &mut MultiAppConfig,
         provider_id: &str,
+        effective_current_provider: Option<&str>,
     ) -> Result<Provider, AppError> {
         let provider = config
             .get_manager(&AppType::Codex)
@@ -262,7 +241,7 @@ impl ProviderService {
                 )
             })?;
 
-        Self::backfill_codex_current(config, provider_id)?;
+        Self::backfill_codex_current(config, provider_id, effective_current_provider)?;
 
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             manager.current = provider_id.to_string();
@@ -274,11 +253,9 @@ impl ProviderService {
     pub(super) fn backfill_codex_current(
         config: &mut MultiAppConfig,
         next_provider: &str,
+        effective_current_provider: Option<&str>,
     ) -> Result<(), AppError> {
-        let current_id = config
-            .get_manager(&AppType::Codex)
-            .map(|m| m.current.clone())
-            .unwrap_or_default();
+        let current_id = effective_current_provider.unwrap_or_default();
 
         if current_id.is_empty() || current_id == next_provider {
             return Ok(());
@@ -292,7 +269,7 @@ impl ProviderService {
 
         let current_provider = config
             .get_manager(&AppType::Codex)
-            .and_then(|manager| manager.providers.get(&current_id))
+            .and_then(|manager| manager.providers.get(current_id))
             .cloned();
         let Some(current_provider) = current_provider else {
             return Ok(());
@@ -331,7 +308,7 @@ impl ProviderService {
         };
 
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
-            if let Some(current) = manager.providers.get_mut(&current_id) {
+            if let Some(current) = manager.providers.get_mut(current_id) {
                 current.settings_config = settings_config;
             }
         }
@@ -353,8 +330,13 @@ impl ProviderService {
             return Ok(());
         }
 
-        let settings = provider
-            .settings_config
+        let effective = Self::build_effective_live_snapshot(
+            &AppType::Codex,
+            provider,
+            common_config_snippet,
+            apply_common_config,
+        )?;
+        let settings = effective
             .as_object()
             .ok_or_else(|| AppError::Config("Codex 配置必须是 JSON 对象".into()))?;
 
@@ -362,7 +344,6 @@ impl ProviderService {
             .get("auth")
             .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
 
-        // 获取存储的 config TOML 文本
         let cfg_text = settings
             .get("config")
             .and_then(Value::as_str)
@@ -375,36 +356,12 @@ impl ProviderService {
             crate::codex_config::validate_config_toml(cfg_text)?;
         }
 
-        // Merge common config snippet if applicable
-        let final_text = if apply_common_config {
-            if let Some(snippet) = common_config_snippet {
-                let snippet = snippet.trim();
-                if !snippet.is_empty() && !cfg_text.trim().is_empty() {
-                    // Parse both as TOML documents and merge
-                    let mut doc = cfg_text
-                        .parse::<toml_edit::DocumentMut>()
-                        .map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
-                    let common_doc = snippet.parse::<toml_edit::DocumentMut>().map_err(|e| {
-                        AppError::Config(format!("Common config TOML parse error: {e}"))
-                    })?;
-                    Self::merge_toml_tables(doc.as_table_mut(), common_doc.as_table());
-                    doc.to_string()
-                } else {
-                    cfg_text.to_string()
-                }
-            } else {
-                cfg_text.to_string()
-            }
-        } else {
-            cfg_text.to_string()
-        };
-
         // Write config.toml
         let config_path = get_codex_config_path();
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
-        crate::config::write_text_file(&config_path, &final_text)?;
+        crate::config::write_text_file(&config_path, cfg_text)?;
 
         let auth_path = get_codex_auth_path();
         write_json_file(&auth_path, auth)?;

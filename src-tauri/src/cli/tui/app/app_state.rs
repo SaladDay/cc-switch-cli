@@ -76,6 +76,9 @@ pub enum Action {
     ProviderStreamCheck {
         id: String,
     },
+    ProviderQuotaRefresh {
+        id: String,
+    },
     ProviderModelFetch {
         base_url: String,
         api_key: Option<String>,
@@ -439,6 +442,8 @@ pub struct App {
     pub proxy_activity_last_output_tokens: Option<u64>,
     pub proxy_visual_state: Option<bool>,
     pub proxy_visual_transition: Option<ProxyVisualTransition>,
+    pub quota_auto_target_key: Option<String>,
+    pub quota_last_auto_tick: Option<u64>,
 
     pub local_env_results: Vec<crate::services::local_env_check::ToolCheckResult>,
     pub local_env_loading: bool,

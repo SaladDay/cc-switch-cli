@@ -35,6 +35,8 @@ impl App {
             proxy_activity_last_output_tokens: None,
             proxy_visual_state: None,
             proxy_visual_transition: None,
+            quota_auto_target_key: None,
+            quota_last_auto_tick: None,
             local_env_results: Vec::new(),
             local_env_loading: true,
             provider_idx: 0,

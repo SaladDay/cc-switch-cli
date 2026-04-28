@@ -299,7 +299,14 @@ impl ConfigService {
         provider_id: &str,
         provider: &Provider,
     ) -> Result<(), AppError> {
-        let settings = provider.settings_config.as_object().ok_or_else(|| {
+        let common_config_snippet = config.common_config_snippets.codex.clone();
+        let effective = ProviderService::build_effective_live_snapshot(
+            &AppType::Codex,
+            provider,
+            common_config_snippet.as_deref(),
+            true,
+        )?;
+        let settings = effective.as_object().ok_or_else(|| {
             AppError::Config(format!("供应商 {provider_id} 的 Codex 配置必须是对象"))
         })?;
         let auth = settings.get("auth").ok_or_else(|| {
@@ -318,12 +325,18 @@ impl ConfigService {
         let cfg_text_after = crate::codex_config::read_and_validate_codex_config_text()?;
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
-                if let Some(obj) = target.settings_config.as_object_mut() {
-                    obj.insert(
-                        "config".to_string(),
-                        serde_json::Value::String(cfg_text_after),
-                    );
-                }
+                let mut raw_settings = serde_json::Map::new();
+                raw_settings.insert("auth".to_string(), auth.clone());
+                raw_settings.insert(
+                    "config".to_string(),
+                    serde_json::Value::String(cfg_text_after),
+                );
+                target.settings_config = ProviderService::normalize_settings_config_for_storage(
+                    &AppType::Codex,
+                    provider,
+                    serde_json::Value::Object(raw_settings),
+                    common_config_snippet.as_deref(),
+                )?;
             }
         }
 
@@ -342,12 +355,25 @@ impl ConfigService {
             fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
-        write_json_file(&settings_path, &provider.settings_config)?;
+        let common_config_snippet = config.common_config_snippets.claude.clone();
+        let effective = ProviderService::build_effective_live_snapshot(
+            &AppType::Claude,
+            provider,
+            common_config_snippet.as_deref(),
+            true,
+        )?;
+
+        write_json_file(&settings_path, &effective)?;
 
         let live_after = read_json_file::<serde_json::Value>(&settings_path)?;
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
-                target.settings_config = live_after;
+                target.settings_config = ProviderService::normalize_settings_config_for_storage(
+                    &AppType::Claude,
+                    provider,
+                    live_after,
+                    common_config_snippet.as_deref(),
+                )?;
             }
         }
 
@@ -361,8 +387,8 @@ impl ConfigService {
     ) -> Result<(), AppError> {
         use crate::gemini_config::{env_to_json, read_gemini_env};
 
-        let common_config_snippet = config.common_config_snippets.gemini.as_deref();
-        ProviderService::write_gemini_live_force(provider, common_config_snippet)?;
+        let common_config_snippet = config.common_config_snippets.gemini.clone();
+        ProviderService::write_gemini_live_force(provider, common_config_snippet.as_deref())?;
 
         // 读回实际写入的内容并更新到配置中（包含 settings.json）
         let live_after_env = read_gemini_env()?;
@@ -379,7 +405,12 @@ impl ConfigService {
 
         if let Some(manager) = config.get_manager_mut(&AppType::Gemini) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
-                target.settings_config = live_after;
+                target.settings_config = ProviderService::normalize_settings_config_for_storage(
+                    &AppType::Gemini,
+                    provider,
+                    live_after,
+                    common_config_snippet.as_deref(),
+                )?;
             }
         }
 

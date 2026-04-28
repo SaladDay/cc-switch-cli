@@ -11,6 +11,7 @@ mod tests;
 mod theme;
 mod ui;
 
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -19,7 +20,7 @@ use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 
-use app::{App, ToastKind};
+use app::{Action, App, ToastKind};
 use runtime_actions::handle_action;
 #[cfg(test)]
 use runtime_actions::{
@@ -39,15 +40,16 @@ use runtime_systems::{
 };
 pub(crate) use runtime_systems::{fetch_provider_models_for_tui, ModelFetchStrategy};
 use runtime_systems::{
-    handle_local_env_msg, handle_model_fetch_msg, handle_proxy_msg, handle_skills_msg,
-    handle_speedtest_msg, handle_stream_check_msg, handle_update_msg, handle_webdav_msg,
-    start_local_env_system, start_model_fetch_system, start_proxy_system, start_skills_system,
-    start_speedtest_system, start_stream_check_system, start_update_system, start_webdav_system,
-    LocalEnvReq, RequestTracker,
+    handle_local_env_msg, handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg,
+    handle_skills_msg, handle_speedtest_msg, handle_stream_check_msg, handle_update_msg,
+    handle_webdav_msg, start_local_env_system, start_model_fetch_system, start_proxy_system,
+    start_quota_system, start_skills_system, start_speedtest_system, start_stream_check_system,
+    start_update_system, start_webdav_system, LocalEnvReq, QuotaReq, RequestTracker,
 };
 use terminal::{PanicRestoreHookGuard, TuiTerminal};
 
 pub(super) const TUI_TICK_RATE: Duration = Duration::from_millis(200);
+const QUOTA_REFRESH_INTERVAL_TICKS: u64 = 5 * 60 * 1000 / 200;
 
 fn resolve_initial_app_type(app_override: Option<AppType>) -> AppType {
     let requested = app_override.unwrap_or(AppType::Claude);
@@ -124,6 +126,82 @@ impl ProxyOpenFlash {
     fn active(&self) -> bool {
         self.effect.is_some()
     }
+}
+
+fn queue_quota_refresh(
+    app: &mut App,
+    data: &mut data::UiData,
+    quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
+    target: data::QuotaTarget,
+    manual: bool,
+) {
+    let Some(tx) = quota_req_tx else {
+        if manual {
+            app.push_toast(
+                texts::tui_toast_quota_worker_unavailable("quota worker is not running"),
+                ToastKind::Warning,
+            );
+        }
+        return;
+    };
+
+    data.quota.mark_loading(target.clone(), manual);
+    if let Err(error) = tx.send(QuotaReq::Refresh {
+        target: target.clone(),
+    }) {
+        data.quota.finish_error(target, error.to_string());
+        app.push_toast(
+            texts::tui_toast_quota_refresh_failed(&error.to_string()),
+            ToastKind::Warning,
+        );
+    } else if manual {
+        app.push_toast(
+            texts::tui_toast_quota_refresh_started(&target.provider_name),
+            ToastKind::Info,
+        );
+    }
+}
+
+fn queue_current_quota_refresh_if_due(
+    app: &mut App,
+    data: &mut data::UiData,
+    quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
+) {
+    let Some(target) = data::quota_target_for_current_provider(&app.app_type, data) else {
+        app.quota_auto_target_key = None;
+        app.quota_last_auto_tick = None;
+        return;
+    };
+
+    let target_key = target.cache_key();
+    let target_changed = app.quota_auto_target_key.as_deref() != Some(target_key.as_str());
+    let target_missing_state = data.quota.state_for(&target.provider_id).is_none();
+    let due = app
+        .quota_last_auto_tick
+        .is_none_or(|last_tick| app.tick.saturating_sub(last_tick) >= QUOTA_REFRESH_INTERVAL_TICKS);
+
+    if target_changed || target_missing_state || due {
+        app.quota_auto_target_key = Some(target_key);
+        app.quota_last_auto_tick = Some(app.tick);
+        queue_quota_refresh(app, data, quota_req_tx, target, false);
+    }
+}
+
+fn queue_provider_quota_refresh(
+    app: &mut App,
+    data: &mut data::UiData,
+    quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
+    provider_id: &str,
+) {
+    let Some(row) = data.providers.rows.iter().find(|row| row.id == provider_id) else {
+        return;
+    };
+    let Some(target) = data::quota_target_for_provider(&app.app_type, row) else {
+        app.push_toast(texts::tui_toast_quota_not_available(), ToastKind::Info);
+        return;
+    };
+
+    queue_quota_refresh(app, data, quota_req_tx, target, true);
 }
 
 pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
@@ -209,6 +287,18 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         }
     };
 
+    let quota = match start_quota_system() {
+        Ok(system) => Some(system),
+        Err(err) => {
+            app.push_toast(
+                texts::tui_toast_quota_worker_unavailable(&err.to_string()),
+                ToastKind::Warning,
+            );
+            None
+        }
+    };
+    queue_current_quota_refresh_if_due(&mut app, &mut data, quota.as_ref().map(|s| &s.req_tx));
+
     let webdav = match start_webdav_system() {
         Ok(system) => Some(system),
         Err(err) => {
@@ -280,6 +370,12 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             }
         }
 
+        if let Some(quota) = quota.as_ref() {
+            while let Ok(msg) = quota.result_rx.try_recv() {
+                handle_quota_msg(&mut app, &mut data, msg);
+            }
+        }
+
         if let Some(skills) = skills.as_ref() {
             while let Ok(msg) = skills.result_rx.try_recv() {
                 if let Err(err) = handle_skills_msg(&mut app, &mut data, msg) {
@@ -314,7 +410,14 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 event::Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let key = normalize_key_event(key);
                     let action = app.on_key(key, &data);
-                    if let Err(err) = handle_action(
+                    if let Action::ProviderQuotaRefresh { id } = action {
+                        queue_provider_quota_refresh(
+                            &mut app,
+                            &mut data,
+                            quota.as_ref().map(|s| &s.req_tx),
+                            &id,
+                        );
+                    } else if let Err(err) = handle_action(
                         &mut terminal,
                         &mut app,
                         &mut data,
@@ -349,7 +452,14 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         };
                         let key = event::KeyEvent::new(code, event::KeyModifiers::NONE);
                         let action = app.on_key(key, &data);
-                        if let Err(err) = handle_action(
+                        if let Action::ProviderQuotaRefresh { id } = action {
+                            queue_provider_quota_refresh(
+                                &mut app,
+                                &mut data,
+                                quota.as_ref().map(|s| &s.req_tx),
+                                &id,
+                            );
+                        } else if let Err(err) = handle_action(
                             &mut terminal,
                             &mut app,
                             &mut data,
@@ -393,6 +503,11 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                     );
                 }
             }
+            queue_current_quota_refresh_if_due(
+                &mut app,
+                &mut data,
+                quota.as_ref().map(|s| &s.req_tx),
+            );
             last_tick = Instant::now();
         }
 

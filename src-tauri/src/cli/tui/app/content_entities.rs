@@ -35,6 +35,13 @@ impl App {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
+                if matches!(self.app_type, AppType::OpenCode) {
+                    if row.is_in_config {
+                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
+                    }
+
+                    return Action::ProviderSwitch { id: row.id.clone() };
+                }
                 if matches!(self.app_type, AppType::OpenClaw) {
                     if row.is_in_config {
                         if row.is_default_model {
@@ -135,6 +142,16 @@ impl App {
                 };
                 Action::ProviderStreamCheck { id: row.id.clone() }
             }
+            KeyCode::Char('r') => {
+                let Some(row) = visible.get(self.provider_idx) else {
+                    return Action::None;
+                };
+                if data::quota_target_for_provider(&self.app_type, row).is_none() {
+                    self.push_toast(texts::tui_toast_quota_not_available(), ToastKind::Info);
+                    return Action::None;
+                }
+                Action::ProviderQuotaRefresh { id: row.id.clone() }
+            }
             _ => Action::None,
         }
     }
@@ -156,6 +173,13 @@ impl App {
             }
             KeyCode::Enter => Action::None,
             KeyCode::Char('s') => {
+                if matches!(self.app_type, AppType::OpenCode) {
+                    if row.is_in_config {
+                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
+                    }
+
+                    return Action::ProviderSwitch { id: row.id.clone() };
+                }
                 if matches!(self.app_type, AppType::OpenClaw) {
                     if row.is_in_config {
                         if row.is_default_model {
@@ -222,6 +246,13 @@ impl App {
                     provider_name: super::data::provider_display_name(&self.app_type, row),
                 };
                 Action::ProviderStreamCheck { id: row.id.clone() }
+            }
+            KeyCode::Char('r') => {
+                if data::quota_target_for_provider(&self.app_type, row).is_none() {
+                    self.push_toast(texts::tui_toast_quota_not_available(), ToastKind::Info);
+                    return Action::None;
+                }
+                Action::ProviderQuotaRefresh { id: row.id.clone() }
             }
             _ => Action::None,
         }

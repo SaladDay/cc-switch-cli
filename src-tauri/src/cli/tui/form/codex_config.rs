@@ -161,61 +161,6 @@ pub(crate) fn build_codex_provider_config_toml(
     .join("\n")
 }
 
-pub(crate) fn merge_codex_common_config_snippet(
-    config_toml: &str,
-    common_snippet: &str,
-) -> Result<String, String> {
-    use toml_edit::DocumentMut;
-
-    let common_trimmed = common_snippet.trim();
-    if common_trimmed.is_empty() {
-        return Ok(config_toml.to_string());
-    }
-
-    let mut common_doc: DocumentMut = common_trimmed
-        .parse()
-        .map_err(|e| format!("Invalid common Codex TOML: {e}"))?;
-
-    let config_trimmed = config_toml.trim();
-    let config_doc: DocumentMut = if config_trimmed.is_empty() {
-        DocumentMut::default()
-    } else {
-        config_trimmed
-            .parse()
-            .map_err(|e| format!("Invalid provider Codex TOML: {e}"))?
-    };
-
-    merge_toml_tables(common_doc.as_table_mut(), config_doc.as_table());
-    Ok(common_doc.to_string())
-}
-
-pub(crate) fn strip_codex_common_config_snippet(
-    config_toml: &str,
-    common_snippet: &str,
-) -> Result<String, String> {
-    use toml_edit::DocumentMut;
-
-    let common_trimmed = common_snippet.trim();
-    if common_trimmed.is_empty() {
-        return Ok(config_toml.to_string());
-    }
-
-    let common_doc: DocumentMut = common_trimmed
-        .parse()
-        .map_err(|e| format!("Invalid common Codex TOML: {e}"))?;
-
-    let config_trimmed = config_toml.trim();
-    if config_trimmed.is_empty() {
-        return Ok(String::new());
-    }
-
-    let mut config_doc: DocumentMut = config_trimmed
-        .parse()
-        .map_err(|e| format!("Invalid provider Codex TOML: {e}"))?;
-    strip_toml_tables(config_doc.as_table_mut(), common_doc.as_table());
-    Ok(config_doc.to_string())
-}
-
 fn non_empty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -227,56 +172,4 @@ fn non_empty(value: &str) -> Option<&str> {
 
 fn escape_toml_string(value: &str) -> String {
     value.replace('"', "\\\"")
-}
-
-fn merge_toml_tables(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
-    for (key, src_item) in src.iter() {
-        match (dst.get_mut(key), src_item) {
-            (Some(dst_item), toml_edit::Item::Table(src_table)) if dst_item.is_table() => {
-                if let Some(dst_table) = dst_item.as_table_mut() {
-                    merge_toml_tables(dst_table, src_table);
-                }
-            }
-            _ => {
-                dst.insert(key, src_item.clone());
-            }
-        }
-    }
-}
-
-fn strip_toml_tables(dst: &mut toml_edit::Table, common: &toml_edit::Table) {
-    let mut keys_to_remove = Vec::new();
-
-    for (key, common_item) in common.iter() {
-        let Some(dst_item) = dst.get_mut(key) else {
-            continue;
-        };
-
-        match (dst_item, common_item) {
-            (toml_edit::Item::Table(dst_table), toml_edit::Item::Table(common_table)) => {
-                strip_toml_tables(dst_table, common_table);
-                if dst_table.is_empty() {
-                    keys_to_remove.push(key.to_string());
-                }
-            }
-            (dst_item, common_item) => {
-                if toml_items_equal(dst_item, common_item) {
-                    keys_to_remove.push(key.to_string());
-                }
-            }
-        }
-    }
-
-    for key in keys_to_remove {
-        dst.remove(&key);
-    }
-}
-
-fn toml_items_equal(left: &toml_edit::Item, right: &toml_edit::Item) -> bool {
-    match (left.as_value(), right.as_value()) {
-        (Some(left_value), Some(right_value)) => {
-            left_value.to_string().trim() == right_value.to_string().trim()
-        }
-        _ => left.to_string().trim() == right.to_string().trim(),
-    }
 }

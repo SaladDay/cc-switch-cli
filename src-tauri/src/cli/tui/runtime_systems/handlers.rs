@@ -10,9 +10,9 @@ use super::super::app::{App, ConfirmAction, ConfirmOverlay, LoadingKind, Overlay
 use super::super::data::{load_state, UiData};
 use super::super::runtime_actions::app_display_name;
 use super::types::{
-    build_stream_check_result_lines, LocalEnvMsg, ModelFetchMsg, ProxyMsg, RequestTracker,
-    SkillsMsg, SpeedtestMsg, StreamCheckMsg, UpdateMsg, WebDavDone, WebDavErr, WebDavMsg,
-    WebDavReqKind,
+    build_stream_check_result_lines, LocalEnvMsg, ModelFetchMsg, ProxyMsg, QuotaMsg,
+    RequestTracker, SkillsMsg, SpeedtestMsg, StreamCheckMsg, UpdateMsg, WebDavDone, WebDavErr,
+    WebDavMsg, WebDavReqKind,
 };
 
 pub(crate) fn handle_stream_check_msg(app: &mut App, msg: StreamCheckMsg) {
@@ -101,6 +101,37 @@ pub(crate) fn handle_local_env_msg(app: &mut App, msg: LocalEnvMsg) {
         LocalEnvMsg::Finished { result } => {
             app.local_env_results = result;
             app.local_env_loading = false;
+        }
+    }
+}
+
+pub(crate) fn handle_quota_msg(app: &mut App, data: &mut UiData, msg: QuotaMsg) {
+    match msg {
+        QuotaMsg::Finished { target, result } => {
+            if !data.quota.target_is_current(&target) {
+                return;
+            }
+
+            let was_manual = data.quota.has_manual_loading(&target);
+            match result {
+                Ok(quota) => {
+                    let provider_name = target.provider_name.clone();
+                    data.quota.finish(target, quota);
+                    if was_manual {
+                        app.push_toast(
+                            texts::tui_toast_quota_refresh_finished(&provider_name),
+                            ToastKind::Success,
+                        );
+                    }
+                }
+                Err(error) => {
+                    data.quota.finish_error(target, error.clone());
+                    app.push_toast(
+                        texts::tui_toast_quota_refresh_failed(&error),
+                        ToastKind::Warning,
+                    );
+                }
+            }
         }
     }
 }
@@ -525,5 +556,87 @@ pub(crate) fn handle_update_msg(app: &mut App, update_check: &mut RequestTracker
                 };
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_config::AppType;
+    use crate::cli::tui::data::{QuotaTarget, QuotaTargetKind};
+    use crate::services::{CredentialStatus, SubscriptionQuota};
+
+    fn quota_target() -> QuotaTarget {
+        QuotaTarget {
+            app_type: AppType::Claude,
+            provider_id: "official".to_string(),
+            provider_name: "Claude Official".to_string(),
+            kind: QuotaTargetKind::SubscriptionTool {
+                tool: "claude".to_string(),
+            },
+        }
+    }
+
+    fn quota_result() -> SubscriptionQuota {
+        SubscriptionQuota {
+            tool: "claude".to_string(),
+            credential_status: CredentialStatus::Valid,
+            credential_message: None,
+            success: true,
+            tiers: Vec::new(),
+            extra_usage: None,
+            error: None,
+            queried_at: Some(chrono::Utc::now().timestamp_millis()),
+        }
+    }
+
+    #[test]
+    fn manual_quota_refresh_success_shows_finished_toast() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        let target = quota_target();
+        data.quota.mark_loading(target.clone(), true);
+
+        handle_quota_msg(
+            &mut app,
+            &mut data,
+            QuotaMsg::Finished {
+                target: target.clone(),
+                result: Ok(quota_result()),
+            },
+        );
+
+        let toast = app
+            .toast
+            .as_ref()
+            .expect("manual refresh completion should show a toast");
+        assert_eq!(toast.kind, ToastKind::Success);
+        assert_eq!(
+            toast.message,
+            texts::tui_toast_quota_refresh_finished("Claude Official")
+        );
+        assert!(!data.quota.has_manual_loading(&target));
+    }
+
+    #[test]
+    fn automatic_quota_refresh_success_stays_quiet() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        let target = quota_target();
+        data.quota.mark_loading(target.clone(), false);
+
+        handle_quota_msg(
+            &mut app,
+            &mut data,
+            QuotaMsg::Finished {
+                target,
+                result: Ok(quota_result()),
+            },
+        );
+
+        assert!(
+            app.toast.is_none(),
+            "automatic background quota refresh should not interrupt the user"
+        );
     }
 }

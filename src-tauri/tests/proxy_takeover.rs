@@ -2,7 +2,7 @@ use std::{net::TcpListener, sync::Arc};
 
 use cc_switch_lib::{
     get_claude_settings_path, get_codex_auth_path, get_codex_config_path, read_json_file,
-    write_codex_live_atomic, AppState, Database, Provider, ProxyService,
+    write_codex_live_atomic, AppState, Database, Provider, ProviderMeta, ProxyService,
 };
 use serde_json::{json, Value};
 use serial_test::serial;
@@ -602,7 +602,7 @@ async fn app_state_try_new_restores_claude_from_current_provider_with_common_sni
     let _home = ensure_test_home();
 
     let seeded = AppState::try_new().expect("create seeded app state");
-    let provider = Provider::with_id(
+    let mut provider = Provider::with_id(
         "claude-provider".to_string(),
         "Claude Provider".to_string(),
         json!({
@@ -612,6 +612,10 @@ async fn app_state_try_new_restores_claude_from_current_provider_with_common_sni
         }),
         Some("claude".to_string()),
     );
+    provider.meta = Some(ProviderMeta {
+        apply_common_config: Some(true),
+        ..Default::default()
+    });
     seeded
         .db
         .save_provider("claude", &provider)
@@ -1096,7 +1100,7 @@ async fn app_state_try_new_restores_codex_from_current_provider_and_auth_json() 
     let _home = ensure_test_home();
 
     let seeded = AppState::try_new().expect("create seeded app state");
-    let provider = Provider::with_id(
+    let mut provider = Provider::with_id(
         "openai-official".to_string(),
         "OpenAI Official".to_string(),
         json!({
@@ -1105,6 +1109,10 @@ async fn app_state_try_new_restores_codex_from_current_provider_and_auth_json() 
         }),
         None,
     );
+    provider.meta = Some(ProviderMeta {
+        apply_common_config: Some(true),
+        ..Default::default()
+    });
     seeded
         .db
         .save_provider("codex", &provider)

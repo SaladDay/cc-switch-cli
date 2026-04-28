@@ -1,4 +1,5 @@
 use super::*;
+use crate::cli::tui::data;
 
 pub(super) fn pane_border_style(app: &App, pane: Focus, theme: &super::theme::Theme) -> Style {
     if app.focus == pane {
@@ -154,6 +155,404 @@ pub(super) fn format_estimated_token_compact(total: u64) -> String {
     }
 
     format!("~{}M", total / 1_000_000)
+}
+
+fn quota_tier_label(name: &str) -> String {
+    match name {
+        "five_hour" => texts::tui_quota_tier_five_hour().to_string(),
+        "seven_day" => texts::tui_quota_tier_seven_day().to_string(),
+        "seven_day_opus" => texts::tui_quota_tier_seven_day_opus().to_string(),
+        "seven_day_sonnet" => texts::tui_quota_tier_seven_day_sonnet().to_string(),
+        "weekly_limit" => texts::tui_quota_tier_weekly_limit().to_string(),
+        "premium" => texts::tui_quota_tier_premium().to_string(),
+        "gemini_pro" => texts::tui_quota_tier_gemini_pro().to_string(),
+        "gemini_flash" => texts::tui_quota_tier_gemini_flash().to_string(),
+        "gemini_flash_lite" => texts::tui_quota_tier_gemini_flash_lite().to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
+fn quota_percent_text(utilization: f64) -> String {
+    format!("{:.0}%", utilization.clamp(0.0, 100.0))
+}
+
+fn quota_utilization_style(theme: &super::theme::Theme, utilization: f64) -> Style {
+    if theme.no_color {
+        return Style::default();
+    }
+
+    if utilization >= 90.0 {
+        Style::default().fg(theme.err)
+    } else if utilization >= 70.0 {
+        Style::default().fg(theme.warn)
+    } else {
+        Style::default().fg(theme.ok)
+    }
+}
+
+fn quota_countdown(resets_at: Option<&str>) -> Option<String> {
+    let resets_at = resets_at?;
+    let reset = chrono::DateTime::parse_from_rfc3339(resets_at).ok()?;
+    let diff_ms = reset.timestamp_millis() - chrono::Utc::now().timestamp_millis();
+    if diff_ms <= 0 {
+        return None;
+    }
+
+    let total_minutes = diff_ms / 60_000;
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    if hours > 24 {
+        Some(format!("{}d{}h", hours / 24, hours % 24))
+    } else if hours > 0 {
+        Some(format!("{hours}h{minutes}m"))
+    } else {
+        Some(format!("{minutes}m"))
+    }
+}
+
+fn quota_relative_time(timestamp_ms: i64) -> String {
+    let diff_secs = ((chrono::Utc::now().timestamp_millis() - timestamp_ms).max(0)) / 1000;
+    if diff_secs < 60 {
+        texts::tui_quota_just_now().to_string()
+    } else if diff_secs < 3600 {
+        texts::tui_quota_minutes_ago(diff_secs / 60)
+    } else if diff_secs < 86_400 {
+        texts::tui_quota_hours_ago(diff_secs / 3600)
+    } else {
+        texts::tui_quota_days_ago(diff_secs / 86_400)
+    }
+}
+
+fn quota_relative_time_compact(timestamp_ms: i64) -> String {
+    let diff_secs = ((chrono::Utc::now().timestamp_millis() - timestamp_ms).max(0)) / 1000;
+    let (value, unit) = if diff_secs < 60 {
+        (diff_secs.max(1), "s")
+    } else if diff_secs < 3600 {
+        (diff_secs / 60, "m")
+    } else if diff_secs < 86_400 {
+        (diff_secs / 3600, "h")
+    } else {
+        (diff_secs / 86_400, "d")
+    };
+
+    if i18n::is_chinese() {
+        format!("{value}{unit}前")
+    } else {
+        format!("{value}{unit} ago")
+    }
+}
+
+pub(super) fn quota_compact_line(
+    state: Option<&data::ProviderQuotaState>,
+    theme: &super::theme::Theme,
+    quiet_missing: bool,
+) -> Option<Line<'static>> {
+    let Some(state) = state else {
+        return None;
+    };
+
+    if state.loading && state.quota.is_none() {
+        return Some(Line::from(Span::styled(
+            texts::tui_quota_loading().to_string(),
+            Style::default().fg(theme.surface),
+        )));
+    }
+
+    if state.last_error.is_some() && state.quota.is_none() {
+        return Some(Line::from(Span::styled(
+            texts::tui_quota_query_failed().to_string(),
+            Style::default().fg(theme.warn),
+        )));
+    }
+
+    let quota = state.quota.as_ref()?;
+    match quota.credential_status {
+        crate::services::CredentialStatus::NotFound => {
+            if quiet_missing {
+                return None;
+            }
+            return Some(Line::from(Span::styled(
+                texts::tui_quota_not_available().to_string(),
+                Style::default().fg(theme.surface),
+            )));
+        }
+        crate::services::CredentialStatus::ParseError => {
+            if quiet_missing {
+                return None;
+            }
+            return Some(Line::from(Span::styled(
+                texts::tui_quota_parse_error().to_string(),
+                Style::default().fg(theme.warn),
+            )));
+        }
+        crate::services::CredentialStatus::Expired if !quota.success => {
+            return Some(Line::from(Span::styled(
+                texts::tui_quota_expired().to_string(),
+                Style::default().fg(theme.warn),
+            )));
+        }
+        _ => {}
+    }
+
+    if !quota.success {
+        return Some(Line::from(Span::styled(
+            texts::tui_quota_query_failed().to_string(),
+            Style::default().fg(theme.err),
+        )));
+    }
+
+    let tiers = quota
+        .tiers
+        .iter()
+        .filter(|tier| tier.name != "seven_day_sonnet")
+        .take(2)
+        .collect::<Vec<_>>();
+    if tiers.is_empty() {
+        if quiet_missing {
+            return None;
+        }
+        return Some(Line::from(Span::styled(
+            texts::tui_quota_not_available().to_string(),
+            Style::default().fg(theme.surface),
+        )));
+    }
+
+    let mut spans = Vec::new();
+    for (idx, tier) in tiers.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            format!("{} ", quota_tier_label(&tier.name)),
+            Style::default().fg(theme.comment),
+        ));
+        spans.push(Span::styled(
+            quota_percent_text(tier.utilization),
+            quota_utilization_style(theme, tier.utilization),
+        ));
+    }
+    if let Some(checked) = quota.queried_at.map(quota_relative_time_compact) {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" | ", Style::default().fg(theme.comment)));
+        }
+        spans.push(Span::styled(checked, Style::default().fg(theme.surface)));
+    }
+    if state.loading {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" | ", Style::default().fg(theme.comment)));
+        }
+        spans.push(Span::styled(
+            texts::tui_quota_loading().to_string(),
+            Style::default().fg(theme.surface),
+        ));
+    }
+    Some(Line::from(spans))
+}
+
+pub(super) fn quota_detail_lines(
+    app: &App,
+    data: &UiData,
+    row: &ProviderRow,
+    theme: &super::theme::Theme,
+) -> Vec<Line<'static>> {
+    if data::quota_target_for_provider(&app.app_type, row).is_none() {
+        return Vec::new();
+    }
+
+    let label_style = Style::default().fg(theme.accent);
+    let value_style = Style::default().fg(theme.cyan);
+    let muted_style = Style::default().fg(theme.surface);
+    let state = data.quota.state_for(&row.id);
+    let mut lines = Vec::new();
+    lines.push(Line::raw(""));
+
+    let mut push_kv = |label: String, spans: Vec<Span<'static>>| {
+        let mut line_spans = vec![Span::styled(label, label_style), Span::raw(": ")];
+        line_spans.extend(spans);
+        lines.push(Line::from(line_spans));
+    };
+
+    let Some(state) = state else {
+        push_kv(
+            texts::tui_label_quota().to_string(),
+            vec![
+                Span::styled(texts::tui_quota_not_queried().to_string(), muted_style),
+                Span::raw("  "),
+                Span::styled(texts::tui_quota_refresh_hint().to_string(), muted_style),
+            ],
+        );
+        return lines;
+    };
+
+    if state.loading && state.quota.is_none() {
+        push_kv(
+            texts::tui_label_quota().to_string(),
+            vec![Span::styled(
+                texts::tui_quota_loading().to_string(),
+                muted_style,
+            )],
+        );
+        return lines;
+    }
+
+    if let Some(error) = state
+        .last_error
+        .as_deref()
+        .filter(|_| state.quota.is_none())
+    {
+        push_kv(
+            texts::tui_label_quota().to_string(),
+            vec![
+                Span::styled(
+                    texts::tui_quota_query_failed().to_string(),
+                    Style::default().fg(theme.warn),
+                ),
+                Span::raw("  "),
+                Span::raw(error.to_string()),
+            ],
+        );
+        return lines;
+    }
+
+    let Some(quota) = state.quota.as_ref() else {
+        push_kv(
+            texts::tui_label_quota().to_string(),
+            vec![Span::styled(
+                texts::tui_quota_not_queried().to_string(),
+                muted_style,
+            )],
+        );
+        return lines;
+    };
+
+    match quota.credential_status {
+        crate::services::CredentialStatus::NotFound => {
+            push_kv(
+                texts::tui_label_quota().to_string(),
+                vec![Span::styled(
+                    texts::tui_quota_not_available().to_string(),
+                    muted_style,
+                )],
+            );
+            return lines;
+        }
+        crate::services::CredentialStatus::ParseError => {
+            push_kv(
+                texts::tui_label_quota().to_string(),
+                vec![
+                    Span::styled(
+                        texts::tui_quota_parse_error().to_string(),
+                        Style::default().fg(theme.warn),
+                    ),
+                    Span::raw("  "),
+                    Span::raw(
+                        quota
+                            .credential_message
+                            .clone()
+                            .or_else(|| quota.error.clone())
+                            .unwrap_or_default(),
+                    ),
+                ],
+            );
+            return lines;
+        }
+        crate::services::CredentialStatus::Expired if !quota.success => {
+            push_kv(
+                texts::tui_label_quota().to_string(),
+                vec![
+                    Span::styled(
+                        texts::tui_quota_expired().to_string(),
+                        Style::default().fg(theme.warn),
+                    ),
+                    Span::raw("  "),
+                    Span::raw(
+                        quota
+                            .credential_message
+                            .clone()
+                            .or_else(|| quota.error.clone())
+                            .unwrap_or_default(),
+                    ),
+                ],
+            );
+            return lines;
+        }
+        _ => {}
+    }
+
+    if !quota.success {
+        push_kv(
+            texts::tui_label_quota().to_string(),
+            vec![
+                Span::styled(
+                    texts::tui_quota_query_failed().to_string(),
+                    Style::default().fg(theme.err),
+                ),
+                Span::raw("  "),
+                Span::raw(quota.error.clone().unwrap_or_default()),
+            ],
+        );
+        return lines;
+    }
+
+    let checked = quota
+        .queried_at
+        .map(quota_relative_time)
+        .unwrap_or_else(|| texts::tui_na().to_string());
+    push_kv(
+        texts::tui_label_quota().to_string(),
+        vec![
+            Span::styled(
+                texts::tui_quota_ok().to_string(),
+                Style::default().fg(theme.ok),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                texts::tui_quota_last_checked(),
+                Style::default().fg(theme.comment),
+            ),
+            Span::raw(" "),
+            Span::styled(checked, value_style),
+        ],
+    );
+
+    for tier in &quota.tiers {
+        let mut spans = vec![Span::styled(
+            quota_percent_text(tier.utilization),
+            quota_utilization_style(theme, tier.utilization),
+        )];
+        if let Some(reset) = quota_countdown(tier.resets_at.as_deref()) {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                texts::tui_quota_resets_in(&reset),
+                Style::default().fg(theme.comment),
+            ));
+        }
+        push_kv(quota_tier_label(&tier.name), spans);
+    }
+
+    if let Some(extra) = quota.extra_usage.as_ref().filter(|extra| extra.is_enabled) {
+        let mut parts = Vec::new();
+        if let Some(used) = extra.used_credits {
+            parts.push(format!("{used:.1}"));
+        }
+        if let Some(limit) = extra.monthly_limit {
+            parts.push(format!("/ {limit:.1}"));
+        }
+        if let Some(currency) = extra.currency.as_deref() {
+            parts.push(currency.to_string());
+        }
+        if let Some(utilization) = extra.utilization {
+            parts.push(format!("({})", quota_percent_text(utilization)));
+        }
+        if !parts.is_empty() {
+            push_kv(
+                texts::tui_quota_extra_usage().to_string(),
+                vec![Span::styled(parts.join(" "), value_style)],
+            );
+        }
+    }
+
+    lines
 }
 
 pub(super) fn kv_line<'a>(

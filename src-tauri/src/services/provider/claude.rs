@@ -112,30 +112,17 @@ impl ProviderService {
         provider: &mut Provider,
         common_config_snippet: Option<&str>,
     ) -> Result<(), AppError> {
-        let apply_common_config = provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(true);
-        if !apply_common_config {
-            return Ok(());
-        }
-
-        let Some(snippet) = common_config_snippet.map(str::trim) else {
-            return Ok(());
-        };
-        if snippet.is_empty() {
-            return Ok(());
-        }
-
-        let common = Self::parse_common_claude_config_snippet_for_strip(snippet)?;
-        strip_common_values(&mut provider.settings_config, &common);
-        Ok(())
+        common_config::normalize_provider_common_config_for_storage(
+            &AppType::Claude,
+            provider,
+            common_config_snippet,
+        )
     }
 
     pub(super) fn prepare_switch_claude(
         config: &mut MultiAppConfig,
         provider_id: &str,
+        effective_current_provider: Option<&str>,
     ) -> Result<Provider, AppError> {
         let provider = config
             .get_manager(&AppType::Claude)
@@ -151,7 +138,7 @@ impl ProviderService {
                 )
             })?;
 
-        Self::backfill_claude_current(config, provider_id)?;
+        Self::backfill_claude_current(config, provider_id, effective_current_provider)?;
 
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
             manager.current = provider_id.to_string();
@@ -163,31 +150,36 @@ impl ProviderService {
     pub(super) fn backfill_claude_current(
         config: &mut MultiAppConfig,
         next_provider: &str,
+        effective_current_provider: Option<&str>,
     ) -> Result<(), AppError> {
         let settings_path = get_claude_settings_path();
         if !settings_path.exists() {
             return Ok(());
         }
 
-        let current_id = config
-            .get_manager(&AppType::Claude)
-            .map(|m| m.current.clone())
-            .unwrap_or_default();
+        let current_id = effective_current_provider.unwrap_or_default();
         if current_id.is_empty() || current_id == next_provider {
             return Ok(());
         }
 
+        let current_provider = config
+            .get_manager(&AppType::Claude)
+            .and_then(|manager| manager.providers.get(current_id))
+            .cloned();
+        let Some(current_provider) = current_provider else {
+            return Ok(());
+        };
+
         let mut live = read_json_file::<Value>(&settings_path)?;
         let _ = Self::normalize_claude_models_in_value(&mut live);
-        if let Some(snippet) = config.common_config_snippets.claude.as_deref() {
-            let snippet = snippet.trim();
-            if !snippet.is_empty() {
-                let common = Self::parse_common_claude_config_snippet_for_strip(snippet)?;
-                strip_common_values(&mut live, &common);
-            }
-        }
+        live = common_config::strip_common_config_from_live_settings(
+            &AppType::Claude,
+            &current_provider,
+            live,
+            config.common_config_snippets.claude.as_deref(),
+        );
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
-            if let Some(current) = manager.providers.get_mut(&current_id) {
+            if let Some(current) = manager.providers.get_mut(current_id) {
                 current.settings_config = live;
             }
         }
@@ -204,20 +196,16 @@ impl ProviderService {
             return Ok(());
         }
 
-        let common = Self::parse_common_claude_config_snippet_for_strip(old_snippet)?;
         let Some(manager) = config.get_manager_mut(&AppType::Claude) else {
             return Ok(());
         };
 
         for provider in manager.providers.values_mut() {
-            if provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.apply_common_config)
-                .unwrap_or(true)
-            {
-                strip_common_values(&mut provider.settings_config, &common);
-            }
+            common_config::normalize_provider_common_config_for_storage(
+                &AppType::Claude,
+                provider,
+                Some(old_snippet),
+            )?;
         }
 
         Ok(())

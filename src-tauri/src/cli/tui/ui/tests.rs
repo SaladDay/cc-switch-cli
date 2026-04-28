@@ -489,6 +489,7 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
         config: ConfigSnapshot::default(),
         skills: SkillsSnapshot::default(),
         proxy: ProxySnapshot::default(),
+        quota: Default::default(),
     }
 }
 
@@ -1387,6 +1388,26 @@ fn home_connection_card_labels_mcp_and_skills_with_active_counts() {
 
     assert!(all.contains("MCP:"), "{all}");
     assert!(all.contains("Skills: [1/2 Active]"), "{all}");
+}
+
+#[test]
+fn home_opencode_reports_configured_provider_count_instead_of_current_provider_none() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenCode));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.providers.current_id.clear();
+    data.providers.rows[0].is_current = false;
+    data.providers.rows[0].is_in_config = true;
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("Provider"), "{all}");
+    assert!(all.contains("1/1 in config"), "{all}");
+    assert!(!all.contains("None"), "{all}");
 }
 
 #[test]
@@ -6752,6 +6773,46 @@ fn openclaw_provider_list_key_bar_uses_additive_mode_actions() {
 }
 
 #[test]
+fn opencode_provider_list_key_bar_uses_config_membership_actions() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenCode));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("s add/remove"), "{all}");
+    assert!(all.contains("c stream check"), "{all}");
+    assert!(!all.contains("s switch"), "{all}");
+    assert!(!all.contains("x set default"), "{all}");
+}
+
+#[test]
+fn opencode_provider_list_marks_rows_in_config_without_current_marker() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenCode));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_in_config = true;
+    data.providers.rows[0].is_current = false;
+
+    let buf = render(&app, &data);
+    let provider_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("Demo Provider"))
+        .expect("provider row rendered");
+
+    assert!(provider_line.contains("+"), "{provider_line}");
+    assert!(!provider_line.contains("*"), "{provider_line}");
+}
+
+#[test]
 fn openclaw_provider_detail_key_bar_hides_stream_check_hint() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -6800,6 +6861,30 @@ fn openclaw_provider_detail_key_bar_uses_additive_mode_actions() {
     assert!(all.contains("s add/remove"));
     assert!(all.contains("x set default"));
     assert!(!all.contains("s switch"));
+}
+
+#[test]
+fn opencode_provider_detail_key_bar_uses_config_membership_actions() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenCode));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("s add/remove"), "{all}");
+    assert!(all.contains("c stream check"), "{all}");
+    assert!(
+        all.contains(texts::tui_label_provider_config_status()),
+        "{all}"
+    );
+    assert!(!all.contains("s switch"), "{all}");
+    assert!(!all.contains("x set default"), "{all}");
 }
 
 #[test]

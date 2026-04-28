@@ -282,6 +282,7 @@ fn is_default_openclaw_common_config_marker(meta: &ProviderMeta) -> bool {
         && meta.proxy_config.is_none()
         && meta.api_format.is_none()
         && meta.prompt_cache_key.is_none()
+        && meta.live_config_managed.is_none()
 }
 
 pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {

@@ -275,6 +275,46 @@ pub fn tui_toast_stream_check_request_failed(err: &str) -> String {
     }
 }
 
+pub fn tui_toast_quota_not_available() -> &'static str {
+    if is_chinese() {
+        "当前供应商没有官方额度查询。"
+    } else {
+        "This provider has no official quota query."
+    }
+}
+
+pub fn tui_toast_quota_worker_unavailable(err: &str) -> String {
+    if is_chinese() {
+        format!("额度查询后台任务不可用: {err}")
+    } else {
+        format!("Quota worker unavailable: {err}")
+    }
+}
+
+pub fn tui_toast_quota_refresh_started(provider: &str) -> String {
+    if is_chinese() {
+        format!("正在刷新额度: {provider}")
+    } else {
+        format!("Refreshing quota: {provider}")
+    }
+}
+
+pub fn tui_toast_quota_refresh_finished(provider: &str) -> String {
+    if is_chinese() {
+        format!("额度已刷新: {provider}")
+    } else {
+        format!("Quota refreshed: {provider}")
+    }
+}
+
+pub fn tui_toast_quota_refresh_failed(err: &str) -> String {
+    if is_chinese() {
+        format!("额度刷新失败: {err}")
+    } else {
+        format!("Quota refresh failed: {err}")
+    }
+}
+
 pub fn tui_toast_skills_worker_unavailable(err: &str) -> String {
     if is_chinese() {
         format!("Skills 后台任务不可用: {err}")

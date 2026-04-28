@@ -219,7 +219,7 @@ mod tests {
 
     use crate::codex_config::{get_codex_config_dir, get_codex_config_path};
     use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
-    use crate::provider::Provider;
+    use crate::provider::{Provider, ProviderMeta};
     use crate::services::ProviderService;
     use crate::test_support::{
         lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
@@ -263,26 +263,30 @@ mod tests {
         }
     }
 
-    fn seed_current_claude_provider() -> (TempDir, EnvGuard) {
+    fn common_config_meta(enabled: bool) -> ProviderMeta {
+        ProviderMeta {
+            apply_common_config: Some(enabled),
+            ..Default::default()
+        }
+    }
+
+    fn seed_current_claude_provider_with_meta(meta: Option<ProviderMeta>) -> (TempDir, EnvGuard) {
         let temp_home = TempDir::new().expect("create temp home");
         let env = EnvGuard::set_home(temp_home.path());
         let state = AppState::try_new().expect("create state");
+        let mut provider = Provider::with_id(
+            "p1".to_string(),
+            "Provider One".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://provider.example"
+                }
+            }),
+            None,
+        );
+        provider.meta = meta;
 
-        ProviderService::add(
-            &state,
-            AppType::Claude,
-            Provider::with_id(
-                "p1".to_string(),
-                "Provider One".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_BASE_URL": "https://provider.example"
-                    }
-                }),
-                None,
-            ),
-        )
-        .expect("seed provider");
+        ProviderService::add(&state, AppType::Claude, provider).expect("seed provider");
         ProviderService::switch(&state, AppType::Claude, "p1").expect("switch provider");
         write_json_file(
             &get_claude_settings_path(),
@@ -297,37 +301,77 @@ mod tests {
         (temp_home, env)
     }
 
-    fn seed_current_codex_provider() -> (TempDir, EnvGuard) {
+    fn seed_current_claude_provider() -> (TempDir, EnvGuard) {
+        seed_current_claude_provider_with_meta(None)
+    }
+
+    fn seed_current_codex_provider_with_meta(meta: Option<ProviderMeta>) -> (TempDir, EnvGuard) {
         let temp_home = TempDir::new().expect("create temp home");
         let env = EnvGuard::set_home(temp_home.path());
         std::fs::create_dir_all(get_codex_config_dir()).expect("create codex config dir");
         let state = AppState::try_new().expect("create state");
+        let mut provider = Provider::with_id(
+            "p1".to_string(),
+            "Provider One".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "sk-provider"
+                },
+                "config": "model_provider = \"provider-one\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.provider-one]\nbase_url = \"https://provider.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+            }),
+            None,
+        );
+        provider.meta = meta;
 
-        ProviderService::add(
-            &state,
-            AppType::Codex,
-            Provider::with_id(
-                "p1".to_string(),
-                "Provider One".to_string(),
-                json!({
-                    "auth": {
-                        "OPENAI_API_KEY": "sk-provider"
-                    },
-                    "config": "model_provider = \"provider-one\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.provider-one]\nbase_url = \"https://provider.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-                }),
-                None,
-            ),
-        )
-        .expect("seed codex provider");
+        ProviderService::add(&state, AppType::Codex, provider).expect("seed codex provider");
         ProviderService::switch(&state, AppType::Codex, "p1").expect("switch provider");
 
         (temp_home, env)
     }
 
+    fn seed_current_codex_provider() -> (TempDir, EnvGuard) {
+        seed_current_codex_provider_with_meta(None)
+    }
+
     #[test]
     #[serial]
-    fn set_updates_live_config_even_without_apply_flag() {
+    fn set_stores_claude_snippet_without_enabling_provider_live_config() {
         let (_temp_home, _env) = seed_current_claude_provider();
+
+        set(
+            AppType::Claude,
+            Some(r#"{"alwaysThinkingEnabled":false}"#),
+            None,
+            false,
+        )
+        .expect("set should succeed");
+
+        let state = AppState::try_new().expect("reload state");
+        let stored = state
+            .config
+            .read()
+            .expect("read config")
+            .common_config_snippets
+            .claude
+            .clone()
+            .expect("stored claude snippet");
+        let stored_json: serde_json::Value =
+            serde_json::from_str(&stored).expect("stored snippet should be valid JSON");
+        assert_eq!(stored_json["alwaysThinkingEnabled"], false);
+
+        let live: serde_json::Value =
+            read_json_file(&get_claude_settings_path()).expect("read live settings");
+        assert!(
+            live.get("alwaysThinkingEnabled").is_none(),
+            "setting a new common snippet must not opt the current provider into common config"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn set_updates_live_config_for_common_config_enabled_claude_provider() {
+        let (_temp_home, _env) =
+            seed_current_claude_provider_with_meta(Some(common_config_meta(true)));
 
         set(
             AppType::Claude,
@@ -367,7 +411,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn set_accepts_codex_toml_common_snippet_and_updates_live_config() {
+    fn set_accepts_codex_toml_common_snippet_without_enabling_provider_live_config() {
         let (_temp_home, _env) = seed_current_codex_provider();
 
         set(
@@ -387,6 +431,28 @@ mod tests {
             .codex
             .clone();
         assert_eq!(stored.as_deref(), Some("disable_response_storage = true"));
+
+        let live =
+            std::fs::read_to_string(get_codex_config_path()).expect("read live codex config");
+        assert!(
+            !live.contains("disable_response_storage = true"),
+            "setting a new common snippet must not opt the current provider into common config"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn set_accepts_codex_toml_common_snippet_and_updates_enabled_provider_live_config() {
+        let (_temp_home, _env) =
+            seed_current_codex_provider_with_meta(Some(common_config_meta(true)));
+
+        set(
+            AppType::Codex,
+            Some("disable_response_storage = true"),
+            None,
+            false,
+        )
+        .expect("set should accept codex toml snippet");
 
         let live =
             std::fs::read_to_string(get_codex_config_path()).expect("read live codex config");

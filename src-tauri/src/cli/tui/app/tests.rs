@@ -827,6 +827,71 @@ mod tests {
     }
 
     #[test]
+    fn providers_r_key_refreshes_official_quota() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.current_id = "official".to_string();
+        let mut provider = crate::provider::Provider::with_id(
+            "official".to_string(),
+            "Claude Official".to_string(),
+            json!({"env": {}}),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "official".to_string(),
+            provider,
+            api_url: None,
+            is_current: true,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('r')), &data);
+        assert!(matches!(action, Action::ProviderQuotaRefresh { id } if id == "official"));
+    }
+
+    #[test]
+    fn providers_r_key_ignores_non_official_quota() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "custom".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "custom".to_string(),
+                "Custom".to_string(),
+                json!({"env": {"ANTHROPIC_BASE_URL": "https://example.com"}}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('r')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == ToastKind::Info
+                    && toast.message == texts::tui_toast_quota_not_available()
+        ));
+    }
+
+    #[test]
     fn providers_c_key_requests_stream_check() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
@@ -907,6 +972,38 @@ mod tests {
             is_saved: true,
             is_default_model: false,
             primary_model_id: Some("claude-sonnet-4".to_string()),
+            default_model_id: None,
+        });
+
+        let add_action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(add_action, Action::ProviderSwitch { id } if id == "p1"));
+
+        data.providers.rows[0].is_in_config = true;
+        let remove_action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(remove_action, Action::ProviderRemoveFromConfig { id } if id == "p1"));
+    }
+
+    #[test]
+    fn opencode_providers_s_key_adds_or_removes_live_config_membership() {
+        let mut app = App::new(Some(AppType::OpenCode));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"options":{"baseURL":"https://example.com"}}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: false,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("main".to_string()),
             default_model_id: None,
         });
 

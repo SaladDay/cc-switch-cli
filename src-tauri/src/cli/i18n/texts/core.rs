@@ -1017,6 +1017,204 @@ pub fn tui_loading() -> &'static str {
     }
 }
 
+pub fn tui_header_quota() -> &'static str {
+    if is_chinese() {
+        "额度"
+    } else {
+        "Quota"
+    }
+}
+
+pub fn tui_label_quota() -> &'static str {
+    if is_chinese() {
+        "额度"
+    } else {
+        "Quota"
+    }
+}
+
+pub fn tui_quota_loading() -> &'static str {
+    if is_chinese() {
+        "查询中…"
+    } else {
+        "checking…"
+    }
+}
+
+pub fn tui_quota_not_available() -> &'static str {
+    if is_chinese() {
+        "不可用"
+    } else {
+        "not available"
+    }
+}
+
+pub fn tui_quota_parse_error() -> &'static str {
+    if is_chinese() {
+        "凭据解析失败"
+    } else {
+        "credential parse failed"
+    }
+}
+
+pub fn tui_quota_expired() -> &'static str {
+    if is_chinese() {
+        "登录过期"
+    } else {
+        "login expired"
+    }
+}
+
+pub fn tui_quota_query_failed() -> &'static str {
+    if is_chinese() {
+        "查询失败"
+    } else {
+        "query failed"
+    }
+}
+
+pub fn tui_quota_not_queried() -> &'static str {
+    if is_chinese() {
+        "未查询"
+    } else {
+        "not queried"
+    }
+}
+
+pub fn tui_quota_refresh_hint() -> &'static str {
+    if is_chinese() {
+        "按 r 刷新"
+    } else {
+        "press r to refresh"
+    }
+}
+
+pub fn tui_quota_ok() -> &'static str {
+    if is_chinese() {
+        "已获取"
+    } else {
+        "ok"
+    }
+}
+
+pub fn tui_quota_last_checked() -> &'static str {
+    if is_chinese() {
+        "更新于"
+    } else {
+        "checked"
+    }
+}
+
+pub fn tui_quota_resets_in(time: &str) -> String {
+    if is_chinese() {
+        format!("{time} 后重置")
+    } else {
+        format!("resets in {time}")
+    }
+}
+
+pub fn tui_quota_just_now() -> &'static str {
+    if is_chinese() {
+        "刚刚"
+    } else {
+        "just now"
+    }
+}
+
+pub fn tui_quota_minutes_ago(count: i64) -> String {
+    if is_chinese() {
+        format!("{count} 分钟前")
+    } else if count == 1 {
+        "1 minute ago".to_string()
+    } else {
+        format!("{count} minutes ago")
+    }
+}
+
+pub fn tui_quota_hours_ago(count: i64) -> String {
+    if is_chinese() {
+        format!("{count} 小时前")
+    } else if count == 1 {
+        "1 hour ago".to_string()
+    } else {
+        format!("{count} hours ago")
+    }
+}
+
+pub fn tui_quota_days_ago(count: i64) -> String {
+    if is_chinese() {
+        format!("{count} 天前")
+    } else if count == 1 {
+        "1 day ago".to_string()
+    } else {
+        format!("{count} days ago")
+    }
+}
+
+pub fn tui_quota_extra_usage() -> &'static str {
+    if is_chinese() {
+        "额外用量"
+    } else {
+        "Extra usage"
+    }
+}
+
+pub fn tui_quota_tier_five_hour() -> &'static str {
+    if is_chinese() {
+        "5小时"
+    } else {
+        "5h"
+    }
+}
+
+pub fn tui_quota_tier_seven_day() -> &'static str {
+    if is_chinese() {
+        "7天"
+    } else {
+        "7d"
+    }
+}
+
+pub fn tui_quota_tier_seven_day_opus() -> &'static str {
+    if is_chinese() {
+        "7天 Opus"
+    } else {
+        "7d Opus"
+    }
+}
+
+pub fn tui_quota_tier_seven_day_sonnet() -> &'static str {
+    if is_chinese() {
+        "7天 Sonnet"
+    } else {
+        "7d Sonnet"
+    }
+}
+
+pub fn tui_quota_tier_weekly_limit() -> &'static str {
+    if is_chinese() {
+        "周额度"
+    } else {
+        "weekly"
+    }
+}
+
+pub fn tui_quota_tier_premium() -> &'static str {
+    "premium"
+}
+
+pub fn tui_quota_tier_gemini_pro() -> &'static str {
+    "Gemini Pro"
+}
+
+pub fn tui_quota_tier_gemini_flash() -> &'static str {
+    "Gemini Flash"
+}
+
+pub fn tui_quota_tier_gemini_flash_lite() -> &'static str {
+    "Gemini Flash Lite"
+}
+
 pub fn tui_header_id() -> &'static str {
     "ID"
 }

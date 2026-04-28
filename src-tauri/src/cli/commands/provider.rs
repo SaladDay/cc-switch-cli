@@ -133,7 +133,14 @@ fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         );
     }
 
-    println!("{}", success(&format!("✓ Switched to provider '{}'", id)));
+    if app_type.is_additive_mode() {
+        println!(
+            "{}",
+            success(&texts::provider_added_to_app_config(id, &app_str))
+        );
+    } else {
+        println!("{}", success(&texts::switched_to_provider(id)));
+    }
     println!("{}", info(&format!("  Application: {}", app_str)));
     if skip_live_sync {
         println!(
@@ -141,10 +148,7 @@ fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
             warning(&texts::live_sync_skipped_uninitialized_warning(&app_str))
         );
     }
-    println!(
-        "\n{}",
-        info("Note: Restart your CLI client to apply the changes.")
-    );
+    println!("\n{}", info(texts::restart_note()));
 
     Ok(())
 }

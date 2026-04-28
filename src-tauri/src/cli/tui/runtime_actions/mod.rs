@@ -220,6 +220,7 @@ pub(crate) fn handle_action(
             _ => Ok(()),
         },
         Action::ProviderStreamCheck { id } => providers::stream_check(&mut ctx, id),
+        Action::ProviderQuotaRefresh { .. } => Ok(()),
         Action::ProviderModelFetch {
             base_url,
             api_key,
@@ -702,7 +703,10 @@ mod tests {
     }
 
     #[test]
+    #[serial(home_settings)]
     fn claude_provider_launch_temporary_dispatches_to_claude_runtime_handler() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
         let mut app = App::new(Some(AppType::Claude));
         let mut data = UiData::default();
 

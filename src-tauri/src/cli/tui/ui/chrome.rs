@@ -21,15 +21,30 @@ fn openclaw_header_default_model_value(data: &UiData) -> String {
         .unwrap_or_else(|| texts::none().to_string())
 }
 
+fn opencode_configured_provider_count(data: &UiData) -> usize {
+    data.providers
+        .rows
+        .iter()
+        .filter(|row| row.is_in_config)
+        .count()
+}
+
 fn header_status_label(app_type: &AppType) -> &'static str {
-    if matches!(app_type, AppType::OpenClaw) {
-        texts::tui_openclaw_agents_primary_model()
-    } else {
-        strip_trailing_colon(texts::provider_label())
+    match app_type {
+        AppType::OpenCode => texts::tui_opencode_config_status_label(),
+        AppType::OpenClaw => texts::tui_openclaw_agents_primary_model(),
+        _ => strip_trailing_colon(texts::provider_label()),
     }
 }
 
 fn header_status_value(app: &App, data: &UiData) -> String {
+    if matches!(app.app_type, AppType::OpenCode) {
+        return texts::tui_provider_config_count(
+            opencode_configured_provider_count(data),
+            data.providers.rows.len(),
+        );
+    }
+
     if matches!(app.app_type, AppType::OpenClaw) {
         return openclaw_header_default_model_value(data);
     }

@@ -5,6 +5,7 @@ mod codex;
 #[cfg(test)]
 mod codex_openai_auth_tests;
 mod common;
+mod common_config;
 mod endpoints;
 mod gemini;
 mod gemini_auth;
@@ -32,7 +33,8 @@ use gemini_auth::GeminiAuthType;
 use live::LiveSnapshot;
 
 pub use common::migrate_legacy_codex_config;
-use common::{merge_json_values, strip_codex_common_config_from_full_text, strip_common_values};
+#[cfg(test)]
+use common::strip_codex_common_config_from_full_text;
 
 /// 供应商相关业务逻辑
 pub struct ProviderService;
@@ -49,6 +51,9 @@ fn state_from_config(config: MultiAppConfig) -> AppState {
     let db = std::sync::Arc::new(crate::Database::memory().expect("create memory database"));
     db.migrate_from_json(&config)
         .expect("seed memory database from config");
+    let mut config = config;
+    ProviderService::migrate_common_config_upstream_semantics_if_needed(&db, &mut config)
+        .expect("migrate common config semantics for test state");
     AppState {
         db: db.clone(),
         config: std::sync::RwLock::new(config),
@@ -116,7 +121,12 @@ impl ProviderService {
             };
 
             (
-                manager.providers.values().cloned().collect::<Vec<_>>(),
+                manager
+                    .providers
+                    .values()
+                    .filter(|provider| Self::provider_live_config_managed(provider) != Some(false))
+                    .cloned()
+                    .collect::<Vec<_>>(),
                 guard
                     .common_config_snippets
                     .get(&AppType::OpenClaw)
@@ -158,6 +168,40 @@ impl ProviderService {
         }
 
         Ok(Some(valid_provider_ids))
+    }
+
+    fn provider_live_config_managed(provider: &Provider) -> Option<bool> {
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.live_config_managed)
+    }
+
+    fn set_provider_live_config_managed(provider: &mut Provider, managed: bool) {
+        provider
+            .meta
+            .get_or_insert_with(Default::default)
+            .live_config_managed = Some(managed);
+    }
+
+    fn additive_provider_exists_in_live_config(
+        app_type: &AppType,
+        provider_id: &str,
+        live_config_managed: Option<bool>,
+    ) -> Result<bool, AppError> {
+        let read_presence = || match app_type {
+            AppType::OpenCode => crate::opencode_config::get_providers()
+                .map(|providers| providers.contains_key(provider_id)),
+            AppType::OpenClaw => Self::valid_openclaw_live_provider_ids()
+                .map(|ids| ids.is_some_and(|ids| ids.contains(provider_id))),
+            _ => Ok(false),
+        };
+
+        if live_config_managed == Some(false) {
+            Ok(read_presence().unwrap_or(false))
+        } else {
+            read_presence()
+        }
     }
 
     fn parse_common_opencode_config_snippet(snippet: &str) -> Result<Value, AppError> {
@@ -385,17 +429,29 @@ impl ProviderService {
                 let mut live_after = read_json_file::<Value>(&settings_path)?;
                 let _ = Self::normalize_claude_models_in_value(&mut live_after);
 
-                let common_snippet = {
+                let (provider, common_snippet) = {
                     let guard = state.config.read().map_err(AppError::from)?;
-                    guard.common_config_snippets.claude.clone()
+                    (
+                        guard
+                            .get_manager(app_type)
+                            .and_then(|manager| manager.providers.get(provider_id))
+                            .cloned()
+                            .ok_or_else(|| {
+                                AppError::localized(
+                                    "provider.not_found",
+                                    format!("供应商不存在: {provider_id}"),
+                                    format!("Provider not found: {provider_id}"),
+                                )
+                            })?,
+                        guard.common_config_snippets.claude.clone(),
+                    )
                 };
-                if let Some(snippet) = common_snippet.as_deref() {
-                    let snippet = snippet.trim();
-                    if !snippet.is_empty() {
-                        let common = Self::parse_common_claude_config_snippet_for_strip(snippet)?;
-                        strip_common_values(&mut live_after, &common);
-                    }
-                }
+                live_after = common_config::strip_common_config_from_live_settings(
+                    app_type,
+                    &provider,
+                    live_after,
+                    common_snippet.as_deref(),
+                );
                 {
                     let mut guard = state.config.write().map_err(AppError::from)?;
                     if let Some(manager) = guard.get_manager_mut(app_type) {
@@ -603,31 +659,7 @@ impl ProviderService {
         app_type: &AppType,
         snippet: Option<&str>,
     ) -> Result<(), AppError> {
-        let Some(snippet) = snippet.map(str::trim) else {
-            return Ok(());
-        };
-        if snippet.is_empty() {
-            return Ok(());
-        }
-
-        match app_type {
-            AppType::Claude => {
-                Self::parse_common_claude_config_snippet(snippet)?;
-            }
-            AppType::Codex => {
-                snippet.parse::<toml_edit::DocumentMut>().map_err(|e| {
-                    AppError::Config(format!("Common config TOML parse error: {e}"))
-                })?;
-            }
-            AppType::Gemini => {
-                Self::parse_common_gemini_config_snippet(snippet)?;
-            }
-            AppType::OpenCode | AppType::OpenClaw => {
-                Self::parse_common_opencode_config_snippet(snippet)?;
-            }
-        }
-
-        Ok(())
+        common_config::validate_common_config_snippet(app_type, snippet)
     }
 
     fn should_skip_common_config_migration_error(app_type: &AppType, err: &AppError) -> bool {
@@ -683,6 +715,14 @@ impl ProviderService {
             }
             Err(err) => Err(err),
         }
+    }
+
+    #[doc(hidden)]
+    pub fn migrate_common_config_upstream_semantics_if_needed(
+        db: &crate::database::Database,
+        config: &mut MultiAppConfig,
+    ) -> Result<(), AppError> {
+        common_config::migrate_common_config_upstream_semantics_if_needed(db, config)
     }
 
     fn build_common_config_post_commit_action(
@@ -742,21 +782,7 @@ impl ProviderService {
             return false;
         }
 
-        if common_config_snippet
-            .map(str::trim)
-            .is_none_or(|snippet| snippet.is_empty())
-        {
-            return false;
-        }
-
-        match app_type {
-            AppType::Claude | AppType::Codex | AppType::Gemini => provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.apply_common_config)
-                .unwrap_or(true),
-            AppType::OpenCode | AppType::OpenClaw => false,
-        }
+        common_config::provider_uses_common_config(app_type, provider, common_config_snippet)
     }
 
     fn normalize_provider_for_storage(
@@ -764,23 +790,14 @@ impl ProviderService {
         provider: &mut Provider,
         common_config_snippet: Option<&str>,
     ) -> Result<(), AppError> {
-        match app_type {
-            AppType::Claude => {
-                Self::strip_common_claude_config_from_provider(provider, common_config_snippet)?;
-            }
-            AppType::Codex => {
-                Self::strip_common_codex_config_from_provider(provider, common_config_snippet)?;
-            }
-            AppType::Gemini => {
-                Self::strip_common_gemini_config_from_provider(provider, common_config_snippet)?;
-            }
-            AppType::OpenCode | AppType::OpenClaw => {}
-        }
-
-        Ok(())
+        common_config::normalize_provider_common_config_for_storage(
+            app_type,
+            provider,
+            common_config_snippet,
+        )
     }
 
-    fn normalize_settings_config_for_storage(
+    pub(crate) fn normalize_settings_config_for_storage(
         app_type: &AppType,
         provider: &Provider,
         settings_config: Value,
@@ -796,6 +813,18 @@ impl ProviderService {
         Ok(snapshot_provider.settings_config)
     }
 
+    pub(crate) fn remove_common_config_from_settings_for_preview(
+        app_type: &AppType,
+        settings_config: &Value,
+        common_config_snippet: &str,
+    ) -> Result<Value, AppError> {
+        common_config::remove_common_config_from_settings(
+            app_type,
+            settings_config,
+            common_config_snippet,
+        )
+    }
+
     fn normalize_existing_provider_snapshots_for_storage(
         config: &mut MultiAppConfig,
         app_type: &AppType,
@@ -806,7 +835,11 @@ impl ProviderService {
         };
 
         for provider in manager.providers.values_mut() {
-            Self::normalize_provider_for_storage(app_type, provider, common_config_snippet)?;
+            common_config::migrate_provider_subset_usage_for_storage(
+                app_type,
+                provider,
+                common_config_snippet,
+            )?;
         }
 
         Ok(())
@@ -822,9 +855,11 @@ impl ProviderService {
         };
 
         for (provider_id, provider) in manager.providers.iter_mut() {
-            if let Err(err) =
-                Self::normalize_provider_for_storage(app_type, provider, common_config_snippet)
-            {
+            if let Err(err) = common_config::migrate_provider_subset_usage_for_storage(
+                app_type,
+                provider,
+                common_config_snippet,
+            ) {
                 log::warn!(
                     "skip normalizing {app_type} provider snapshot '{provider_id}' while applying auto-extracted common config: {err}"
                 );
@@ -858,7 +893,7 @@ impl ProviderService {
         };
 
         if let Some(current_provider) = manager.providers.get_mut(&current_provider_id) {
-            Self::normalize_provider_for_storage(
+            common_config::migrate_provider_subset_usage_for_storage(
                 app_type,
                 current_provider,
                 common_config_snippet,
@@ -870,9 +905,11 @@ impl ProviderService {
                 continue;
             }
 
-            if let Err(err) =
-                Self::normalize_provider_for_storage(app_type, provider, common_config_snippet)
-            {
+            if let Err(err) = common_config::migrate_provider_subset_usage_for_storage(
+                app_type,
+                provider,
+                common_config_snippet,
+            ) {
                 log::warn!(
                     "skip normalizing {app_type} non-current provider snapshot '{provider_id}' while updating common config snippet: {err}"
                 );
@@ -1059,6 +1096,9 @@ impl ProviderService {
             {
                 provider_to_store.created_at = Some(current_timestamp());
             }
+            if app_type_clone.is_additive_mode() {
+                Self::set_provider_live_config_managed(&mut provider_to_store, true);
+            }
 
             config.ensure_app(&app_type_clone);
             let manager = config
@@ -1144,8 +1184,10 @@ impl ProviderService {
                 manager.current = stored_current_provider.clone().unwrap_or_default();
             }
 
-            let is_current = app_type_clone.is_additive_mode()
-                || effective_current_provider.as_deref() == Some(provider_id.as_str());
+            let existing_live_config_managed = manager
+                .providers
+                .get(&provider_id)
+                .and_then(Self::provider_live_config_managed);
             let mut merged = if let Some(existing) = manager.providers.get(&provider_id) {
                 let mut updated = provider_clone.clone();
                 match (existing.meta.as_ref(), updated.meta.take()) {
@@ -1178,11 +1220,23 @@ impl ProviderService {
                 common_config_snippet.as_deref(),
             )?;
 
+            let should_write_live = if app_type_clone.is_additive_mode() {
+                let live_config_managed = Self::additive_provider_exists_in_live_config(
+                    &app_type_clone,
+                    &provider_id,
+                    Self::provider_live_config_managed(&merged).or(existing_live_config_managed),
+                )?;
+                Self::set_provider_live_config_managed(&mut merged, live_config_managed);
+                live_config_managed
+            } else {
+                effective_current_provider.as_deref() == Some(provider_id.as_str())
+            };
+
             manager
                 .providers
                 .insert(provider_id.clone(), merged.clone());
 
-            let action = if is_current {
+            let action = if should_write_live {
                 let backup = Self::capture_live_snapshot(&app_type_clone)?;
                 Some(PostCommitAction {
                     app_type: app_type_clone.clone(),
@@ -1468,6 +1522,89 @@ impl ProviderService {
         Ok(true)
     }
 
+    pub fn remove_from_live_config(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        if !app_type.is_additive_mode() {
+            return Err(AppError::localized(
+                "provider.remove_from_live_config.unsupported",
+                "只有累加模式应用支持从 live 配置中移除供应商",
+                "Only additive-mode apps support removing a provider from live config",
+            ));
+        }
+
+        let original = {
+            let config = state.config.read().map_err(AppError::from)?;
+            let manager = config
+                .get_manager(&app_type)
+                .ok_or_else(|| Self::app_not_found(&app_type))?;
+            if !manager.providers.contains_key(provider_id) {
+                return Err(AppError::localized(
+                    "provider.not_found",
+                    format!("供应商不存在: {provider_id}"),
+                    format!("Provider not found: {provider_id}"),
+                ));
+            }
+            config.clone()
+        };
+
+        let backup = Self::capture_live_snapshot(&app_type)?;
+        match &app_type {
+            AppType::OpenCode => {
+                if crate::opencode_config::get_opencode_dir().exists() {
+                    crate::opencode_config::remove_provider(provider_id)?;
+                }
+            }
+            AppType::OpenClaw => {
+                if crate::openclaw_config::get_openclaw_dir().exists() {
+                    crate::openclaw_config::remove_provider(provider_id)?;
+                }
+            }
+            _ => unreachable!("non-additive apps should not enter remove-from-live branch"),
+        }
+
+        {
+            let mut config = state.config.write().map_err(AppError::from)?;
+            let manager = config
+                .get_manager_mut(&app_type)
+                .ok_or_else(|| Self::app_not_found(&app_type))?;
+            let provider = manager.providers.get_mut(provider_id).ok_or_else(|| {
+                AppError::localized(
+                    "provider.not_found",
+                    format!("供应商不存在: {provider_id}"),
+                    format!("Provider not found: {provider_id}"),
+                )
+            })?;
+            Self::set_provider_live_config_managed(provider, false);
+        }
+
+        if let Err(save_err) = state.save() {
+            let config_restore = Self::restore_config_only(state, original);
+            let live_restore = backup.restore();
+            if let Err(rollback_err) = config_restore {
+                return Err(AppError::localized(
+                    "config.save.rollback_failed",
+                    format!("保存配置失败: {save_err}；回滚失败: {rollback_err}"),
+                    format!("Failed to save config: {save_err}; rollback failed: {rollback_err}"),
+                ));
+            }
+            if let Err(rollback_err) = live_restore {
+                return Err(AppError::localized(
+                    "post_commit.rollback_failed",
+                    format!("保存配置失败: {save_err}；live 回滚失败: {rollback_err}"),
+                    format!(
+                        "Failed to save config: {save_err}; live rollback failed: {rollback_err}"
+                    ),
+                ));
+            }
+            return Err(save_err);
+        }
+
+        Ok(())
+    }
+
     /// 将所有应用的当前供应商配置同步到 live 文件。
     ///
     /// 用于 WebDAV 下载、备份恢复等场景：数据库已更新，但 live 配置文件
@@ -1485,6 +1622,9 @@ impl ProviderService {
                     if let Some(manager) = guard.get_manager(&app_type) {
                         let snippet = guard.common_config_snippets.get(&app_type).cloned();
                         for provider in manager.providers.values() {
+                            if Self::provider_live_config_managed(provider) == Some(false) {
+                                continue;
+                            }
                             result.push((app_type.clone(), provider.clone(), snippet.clone()));
                         }
                     }
@@ -1599,22 +1739,30 @@ impl ProviderService {
 
         let app_type_clone = app_type.clone();
         let provider_id_owned = provider_id.to_string();
+        let effective_current_provider = if app_type.is_additive_mode() {
+            None
+        } else {
+            crate::settings::get_effective_current_provider(&state.db, &app_type)?
+        };
 
         Self::run_transaction(state, move |config| {
             if app_type_clone.is_additive_mode() {
-                let provider = config
-                    .get_manager(&app_type_clone)
-                    .ok_or_else(|| Self::app_not_found(&app_type_clone))?
-                    .providers
-                    .get(&provider_id_owned)
-                    .cloned()
-                    .ok_or_else(|| {
-                        AppError::localized(
-                            "provider.not_found",
-                            format!("供应商不存在: {provider_id_owned}"),
-                            format!("Provider not found: {provider_id_owned}"),
-                        )
-                    })?;
+                let provider = {
+                    let provider = config
+                        .get_manager_mut(&app_type_clone)
+                        .ok_or_else(|| Self::app_not_found(&app_type_clone))?
+                        .providers
+                        .get_mut(&provider_id_owned)
+                        .ok_or_else(|| {
+                            AppError::localized(
+                                "provider.not_found",
+                                format!("供应商不存在: {provider_id_owned}"),
+                                format!("Provider not found: {provider_id_owned}"),
+                            )
+                        })?;
+                    Self::set_provider_live_config_managed(provider, true);
+                    provider.clone()
+                };
 
                 let action = PostCommitAction {
                     app_type: app_type_clone.clone(),
@@ -1634,9 +1782,21 @@ impl ProviderService {
 
             let backup = Self::capture_live_snapshot(&app_type_clone)?;
             let provider = match app_type_clone {
-                AppType::Codex => Self::prepare_switch_codex(config, &provider_id_owned)?,
-                AppType::Claude => Self::prepare_switch_claude(config, &provider_id_owned)?,
-                AppType::Gemini => Self::prepare_switch_gemini(config, &provider_id_owned)?,
+                AppType::Codex => Self::prepare_switch_codex(
+                    config,
+                    &provider_id_owned,
+                    effective_current_provider.as_deref(),
+                )?,
+                AppType::Claude => Self::prepare_switch_claude(
+                    config,
+                    &provider_id_owned,
+                    effective_current_provider.as_deref(),
+                )?,
+                AppType::Gemini => Self::prepare_switch_gemini(
+                    config,
+                    &provider_id_owned,
+                    effective_current_provider.as_deref(),
+                )?,
                 AppType::OpenCode => unreachable!("additive mode handled above"),
                 AppType::OpenClaw => unreachable!("additive mode handled above"),
             };
@@ -1832,29 +1992,23 @@ impl ProviderService {
 
         match app_type {
             AppType::Claude => {
-                let mut provider_content = provider.settings_config.clone();
-                let _ = Self::normalize_claude_models_in_value(&mut provider_content);
-
-                if !apply_common_config {
-                    return Ok(provider_content);
-                }
-
-                let Some(snippet) = common_config_snippet.map(str::trim) else {
-                    return Ok(provider_content);
-                };
-                if snippet.is_empty() {
-                    return Ok(provider_content);
-                }
-
-                let common = Self::parse_common_claude_config_snippet(snippet)?;
-                let mut merged = common;
-                merge_json_values(&mut merged, &provider_content);
-                let _ = Self::normalize_claude_models_in_value(&mut merged);
-                Ok(merged)
+                let mut effective = common_config::build_effective_settings_with_common_config(
+                    app_type,
+                    provider,
+                    common_config_snippet,
+                    apply_common_config,
+                )?;
+                let _ = Self::normalize_claude_models_in_value(&mut effective);
+                Ok(effective)
             }
             AppType::Codex => {
-                let settings = provider
-                    .settings_config
+                let effective = common_config::build_effective_settings_with_common_config(
+                    app_type,
+                    provider,
+                    common_config_snippet,
+                    apply_common_config,
+                )?;
+                let settings = effective
                     .as_object()
                     .ok_or_else(|| AppError::Config("Codex 配置必须是 JSON 对象".into()))?;
                 let auth = settings.get("auth").cloned();
@@ -1864,53 +2018,20 @@ impl ProviderService {
                     crate::codex_config::validate_config_toml(cfg_text)?;
                 }
 
-                let final_text = if apply_common_config {
-                    if let Some(snippet) = common_config_snippet.map(str::trim) {
-                        if !snippet.is_empty() && !cfg_text.trim().is_empty() {
-                            let mut doc = cfg_text
-                                .parse::<toml_edit::DocumentMut>()
-                                .map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
-                            let common_doc =
-                                snippet.parse::<toml_edit::DocumentMut>().map_err(|e| {
-                                    AppError::Config(format!("Common config TOML parse error: {e}"))
-                                })?;
-                            Self::merge_toml_tables(doc.as_table_mut(), common_doc.as_table());
-                            doc.to_string()
-                        } else {
-                            cfg_text.to_string()
-                        }
-                    } else {
-                        cfg_text.to_string()
-                    }
-                } else {
-                    cfg_text.to_string()
-                };
-
                 let mut backup = serde_json::Map::new();
                 if let Some(auth) = auth {
                     backup.insert("auth".to_string(), auth);
                 }
-                backup.insert("config".to_string(), Value::String(final_text));
+                backup.insert("config".to_string(), Value::String(cfg_text.to_string()));
                 Ok(Value::Object(backup))
             }
             AppType::Gemini => {
-                let provider_content = provider.settings_config.clone();
-                let content_to_write = if apply_common_config {
-                    if let Some(snippet) = common_config_snippet.map(str::trim) {
-                        if snippet.is_empty() {
-                            provider_content
-                        } else {
-                            let common = Self::parse_common_gemini_config_snippet(snippet)?;
-                            let mut merged = common;
-                            merge_json_values(&mut merged, &provider_content);
-                            merged
-                        }
-                    } else {
-                        provider_content
-                    }
-                } else {
-                    provider_content
-                };
+                let content_to_write = common_config::build_effective_settings_with_common_config(
+                    app_type,
+                    provider,
+                    common_config_snippet,
+                    apply_common_config,
+                )?;
 
                 let env_obj = content_to_write
                     .get("env")

@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
+use crate::cli::tui::data::QuotaTarget;
 use crate::provider::Provider;
 use crate::services::{EndpointLatency, HealthStatus, StreamCheckResult, SyncDecision};
 
@@ -46,6 +47,17 @@ pub(crate) enum LocalEnvReq {
 pub(crate) enum LocalEnvMsg {
     Finished {
         result: Vec<crate::services::local_env_check::ToolCheckResult>,
+    },
+}
+
+pub(crate) enum QuotaReq {
+    Refresh { target: QuotaTarget },
+}
+
+pub(crate) enum QuotaMsg {
+    Finished {
+        target: QuotaTarget,
+        result: Result<crate::services::SubscriptionQuota, String>,
     },
 }
 
@@ -127,6 +139,12 @@ pub(crate) struct StreamCheckSystem {
 pub(crate) struct LocalEnvSystem {
     pub(crate) req_tx: mpsc::Sender<LocalEnvReq>,
     pub(crate) result_rx: mpsc::Receiver<LocalEnvMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct QuotaSystem {
+    pub(crate) req_tx: mpsc::Sender<QuotaReq>,
+    pub(crate) result_rx: mpsc::Receiver<QuotaMsg>,
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 

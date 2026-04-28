@@ -342,8 +342,8 @@ command = "echo"
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("disable_response_storage = true"),
-        "common snippet should still be present after add"
+        !config_text.contains("disable_response_storage = true"),
+        "new missing-meta providers should not apply common config implicitly after migration"
     );
     assert!(
         config_text.contains("[mcp_servers.echo-server]"),
@@ -1659,7 +1659,69 @@ fn provider_service_sync_current_to_live_openclaw_ignores_blank_model_ids_in_liv
 }
 
 #[test]
-fn provider_service_update_saved_only_openclaw_writes_live_config_additively() {
+fn provider_service_sync_openclaw_to_live_skips_db_only_providers() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        let mut keep = Provider::with_id(
+            "keep".to_string(),
+            "Keep".to_string(),
+            json!({
+                "apiKey": "sk-keep",
+                "baseUrl": "https://keep.example/v1",
+                "models": [{ "id": "keep-model" }]
+            }),
+            None,
+        );
+        keep.meta = Some(ProviderMeta {
+            live_config_managed: Some(true),
+            ..Default::default()
+        });
+        manager.providers.insert("keep".to_string(), keep);
+
+        let mut saved_only = Provider::with_id(
+            "saved-only".to_string(),
+            "Saved Only".to_string(),
+            json!({
+                "apiKey": "sk-saved",
+                "baseUrl": "https://saved.example/v1",
+                "models": [{ "id": "saved-model" }]
+            }),
+            None,
+        );
+        saved_only.meta = Some(ProviderMeta {
+            live_config_managed: Some(false),
+            ..Default::default()
+        });
+        manager
+            .providers
+            .insert("saved-only".to_string(), saved_only);
+    }
+
+    let state = state_from_config(config);
+    ProviderService::sync_openclaw_to_live(&state)
+        .expect("sync_openclaw_to_live should skip explicit DB-only providers");
+
+    let openclaw_path = home.join(".openclaw").join("openclaw.json");
+    let live_after = read_openclaw_live_config_json5(&openclaw_path);
+    let providers = live_after["models"]["providers"]
+        .as_object()
+        .expect("openclaw live config should contain providers map");
+    assert!(providers.get("keep").is_some());
+    assert!(
+        providers.get("saved-only").is_none(),
+        "sync_openclaw_to_live should not write DB-only providers back into live config"
+    );
+}
+
+#[test]
+fn provider_service_update_saved_only_openclaw_does_not_add_to_live_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -1726,7 +1788,7 @@ fn provider_service_update_saved_only_openclaw_writes_live_config_additively() {
             None,
         ),
     )
-    .expect("updating saved-only openclaw provider should write back into live config");
+    .expect("updating saved-only openclaw provider should only update stored config");
 
     let guard = state
         .config
@@ -1749,21 +1811,25 @@ fn provider_service_update_saved_only_openclaw_writes_live_config_additively() {
         provider.settings_config["models"][0]["id"],
         json!("saved-model-updated")
     );
+    assert_eq!(
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.live_config_managed),
+        Some(false)
+    );
 
     let live_after_text =
         std::fs::read_to_string(&openclaw_path).expect("read openclaw live config");
     let live_after = read_openclaw_live_config_json5(&openclaw_path);
-    assert!(
-        live_after_text.contains("// keep-live-comment"),
-        "additive OpenClaw writes should preserve unrelated round-trippable source when possible"
+    assert_eq!(
+        live_after_text, original_text,
+        "editing a saved-only OpenClaw provider should not rewrite openclaw.json"
     );
     assert_eq!(
-        live_after["models"]["providers"]["saved-only"]["baseUrl"],
-        json!("https://saved.new.example/v1")
-    );
-    assert_eq!(
-        live_after["models"]["providers"]["saved-only"]["models"][0]["id"],
-        json!("saved-model-updated")
+        live_after["models"]["providers"]["saved-only"],
+        serde_json::Value::Null,
+        "saved-only provider should not be added to live OpenClaw config by edit"
     );
     assert_eq!(
         live_after["agents"]["defaults"]["model"]["primary"],
@@ -1773,7 +1839,97 @@ fn provider_service_update_saved_only_openclaw_writes_live_config_additively() {
 }
 
 #[test]
-fn provider_service_update_saved_only_openclaw_rejects_broken_live_file() {
+fn provider_service_update_db_only_openclaw_ignores_unreadable_live_membership() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        let mut provider = Provider::with_id(
+            "saved-only".to_string(),
+            "Saved Only".to_string(),
+            json!({
+                "apiKey": "sk-saved-old",
+                "baseUrl": "https://saved.old.example/v1",
+                "models": [{ "id": "saved-model" }]
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            live_config_managed: Some(false),
+            ..Default::default()
+        });
+        manager.providers.insert("saved-only".to_string(), provider);
+    }
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    let broken_live_text = "{ broken: [ }\n";
+    std::fs::write(&openclaw_path, broken_live_text).expect("seed broken openclaw live config");
+
+    let state = state_from_config(config);
+
+    let mut incoming = Provider::with_id(
+        "saved-only".to_string(),
+        "Saved Only Updated".to_string(),
+        json!({
+            "apiKey": "sk-saved-new",
+            "baseUrl": "https://saved.new.example/v1",
+            "models": [{ "id": "saved-model-updated" }]
+        }),
+        None,
+    );
+    incoming.meta = Some(ProviderMeta {
+        apply_common_config: Some(false),
+        ..Default::default()
+    });
+
+    cc_switch_lib::ProviderService::update(&state, AppType::OpenClaw, incoming)
+        .expect("explicit DB-only OpenClaw update should ignore unreadable live membership");
+
+    let guard = state
+        .config
+        .read()
+        .expect("read config after db-only update");
+    let provider = guard
+        .get_manager(&AppType::OpenClaw)
+        .and_then(|manager| manager.providers.get("saved-only"))
+        .expect("saved-only provider should remain in snapshot state");
+    assert_eq!(provider.name, "Saved Only Updated");
+    assert_eq!(
+        provider.settings_config["baseUrl"],
+        json!("https://saved.new.example/v1")
+    );
+    assert_eq!(
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.live_config_managed),
+        Some(false)
+    );
+    assert_eq!(
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.apply_common_config),
+        Some(false)
+    );
+
+    let live_after_text =
+        std::fs::read_to_string(&openclaw_path).expect("read broken live config after update");
+    assert_eq!(
+        live_after_text, broken_live_text,
+        "db-only additive update should not touch broken openclaw.json text"
+    );
+}
+
+#[test]
+fn provider_service_update_saved_only_openclaw_rejects_unreadable_live_membership() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -1820,11 +1976,12 @@ fn provider_service_update_saved_only_openclaw_rejects_broken_live_file() {
             None,
         ),
     )
-    .expect_err("saved-only update should fail when openclaw.json cannot be rewritten");
+    .expect_err("saved-only update should fail when openclaw.json membership cannot be inspected");
 
     assert!(
-        err.to_string().contains("round-trip JSON5"),
-        "expected rewrite failure to mention round-trip JSON5 parsing, got: {err}"
+        err.to_string()
+            .contains("Failed to parse OpenClaw config as JSON5"),
+        "expected membership read failure to mention JSON5 parsing, got: {err}"
     );
 
     let guard = state

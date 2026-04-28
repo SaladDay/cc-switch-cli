@@ -318,7 +318,7 @@ fn submit_provider_form_apply_json(
 
     let provider_value = match ctx.app.form.as_ref() {
         Some(FormState::ProviderAdd(form)) => {
-            if form.include_common_config {
+            if form.should_strip_common_config_from_applied_settings_json() {
                 if let Err(err) = strip_common_config_from_settings(
                     &form.app_type,
                     &mut settings_value,
@@ -2281,6 +2281,94 @@ mod tests {
         assert_eq!(
             settings["env"]["EXTRA_FIELD"], "kept",
             "non-common keys introduced in the preview editor should still be preserved"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_provider_form_apply_json_preserves_missing_meta_subset_detection() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+
+        fixture.data.config.common_snippet = r#"{
+            "alwaysThinkingEnabled": false,
+            "env": {
+                "COMMON_FLAG": "1"
+            }
+        }"#
+        .to_string();
+
+        let provider = Provider::with_id(
+            "legacy-provider".to_string(),
+            "Legacy Provider".to_string(),
+            json!({
+                "alwaysThinkingEnabled": false,
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://provider.example",
+                    "COMMON_FLAG": "1"
+                }
+            }),
+            None,
+        );
+        fixture.app.form = Some(FormState::ProviderAdd(
+            crate::cli::tui::form::ProviderAddFormState::from_provider(AppType::Claude, &provider),
+        ));
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+        };
+
+        submit_provider_form_apply_json(
+            &mut ctx,
+            r#"{
+                "alwaysThinkingEnabled": false,
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://edited.example",
+                    "COMMON_FLAG": "1"
+                }
+            }"#
+            .to_string(),
+        )
+        .expect("apply should succeed");
+
+        let FormState::ProviderAdd(form) = ctx
+            .app
+            .form
+            .as_ref()
+            .expect("provider form should remain open")
+        else {
+            panic!("expected provider form");
+        };
+        let raw = form.to_provider_json_value();
+        assert!(
+            raw.get("meta")
+                .and_then(|meta| meta.get("commonConfigEnabled"))
+                .is_none(),
+            "settings JSON edits on a missing-meta provider must not synthesize explicit common config metadata"
+        );
+        assert_eq!(
+            raw["settingsConfig"]["alwaysThinkingEnabled"], false,
+            "missing-meta providers must keep the common subset when metadata remains absent"
+        );
+        assert_eq!(
+            raw["settingsConfig"]["env"]["COMMON_FLAG"], "1",
+            "missing-meta providers need the common subset for backend subset detection"
+        );
+        assert_eq!(
+            raw["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"], "https://edited.example",
+            "provider-specific edits from the settings JSON editor should still be preserved"
         );
     }
 }
