@@ -1,9 +1,55 @@
 use crate::{app_config::McpServer, cli::i18n::texts};
 use serde_json::{json, Value};
 
-use super::{FormFocus, FormMode, McpAddField, McpAddFormState, McpEnvVarRow, TextInput};
+use super::{
+    FormFocus, FormMode, McpAddField, McpAddFormState, McpEnvVarRow, McpTransport, TextInput,
+};
 
 const MCP_TEMPLATES: [&str; 2] = ["Custom", "Filesystem (npx)"];
+
+impl McpTransport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdio => "stdio",
+            Self::Http => "http",
+            Self::Sse => "sse",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        self.as_str()
+    }
+
+    pub fn picker_index(self) -> usize {
+        match self {
+            Self::Stdio => 0,
+            Self::Http => 1,
+            Self::Sse => 2,
+        }
+    }
+
+    pub fn from_picker_index(index: usize) -> Self {
+        match index {
+            1 => Self::Http,
+            2 => Self::Sse,
+            _ => Self::Stdio,
+        }
+    }
+
+    pub fn from_server_spec(spec: &Value) -> Self {
+        match spec.get("type").and_then(|value| value.as_str()) {
+            Some("http") => Self::Http,
+            Some("sse") => Self::Sse,
+            Some("stdio") => Self::Stdio,
+            None if spec.get("url").and_then(|value| value.as_str()).is_some() => Self::Http,
+            _ => Self::Stdio,
+        }
+    }
+
+    pub fn is_remote(self) -> bool {
+        matches!(self, Self::Http | Self::Sse)
+    }
+}
 
 impl McpAddFormState {
     pub fn new() -> Self {
@@ -16,8 +62,10 @@ impl McpAddFormState {
             extra: json!({}),
             id: TextInput::new(""),
             name: TextInput::new(""),
+            server_type: McpTransport::Stdio,
             command: TextInput::new(""),
             args: TextInput::new(""),
+            url: TextInput::new(""),
             env_rows: Vec::new(),
             apps: Default::default(),
             json_scroll: 0,
@@ -37,6 +85,7 @@ impl McpAddFormState {
         form.id.set(server.id.clone());
         form.name.set(server.name.clone());
         form.apps = server.apps.clone();
+        form.server_type = McpTransport::from_server_spec(&server.server);
 
         if let Some(command) = server
             .server
@@ -52,6 +101,9 @@ impl McpAddFormState {
                 .collect::<Vec<_>>()
                 .join(" ");
             form.args.set(joined);
+        }
+        if let Some(url) = server.server.get("url").and_then(|value| value.as_str()) {
+            form.url.set(url);
         }
         form.env_rows = load_env_rows(server);
         form.capture_initial_snapshot();
@@ -116,16 +168,22 @@ impl McpAddFormState {
     }
 
     pub fn fields(&self) -> Vec<McpAddField> {
-        vec![
-            McpAddField::Id,
-            McpAddField::Name,
-            McpAddField::Command,
-            McpAddField::Args,
-            McpAddField::Env,
+        let mut fields = vec![McpAddField::Id, McpAddField::Name, McpAddField::Type];
+
+        if self.server_type.is_remote() {
+            fields.push(McpAddField::Url);
+        } else {
+            fields.extend([McpAddField::Command, McpAddField::Args, McpAddField::Env]);
+        }
+
+        fields.extend([
             McpAddField::AppClaude,
             McpAddField::AppCodex,
             McpAddField::AppGemini,
-        ]
+            McpAddField::AppOpenCode,
+        ]);
+
+        fields
     }
 
     pub fn input(&self, field: McpAddField) -> Option<&TextInput> {
@@ -134,10 +192,13 @@ impl McpAddFormState {
             McpAddField::Name => Some(&self.name),
             McpAddField::Command => Some(&self.command),
             McpAddField::Args => Some(&self.args),
-            McpAddField::Env
+            McpAddField::Url => Some(&self.url),
+            McpAddField::Type
+            | McpAddField::Env
             | McpAddField::AppClaude
             | McpAddField::AppCodex
-            | McpAddField::AppGemini => None,
+            | McpAddField::AppGemini
+            | McpAddField::AppOpenCode => None,
         }
     }
 
@@ -147,10 +208,13 @@ impl McpAddFormState {
             McpAddField::Name => Some(&mut self.name),
             McpAddField::Command => Some(&mut self.command),
             McpAddField::Args => Some(&mut self.args),
-            McpAddField::Env
+            McpAddField::Url => Some(&mut self.url),
+            McpAddField::Type
+            | McpAddField::Env
             | McpAddField::AppClaude
             | McpAddField::AppCodex
-            | McpAddField::AppGemini => None,
+            | McpAddField::AppGemini
+            | McpAddField::AppOpenCode => None,
         }
     }
 
@@ -163,8 +227,10 @@ impl McpAddFormState {
                 let defaults = Self::new();
                 self.extra = defaults.extra;
                 self.name = defaults.name;
+                self.server_type = defaults.server_type;
                 self.command = defaults.command;
                 self.args = defaults.args;
+                self.url = defaults.url;
                 self.env_rows = defaults.env_rows;
                 self.json_scroll = defaults.json_scroll;
             }
@@ -173,9 +239,11 @@ impl McpAddFormState {
 
         if idx == 1 {
             self.name.set("Filesystem");
+            self.server_type = McpTransport::Stdio;
             self.command.set("npx");
             self.args
                 .set("-y @modelcontextprotocol/server-filesystem /");
+            self.url.set("");
         }
     }
 
@@ -202,19 +270,33 @@ impl McpAddFormState {
         let server_obj = server_value
             .as_object_mut()
             .expect("server must be a JSON object");
-        server_obj.insert("command".to_string(), json!(self.command.value.trim()));
-        server_obj.insert("args".to_string(), Value::Array(args));
-        let env = self
-            .env_rows
-            .iter()
-            .fold(serde_json::Map::new(), |mut map, row| {
-                map.insert(row.key.clone(), Value::String(row.value.clone()));
-                map
-            });
-        if env.is_empty() {
-            server_obj.remove("env");
+
+        for key in ["type", "command", "args", "env", "url"] {
+            server_obj.remove(key);
+        }
+        if self.server_type.is_remote() {
+            server_obj.remove("cwd");
         } else {
-            server_obj.insert("env".to_string(), Value::Object(env));
+            server_obj.remove("headers");
+        }
+
+        server_obj.insert("type".to_string(), json!(self.server_type.as_str()));
+        if self.server_type.is_remote() {
+            server_obj.insert("url".to_string(), json!(self.url.value.trim()));
+        } else {
+            server_obj.insert("command".to_string(), json!(self.command.value.trim()));
+            server_obj.insert("args".to_string(), Value::Array(args));
+            let env = self
+                .env_rows
+                .iter()
+                .fold(serde_json::Map::new(), |mut map, row| {
+                    map.insert(row.key.clone(), Value::String(row.value.clone()));
+                    map
+                });
+            server_obj.remove("env");
+            if !env.is_empty() {
+                server_obj.insert("env".to_string(), Value::Object(env));
+            }
         }
 
         obj.insert(
@@ -223,6 +305,7 @@ impl McpAddFormState {
                 "claude": self.apps.claude,
                 "codex": self.apps.codex,
                 "gemini": self.apps.gemini,
+                "opencode": self.apps.opencode,
             }),
         );
 

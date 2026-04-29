@@ -50,7 +50,12 @@ impl App {
             self.push_toast(texts::tui_toast_mcp_missing_fields(), ToastKind::Warning);
             return Action::None;
         }
-        if mcp.command.is_blank() {
+        if mcp.server_type.is_remote() {
+            if mcp.url.is_blank() {
+                self.push_toast(texts::tui_toast_url_empty(), ToastKind::Warning);
+                return Action::None;
+            }
+        } else if mcp.command.is_blank() {
             self.push_toast(texts::tui_toast_command_empty(), ToastKind::Warning);
             return Action::None;
         }
@@ -159,6 +164,11 @@ impl App {
                     return None;
                 };
                 match selected {
+                    McpAddField::Type => {
+                        self.overlay = Overlay::McpTypePicker {
+                            selected: mcp.server_type.picker_index(),
+                        };
+                    }
                     McpAddField::Env => {
                         let selected = 0;
                         self.overlay = Overlay::McpEnvPicker { selected };
@@ -166,6 +176,7 @@ impl App {
                     McpAddField::AppClaude => mcp.apps.claude = !mcp.apps.claude,
                     McpAddField::AppCodex => mcp.apps.codex = !mcp.apps.codex,
                     McpAddField::AppGemini => mcp.apps.gemini = !mcp.apps.gemini,
+                    McpAddField::AppOpenCode => mcp.apps.opencode = !mcp.apps.opencode,
                     _ => {
                         if selected == McpAddField::Id && mcp.locked_id().is_some() {
                             return Some(Action::None);

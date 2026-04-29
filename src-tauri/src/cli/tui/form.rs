@@ -258,12 +258,22 @@ pub enum ProviderAddField {
 pub enum McpAddField {
     Id,
     Name,
+    Type,
     Command,
     Args,
+    Url,
     Env,
     AppClaude,
     AppCodex,
     AppGemini,
+    AppOpenCode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpTransport {
+    Stdio,
+    Http,
+    Sse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,8 +348,10 @@ pub struct McpAddFormState {
     pub extra: Value,
     pub id: TextInput,
     pub name: TextInput,
+    pub server_type: McpTransport,
     pub command: TextInput,
     pub args: TextInput,
+    pub url: TextInput,
     pub env_rows: Vec<McpEnvVarRow>,
     pub apps: McpApps,
     pub json_scroll: usize,

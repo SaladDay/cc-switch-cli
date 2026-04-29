@@ -131,6 +131,9 @@ pub(crate) fn render_overlay(
             *selected,
             apps,
         ),
+        Overlay::McpTypePicker { selected } => {
+            super::pickers::render_mcp_type_picker_overlay(frame, content_area, theme, *selected)
+        }
         Overlay::VisibleAppsPicker { selected, apps } => {
             super::pickers::render_visible_apps_picker_overlay(
                 frame,

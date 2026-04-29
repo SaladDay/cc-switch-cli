@@ -12,7 +12,7 @@ use crate::services::skill::SyncMethod;
 use super::data::UiData;
 use super::form::{
     CodexWireApi, FormFocus, FormMode, FormState, GeminiAuthType, McpAddField, McpAddFormState,
-    ProviderAddField, ProviderAddFormState,
+    McpTransport, ProviderAddField, ProviderAddFormState,
 };
 use super::route::{NavItem, Route};
 use super::{data, form};

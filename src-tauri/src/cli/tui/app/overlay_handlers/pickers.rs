@@ -24,6 +24,9 @@ impl App {
         if let Some(action) = self.handle_openclaw_agents_fallback_picker_key(key, data) {
             return Some(action);
         }
+        if let Some(action) = self.handle_mcp_type_picker_key(key) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_mcp_apps_picker_key(key, data) {
             return Some(action);
         }
@@ -543,6 +546,41 @@ impl App {
                 } else {
                     Action::McpSetApps { id, apps: next }
                 }
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_mcp_type_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::McpTypePicker { selected } = &mut self.overlay else {
+            return None;
+        };
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(2);
+                Action::None
+            }
+            KeyCode::Enter => {
+                let next = McpTransport::from_picker_index(*selected);
+                self.overlay = Overlay::None;
+                if let Some(FormState::McpAdd(mcp)) = self.form.as_mut() {
+                    mcp.server_type = next;
+                    let fields = mcp.fields();
+                    if !fields.is_empty() {
+                        mcp.field_idx = mcp.field_idx.min(fields.len() - 1);
+                    }
+                    mcp.editing = false;
+                }
+                Action::None
             }
             _ => Action::None,
         })

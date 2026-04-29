@@ -246,6 +246,9 @@ pub enum Overlay {
     McpEnvPicker {
         selected: usize,
     },
+    McpTypePicker {
+        selected: usize,
+    },
     McpEnvEntryEditor(McpEnvEntryEditorState),
     Loading {
         kind: LoadingKind,

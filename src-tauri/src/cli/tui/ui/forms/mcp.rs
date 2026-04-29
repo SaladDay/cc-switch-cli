@@ -33,11 +33,15 @@ pub(crate) fn render_mcp_add_form(
         ])
         .split(inner);
 
+    let selected = mcp
+        .fields()
+        .get(mcp.field_idx.min(mcp.fields().len().saturating_sub(1)))
+        .copied();
     render_key_bar(
         frame,
         chunks[0],
         theme,
-        &add_form_key_items(mcp.focus, mcp.editing, None),
+        &mcp_add_form_key_items(mcp.focus, mcp.editing, selected),
     );
 
     if matches!(mcp.mode, super::form::FormMode::Add) {
@@ -173,15 +177,19 @@ pub(crate) fn mcp_field_label_and_value(
     let label = match field {
         McpAddField::Id => texts::tui_label_id().to_string(),
         McpAddField::Name => texts::header_name().to_string(),
+        McpAddField::Type => texts::tui_label_mcp_type().to_string(),
         McpAddField::Command => texts::tui_label_command().to_string(),
         McpAddField::Args => texts::tui_label_args().to_string(),
+        McpAddField::Url => texts::tui_label_url().to_string(),
         McpAddField::Env => texts::tui_label_env().to_string(),
         McpAddField::AppClaude => texts::tui_label_app_claude().to_string(),
         McpAddField::AppCodex => texts::tui_label_app_codex().to_string(),
         McpAddField::AppGemini => texts::tui_label_app_gemini().to_string(),
+        McpAddField::AppOpenCode => texts::tui_label_app_opencode().to_string(),
     };
 
     let value = match field {
+        McpAddField::Type => mcp.server_type.label().to_string(),
         McpAddField::Env => mcp.env_summary(),
         McpAddField::AppClaude => {
             if mcp.apps.claude {
@@ -199,6 +207,13 @@ pub(crate) fn mcp_field_label_and_value(
         }
         McpAddField::AppGemini => {
             if mcp.apps.gemini {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        McpAddField::AppOpenCode => {
+            if mcp.apps.opencode {
                 format!("[{}]", texts::tui_marker_active())
             } else {
                 "[ ]".to_string()
@@ -230,12 +245,72 @@ pub(crate) fn mcp_field_editor_line(
     };
 
     let text = match field {
+        McpAddField::Type => texts::tui_mcp_type_editor_hint().to_string(),
         McpAddField::Env => texts::tui_mcp_env_editor_hint().to_string(),
         McpAddField::AppClaude => format!("claude = {}", mcp.apps.claude),
         McpAddField::AppCodex => format!("codex = {}", mcp.apps.codex),
         McpAddField::AppGemini => format!("gemini = {}", mcp.apps.gemini),
+        McpAddField::AppOpenCode => format!("opencode = {}", mcp.apps.opencode),
         _ => String::new(),
     };
 
     (Line::raw(text), 0)
+}
+
+fn mcp_add_form_key_items(
+    focus: FormFocus,
+    editing: bool,
+    selected_field: Option<McpAddField>,
+) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![
+        ("Tab", texts::tui_key_focus()),
+        ("Ctrl+S", texts::tui_key_save()),
+        ("Esc", texts::tui_key_close()),
+    ];
+
+    match focus {
+        FormFocus::Templates => keys.extend([
+            ("←→", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+        ]),
+        FormFocus::Fields => {
+            if editing {
+                keys.extend([
+                    ("←→", texts::tui_key_move()),
+                    ("Enter", texts::tui_key_exit_edit()),
+                ]);
+            } else {
+                let enter_action = match selected_field {
+                    Some(McpAddField::Type | McpAddField::Env) => texts::tui_key_open(),
+                    Some(
+                        McpAddField::AppClaude
+                        | McpAddField::AppCodex
+                        | McpAddField::AppGemini
+                        | McpAddField::AppOpenCode,
+                    ) => texts::tui_key_toggle(),
+                    _ => texts::tui_key_edit_mode(),
+                };
+                keys.extend([("↑↓", texts::tui_key_select()), ("Enter", enter_action)]);
+                match selected_field {
+                    Some(McpAddField::Type | McpAddField::Env) => {
+                        keys.push(("Space", texts::tui_key_open()));
+                    }
+                    Some(
+                        McpAddField::AppClaude
+                        | McpAddField::AppCodex
+                        | McpAddField::AppGemini
+                        | McpAddField::AppOpenCode,
+                    ) => {
+                        keys.push(("Space", texts::tui_key_toggle()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        FormFocus::JsonPreview => {
+            keys.push(("↑↓", texts::tui_key_scroll()));
+        }
+    }
+
+    keys
 }

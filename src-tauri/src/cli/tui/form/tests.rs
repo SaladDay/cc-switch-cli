@@ -1026,11 +1026,51 @@ fn mcp_add_form_builds_server_and_apps() {
     let server = form.to_mcp_server_json_value();
     assert_eq!(server["id"], "m1");
     assert_eq!(server["name"], "Server One");
+    assert_eq!(server["server"]["type"], "stdio");
     assert_eq!(server["server"]["command"], "npx");
     assert_eq!(server["server"]["args"][0], "-y");
     assert_eq!(server["apps"]["claude"], true);
     assert_eq!(server["apps"]["codex"], false);
     assert_eq!(server["apps"]["gemini"], true);
+    assert_eq!(server["apps"]["opencode"], false);
+}
+
+#[test]
+fn mcp_add_form_builds_http_server_without_stdio_fields() {
+    let mut form = McpAddFormState::new();
+    form.id.set("docs-langchain");
+    form.name.set("LangChain Docs");
+    form.server_type = McpTransport::Http;
+    form.command.set("ignored");
+    form.args.set("--ignored");
+    form.url.set("https://docs.langchain.com/mcp");
+
+    let server = form.to_mcp_server_json_value();
+    assert_eq!(server["server"]["type"], "http");
+    assert_eq!(server["server"]["url"], "https://docs.langchain.com/mcp");
+    assert!(
+        server["server"].get("command").is_none(),
+        "http MCP should not serialize stdio command"
+    );
+    assert!(
+        server["server"].get("args").is_none(),
+        "http MCP should not serialize stdio args"
+    );
+}
+
+#[test]
+fn mcp_add_form_builds_sse_server_without_stdio_fields() {
+    let mut form = McpAddFormState::new();
+    form.id.set("remote-sse");
+    form.name.set("Remote SSE");
+    form.server_type = McpTransport::Sse;
+    form.command.set("ignored");
+    form.url.set("https://example.com/sse");
+
+    let server = form.to_mcp_server_json_value();
+    assert_eq!(server["server"]["type"], "sse");
+    assert_eq!(server["server"]["url"], "https://example.com/sse");
+    assert!(server["server"].get("command").is_none());
 }
 
 #[test]
@@ -1150,6 +1190,82 @@ fn mcp_env_form_places_env_between_args_and_apps() {
         "MCP Env field should appear between Args and AppClaude"
     );
     assert!(form.input(McpAddField::Env).is_none());
+}
+
+#[test]
+fn mcp_http_form_replaces_stdio_fields_with_url() {
+    let mut form = McpAddFormState::new();
+    form.server_type = McpTransport::Http;
+
+    let fields = form.fields();
+    assert!(fields.contains(&McpAddField::Type));
+    assert!(fields.contains(&McpAddField::Url));
+    assert!(!fields.contains(&McpAddField::Command));
+    assert!(!fields.contains(&McpAddField::Args));
+    assert!(!fields.contains(&McpAddField::Env));
+    assert!(fields.contains(&McpAddField::AppOpenCode));
+}
+
+#[test]
+fn mcp_form_restores_remote_server_type_and_url() {
+    let server = crate::app_config::McpServer {
+        id: "docs-langchain".to_string(),
+        name: "LangChain Docs".to_string(),
+        server: json!({
+            "type": "http",
+            "url": "https://docs.langchain.com/mcp",
+            "headers": {
+                "Authorization": "Bearer token"
+            }
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+
+    let form = McpAddFormState::from_server(&server);
+    assert_eq!(form.server_type, McpTransport::Http);
+    assert_eq!(form.url.value, "https://docs.langchain.com/mcp");
+
+    let roundtrip = form.to_mcp_server_json_value();
+    assert_eq!(roundtrip["server"]["type"], "http");
+    assert_eq!(roundtrip["server"]["url"], "https://docs.langchain.com/mcp");
+    assert_eq!(
+        roundtrip["server"]["headers"]["Authorization"],
+        "Bearer token"
+    );
+}
+
+#[test]
+fn mcp_form_infers_http_only_when_url_has_no_type() {
+    let server = crate::app_config::McpServer {
+        id: "docs-langchain".to_string(),
+        name: "LangChain Docs".to_string(),
+        server: json!({
+            "url": "https://docs.langchain.com/mcp"
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+
+    let form = McpAddFormState::from_server(&server);
+    assert_eq!(form.server_type, McpTransport::Http);
+
+    let server = crate::app_config::McpServer {
+        server: json!({
+            "type": "websocket",
+            "url": "https://docs.langchain.com/mcp"
+        }),
+        ..server
+    };
+
+    let form = McpAddFormState::from_server(&server);
+    assert_eq!(form.server_type, McpTransport::Stdio);
 }
 
 #[test]

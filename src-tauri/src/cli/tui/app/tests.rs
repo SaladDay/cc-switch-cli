@@ -13,7 +13,7 @@ mod tests {
 
     use crate::cli::i18n::{texts, use_test_language, Language};
     use crate::cli::tui::data::ProviderRow;
-    use crate::cli::tui::form::{McpEnvVarRow, TextInput};
+    use crate::cli::tui::form::{McpEnvVarRow, McpTransport, TextInput};
     use crate::cli::tui::runtime_actions::handle_action;
     use crate::cli::tui::runtime_systems::RequestTracker;
     use crate::cli::tui::terminal::TuiTerminal;
@@ -8584,6 +8584,89 @@ mod tests {
         ));
         assert!(matches!(app.form, Some(FormState::McpAdd(_))));
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn mcp_http_form_save_does_not_require_command() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Mcp;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+
+        if let Some(super::super::form::FormState::McpAdd(form)) = app.form.as_mut() {
+            form.id.set("docs-langchain");
+            form.name.set("LangChain Docs");
+            form.server_type = McpTransport::Http;
+            form.url.set("https://docs.langchain.com/mcp");
+        } else {
+            panic!("expected McpAdd form");
+        }
+
+        app.on_key(key(KeyCode::Esc), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::EditorSubmit {
+                submit: EditorSubmit::McpAdd,
+                content
+            } if content.contains("\"type\": \"http\"")
+                && content.contains("\"url\": \"https://docs.langchain.com/mcp\"")
+                && !content.contains("\"command\"")
+        ));
+    }
+
+    #[test]
+    fn mcp_http_form_save_rejects_empty_url() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Mcp;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+
+        if let Some(super::super::form::FormState::McpAdd(form)) = app.form.as_mut() {
+            form.id.set("docs-langchain");
+            form.name.set("LangChain Docs");
+            form.server_type = McpTransport::Http;
+        } else {
+            panic!("expected McpAdd form");
+        }
+
+        app.on_key(key(KeyCode::Esc), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.form, Some(FormState::McpAdd(_))));
+    }
+
+    #[test]
+    fn mcp_type_picker_updates_form_transport() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut form = McpAddFormState::new();
+        form.focus = FormFocus::Fields;
+        form.field_idx = form
+            .fields()
+            .iter()
+            .position(|field| *field == McpAddField::Type)
+            .expect("Type field should exist");
+        app.form = Some(FormState::McpAdd(form));
+
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpTypePicker { selected: 0 }
+        ));
+
+        app.on_key(key(KeyCode::Down), &UiData::default());
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        let Some(FormState::McpAdd(form)) = app.form.as_ref() else {
+            panic!("expected MCP form");
+        };
+        assert_eq!(form.server_type, McpTransport::Http);
+        assert!(form.fields().contains(&McpAddField::Url));
+        assert!(!form.fields().contains(&McpAddField::Command));
     }
 
     #[test]

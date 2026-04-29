@@ -55,6 +55,14 @@ pub fn tui_toast_command_empty() -> &'static str {
     }
 }
 
+pub fn tui_toast_url_empty() -> &'static str {
+    if is_chinese() {
+        "URL 为空。"
+    } else {
+        "URL is empty."
+    }
+}
+
 pub fn tui_toast_mcp_env_key_empty() -> &'static str {
     if is_chinese() {
         "环境变量 Key 不能为空。"

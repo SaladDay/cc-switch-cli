@@ -140,6 +140,22 @@ pub fn tui_label_command() -> &'static str {
     }
 }
 
+pub fn tui_label_mcp_type() -> &'static str {
+    if is_chinese() {
+        "连接类型"
+    } else {
+        "Transport"
+    }
+}
+
+pub fn tui_label_url() -> &'static str {
+    if is_chinese() {
+        "URL"
+    } else {
+        "URL"
+    }
+}
+
 pub fn tui_label_args() -> &'static str {
     if is_chinese() {
         "参数"
@@ -171,6 +187,22 @@ pub fn tui_mcp_env_editor_hint() -> &'static str {
         "按 Enter 管理环境变量"
     } else {
         "Press Enter to manage env entries"
+    }
+}
+
+pub fn tui_mcp_type_editor_hint() -> &'static str {
+    if is_chinese() {
+        "按 Enter 选择连接类型"
+    } else {
+        "Press Enter to choose transport"
+    }
+}
+
+pub fn tui_mcp_type_title() -> &'static str {
+    if is_chinese() {
+        "选择 MCP 连接类型"
+    } else {
+        "Select MCP Transport"
     }
 }
 
@@ -211,6 +243,14 @@ pub fn tui_label_app_gemini() -> &'static str {
         "应用: Gemini"
     } else {
         "App: Gemini"
+    }
+}
+
+pub fn tui_label_app_opencode() -> &'static str {
+    if is_chinese() {
+        "应用: OpenCode"
+    } else {
+        "App: OpenCode"
     }
 }
 

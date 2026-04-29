@@ -384,6 +384,71 @@ fn set_mcp_enabled_for_codex_writes_live_config() {
 }
 
 #[test]
+fn set_mcp_enabled_for_codex_writes_remote_headers_once_as_http_headers() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+    fs::write(
+        codex_dir.join("auth.json"),
+        r#"{"OPENAI_API_KEY":"test-key"}"#,
+    )
+    .expect("create auth.json");
+    fs::write(codex_dir.join("config.toml"), "").expect("create empty config.toml");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    config.mcp.servers = Some(HashMap::new());
+    config.mcp.servers.as_mut().unwrap().insert(
+        "remote-headers".into(),
+        McpServer {
+            id: "remote-headers".to_string(),
+            name: "Remote Headers".to_string(),
+            server: json!({
+                "type": "http",
+                "url": "https://example.com/mcp",
+                "headers": {
+                    "Authorization": "Bearer token"
+                }
+            }),
+            apps: McpApps {
+                claude: false,
+                codex: false,
+                gemini: false,
+                opencode: false,
+                hermes: false,
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    );
+
+    let state = state_from_config(config);
+
+    McpService::toggle_app(&state, "remote-headers", AppType::Codex, true)
+        .expect("toggle_app should succeed");
+
+    let toml_path = cc_switch_lib::get_codex_config_path();
+    let toml_text = fs::read_to_string(&toml_path).expect("read codex config");
+    assert!(
+        toml_text.contains("[mcp_servers.remote-headers.http_headers]"),
+        "codex remote headers should be written as http_headers, got: {toml_text}"
+    );
+    assert!(
+        toml_text.contains("Authorization = \"Bearer token\""),
+        "codex remote headers should preserve Authorization value, got: {toml_text}"
+    );
+    assert!(
+        !toml_text.contains("[mcp_servers.remote-headers.headers]"),
+        "codex config should not also write legacy headers table, got: {toml_text}"
+    );
+}
+
+#[test]
 fn upsert_server_skips_live_sync_when_gemini_uninitialized() {
     let _guard = lock_test_mutex();
     reset_test_fs();
