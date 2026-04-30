@@ -33,7 +33,7 @@ async fn handle_streaming_tool_calls_interleaved(
             b"data: {\"id\":\"chatcmpl-tool\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n\n",
         ));
         yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(
-            b"data: {\"id\":\"chatcmpl-tool\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4}}\n\n",
+            b"data: {\"id\":\"chatcmpl-tool\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
         ));
         yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
     };
@@ -482,6 +482,7 @@ async fn stream_openai_chat_tool_calls_interleaved_transform_to_stable_anthropic
         std::collections::HashMap::new();
     for event in &events {
         if event["type"] == "content_block_start" && event["content_block"]["type"] == "tool_use" {
+            assert_eq!(event.pointer("/content_block/input"), Some(&json!({})));
             if let (Some(call_id), Some(index)) = (
                 event.pointer("/content_block/id").and_then(|v| v.as_str()),
                 event.get("index").and_then(|v| v.as_u64()),
@@ -523,9 +524,13 @@ async fn stream_openai_chat_tool_calls_interleaved_transform_to_stable_anthropic
 
     assert_eq!(second_idx, *tool_index_by_call.get("call_1").unwrap());
     assert_eq!(first_idx, *tool_index_by_call.get("call_0").unwrap());
-    assert!(events.iter().any(|event| {
-        event["type"] == "message_delta" && event["delta"]["stop_reason"] == "tool_use"
-    }));
+    let message_delta = events
+        .iter()
+        .find(|event| event["type"] == "message_delta")
+        .expect("message_delta event");
+    assert_eq!(message_delta["delta"]["stop_reason"], "tool_use");
+    assert!(message_delta["usage"].is_object());
+    assert_eq!(message_delta["usage"]["output_tokens"], 0);
 
     service.stop().await.expect("stop proxy service");
     upstream_handle.abort();

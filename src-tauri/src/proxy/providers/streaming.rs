@@ -115,7 +115,7 @@ pub fn create_anthropic_sse_stream(
                         }
 
                         for raw_line in line.lines() {
-                            let Some(data) = raw_line.strip_prefix("data: ") else {
+                            let Some(data) = raw_line.strip_prefix("data:").map(str::trim_start) else {
                                 continue;
                             };
 
@@ -370,7 +370,8 @@ pub fn create_anthropic_sse_stream(
                                             "content_block": {
                                                 "type": "tool_use",
                                                 "id": id,
-                                                "name": name
+                                                "name": name,
+                                                "input": {}
                                             }
                                         });
                                         let sse_data = format!(
@@ -444,7 +445,8 @@ pub fn create_anthropic_sse_stream(
                                             "content_block": {
                                                 "type": "tool_use",
                                                 "id": "",
-                                                "name": legacy_function_name.clone().unwrap_or_default()
+                                                "name": legacy_function_name.clone().unwrap_or_default(),
+                                                "input": {}
                                             }
                                         });
                                         let sse_data = format!(
@@ -527,7 +529,8 @@ pub fn create_anthropic_sse_stream(
                                         "content_block": {
                                             "type": "tool_use",
                                             "id": id,
-                                            "name": name
+                                            "name": name,
+                                            "input": {}
                                         }
                                     });
                                     let sse_data = format!(
@@ -583,7 +586,7 @@ pub fn create_anthropic_sse_stream(
                                     open_tool_block_indices.clear();
                                 }
 
-                                let usage_json = chunk.usage.as_ref().map(|usage| {
+                                let usage_json = if let Some(usage) = chunk.usage.as_ref() {
                                     let mut usage_json = json!({
                                         "input_tokens": usage.prompt_tokens,
                                         "output_tokens": usage.completion_tokens
@@ -595,7 +598,11 @@ pub fn create_anthropic_sse_stream(
                                         usage_json["cache_creation_input_tokens"] = json!(created);
                                     }
                                     usage_json
-                                });
+                                } else {
+                                    json!({
+                                        "output_tokens": 0
+                                    })
+                                };
                                 let event = json!({
                                     "type": "message_delta",
                                     "delta": {
@@ -817,6 +824,7 @@ mod tests {
             .expect("message_delta event");
 
         assert_eq!(tool_start["content_block"]["name"], "get_weather");
+        assert_eq!(tool_start["content_block"]["input"], json!({}));
         assert_eq!(
             tool_delta["delta"]["partial_json"],
             "{\"location\":\"Tokyo\"}"
@@ -883,6 +891,37 @@ mod tests {
 
         assert_eq!(second_idx, *tool_index_by_call.get("call_1").unwrap());
         assert_eq!(first_idx, *tool_index_by_call.get("call_0").unwrap());
+    }
+
+    #[tokio::test]
+    async fn streaming_tool_call_schema_is_valid_when_finish_chunk_omits_usage() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_tool\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\"}}]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_tool\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"location\\\":\\\"Tokyo\\\"}\"}}]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_tool\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_events(input).await;
+        let tool_start = events
+            .iter()
+            .find(|event| {
+                event["type"] == "content_block_start"
+                    && event["content_block"]["type"] == "tool_use"
+            })
+            .expect("tool_use block start");
+        let message_delta = events
+            .iter()
+            .find(|event| event["type"] == "message_delta")
+            .expect("message_delta event");
+
+        assert_eq!(tool_start["content_block"]["id"], "call_0");
+        assert_eq!(tool_start["content_block"]["name"], "get_weather");
+        assert_eq!(tool_start["content_block"]["input"], json!({}));
+        assert_eq!(message_delta["delta"]["stop_reason"], "tool_use");
+        assert!(message_delta["usage"].is_object());
+        assert_eq!(message_delta["usage"]["output_tokens"], 0);
+        assert!(events.iter().any(|event| event["type"] == "message_stop"));
     }
 
     #[tokio::test]
@@ -957,6 +996,7 @@ mod tests {
             .expect("message_delta emitted");
 
         assert_eq!(events[tool_start_pos]["content_block"]["id"], "tool_call_0");
+        assert_eq!(events[tool_start_pos]["content_block"]["input"], json!({}));
         assert_eq!(
             events[tool_start_pos]["content_block"]["name"],
             "unknown_tool"
