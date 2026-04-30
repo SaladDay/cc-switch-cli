@@ -712,7 +712,7 @@ impl ProxyService {
         let mut backup_snapshot = self.build_live_snapshot_from_provider(&app_type, provider)?;
 
         if matches!(app_type, AppType::Codex) {
-            if let Some(existing_backup) = self
+            let existing_backup_value = self
                 .db
                 .get_live_backup(app_type.as_str())
                 .await
@@ -722,16 +722,29 @@ impl ProxyService {
                         app_type.as_str()
                     )
                 })?
-            {
-                let existing_value: Value = serde_json::from_str(&existing_backup.original_config)
-                    .map_err(|error| {
+                .map(|backup| {
+                    serde_json::from_str::<Value>(&backup.original_config).map_err(|error| {
                         format!(
                             "parse {} existing live backup failed: {error}",
                             app_type.as_str()
                         )
-                    })?;
-                Self::preserve_codex_mcp_servers_in_backup(&mut backup_snapshot, &existing_value)?;
+                    })
+                })
+                .transpose()?;
+
+            if let Some(existing_value) = existing_backup_value.as_ref() {
+                Self::preserve_codex_mcp_servers_in_backup(&mut backup_snapshot, existing_value)?;
             }
+
+            let anchor_config_text = existing_backup_value
+                .as_ref()
+                .and_then(|value| value.get("config"))
+                .and_then(Value::as_str);
+            crate::codex_config::normalize_codex_settings_config_model_provider(
+                &mut backup_snapshot,
+                anchor_config_text,
+            )
+            .map_err(|error| format!("normalize Codex live backup failed: {error}"))?;
         }
 
         if matches!(app_type, AppType::Gemini) {
@@ -1092,6 +1105,15 @@ impl ProxyService {
             common_config_snippet.as_deref(),
             apply_common_config,
         )
+        .and_then(|mut snapshot| {
+            if matches!(app_type, AppType::Codex) {
+                crate::codex_config::normalize_codex_settings_config_model_provider(
+                    &mut snapshot,
+                    None,
+                )?;
+            }
+            Ok(snapshot)
+        })
         .map_err(|error| {
             format!(
                 "build {} current-provider restore snapshot failed: {error}",
@@ -1588,6 +1610,7 @@ impl ProxyService {
         let config_text = config.get("config").and_then(Value::as_str);
         let auth_path = get_codex_auth_path();
 
+        // Proxy restore applies the saved backup config without another stable-provider rewrite.
         match (auth, config_text) {
             (Some(auth), Some(config_text)) => write_codex_live_atomic(auth, Some(config_text))
                 .map_err(|error| format!("write Codex live config failed: {error}")),
@@ -3053,6 +3076,147 @@ base_url = "https://new.example/v1"
         assert!(
             config.contains("https://new.example/v1"),
             "provider-specific base_url should still update to the new provider"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn hot_switch_codex_provider_keeps_model_provider_stable_in_backup_and_restore() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        let provider_a = Provider::with_id(
+            "a".to_string(),
+            "RightCode".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "rightcode-key"
+                },
+                "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+        let provider_b = Provider::with_id(
+            "b".to_string(),
+            "AiHubMix".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "aihubmix-key"
+                },
+                "config": r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+
+[model_providers.aihubmix]
+name = "AiHubMix"
+base_url = "https://aihubmix.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+
+        db.save_provider("codex", &provider_a)
+            .expect("save provider a");
+        db.save_provider("codex", &provider_b)
+            .expect("save provider b");
+        db.set_current_provider("codex", "a")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("a"))
+            .expect("set local current provider");
+        db.save_live_backup(
+            "codex",
+            &serde_json::to_string(&provider_a.settings_config).expect("serialize provider a"),
+        )
+        .await
+        .expect("seed live backup");
+        service
+            .write_codex_live(&json!({
+                "auth": {
+                    "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+                },
+                "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }))
+            .expect("seed taken-over Codex live config");
+
+        service
+            .hot_switch_provider("codex", "b")
+            .await
+            .expect("hot switch Codex provider");
+
+        let backup = db
+            .get_live_backup("codex")
+            .await
+            .expect("get live backup")
+            .expect("backup exists");
+        let stored: Value =
+            serde_json::from_str(&backup.original_config).expect("parse backup json");
+        let backup_config = stored
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("backup config string");
+        let parsed_backup: toml::Value =
+            toml::from_str(backup_config).expect("parse backup config");
+        assert_eq!(
+            parsed_backup.get("model_provider").and_then(|v| v.as_str()),
+            Some("rightcode"),
+            "provider-derived restore backup should retain stable Codex model_provider"
+        );
+        let backup_model_providers = parsed_backup
+            .get("model_providers")
+            .and_then(|v| v.as_table())
+            .expect("backup model_providers");
+        assert!(backup_model_providers.get("aihubmix").is_none());
+        assert_eq!(
+            backup_model_providers
+                .get("rightcode")
+                .and_then(|v| v.get("base_url"))
+                .and_then(|v| v.as_str()),
+            Some("https://aihubmix.example/v1"),
+            "stable provider id should point at the hot-switched provider endpoint"
+        );
+
+        service
+            .restore_live_config_for_app(&AppType::Codex)
+            .await
+            .expect("restore Codex live config");
+
+        let live = service.read_codex_live().expect("read Codex live config");
+        let live_config = live
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("live config string");
+        let parsed_live: toml::Value = toml::from_str(live_config).expect("parse live config");
+        assert_eq!(
+            parsed_live.get("model_provider").and_then(|v| v.as_str()),
+            Some("rightcode"),
+            "restored Codex live config should not switch history buckets"
+        );
+        assert_eq!(
+            live.get("auth")
+                .and_then(|auth| auth.get("OPENAI_API_KEY"))
+                .and_then(Value::as_str),
+            Some("aihubmix-key"),
+            "restore should still use the hot-switched provider auth"
         );
     }
 

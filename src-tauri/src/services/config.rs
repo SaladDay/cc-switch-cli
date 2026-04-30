@@ -319,7 +319,7 @@ impl ConfigService {
         }
         let cfg_text = settings.get("config").and_then(Value::as_str);
 
-        crate::codex_config::write_codex_live_atomic(auth, cfg_text)?;
+        crate::codex_config::write_codex_live_atomic_with_stable_provider(auth, cfg_text)?;
         crate::mcp::sync_enabled_to_codex(config)?;
 
         let cfg_text_after = crate::codex_config::read_and_validate_codex_config_text()?;

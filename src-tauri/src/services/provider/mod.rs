@@ -365,26 +365,20 @@ impl ProviderService {
     }
 
     fn apply_post_commit(state: &AppState, action: &PostCommitAction) -> Result<(), AppError> {
-        let apply_common_config = action
-            .provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(true);
         if action.takeover_active {
-            let backup_snapshot = Self::build_live_backup_snapshot(
-                &action.app_type,
-                &action.provider,
-                action.common_config_snippet.as_deref(),
-                apply_common_config,
-            )?;
             futures::executor::block_on(
                 state
                     .proxy_service
-                    .save_live_backup_snapshot(action.app_type.as_str(), &backup_snapshot),
+                    .update_live_backup_from_provider(action.app_type.as_str(), &action.provider),
             )
             .map_err(AppError::Message)?;
         } else {
+            let apply_common_config = action
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.apply_common_config)
+                .unwrap_or(true);
             Self::write_live_snapshot(
                 &action.app_type,
                 &action.provider,
@@ -513,12 +507,16 @@ impl ProviderService {
                     raw_settings.insert("auth".to_string(), auth);
                 }
                 raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
-                let settings_to_store = Self::normalize_settings_config_for_storage(
+                let mut settings_to_store = Self::normalize_settings_config_for_storage(
                     app_type,
                     &provider,
                     Value::Object(raw_settings),
                     effective_common_snippet.as_deref(),
                 )?;
+                Self::restore_codex_model_provider_for_storage_best_effort(
+                    &provider,
+                    &mut settings_to_store,
+                );
 
                 {
                     let mut guard = state.config.write().map_err(AppError::from)?;
@@ -811,6 +809,23 @@ impl ProviderService {
             common_config_snippet,
         )?;
         Ok(snapshot_provider.settings_config)
+    }
+
+    fn restore_codex_model_provider_for_storage_best_effort(
+        provider: &Provider,
+        settings_config: &mut Value,
+    ) {
+        if let Err(err) =
+            crate::codex_config::restore_codex_settings_config_model_provider_for_backfill(
+                settings_config,
+                &provider.settings_config,
+            )
+        {
+            log::warn!(
+                "Failed to restore Codex provider id while storing snapshot for '{}': {err}",
+                provider.id
+            );
+        }
     }
 
     pub(crate) fn remove_common_config_from_settings_for_preview(

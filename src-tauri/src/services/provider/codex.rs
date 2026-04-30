@@ -283,7 +283,7 @@ impl ProviderService {
             current_provider.settings_config.get("auth").cloned()
         };
 
-        let settings_config = if config_path.exists() {
+        let mut settings_config = if config_path.exists() {
             let text =
                 std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
             Self::maybe_update_codex_common_config_snippet(config, &text)?;
@@ -306,6 +306,10 @@ impl ProviderService {
             }
             Value::Object(raw_settings)
         };
+        Self::restore_codex_model_provider_for_storage_best_effort(
+            &current_provider,
+            &mut settings_config,
+        );
 
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             if let Some(current) = manager.providers.get_mut(current_id) {
@@ -351,20 +355,7 @@ impl ProviderService {
                 AppError::Config("Codex 供应商配置缺少 'config' 字段或不是字符串".to_string())
             })?;
 
-        // Validate TOML before writing
-        if !cfg_text.trim().is_empty() {
-            crate::codex_config::validate_config_toml(cfg_text)?;
-        }
-
-        // Write config.toml
-        let config_path = get_codex_config_path();
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-        }
-        crate::config::write_text_file(&config_path, cfg_text)?;
-
-        let auth_path = get_codex_auth_path();
-        write_json_file(&auth_path, auth)?;
+        crate::codex_config::write_codex_live_atomic_with_stable_provider(auth, Some(cfg_text))?;
 
         Ok(())
     }
