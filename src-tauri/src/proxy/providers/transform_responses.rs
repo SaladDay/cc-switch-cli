@@ -14,10 +14,17 @@ pub fn anthropic_to_responses(
 
     if let Some(system) = body.get("system") {
         let instructions = if let Some(text) = system.as_str() {
-            text.to_string()
+            super::transform::sanitize_system_text(text)
+                .map(|text| text.into_owned())
+                .unwrap_or_default()
         } else if let Some(arr) = system.as_array() {
             arr.iter()
-                .filter_map(|msg| msg.get("text").and_then(|t| t.as_str()))
+                .filter_map(|msg| {
+                    msg.get("text")
+                        .and_then(|t| t.as_str())
+                        .and_then(super::transform::sanitize_system_text)
+                        .map(|text| text.into_owned())
+                })
                 .collect::<Vec<_>>()
                 .join("\n\n")
         } else {
@@ -422,6 +429,51 @@ pub fn responses_to_anthropic(body: Value) -> Result<Value, ProxyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anthropic_to_responses_removes_billing_header_from_system_string() {
+        let input = json!({
+            "model": "gpt-5",
+            "system": "x-anthropic-billing-header: cc_version=2.1.120.cf9; cc_entrypoint=cli; cch=543cf;\nYou are helpful.",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_responses(input, None, false).expect("transform responses");
+
+        assert_eq!(result["instructions"], json!("You are helpful."));
+    }
+
+    #[test]
+    fn anthropic_to_responses_removes_billing_header_from_system_array() {
+        let input = json!({
+            "model": "gpt-5",
+            "system": [{
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.120.cf9; cc_entrypoint=cli; cch=543cf;\nProject instructions"
+            }],
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_responses(input, None, false).expect("transform responses");
+
+        assert_eq!(result["instructions"], json!("Project instructions"));
+    }
+
+    #[test]
+    fn anthropic_to_responses_omits_empty_billing_header_system_block() {
+        let input = json!({
+            "model": "gpt-5",
+            "system": [{
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.120.cf9; cc_entrypoint=cli; cch=543cf;"
+            }],
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_responses(input, None, false).expect("transform responses");
+
+        assert!(result.get("instructions").is_none());
+    }
 
     #[test]
     fn anthropic_to_responses_codex_oauth_sets_required_contract_fields() {

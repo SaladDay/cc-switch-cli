@@ -1,5 +1,8 @@
 use crate::proxy::error::ProxyError;
 use serde_json::{json, Value};
+use std::borrow::Cow;
+
+const ANTHROPIC_BILLING_HEADER_PREFIX: &str = "x-anthropic-billing-header:";
 
 pub fn is_openai_o_series(model: &str) -> bool {
     model.len() > 1
@@ -47,6 +50,33 @@ pub fn resolve_reasoning_effort(body: &Value) -> Option<&'static str> {
     }
 }
 
+pub fn sanitize_system_text(text: &str) -> Option<Cow<'_, str>> {
+    let mut sanitized = String::new();
+    let mut removed = false;
+
+    for segment in text.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        if line
+            .trim_start()
+            .starts_with(ANTHROPIC_BILLING_HEADER_PREFIX)
+        {
+            removed = true;
+            continue;
+        }
+        sanitized.push_str(segment);
+    }
+
+    if !removed {
+        return Some(Cow::Borrowed(text));
+    }
+
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(Cow::Owned(sanitized))
+    }
+}
+
 pub fn anthropic_to_openai(body: Value, cache_key: Option<&str>) -> Result<Value, ProxyError> {
     let mut result = json!({});
 
@@ -58,10 +88,15 @@ pub fn anthropic_to_openai(body: Value, cache_key: Option<&str>) -> Result<Value
 
     if let Some(system) = body.get("system") {
         if let Some(text) = system.as_str() {
-            messages.push(json!({"role": "system", "content": text}));
+            if let Some(text) = sanitize_system_text(text) {
+                messages.push(json!({"role": "system", "content": text}));
+            }
         } else if let Some(arr) = system.as_array() {
             for msg in arr {
                 if let Some(text) = msg.get("text").and_then(|t| t.as_str()) {
+                    let Some(text) = sanitize_system_text(text) else {
+                        continue;
+                    };
                     let mut system_message = json!({"role": "system", "content": text});
                     if let Some(cache_control) = msg.get("cache_control") {
                         system_message["cache_control"] = cache_control.clone();
@@ -492,6 +527,62 @@ pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anthropic_to_openai_removes_billing_header_from_system_string() {
+        let input = json!({
+            "model": "gpt-5",
+            "system": "x-anthropic-billing-header: cc_version=2.1.120.cf9; cc_entrypoint=cli; cch=543cf;\nYou are helpful.",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["messages"][0]["content"], "You are helpful.");
+    }
+
+    #[test]
+    fn anthropic_to_openai_removes_billing_header_from_system_array() {
+        let input = json!({
+            "model": "gpt-5",
+            "system": [{
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.120.cf9; cc_entrypoint=cli; cch=543cf;\nProject instructions",
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["messages"][0]["content"], "Project instructions");
+        assert_eq!(result["messages"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn anthropic_to_openai_omits_empty_billing_header_system_block() {
+        let input = json!({
+            "model": "gpt-5",
+            "system": [{
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.120.cf9; cc_entrypoint=cli; cch=543cf;"
+            }],
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn sanitize_system_text_preserves_remaining_content() {
+        let text = "First line\n  x-anthropic-billing-header: cc_version=2.1.120.cf9; cc_entrypoint=cli; cch=543cf;\n\nLast line\n";
+
+        let result = sanitize_system_text(text).unwrap();
+
+        assert_eq!(result, "First line\n\nLast line\n");
+    }
 
     #[test]
     fn anthropic_to_openai_injects_prompt_cache_key() {
