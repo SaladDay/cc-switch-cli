@@ -3,7 +3,10 @@ use crate::provider::Provider;
 use serde_json::Value;
 
 use super::codex_config::parse_codex_config_snippet;
-use super::{ClaudeApiFormat, ProviderAddFormState, OPENCLAW_DEFAULT_API_PROTOCOL};
+use super::{
+    claude_hide_attribution_enabled, ClaudeApiFormat, ProviderAddFormState,
+    OPENCLAW_DEFAULT_API_PROTOCOL,
+};
 
 pub(super) fn populate_form_from_provider(
     form: &mut ProviderAddFormState,
@@ -21,6 +24,7 @@ pub(super) fn populate_form_from_provider(
 
 fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
     form.claude_api_format = parse_claude_api_format(provider);
+    form.claude_hide_attribution = claude_hide_attribution_enabled(&provider.settings_config);
     if let Some(env) = provider
         .settings_config
         .get("env")

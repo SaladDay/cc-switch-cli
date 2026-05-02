@@ -78,6 +78,17 @@ impl ProviderAddFormState {
                 }
                 settings_obj.remove("api_format");
                 settings_obj.remove("openrouter_compat_mode");
+                if self.claude_hide_attribution && self.claude_hide_attribution_touched {
+                    settings_obj.insert(
+                        "attribution".to_string(),
+                        json!({
+                            "commit": "",
+                            "pr": ""
+                        }),
+                    );
+                } else if self.claude_hide_attribution_touched {
+                    settings_obj.remove("attribution");
+                }
             }
             AppType::Codex => {
                 if self.is_codex_official_provider() {
@@ -568,6 +579,18 @@ pub(crate) fn strip_common_config_from_settings(
     }
 
     Ok(())
+}
+
+pub(crate) fn claude_hide_attribution_enabled(settings_config: &Value) -> bool {
+    let Some(attribution) = settings_config
+        .get("attribution")
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+
+    attribution.get("commit").and_then(Value::as_str) == Some("")
+        && attribution.get("pr").and_then(Value::as_str) == Some("")
 }
 
 pub(crate) fn should_hide_provider_field(key: &str) -> bool {

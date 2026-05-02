@@ -44,6 +44,7 @@ pub(crate) fn add_form_key_items(
                     ) => texts::tui_key_open(),
                     Some(
                         ProviderAddField::GeminiAuthType
+                        | ProviderAddField::ClaudeHideAttribution
                         | ProviderAddField::OpenClawApiProtocol
                         | ProviderAddField::OpenClawUserAgent,
                     ) => texts::tui_key_toggle(),

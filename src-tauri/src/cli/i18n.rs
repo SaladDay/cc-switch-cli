@@ -1564,6 +1564,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_claude_hide_attribution() -> &'static str {
+        if is_chinese() {
+            "隐藏 AI 署名"
+        } else {
+            "Hide AI Attribution"
+        }
+    }
+
     pub fn tui_label_provider_package() -> &'static str {
         if is_chinese() {
             "Provider / npm 包"

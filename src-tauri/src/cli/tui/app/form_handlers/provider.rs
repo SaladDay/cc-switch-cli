@@ -319,6 +319,13 @@ impl App {
                 };
                 Action::None
             }
+            ProviderAddField::ClaudeHideAttribution => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.toggle_claude_hide_attribution();
+                Action::None
+            }
             ProviderAddField::OpenClawModels => {
                 if matches!(key.code, KeyCode::Enter) {
                     let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {

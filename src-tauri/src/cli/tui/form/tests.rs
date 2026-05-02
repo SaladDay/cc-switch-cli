@@ -301,6 +301,160 @@ fn provider_add_form_claude_fields_include_model_config_entry() {
 }
 
 #[test]
+fn provider_add_form_claude_fields_include_hide_attribution_entry() {
+    let form = ProviderAddFormState::new(AppType::Claude);
+    let fields = form.fields();
+    let model_cfg_idx = fields
+        .iter()
+        .position(|field| *field == ProviderAddField::ClaudeModelConfig)
+        .expect("ClaudeModelConfig field should exist");
+    let hide_attribution_idx = fields
+        .iter()
+        .position(|field| *field == ProviderAddField::ClaudeHideAttribution)
+        .expect("ClaudeHideAttribution field should exist");
+    let common_divider_idx = fields
+        .iter()
+        .position(|field| *field == ProviderAddField::CommonConfigDivider)
+        .expect("CommonConfigDivider field should exist");
+
+    assert!(
+        hide_attribution_idx > model_cfg_idx,
+        "hide attribution should appear after Claude model config"
+    );
+    assert!(
+        hide_attribution_idx < common_divider_idx,
+        "hide attribution should stay with Claude-specific fields"
+    );
+}
+
+#[test]
+fn provider_add_form_claude_official_keeps_hide_attribution_field_visible() {
+    let mut provider = Provider::with_id(
+        "official".to_string(),
+        "Claude Official".to_string(),
+        json!({"env": {}}),
+        Some("https://www.anthropic.com/claude-code".to_string()),
+    );
+    provider.category = Some("official".to_string());
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    let fields = form.fields();
+
+    assert!(!fields.contains(&ProviderAddField::ClaudeBaseUrl));
+    assert!(!fields.contains(&ProviderAddField::ClaudeApiFormat));
+    assert!(!fields.contains(&ProviderAddField::ClaudeApiKey));
+    assert!(!fields.contains(&ProviderAddField::ClaudeModelConfig));
+    assert!(fields.contains(&ProviderAddField::ClaudeHideAttribution));
+}
+
+#[test]
+fn provider_add_form_claude_hide_attribution_writes_upstream_shape() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.id.set("p1");
+    form.name.set("Provider One");
+    form.toggle_claude_hide_attribution();
+
+    let provider = form.to_provider_json_value();
+
+    assert_eq!(
+        provider["settingsConfig"]["attribution"],
+        json!({
+            "commit": "",
+            "pr": ""
+        })
+    );
+}
+
+#[test]
+fn provider_add_form_claude_hide_attribution_round_trips_and_removes_when_toggled_off() {
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {},
+            "attribution": {
+                "commit": "",
+                "pr": ""
+            }
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert!(form.claude_hide_attribution);
+
+    form.toggle_claude_hide_attribution();
+    let out = form.to_provider_json_value();
+
+    assert!(
+        out["settingsConfig"]
+            .as_object()
+            .is_some_and(|settings| !settings.contains_key("attribution")),
+        "unchecked hide attribution should remove the upstream attribution object"
+    );
+}
+
+#[test]
+fn provider_add_form_claude_preserves_existing_hidden_attribution_when_untouched() {
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {},
+            "attribution": {
+                "commit": "",
+                "pr": "",
+                "extra": "keep"
+            }
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert!(form.claude_hide_attribution);
+
+    let out = form.to_provider_json_value();
+
+    assert_eq!(
+        out["settingsConfig"]["attribution"],
+        json!({
+            "commit": "",
+            "pr": "",
+            "extra": "keep"
+        })
+    );
+}
+
+#[test]
+fn provider_add_form_claude_preserves_custom_attribution_when_untouched() {
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {},
+            "attribution": {
+                "commit": "custom",
+                "pr": "custom"
+            }
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert!(!form.claude_hide_attribution);
+
+    let out = form.to_provider_json_value();
+
+    assert_eq!(
+        out["settingsConfig"]["attribution"],
+        json!({
+            "commit": "custom",
+            "pr": "custom"
+        })
+    );
+}
+
+#[test]
 fn provider_add_form_packycode_template_claude_sets_partner_meta_and_base_url() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     let existing_ids = Vec::<String>::new();

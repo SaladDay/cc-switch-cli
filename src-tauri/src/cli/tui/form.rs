@@ -15,6 +15,7 @@ mod tests;
 pub(crate) use provider_json::strip_provider_internal_fields;
 
 pub(crate) use codex_config::parse_codex_config_snippet;
+pub(crate) use provider_json::claude_hide_attribution_enabled;
 pub(crate) use provider_json::strip_common_config_from_settings;
 pub(crate) use provider_state::resolve_provider_id_for_submit;
 
@@ -229,6 +230,7 @@ pub enum ProviderAddField {
     ClaudeApiFormat,
     ClaudeApiKey,
     ClaudeModelConfig,
+    ClaudeHideAttribution,
     CodexBaseUrl,
     CodexModel,
     CodexWireApi,
@@ -312,6 +314,8 @@ pub struct ProviderAddFormState {
     pub claude_haiku_model: TextInput,
     pub claude_sonnet_model: TextInput,
     pub claude_opus_model: TextInput,
+    pub claude_hide_attribution: bool,
+    claude_hide_attribution_touched: bool,
 
     pub codex_base_url: TextInput,
     pub codex_model: TextInput,

@@ -325,6 +325,23 @@ pub(super) fn render_provider_detail(
     }
 
     if matches!(app.app_type, crate::app_config::AppType::Claude) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                texts::tui_label_claude_hide_attribution(),
+                Style::default().fg(theme.accent),
+            ),
+            Span::raw(": "),
+            Span::raw(
+                if crate::cli::tui::form::claude_hide_attribution_enabled(
+                    &row.provider.settings_config,
+                ) {
+                    texts::tui_marker_active()
+                } else {
+                    texts::tui_marker_inactive()
+                },
+            ),
+        ]));
+
         if let Some(env) = row
             .provider
             .settings_config

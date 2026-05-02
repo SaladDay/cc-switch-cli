@@ -147,6 +147,20 @@ fn provider_field_label_and_value_renders_claude_responses_api_format() {
 }
 
 #[test]
+fn provider_field_label_and_value_renders_claude_hide_attribution_toggle() {
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.toggle_claude_hide_attribution();
+
+    let (label, value) = super::provider_field_label_and_value(
+        &form,
+        crate::cli::tui::form::ProviderAddField::ClaudeHideAttribution,
+    );
+
+    assert!(label.contains("署名") || label.contains("Attribution"));
+    assert_eq!(value, "[✓]");
+}
+
+#[test]
 fn provider_detail_uses_legacy_claude_api_format_for_display() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");

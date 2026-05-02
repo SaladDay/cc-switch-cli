@@ -53,6 +53,8 @@ impl ProviderAddFormState {
             claude_haiku_model: TextInput::new(""),
             claude_sonnet_model: TextInput::new(""),
             claude_opus_model: TextInput::new(""),
+            claude_hide_attribution: false,
+            claude_hide_attribution_touched: false,
             codex_base_url: TextInput::new(codex_defaults.0),
             codex_model: TextInput::new(codex_defaults.1),
             codex_wire_api: codex_defaults.2,
@@ -159,6 +161,7 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::ClaudeApiKey);
                     fields.push(ProviderAddField::ClaudeModelConfig);
                 }
+                fields.push(ProviderAddField::ClaudeHideAttribution);
             }
             AppType::Codex => {
                 if !self.is_codex_official_provider() {
@@ -227,6 +230,7 @@ impl ProviderAddFormState {
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
             | ProviderAddField::ClaudeModelConfig
+            | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::GeminiAuthType
             | ProviderAddField::OpenClawApiProtocol
             | ProviderAddField::OpenClawUserAgent
@@ -267,6 +271,7 @@ impl ProviderAddFormState {
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
             | ProviderAddField::ClaudeModelConfig
+            | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::GeminiAuthType
             | ProviderAddField::OpenClawApiProtocol
             | ProviderAddField::OpenClawUserAgent
@@ -314,6 +319,11 @@ impl ProviderAddFormState {
 
     pub fn mark_claude_model_config_touched(&mut self) {
         self.claude_model_config_touched = true;
+    }
+
+    pub fn toggle_claude_hide_attribution(&mut self) {
+        self.claude_hide_attribution = !self.claude_hide_attribution;
+        self.claude_hide_attribution_touched = true;
     }
 
     pub fn is_claude_official_provider(&self) -> bool {

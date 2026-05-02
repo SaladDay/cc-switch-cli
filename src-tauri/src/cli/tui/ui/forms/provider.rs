@@ -304,6 +304,9 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::ClaudeApiFormat => texts::tui_label_claude_api_format().to_string(),
         ProviderAddField::ClaudeApiKey => texts::tui_label_api_key().to_string(),
         ProviderAddField::ClaudeModelConfig => texts::tui_label_claude_model_config().to_string(),
+        ProviderAddField::ClaudeHideAttribution => {
+            texts::tui_label_claude_hide_attribution().to_string()
+        }
         ProviderAddField::CodexBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::CodexModel => texts::model_label().to_string(),
         ProviderAddField::CodexWireApi => {
@@ -355,6 +358,13 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::ClaudeModelConfig => {
             texts::tui_claude_model_config_summary(provider.claude_model_configured_count())
+        }
+        ProviderAddField::ClaudeHideAttribution => {
+            if provider.claude_hide_attribution {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
         }
         ProviderAddField::IncludeCommonConfig => {
             if provider.include_common_config {
@@ -441,6 +451,16 @@ pub(crate) fn provider_field_editor_line(
             ),
             ProviderAddField::ClaudeModelConfig => {
                 texts::tui_claude_model_config_open_hint().to_string()
+            }
+            ProviderAddField::ClaudeHideAttribution => {
+                format!(
+                    "attribution.commit/pr = {}",
+                    if provider.claude_hide_attribution {
+                        "\"\""
+                    } else {
+                        "<default>"
+                    }
+                )
             }
             ProviderAddField::CommonConfigDivider => String::new(),
             ProviderAddField::IncludeCommonConfig => {
