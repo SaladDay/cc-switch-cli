@@ -90,6 +90,7 @@ tachyonfx = "0.25"
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.52"
 self-replace = "1"
+windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
 
 # Optimize release binary size to help reduce AppImage footprint
 [profile.release]

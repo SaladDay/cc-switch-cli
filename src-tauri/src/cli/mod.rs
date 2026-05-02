@@ -4,10 +4,13 @@ use std::io::Write;
 
 mod claude_temp_launch;
 mod codex_temp_launch;
+#[cfg(windows)]
+mod windows_temp_launch;
 pub mod commands;
 pub mod editor;
 pub mod i18n;
 pub mod interactive;
+pub mod orphan_scan;
 pub mod terminal;
 pub mod tui;
 pub mod ui;
@@ -61,7 +64,7 @@ pub enum Commands {
     Proxy(commands::proxy::ProxyCommand),
 
     /// Start an app with a provider selector without switching the global current provider
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[command(subcommand)]
     Start(commands::start::StartCommand),
 
@@ -184,7 +187,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn parses_start_claude_subcommand() {
         let cli = Cli::parse_from(["cc-switch", "start", "claude", "demo"]);
@@ -201,7 +204,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn parses_start_claude_native_args_after_double_dash() {
         let cli = Cli::parse_from([
@@ -228,7 +231,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn rejects_start_claude_native_args_without_double_dash() {
         let result = Cli::try_parse_from([
@@ -246,7 +249,7 @@ mod tests {
         assert!(rendered.contains("-- --dangerously-skip-permissions"));
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn parses_start_codex_subcommand() {
         let cli = Cli::parse_from(["cc-switch", "start", "codex", "demo"]);
@@ -263,7 +266,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn parses_start_codex_multiple_native_args_after_double_dash() {
         let cli = Cli::parse_from([
@@ -298,7 +301,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn start_claude_help_mentions_double_dash_passthrough_examples() {
         let mut cmd = Cli::command();
@@ -314,7 +317,7 @@ mod tests {
         assert!(help.contains("cc-switch start claude demo -- --dangerously-skip-permissions"));
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn start_codex_help_mentions_double_dash_passthrough_examples() {
         let mut cmd = Cli::command();

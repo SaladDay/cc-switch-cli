@@ -1,7 +1,11 @@
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(windows))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::AppError;
@@ -96,14 +100,9 @@ pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
-    Err(AppError::localized(
-        "claude.temp_launch_unsupported_platform",
-        "当前平台暂不支持在当前终端临时启动 Claude。".to_string(),
-        "Temporary Claude launch in the current terminal is not supported on this platform."
-            .to_string(),
-    ))
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -137,17 +136,124 @@ pub(crate) fn exec_prepared_claude(
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub(crate) fn exec_prepared_claude(
-    _prepared: &PreparedClaudeLaunch,
-    _native_args: &[OsString],
+    prepared: &PreparedClaudeLaunch,
+    native_args: &[OsString],
 ) -> Result<(), AppError> {
-    Err(AppError::localized(
-        "claude.temp_launch_unsupported_platform",
-        "当前平台暂不支持在当前终端临时启动 Claude。".to_string(),
-        "Temporary Claude launch in the current terminal is not supported on this platform."
-            .to_string(),
-    ))
+    use crate::cli::windows_temp_launch::{
+        run_suspended_child, ScopedConsoleCtrlHandler,
+    };
+
+    let _ctrl_guard = ScopedConsoleCtrlHandler::install()?;
+
+    let (program, args, application_name) = build_claude_command_windows(prepared, native_args)?;
+
+    let exit_code = run_suspended_child(
+        &program,
+        &args,
+        None,
+        application_name.as_deref(),
+        Some(&prepared.settings_path),
+    )?;
+
+    if exit_code != 0 {
+        return Err(AppError::localized(
+            "claude.temp_launch_exit_nonzero",
+            format!("Claude 进程退出码非零: {exit_code}"),
+            format!("Claude process exited with non-zero code: {exit_code}"),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn build_claude_command_windows(
+    prepared: &PreparedClaudeLaunch,
+    native_args: &[OsString],
+) -> Result<(PathBuf, Vec<OsString>, Option<PathBuf>), AppError> {
+    use crate::cli::windows_temp_launch::{is_cmd_shim, validate_cmd_arg};
+
+    let exe_str = prepared.executable.to_string_lossy();
+    let is_cmd = is_cmd_shim(&prepared.executable);
+
+    if is_cmd {
+        // Validate internally-constructed arguments that also flow through
+        // cmd.exe /c (executable path and settings path).
+        if let Err(e) = validate_cmd_arg(&exe_str) {
+            return Err(cmd_arg_error_to_app_error("claude", e));
+        }
+        if let Err(e) = validate_cmd_arg(&prepared.settings_path.to_string_lossy()) {
+            return Err(cmd_arg_error_to_app_error("claude", e));
+        }
+
+        for arg in native_args {
+            if let Err(e) = validate_cmd_arg(&arg.to_string_lossy()) {
+                return Err(cmd_arg_error_to_app_error("claude", e));
+            }
+        }
+        let mut args = vec![
+            OsString::from("/c"),
+            OsString::from(exe_str.as_ref()),
+            OsString::from("--settings"),
+            OsString::from(&prepared.settings_path),
+        ];
+        args.extend_from_slice(native_args);
+        // Pass the absolute system cmd.exe as lpApplicationName so
+        // CreateProcessW does not search the current directory.
+        let cmd_exe = crate::cli::windows_temp_launch::resolve_system_cmd_exe()?;
+        Ok((PathBuf::from("cmd.exe"), args, Some(cmd_exe)))
+    } else {
+        let mut args = vec![
+            OsString::from("--settings"),
+            OsString::from(&prepared.settings_path),
+        ];
+        args.extend_from_slice(native_args);
+        Ok((prepared.executable.clone(), args, Some(prepared.executable.clone())))
+    }
+}
+
+#[cfg(windows)]
+fn cmd_arg_error_to_app_error(_app_label: &str, err: crate::cli::windows_temp_launch::CmdArgError) -> AppError {
+    use crate::cli::windows_temp_launch::CmdArgError;
+    match err {
+        CmdArgError::DoubleQuote(arg) => AppError::localized(
+            "claude.temp_launch_unsafe_cmd_quote",
+            format!("参数包含双引号，无法安全地通过 cmd.exe /c 传递: {}", arg),
+            format!(
+                "Native arg contains a double quote which cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
+        CmdArgError::UnsafeTrailingBackslash(arg) => AppError::localized(
+            "claude.temp_launch_unsafe_cmd_trailing_backslash",
+            format!(
+                "参数同时需要 cmd.exe 加引号且以反斜杠结尾，无法安全传递: {}",
+                arg
+            ),
+            format!(
+                "Native arg both requires cmd.exe quoting and ends with a backslash, which cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
+        CmdArgError::Percent(arg) => AppError::localized(
+            "claude.temp_launch_unsafe_cmd_percent",
+            format!("参数包含百分号，cmd.exe 会将其作为环境变量扩展，无法安全传递: {}", arg),
+            format!(
+                "Native arg contains a percent sign which cmd.exe expands as an environment variable, cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
+        CmdArgError::Exclamation(arg) => AppError::localized(
+            "claude.temp_launch_unsafe_cmd_exclamation",
+            format!("参数包含感叹号，cmd.exe 会将其作为延迟环境变量扩展，无法安全传递: {}", arg),
+            format!(
+                "Native arg contains an exclamation mark which cmd.exe expands as a delayed environment variable, cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
+    }
 }
 
 fn write_temp_settings_file(
@@ -167,12 +273,17 @@ fn write_temp_settings_file_with<Finalize>(
 where
     Finalize: FnOnce(&Path) -> Result<(), AppError>,
 {
+    #[cfg(windows)]
+    let timestamp = crate::cli::orphan_scan::current_process_creation_time_nanos();
+    #[cfg(not(windows))]
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LAUNCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let filename = format!(
-        "cc-switch-claude-{}-{}-{timestamp}.json",
+        "cc-switch-claude-{}-{seq:08x}-{}-{timestamp}.json",
         sanitize_filename_fragment(provider_id),
         std::process::id()
     );
@@ -217,7 +328,11 @@ fn finalize_temp_settings_file(path: &Path) -> Result<(), AppError> {
 }
 
 #[cfg(not(unix))]
-fn finalize_temp_settings_file(_path: &Path) -> Result<(), AppError> {
+fn finalize_temp_settings_file(path: &Path) -> Result<(), AppError> {
+    #[cfg(windows)]
+    {
+        crate::cli::windows_temp_launch::restrict_to_owner(path, false)?;
+    }
     Ok(())
 }
 
@@ -235,14 +350,15 @@ fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
 
 #[cfg(not(unix))]
 fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|err| AppError::io(path, err))
+    crate::cli::windows_temp_launch::create_secret_temp_file(path)
 }
 
 fn cleanup_temp_settings_file(path: &Path) -> Result<(), AppError> {
+    // Best-effort: remove the orphan-scan sidecar regardless of how the
+    // settings file removal goes. The sidecar lives next to the temp file,
+    // so a stranded sidecar without its main entry would otherwise wait for
+    // the periodic orphan-sidecar reap.
+    crate::cli::orphan_scan::remove_sidecar_for(path);
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -428,6 +544,34 @@ mod tests {
             leftover_files.is_empty(),
             "temporary settings file should be removed on failure, found: {leftover_files:?}"
         );
+    }
+
+    #[test]
+    fn write_temp_settings_file_uses_unique_filename_per_call() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let settings = json!({
+            "env": { "ANTHROPIC_AUTH_TOKEN": "sk-demo" }
+        });
+
+        let path1 = write_temp_settings_file_with(temp_dir.path(), "demo", &settings, |_| Ok(()))
+            .expect("first write must succeed");
+        let path2 = write_temp_settings_file_with(temp_dir.path(), "demo", &settings, |_| Ok(()))
+            .expect("second write must succeed");
+
+        assert_ne!(
+            path1, path2,
+            "two consecutive launches in the same process must not collide on filename"
+        );
+        let name1 = path1
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("path1 has utf8 filename");
+        let name2 = path2
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("path2 has utf8 filename");
+        assert!(name1.starts_with("cc-switch-claude-demo-"));
+        assert!(name2.starts_with("cc-switch-claude-demo-"));
     }
 
     #[test]

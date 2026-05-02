@@ -83,6 +83,56 @@ impl AppError {
             en: en.into(),
         }
     }
+
+    /// 警告：子进程无法分配到 Job Object（例如已经处于不允许嵌套的 Job 中），将降级回退。
+    /// i18n key: `windows.job_assign_failed_fallback`
+    pub fn windows_job_assign_failed_fallback(reason: impl std::fmt::Display) -> Self {
+        Self::localized(
+            "windows.job_assign_failed_fallback",
+            format!("无法将子进程分配到 Job Object，将降级回退: {reason}"),
+            format!("Failed to assign child process to Job Object; falling back: {reason}"),
+        )
+    }
+
+    /// 错误：ResumeThread 调用失败。
+    /// i18n key: `windows.resume_thread_failed`
+    pub fn windows_resume_thread_failed(code: u32) -> Self {
+        Self::localized(
+            "windows.resume_thread_failed",
+            format!("ResumeThread 调用失败，Win32 错误码: {code}"),
+            format!("ResumeThread failed with Win32 error code: {code}"),
+        )
+    }
+
+    /// 错误：CreateProcessW 调用失败。
+    /// i18n key: `windows.create_process_failed`
+    pub fn windows_create_process_failed(code: u32) -> Self {
+        Self::localized(
+            "windows.create_process_failed",
+            format!("CreateProcessW 调用失败，Win32 错误码: {code}"),
+            format!("CreateProcessW failed with Win32 error code: {code}"),
+        )
+    }
+
+    /// 错误：创建 Job Object 失败。
+    /// i18n key: `windows.create_job_object_failed`
+    pub fn windows_create_job_object_failed(code: u32) -> Self {
+        Self::localized(
+            "windows.create_job_object_failed",
+            format!("创建 Job Object 失败，Win32 错误码: {code}"),
+            format!("Failed to create Job Object, Win32 error: {code}"),
+        )
+    }
+
+    /// 错误：设置 Job Object 信息失败。
+    /// i18n key: `windows.set_job_information_failed`
+    pub fn windows_set_job_information_failed(code: u32) -> Self {
+        Self::localized(
+            "windows.set_job_information_failed",
+            format!("设置 Job Object 信息失败，Win32 错误码: {code}"),
+            format!("Failed to set Job Object information, Win32 error: {code}"),
+        )
+    }
 }
 
 impl<T> From<PoisonError<T>> for AppError {

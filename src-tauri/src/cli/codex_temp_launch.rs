@@ -1,7 +1,11 @@
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(windows))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::codex_config::validate_config_toml;
@@ -59,7 +63,12 @@ pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
     Err(AppError::localized(
         "codex.temp_launch_unsupported_platform",
@@ -100,7 +109,51 @@ pub(crate) fn exec_prepared_codex(
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn exec_prepared_codex(
+    prepared: &PreparedCodexLaunch,
+    native_args: &[OsString],
+) -> Result<(), AppError> {
+    use crate::cli::windows_temp_launch::{
+        build_env_block_with_override, is_cmd_shim, run_suspended_child,
+        ScopedConsoleCtrlHandler,
+    };
+
+    let _ctrl_guard = ScopedConsoleCtrlHandler::install()?;
+
+    let (program, args) = build_command_windows(prepared, native_args)?;
+
+    let env_block = build_env_block_with_override("CODEX_HOME", prepared.codex_home.as_os_str());
+
+    // Pass the absolute system cmd.exe as lpApplicationName so
+    // CreateProcessW does not search the current directory (which would
+    // allow executable hijacking). For direct binaries we already have
+    // the fully-resolved path.
+    let application_name: Option<std::path::PathBuf> = if is_cmd_shim(&prepared.executable) {
+        Some(crate::cli::windows_temp_launch::resolve_system_cmd_exe()?)
+    } else {
+        Some(program.clone())
+    };
+
+    let exit_code = run_suspended_child(
+        &program,
+        &args,
+        Some(&env_block),
+        application_name.as_deref(),
+        Some(&prepared.codex_home),
+    )?;
+
+    if exit_code != 0 {
+        return Err(AppError::localized(
+            "codex.temp_launch_exit_nonzero",
+            format!("Codex 进程退出码非零: {exit_code}"),
+            format!("Codex process exited with non-zero code: {exit_code}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn exec_prepared_codex(
     _prepared: &PreparedCodexLaunch,
     _native_args: &[OsString],
@@ -111,6 +164,75 @@ pub(crate) fn exec_prepared_codex(
         "Temporary Codex launch in the current terminal is not supported on this platform."
             .to_string(),
     ))
+}
+
+#[cfg(windows)]
+fn build_command_windows(
+    prepared: &PreparedCodexLaunch,
+    native_args: &[OsString],
+) -> Result<(std::path::PathBuf, Vec<OsString>), AppError> {
+    use crate::cli::windows_temp_launch::{is_cmd_shim, validate_cmd_arg};
+
+    if is_cmd_shim(&prepared.executable) {
+        // Validate internally-constructed arguments that also flow through
+        // cmd.exe /c (executable path).
+        if let Err(e) = validate_cmd_arg(&prepared.executable.to_string_lossy()) {
+            return Err(cmd_arg_error_to_app_error("codex", e));
+        }
+
+        for arg in native_args {
+            if let Err(e) = validate_cmd_arg(&arg.to_string_lossy()) {
+                return Err(cmd_arg_error_to_app_error("codex", e));
+            }
+        }
+        let mut args = vec![OsString::from("/c"), OsString::from(&prepared.executable)];
+        args.extend_from_slice(native_args);
+        Ok((std::path::PathBuf::from("cmd.exe"), args))
+    } else {
+        Ok((prepared.executable.clone(), native_args.to_vec()))
+    }
+}
+
+#[cfg(windows)]
+fn cmd_arg_error_to_app_error(_app_label: &str, err: crate::cli::windows_temp_launch::CmdArgError) -> AppError {
+    use crate::cli::windows_temp_launch::CmdArgError;
+    match err {
+        CmdArgError::DoubleQuote(arg) => AppError::localized(
+            "codex.temp_launch_unsafe_cmd_quote",
+            format!("参数包含双引号，无法安全地通过 cmd.exe /c 传递: {}", arg),
+            format!(
+                "Native arg contains a double quote which cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
+        CmdArgError::UnsafeTrailingBackslash(arg) => AppError::localized(
+            "codex.temp_launch_unsafe_cmd_trailing_backslash",
+            format!(
+                "参数同时需要 cmd.exe 加引号且以反斜杠结尾，无法安全传递: {}",
+                arg
+            ),
+            format!(
+                "Native arg both requires cmd.exe quoting and ends with a backslash, which cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
+        CmdArgError::Percent(arg) => AppError::localized(
+            "codex.temp_launch_unsafe_cmd_percent",
+            format!("参数包含百分号，cmd.exe 会将其作为环境变量扩展，无法安全传递: {}", arg),
+            format!(
+                "Native arg contains a percent sign which cmd.exe expands as an environment variable, cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
+        CmdArgError::Exclamation(arg) => AppError::localized(
+            "codex.temp_launch_unsafe_cmd_exclamation",
+            format!("参数包含感叹号，cmd.exe 会将其作为延迟环境变量扩展，无法安全传递: {}", arg),
+            format!(
+                "Native arg contains an exclamation mark which cmd.exe expands as a delayed environment variable, cannot be safely passed through cmd.exe /c: {}",
+                arg
+            ),
+        ),
+    }
 }
 
 fn write_temp_codex_home(temp_dir: &Path, provider: &Provider) -> Result<PathBuf, AppError> {
@@ -161,18 +283,26 @@ where
         }
     };
 
+    #[cfg(windows)]
+    let timestamp = crate::cli::orphan_scan::current_process_creation_time_nanos();
+    #[cfg(not(windows))]
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = LAUNCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let dir_name = format!(
-        "cc-switch-codex-{}-{}-{timestamp}",
+        "cc-switch-codex-{}-{seq:08x}-{}-{timestamp}",
         sanitize_filename_fragment(&provider.id),
         std::process::id()
     );
     let codex_home = temp_dir.join(dir_name);
 
     let write_result = (|| {
+        #[cfg(windows)]
+        crate::cli::windows_temp_launch::create_secret_dir_all_with_acl(&codex_home)?;
+        #[cfg(not(windows))]
         fs::create_dir_all(&codex_home).map_err(|err| AppError::io(&codex_home, err))?;
         finalize(&codex_home)?;
 
@@ -213,7 +343,11 @@ fn finalize_temp_codex_home(path: &Path) -> Result<(), AppError> {
 }
 
 #[cfg(not(unix))]
-fn finalize_temp_codex_home(_path: &Path) -> Result<(), AppError> {
+fn finalize_temp_codex_home(path: &Path) -> Result<(), AppError> {
+    #[cfg(windows)]
+    {
+        crate::cli::windows_temp_launch::restrict_to_owner(path, true)?;
+    }
     Ok(())
 }
 
@@ -238,14 +372,15 @@ fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
 
 #[cfg(not(unix))]
 fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|err| AppError::io(path, err))
+    crate::cli::windows_temp_launch::create_secret_temp_file(path)
 }
 
 fn cleanup_temp_codex_home(path: &Path) -> Result<(), AppError> {
+    // Best-effort: remove the orphan-scan sidecar regardless of how the
+    // directory removal goes. The sidecar lives next to the temp dir, so a
+    // stranded sidecar without its main entry would otherwise wait for the
+    // periodic orphan-sidecar reap.
+    crate::cli::orphan_scan::remove_sidecar_for(path);
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -280,6 +415,79 @@ mod tests {
     #[cfg(unix)]
     use std::time::Duration;
     use tempfile::TempDir;
+
+    #[cfg(windows)]
+    #[test]
+    fn build_command_windows_accepts_plain_trailing_backslash_paths() {
+        let prepared = PreparedCodexLaunch {
+            executable: PathBuf::from("C:/tools/codex.cmd"),
+            codex_home: PathBuf::from("C:/tmp/cc-switch-codex-home"),
+        };
+        let native_args = vec![
+            OsString::from("--project-dir=C:\\tmp\\"),
+            OsString::from("C:\\work\\"),
+        ];
+
+        let (program, args) =
+            build_command_windows(&prepared, &native_args).expect("plain trailing backslash paths must pass");
+
+        assert_eq!(program, PathBuf::from("cmd.exe"));
+        assert!(args.iter().any(|a| a == "C:\\work\\"));
+        assert!(args
+            .iter()
+            .any(|a| a == "--project-dir=C:\\tmp\\"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_command_windows_rejects_trailing_backslash_when_quoting_required() {
+        let prepared = PreparedCodexLaunch {
+            executable: PathBuf::from("C:/tools/codex.cmd"),
+            codex_home: PathBuf::from("C:/tmp/cc-switch-codex-home"),
+        };
+        let native_args = vec![OsString::from("C:\\Program Files\\dir\\")];
+
+        let err = build_command_windows(&prepared, &native_args)
+            .expect_err("space + trailing backslash must be rejected for cmd.exe /c");
+
+        assert!(err
+            .to_string()
+            .contains("C:\\Program Files\\dir\\"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_command_windows_rejects_trailing_backslash_with_special_char() {
+        let prepared = PreparedCodexLaunch {
+            executable: PathBuf::from("C:/tools/codex.cmd"),
+            codex_home: PathBuf::from("C:/tmp/cc-switch-codex-home"),
+        };
+        let native_args = vec![OsString::from("a&b\\")];
+
+        let err = build_command_windows(&prepared, &native_args)
+            .expect_err("cmd-special char + trailing backslash must be rejected for cmd.exe /c");
+
+        assert!(err.to_string().contains("a&b\\"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_command_windows_passes_through_for_direct_binary() {
+        let prepared = PreparedCodexLaunch {
+            executable: PathBuf::from("C:/tools/codex.exe"),
+            codex_home: PathBuf::from("C:/tmp/cc-switch-codex-home"),
+        };
+        let native_args = vec![
+            OsString::from("C:\\Program Files\\dir\\"),
+            OsString::from("--project-dir=C:\\tmp\\"),
+        ];
+
+        let (program, args) = build_command_windows(&prepared, &native_args)
+            .expect("direct-binary path must not apply cmd.exe restrictions");
+
+        assert_eq!(program, PathBuf::from("C:/tools/codex.exe"));
+        assert_eq!(args, native_args);
+    }
 
     #[cfg(unix)]
     fn write_test_executable(temp_dir: &TempDir, name: &str, body: &str) -> PathBuf {
