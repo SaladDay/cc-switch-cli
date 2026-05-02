@@ -189,6 +189,12 @@ pub enum Action {
         app_type: AppType,
         enabled: bool,
     },
+    SetUpstreamProxyUrl {
+        url: Option<String>,
+    },
+    SetUpstreamProxyEnabled {
+        enabled: bool,
+    },
     SetLanguage(Language),
     SetVisibleApps {
         apps: crate::settings::VisibleApps,
@@ -348,17 +354,19 @@ pub enum SettingsItem {
     SkipClaudeOnboarding,
     ClaudePluginIntegration,
     Proxy,
+    UpstreamProxy,
     CheckForUpdates,
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 7] = [
+    pub const ALL: [SettingsItem; 8] = [
         SettingsItem::Language,
         SettingsItem::VisibleApps,
         SettingsItem::OpenClawConfigDir,
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,
         SettingsItem::Proxy,
+        SettingsItem::UpstreamProxy,
         SettingsItem::CheckForUpdates,
     ];
 }
@@ -373,6 +381,17 @@ impl LocalProxySettingsItem {
     pub const ALL: [LocalProxySettingsItem; 2] = [
         LocalProxySettingsItem::ListenAddress,
         LocalProxySettingsItem::ListenPort,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamProxySettingsItem {
+    Url,
+}
+
+impl UpstreamProxySettingsItem {
+    pub const ALL: [UpstreamProxySettingsItem; 1] = [
+        UpstreamProxySettingsItem::Url,
     ];
 }
 

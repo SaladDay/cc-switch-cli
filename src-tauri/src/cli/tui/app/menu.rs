@@ -116,7 +116,7 @@ impl App {
             | Route::SkillsDiscover
             | Route::SkillsRepos
             | Route::SkillDetail { .. } => NavItem::Skills,
-            Route::Settings | Route::SettingsProxy => NavItem::Settings,
+            Route::Settings | Route::SettingsProxy | Route::SettingsUpstreamProxy => NavItem::Settings,
         }
     }
 
@@ -474,6 +474,7 @@ impl App {
             Route::SkillDetail { directory } => self.on_skill_detail_key(key, data, &directory),
             Route::Settings => self.on_settings_key(key, data),
             Route::SettingsProxy => self.on_settings_proxy_key(key, data),
+            Route::SettingsUpstreamProxy => self.on_settings_upstream_proxy_key(key, data),
             Route::Main => match key.code {
                 KeyCode::Char('r') => Action::LocalEnvRefresh,
                 KeyCode::Char('p') | KeyCode::Char('P') => self.main_proxy_action(data),
@@ -481,6 +482,7 @@ impl App {
             },
         }
     }
+
     pub(crate) fn clamp_selections(&mut self, data: &UiData) {
         let providers_len = visible_providers(&self.app_type, &self.filter, data).len();
         if providers_len == 0 {

@@ -60,6 +60,10 @@ pub enum Commands {
     #[command(subcommand)]
     Proxy(commands::proxy::ProxyCommand),
 
+    /// Manage global upstream proxy
+    #[command(subcommand)]
+    Upstream(commands::upstream::UpstreamCommand),
+
     /// Start an app with a provider selector without switching the global current provider
     #[cfg(unix)]
     #[command(subcommand)]

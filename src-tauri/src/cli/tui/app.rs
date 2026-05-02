@@ -33,7 +33,7 @@ mod types;
 
 pub(crate) use app_state::{
     Action, App, ConfigItem, LocalProxySettingsItem, ProxyVisualTransition, SettingsItem,
-    WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
+    UpstreamProxySettingsItem, WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
 };
 pub use editor_state::{EditorKind, EditorMode, EditorState, EditorSubmit};
 pub(crate) use helpers::*;
