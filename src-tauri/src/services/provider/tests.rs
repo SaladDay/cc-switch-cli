@@ -2224,6 +2224,380 @@ fn common_config_snippet_is_not_persisted_into_provider_snapshot_on_switch() {
 
 #[test]
 #[serial]
+fn clear_common_config_removes_old_values_and_preserves_unmanaged_live_settings() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    config.common_config_snippets.claude = Some(
+        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#
+            .to_string(),
+    );
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    write_json_file(
+        &get_claude_settings_path(),
+        &json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token1",
+                "ANTHROPIC_BASE_URL": "https://claude.one",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
+            },
+            "includeCoAuthoredBy": false,
+            "statusLine": {
+                "type": "command",
+                "command": "~/.claude/statusline.sh"
+            }
+        }),
+    )
+    .expect("seed live settings");
+
+    let state = state_from_config(config);
+    ProviderService::clear_common_config_snippet(&state, AppType::Claude)
+        .expect("clear common snippet");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    let env = live
+        .get("env")
+        .and_then(Value::as_object)
+        .expect("live env should be object");
+    assert_eq!(
+        env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
+        Some("token1")
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str),
+        Some("https://claude.one")
+    );
+    assert!(
+        !env.contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+        "clearing common config should remove old common env values"
+    );
+    assert!(
+        live.get("includeCoAuthoredBy").is_none(),
+        "clearing common config should remove old common top-level values"
+    );
+    assert_eq!(
+        live["statusLine"]["command"],
+        json!("~/.claude/statusline.sh"),
+        "unmanaged live settings should remain after clearing common config"
+    );
+}
+
+#[test]
+#[serial]
+fn switch_claude_preserves_unmanaged_live_settings() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    write_json_file(
+        &get_claude_settings_path(),
+        &json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token1",
+                "ANTHROPIC_BASE_URL": "https://claude.one"
+            },
+            "statusLine": {
+                "type": "command",
+                "command": "~/.claude/statusline.sh"
+            },
+            "permissions": {
+                "allow": ["Bash(ls)"]
+            }
+        }),
+    )
+    .expect("seed live settings");
+
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert_eq!(
+        live["env"]["ANTHROPIC_AUTH_TOKEN"],
+        json!("token2"),
+        "selected provider token should win"
+    );
+    assert_eq!(
+        live["env"]["ANTHROPIC_BASE_URL"],
+        json!("https://claude.two"),
+        "selected provider base URL should win"
+    );
+    assert_eq!(
+        live["statusLine"]["command"],
+        json!("~/.claude/statusline.sh"),
+        "unmanaged top-level settings should be preserved"
+    );
+    assert_eq!(
+        live["permissions"]["allow"],
+        json!(["Bash(ls)"]),
+        "unmanaged nested settings should be preserved"
+    );
+
+    let cfg = state.config.read().expect("read config");
+    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
+    let p2_after = manager.providers.get("p2").expect("p2 exists");
+    assert!(
+        p2_after.settings_config.get("statusLine").is_none(),
+        "refreshing the selected provider snapshot should not store unmanaged top-level live settings"
+    );
+    assert!(
+        p2_after.settings_config.get("permissions").is_none(),
+        "refreshing the selected provider snapshot should not store unmanaged nested live settings"
+    );
+}
+
+#[test]
+#[serial]
+fn switch_claude_removes_stale_provider_owned_live_keys() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one",
+                        "ANTHROPIC_API_KEY": "stale-api-key",
+                        "ANTHROPIC_SMALL_FAST_MODEL": "legacy-small"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    write_json_file(
+        &get_claude_settings_path(),
+        &json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token1",
+                "ANTHROPIC_BASE_URL": "https://claude.one",
+                "ANTHROPIC_API_KEY": "stale-api-key",
+                "ANTHROPIC_SMALL_FAST_MODEL": "legacy-small"
+            },
+            "statusLine": {
+                "type": "command",
+                "command": "~/.claude/statusline.sh"
+            }
+        }),
+    )
+    .expect("seed live settings");
+
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    let env = live
+        .get("env")
+        .and_then(Value::as_object)
+        .expect("live env should be object");
+    assert_eq!(
+        env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
+        Some("token2")
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str),
+        Some("https://claude.two")
+    );
+    assert!(
+        !env.contains_key("ANTHROPIC_API_KEY"),
+        "stale provider-owned live keys should not be preserved"
+    );
+    assert!(
+        !env.contains_key("ANTHROPIC_SMALL_FAST_MODEL"),
+        "legacy provider-owned model keys should not be preserved"
+    );
+    assert_eq!(
+        live["statusLine"]["command"],
+        json!("~/.claude/statusline.sh"),
+        "unmanaged settings should still be preserved"
+    );
+}
+
+#[test]
+#[serial]
+fn backfill_claude_does_not_store_unmanaged_live_settings() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir())
+        .expect("create ~/.claude (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token1",
+                        "ANTHROPIC_BASE_URL": "https://claude.one"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token2",
+                        "ANTHROPIC_BASE_URL": "https://claude.two"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    write_json_file(
+        &get_claude_settings_path(),
+        &json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token1-updated",
+                "ANTHROPIC_BASE_URL": "https://claude.one.updated"
+            },
+            "statusLine": {
+                "type": "command",
+                "command": "~/.claude/statusline.sh"
+            },
+            "permissions": {
+                "allow": ["Bash(ls)"]
+            }
+        }),
+    )
+    .expect("seed live settings");
+
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
+
+    let cfg = state.config.read().expect("read config");
+    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
+    let p1_after = manager.providers.get("p1").expect("p1 exists");
+    let env = p1_after
+        .settings_config
+        .get("env")
+        .and_then(Value::as_object)
+        .expect("provider env should be object");
+    assert_eq!(
+        env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
+        Some("token1-updated"),
+        "backfill should still update provider-owned values"
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str),
+        Some("https://claude.one.updated"),
+        "backfill should still update provider-owned values"
+    );
+    assert!(
+        p1_after.settings_config.get("statusLine").is_none(),
+        "backfill should not store unmanaged top-level live settings"
+    );
+    assert!(
+        p1_after.settings_config.get("permissions").is_none(),
+        "backfill should not store unmanaged nested live settings"
+    );
+}
+
+#[test]
+#[serial]
 fn updating_common_snippet_removes_stale_fields_from_other_claude_provider_snapshots() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());
