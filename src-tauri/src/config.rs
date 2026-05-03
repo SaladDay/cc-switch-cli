@@ -15,13 +15,23 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-/// 获取 Claude Code 配置目录路径
+/// Returns the Claude Code config directory path.
+///
+/// Priority: `CLAUDE_CONFIG_DIR` env var > cc-switch settings override > `$HOME/.claude`
 pub fn get_claude_config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        let dir = PathBuf::from(dir);
+        if !dir.as_os_str().is_empty()
+            && !dir.to_string_lossy().trim().is_empty()
+        {
+            return dir;
+        }
+    }
     if let Some(custom) = crate::settings::get_claude_override_dir() {
         return custom;
     }
 
-    home_dir().expect("无法获取用户主目录").join(".claude")
+    home_dir().expect("Could not determine home directory").join(".claude")
 }
 
 /// 默认 Claude MCP 配置文件路径 (~/.claude.json)
@@ -208,25 +218,29 @@ mod tests {
     use std::ffi::OsString;
 
     struct ConfigDirEnvGuard {
+        key: String,
         original: Option<OsString>,
     }
 
     impl ConfigDirEnvGuard {
-        fn set(value: Option<&str>) -> Self {
-            let original = env::var_os("CC_SWITCH_CONFIG_DIR");
+        fn new(key: &str, value: Option<&str>) -> Self {
+            let original = env::var_os(key);
             match value {
-                Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-                None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
+                Some(v) => unsafe { env::set_var(key, v) },
+                None => unsafe { env::remove_var(key) },
             }
-            Self { original }
+            Self {
+                key: key.to_string(),
+                original,
+            }
         }
     }
 
     impl Drop for ConfigDirEnvGuard {
         fn drop(&mut self) {
             match self.original.as_ref() {
-                Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-                None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
+                Some(value) => unsafe { env::set_var(&self.key, value) },
+                None => unsafe { env::remove_var(&self.key) },
             }
         }
     }
@@ -264,7 +278,7 @@ mod tests {
     #[test]
     fn get_app_config_dir_defaults_to_home_dot_cc_switch() {
         let _guard = lock_test_home_and_settings();
-        let _env = ConfigDirEnvGuard::set(None);
+        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", None);
         set_test_home_override(Some(Path::new("/tmp/cc-switch-home-default")));
 
         assert_eq!(
@@ -278,7 +292,7 @@ mod tests {
     #[test]
     fn get_app_config_dir_uses_env_override_when_set() {
         let _guard = lock_test_home_and_settings();
-        let _env = ConfigDirEnvGuard::set(Some("/tmp/cc-switch-config-override"));
+        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("/tmp/cc-switch-config-override"));
         set_test_home_override(Some(Path::new("/tmp/cc-switch-home-ignored")));
 
         assert_eq!(
@@ -292,12 +306,54 @@ mod tests {
     #[test]
     fn get_app_config_dir_ignores_blank_env_override() {
         let _guard = lock_test_home_and_settings();
-        let _env = ConfigDirEnvGuard::set(Some("   "));
+        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("   "));
         set_test_home_override(Some(Path::new("/tmp/cc-switch-home-blank")));
 
         assert_eq!(
             get_app_config_dir(),
             PathBuf::from("/tmp/cc-switch-home-blank").join(".cc-switch")
+        );
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn get_claude_config_dir_respects_env_var() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", Some("/tmp/claude-custom"));
+        set_test_home_override(Some(Path::new("/tmp/claude-home")));
+
+        assert_eq!(
+            get_claude_config_dir(),
+            PathBuf::from("/tmp/claude-custom")
+        );
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn get_claude_config_dir_ignores_blank_env_var() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", Some("   "));
+        set_test_home_override(Some(Path::new("/tmp/claude-home-blank")));
+
+        assert_eq!(
+            get_claude_config_dir(),
+            PathBuf::from("/tmp/claude-home-blank").join(".claude")
+        );
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn get_claude_config_dir_falls_back_to_default_when_nothing_set() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", None);
+        set_test_home_override(Some(Path::new("/tmp/default-home")));
+
+        assert_eq!(
+            get_claude_config_dir(),
+            PathBuf::from("/tmp/default-home").join(".claude")
         );
 
         set_test_home_override(None);
