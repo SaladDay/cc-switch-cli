@@ -5,16 +5,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// Returns the Gemini config directory path.
-///
-/// Priority: cc-switch settings override > `$HOME/.gemini`
+/// 获取 Gemini 配置目录路径（支持设置覆盖）
 pub fn get_gemini_dir() -> PathBuf {
     if let Some(custom) = crate::settings::get_gemini_override_dir() {
         return custom;
     }
 
     dirs::home_dir()
-        .expect("Could not determine home directory")
+        .expect("无法获取用户主目录")
         .join(".gemini")
 }
 

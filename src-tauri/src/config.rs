@@ -358,6 +358,41 @@ mod tests {
 
         set_test_home_override(None);
     }
+
+    #[test]
+    fn get_claude_config_dir_env_overrides_settings() {
+        let _guard = lock_test_home_and_settings();
+        let original_settings = crate::settings::get_settings();
+        let mut settings = original_settings.clone();
+        settings.claude_config_dir = Some("/tmp/settings-override".to_string());
+        crate::settings::update_settings(settings).unwrap();
+        let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", Some("/tmp/env-override"));
+        set_test_home_override(Some(Path::new("/tmp/home")));
+
+        assert_eq!(get_claude_config_dir(), PathBuf::from("/tmp/env-override"));
+
+        crate::settings::update_settings(original_settings).unwrap();
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn get_claude_config_dir_blank_env_falls_back_to_settings() {
+        let _guard = lock_test_home_and_settings();
+        let original_settings = crate::settings::get_settings();
+        let mut settings = original_settings.clone();
+        settings.claude_config_dir = Some("/tmp/settings-override".to_string());
+        crate::settings::update_settings(settings).unwrap();
+        let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", Some("   "));
+        set_test_home_override(Some(Path::new("/tmp/home")));
+
+        assert_eq!(
+            get_claude_config_dir(),
+            PathBuf::from("/tmp/settings-override")
+        );
+
+        crate::settings::update_settings(original_settings).unwrap();
+        set_test_home_override(None);
+    }
 }
 
 /// 复制文件

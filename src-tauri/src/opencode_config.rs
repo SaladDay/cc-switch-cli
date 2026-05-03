@@ -6,9 +6,6 @@ use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
-/// Returns the OpenCode config directory path.
-///
-/// Priority: cc-switch settings override > `$HOME/.config/opencode`
 pub fn get_opencode_dir() -> PathBuf {
     if let Some(override_dir) = get_opencode_override_dir() {
         return override_dir;

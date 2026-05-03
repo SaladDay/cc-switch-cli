@@ -24,15 +24,13 @@ const CODEX_RESERVED_MODEL_PROVIDER_IDS: &[&str] = &[
     "ollama-chat",
 ];
 
-/// Returns the Codex config directory path.
-///
-/// Priority: cc-switch settings override > `$HOME/.codex`
+/// 获取 Codex 配置目录路径
 pub fn get_codex_config_dir() -> PathBuf {
     if let Some(custom) = crate::settings::get_codex_override_dir() {
         return custom;
     }
 
-    home_dir().expect("Could not determine home directory").join(".codex")
+    home_dir().expect("无法获取用户主目录").join(".codex")
 }
 
 /// 获取 Codex auth.json 路径
@@ -767,5 +765,4 @@ base_url = "https://aihubmix.example/v1"
             Some("aihubmix")
         );
     }
-
 }
