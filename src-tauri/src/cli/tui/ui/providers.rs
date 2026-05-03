@@ -1,3 +1,4 @@
+use crate::cli::tui::app::failover_queue_position;
 use crate::cli::tui::data;
 
 use super::*;
@@ -22,6 +23,12 @@ fn opencode_status_label(row: &ProviderRow) -> &'static str {
     } else {
         texts::tui_provider_status_untracked()
     }
+}
+
+fn failover_queue_label(data: &UiData, provider_id: &str) -> String {
+    failover_queue_position(data, provider_id)
+        .map(|position| format!("#{position}"))
+        .unwrap_or_else(|| "-".to_string())
 }
 
 pub(super) fn provider_rows_filtered<'a>(app: &App, data: &'a UiData) -> Vec<&'a ProviderRow> {
@@ -129,8 +136,14 @@ pub(super) fn render_providers(
                 keys.push(("a", texts::tui_key_add()));
                 keys.push(("i", texts::tui_key_import()));
             } else {
-                keys.extend([("s", texts::tui_key_switch()), ("a", texts::tui_key_add())]);
-                keys.extend([("e", texts::tui_key_edit()), ("d", texts::tui_key_delete())]);
+                if !data.proxy.auto_failover_enabled {
+                    keys.push(("Space", texts::tui_key_switch()));
+                }
+                keys.extend([
+                    ("a", texts::tui_key_add()),
+                    ("e", texts::tui_key_edit()),
+                    ("d", texts::tui_key_delete()),
+                ]);
                 if selected_supports_quota {
                     keys.push(("r", texts::tui_key_refresh()));
                 }
@@ -140,16 +153,23 @@ pub(super) fn render_providers(
                 }
                 keys.push(("c", texts::tui_key_stream_check()));
             }
+            if crate::cli::tui::app::supports_failover_controls(&app.app_type) {
+                keys.push(("f", crate::t!("manage failover", "管理故障转移")));
+            }
         }
         render_key_bar_center(frame, chunks[0], theme, &keys);
     }
 
-    let header = Row::new(vec![
+    let failover_supported = crate::cli::tui::app::supports_failover_controls(&app.app_type);
+    let mut header_cells = vec![
         Cell::from(""),
         Cell::from(texts::header_name()),
         Cell::from(texts::tui_header_api_url()),
-    ])
-    .style(header_style);
+    ];
+    if failover_supported {
+        header_cells.push(Cell::from(crate::t!("Failover", "故障转移")));
+    }
+    let header = Row::new(header_cells).style(header_style);
 
     let rows = visible.iter().enumerate().map(|(idx, row)| {
         let marker = if matches!(app.app_type, crate::app_config::AppType::OpenClaw) {
@@ -166,6 +186,12 @@ pub(super) fn render_providers(
             } else {
                 ""
             }
+        } else if failover_supported && data.proxy.auto_failover_enabled {
+            if row.provider.in_failover_queue {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            }
         } else if row.is_current {
             texts::tui_marker_active()
         } else {
@@ -173,20 +199,27 @@ pub(super) fn render_providers(
         };
         let api = row.api_url.as_deref().unwrap_or(texts::tui_na());
         let show_quota = row.is_current || idx == app.provider_idx;
-        Row::new(vec![
+        let mut cells = vec![
             Cell::from(marker),
             Cell::from(provider_name_with_quota_line(
                 app, data, row, show_quota, theme,
             )),
             Cell::from(api),
-        ])
+        ];
+        if failover_supported {
+            cells.push(Cell::from(failover_queue_label(data, &row.id)));
+        }
+        Row::new(cells)
     });
 
-    let constraints = vec![
+    let mut constraints = vec![
         Constraint::Length(2),
-        Constraint::Percentage(48),
-        Constraint::Percentage(52),
+        Constraint::Percentage(44),
+        Constraint::Percentage(46),
     ];
+    if failover_supported {
+        constraints.push(Constraint::Length(10));
+    }
 
     let table = Table::new(rows, constraints)
         .header(header)
@@ -247,7 +280,14 @@ pub(super) fn render_provider_detail(
             ];
             keys
         } else {
-            let keys = vec![("s", texts::tui_key_switch()), ("e", texts::tui_key_edit())];
+            let keys = if data.proxy.auto_failover_enabled {
+                vec![("e", texts::tui_key_edit())]
+            } else {
+                vec![
+                    ("Space", texts::tui_key_switch()),
+                    ("e", texts::tui_key_edit()),
+                ]
+            };
             keys
         };
         if data::quota_target_for_provider(&app.app_type, row).is_some() {
@@ -269,6 +309,9 @@ pub(super) fn render_provider_detail(
                 keys.push(("o", texts::tui_key_launch_temp()));
             }
             keys.push(("c", texts::tui_key_stream_check()));
+            if crate::cli::tui::app::supports_failover_controls(&app.app_type) {
+                keys.push(("f", crate::t!("manage failover", "管理故障转移")));
+            }
         }
         render_key_bar_center(frame, chunks[0], theme, &keys);
     }
@@ -399,6 +442,32 @@ pub(super) fn render_provider_detail(
                 Span::raw(api_key),
             ]));
         }
+    }
+
+    if crate::cli::tui::app::supports_failover_controls(&app.app_type) {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                crate::t!("Failover queue", "故障转移队列"),
+                Style::default().fg(theme.accent),
+            ),
+            Span::raw(": "),
+            Span::raw(failover_queue_position(data, &row.id).map_or_else(
+                || crate::t!("Not in queue", "未加入队列").to_string(),
+                |position| format!("{} #{position}", crate::t!("Queued", "已加入")),
+            )),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                crate::t!("Queue ordering", "队列排序"),
+                Style::default().fg(theme.accent),
+            ),
+            Span::raw(": "),
+            Span::raw(crate::t!(
+                "Uses provider order; moving queue entries can also reorder providers.",
+                "使用供应商顺序；移动队列项也可能重排供应商。"
+            )),
+        ]));
     }
 
     lines.extend(quota_detail_lines(app, data, row, theme));
@@ -567,7 +636,7 @@ mod tests {
         app.route = Route::Providers;
         app.focus = Focus::Content;
         let data = current_official_claude_data();
-        let all = all_text(&super::super::tests::render(&app, &data));
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
 
         assert!(!all.contains(texts::tui_header_quota()), "{all}");
         assert!(
@@ -610,7 +679,7 @@ mod tests {
                 default_model_id: None,
             },
         );
-        let all = all_text(&super::super::tests::render(&app, &data));
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
 
         assert!(
             all.contains(&format!("r {}", texts::tui_key_refresh())),

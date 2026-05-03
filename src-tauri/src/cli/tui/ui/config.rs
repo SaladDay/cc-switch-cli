@@ -23,6 +23,7 @@ pub(super) fn local_proxy_settings_item_label(item: &LocalProxySettingsItem) -> 
     match item {
         LocalProxySettingsItem::ListenAddress => texts::tui_settings_proxy_listen_address_label(),
         LocalProxySettingsItem::ListenPort => texts::tui_settings_proxy_listen_port_label(),
+        LocalProxySettingsItem::AutoFailover => crate::t!("Automatic failover", "自动故障转移"),
     }
 }
 
@@ -2500,6 +2501,14 @@ pub(super) fn render_settings_proxy(
                 local_proxy_settings_item_label(item).to_string(),
                 data.proxy.configured_listen_port.to_string(),
             ),
+            LocalProxySettingsItem::AutoFailover => (
+                local_proxy_settings_item_label(item).to_string(),
+                if data.proxy.auto_failover_enabled {
+                    texts::enabled().to_string()
+                } else {
+                    texts::disabled().to_string()
+                },
+            ),
         })
         .collect::<Vec<_>>();
 
@@ -2538,8 +2547,15 @@ pub(super) fn render_settings_proxy(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content && !data.proxy.running {
-        render_key_bar_center(frame, chunks[0], theme, &[("Enter", texts::tui_key_edit())]);
+    if app.focus == Focus::Content {
+        let key_label = match LocalProxySettingsItem::ALL.get(app.settings_proxy_idx) {
+            Some(LocalProxySettingsItem::AutoFailover) => texts::tui_key_toggle(),
+            _ if data.proxy.running => "",
+            _ => texts::tui_key_edit(),
+        };
+        if !key_label.is_empty() {
+            render_key_bar_center(frame, chunks[0], theme, &[("Enter", key_label)]);
+        }
     }
 
     let table = Table::new(

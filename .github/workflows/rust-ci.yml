@@ -46,3 +46,30 @@ jobs:
       - name: Check formatting
         working-directory: src-tauri
         run: cargo fmt --check
+
+  failover-e2e:
+    name: failover E2E test
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: failover-e2e
+
+      - name: Run failover E2E test
+        working-directory: src-tauri
+        run: |
+          sandbox_home="$(mktemp -d)"
+          export HOME="$sandbox_home"
+          export USERPROFILE="$sandbox_home"
+          export CC_SWITCH_CONFIG_DIR="$sandbox_home/.cc-switch"
+          cargo test --test proxy_claude_forwarder_alignment proxy_claude_auto_failover_uses_activated_queue_providers -- --exact --nocapture

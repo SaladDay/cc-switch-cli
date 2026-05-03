@@ -9209,6 +9209,390 @@ mod tests {
         assert_eq!(format, super::super::form::ClaudeApiFormat::OpenAiChat);
     }
 
+    fn failover_provider_row(
+        id: &str,
+        name: &str,
+        settings_config: serde_json::Value,
+        in_failover_queue: bool,
+        sort_index: Option<usize>,
+    ) -> ProviderRow {
+        let mut provider =
+            Provider::with_id(id.to_string(), name.to_string(), settings_config, None);
+        provider.in_failover_queue = in_failover_queue;
+        provider.sort_index = sort_index;
+
+        ProviderRow {
+            id: id.to_string(),
+            provider,
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        }
+    }
+
+    #[test]
+    fn providers_space_switches_provider_when_failover_disabled() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.proxy.auto_failover_enabled = false;
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+            false,
+            None,
+        ));
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(action, Action::ProviderSwitch { id } if id == "p1"));
+    }
+
+    #[test]
+    fn providers_space_is_blocked_when_failover_enabled() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.proxy.auto_failover_enabled = true;
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+            true,
+            Some(0),
+        ));
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.toast.as_ref(), Some(toast) if toast.kind == ToastKind::Info));
+    }
+
+    #[test]
+    fn providers_s_key_is_blocked_when_failover_enabled() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.proxy.auto_failover_enabled = true;
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"model_provider":{"base_url":"https://example.com"}}),
+            true,
+            Some(0),
+        ));
+
+        let action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.toast.as_ref(), Some(toast) if toast.kind == ToastKind::Info));
+    }
+
+    #[test]
+    fn providers_move_keys_do_not_move_failover_queue() {
+        let mut app = App::new(Some(AppType::Gemini));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"baseUrl":"https://example.com"}),
+            true,
+            Some(0),
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('<')), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('>')), &data),
+            Action::None
+        ));
+    }
+
+    #[test]
+    fn provider_detail_move_keys_do_not_move_failover_queue() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+            true,
+            Some(0),
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('<')), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('>')), &data),
+            Action::None
+        ));
+    }
+
+    #[test]
+    fn failover_queue_manager_f_toggles_auto_failover() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::FailoverQueueManager { selected: 0 };
+
+        let mut data = UiData::default();
+        data.proxy.auto_failover_enabled = true;
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+            true,
+            Some(0),
+        ));
+
+        let action = app.on_key(key(KeyCode::Char('f')), &data);
+        assert!(matches!(
+            action,
+            Action::SetProxyAutoFailover { app_type, enabled }
+                if app_type == AppType::Claude && !enabled
+        ));
+    }
+
+    #[test]
+    fn failover_queue_manager_f_toggles_auto_failover_when_empty() {
+        let mut app = App::new(Some(AppType::Gemini));
+        app.overlay = Overlay::FailoverQueueManager { selected: 0 };
+
+        let mut data = UiData::default();
+        data.proxy.auto_failover_enabled = false;
+
+        let action = app.on_key(key(KeyCode::Char('f')), &data);
+        assert!(matches!(
+            action,
+            Action::SetProxyAutoFailover { app_type, enabled }
+                if app_type == AppType::Gemini && enabled
+        ));
+    }
+
+    #[test]
+    fn providers_f_key_opens_failover_queue_manager_for_supported_apps() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+            false,
+            None,
+        ));
+
+        let action = app.on_key(key(KeyCode::Char('f')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::FailoverQueueManager { selected: 0 }
+        ));
+    }
+
+    #[test]
+    fn provider_detail_f_key_opens_failover_queue_manager_for_supported_apps() {
+        let mut app = App::new(Some(AppType::Gemini));
+        app.route = Route::ProviderDetail {
+            id: "p2".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"baseUrl":"https://example.com"}),
+            true,
+            Some(1),
+        ));
+        data.providers.rows.push(failover_provider_row(
+            "p2",
+            "Provider Two",
+            json!({"baseUrl":"https://example.com"}),
+            false,
+            None,
+        ));
+
+        let action = app.on_key(key(KeyCode::Char('f')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::FailoverQueueManager { selected: 1 }
+        ));
+    }
+
+    #[test]
+    fn failover_queue_manager_space_toggles_selected_provider() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::FailoverQueueManager { selected: 0 };
+
+        let mut data = UiData::default();
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+            false,
+            None,
+        ));
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetFailoverQueue { id, enabled } if id == "p1" && enabled
+        ));
+    }
+
+    #[test]
+    fn failover_queue_manager_enter_removes_selected_queued_provider() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.overlay = Overlay::FailoverQueueManager { selected: 0 };
+
+        let mut data = UiData::default();
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"model_provider":{"base_url":"https://example.com"}}),
+            true,
+            Some(1),
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetFailoverQueue { id, enabled } if id == "p1" && !enabled
+        ));
+    }
+
+    #[test]
+    fn failover_queue_manager_move_keys_only_move_queued_provider() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.overlay = Overlay::FailoverQueueManager { selected: 0 };
+
+        let mut data = UiData::default();
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"model_provider":{"base_url":"https://example.com"}}),
+            true,
+            Some(1),
+        ));
+        data.providers.rows.push(failover_provider_row(
+            "p2",
+            "Provider Two",
+            json!({"model_provider":{"base_url":"https://example.com"}}),
+            false,
+            None,
+        ));
+
+        let action = app.on_key(key(KeyCode::Char('>')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderMoveFailoverQueue {
+                id,
+                direction: MoveDirection::Down,
+            } if id == "p1"
+        ));
+
+        app.overlay = Overlay::FailoverQueueManager { selected: 1 };
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('>')), &data),
+            Action::None
+        ));
+    }
+
+    #[test]
+    fn failover_queue_manager_esc_closes_overlay() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::FailoverQueueManager { selected: 0 };
+
+        let action = app.on_key(key(KeyCode::Esc), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn unsupported_apps_ignore_failover_provider_keys() {
+        let mut app = App::new(Some(AppType::OpenCode));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"baseUrl":"https://example.com"}),
+            false,
+            None,
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('f')), &data),
+            Action::None
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('<')), &data),
+            Action::None
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_auto_failover_toggles_while_proxy_running() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.settings_proxy_idx = LocalProxySettingsItem::ALL
+            .iter()
+            .position(|item| *item == LocalProxySettingsItem::AutoFailover)
+            .expect("auto failover item should exist");
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.auto_failover_enabled = false;
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SetProxyAutoFailover { app_type, enabled }
+                if app_type == AppType::Claude && enabled
+        ));
+    }
+
+    #[test]
+    fn unsupported_apps_ignore_settings_proxy_auto_failover() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.settings_proxy_idx = LocalProxySettingsItem::ALL
+            .iter()
+            .position(|item| *item == LocalProxySettingsItem::AutoFailover)
+            .expect("auto failover item should exist");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+    }
+
     #[test]
     fn openclaw_provider_edit_submit_uses_plain_edit_submit() {
         let mut app = App::new(Some(AppType::OpenClaw));

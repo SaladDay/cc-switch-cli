@@ -182,6 +182,9 @@ pub enum Overlay {
     CommonSnippetPicker {
         selected: usize,
     },
+    FailoverQueueManager {
+        selected: usize,
+    },
     CommonSnippetView {
         app_type: AppType,
         view: TextViewState,

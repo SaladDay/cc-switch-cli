@@ -38,6 +38,15 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
+        Overlay::FailoverQueueManager { selected } => {
+            super::pickers::render_failover_queue_manager_overlay(
+                frame,
+                data,
+                content_area,
+                theme,
+                *selected,
+            )
+        }
         Overlay::CommonSnippetView { view, .. } => {
             super::basic::render_common_snippet_view_overlay(
                 frame,

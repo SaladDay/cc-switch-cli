@@ -185,6 +185,7 @@ mod tests {
         dir: TempDir,
         original_home: Option<String>,
         original_userprofile: Option<String>,
+        original_config_dir: Option<String>,
     }
 
     impl TempHome {
@@ -192,15 +193,18 @@ mod tests {
             let dir = TempDir::new().expect("create temp home");
             let original_home = env::var("HOME").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
+            let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
 
             env::set_var("HOME", dir.path());
             env::set_var("USERPROFILE", dir.path());
+            env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
             crate::settings::reload_test_settings();
 
             Self {
                 dir,
                 original_home,
                 original_userprofile,
+                original_config_dir,
             }
         }
     }
@@ -215,6 +219,11 @@ mod tests {
             match &self.original_userprofile {
                 Some(value) => env::set_var("USERPROFILE", value),
                 None => env::remove_var("USERPROFILE"),
+            }
+
+            match &self.original_config_dir {
+                Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
             }
 
             crate::settings::reload_test_settings();
@@ -282,7 +291,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(home_settings)]
     async fn sync_successful_provider_selection_updates_state_after_failover() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("create memory database"));
@@ -388,7 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(home_settings)]
     async fn sync_successful_provider_selection_skips_backup_update_when_takeover_disabled() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("create memory database"));

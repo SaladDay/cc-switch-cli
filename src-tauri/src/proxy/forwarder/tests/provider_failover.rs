@@ -72,7 +72,7 @@ async fn single_provider_bypasses_open_breaker() {
 }
 
 #[tokio::test]
-async fn single_provider_bypasses_open_breaker_even_without_explicit_bypass_option() {
+async fn single_provider_respects_open_breaker_without_explicit_bypass_option() {
     let (base_url, hits, server) = spawn_mock_upstream(StatusCode::OK, json!({"ok": true})).await;
     let provider = claude_provider("p1", &base_url, None);
     let (db, router) = test_router().await;
@@ -101,7 +101,7 @@ async fn single_provider_bypasses_open_breaker_even_without_explicit_bypass_opti
         .expect("open breaker");
     assert!(!router.allow_provider_request("p1", "claude").await.allowed);
 
-    let result = forwarder
+    let error = forwarder
         .forward_buffered_response(
             &AppType::Claude,
             "/v1/messages",
@@ -116,16 +116,16 @@ async fn single_provider_bypasses_open_breaker_even_without_explicit_bypass_opti
             RectifierConfig::default(),
         )
         .await
-        .expect("single provider request should succeed even without explicit bypass");
+        .expect_err("single provider request should respect an open breaker");
 
-    assert_eq!(result.provider.id, provider.id);
-    assert_eq!(hits.count.load(Ordering::SeqCst), 1);
+    assert!(matches!(error, ProxyError::NoAvailableProvider));
+    assert_eq!(hits.count.load(Ordering::SeqCst), 0);
 
     server.abort();
 }
 
 #[tokio::test]
-async fn single_streaming_provider_bypasses_open_breaker_even_without_explicit_bypass_option() {
+async fn single_streaming_provider_respects_open_breaker_without_explicit_bypass_option() {
     let (base_url, hits, bodies, server) = spawn_scripted_streaming_upstream(vec![(
         StatusCode::OK,
         ScriptedStreamingBody::Sse(
@@ -170,7 +170,7 @@ async fn single_streaming_provider_bypasses_open_breaker_even_without_explicit_b
         }]
     });
 
-    let result = forwarder
+    let error = forwarder
         .forward_response(
             &AppType::Claude,
             "/v1/messages",
@@ -185,16 +185,11 @@ async fn single_streaming_provider_bypasses_open_breaker_even_without_explicit_b
             RectifierConfig::default(),
         )
         .await
-        .expect("single provider streaming request should succeed even without explicit bypass");
+        .expect_err("single provider streaming request should respect an open breaker");
 
-    assert_eq!(result.provider.id, provider.id);
-    assert_eq!(result.response.status(), StatusCode::OK);
-    assert!(matches!(
-        &result.response,
-        StreamingResponse::Live(response) if is_sse_response(response)
-    ));
-    assert_eq!(hits.count.load(Ordering::SeqCst), 1);
-    assert_eq!(bodies.lock().await.len(), 1);
+    assert!(matches!(error, ProxyError::NoAvailableProvider));
+    assert_eq!(hits.count.load(Ordering::SeqCst), 0);
+    assert_eq!(bodies.lock().await.len(), 0);
 
     server.abort();
 }
@@ -251,6 +246,204 @@ async fn claude_buffered_failover_uses_second_provider_and_per_provider_endpoint
     secondary_server.abort();
 }
 
+#[tokio::test]
+async fn failover_enabled_single_queued_negative_provider_does_not_use_non_queued_healthy_provider()
+{
+    let (queued_url, queued_hits, queued_server) = spawn_mock_upstream(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({"error": {"message": "queued down"}}),
+    )
+    .await;
+    let (healthy_url, healthy_hits, healthy_server) =
+        spawn_mock_upstream(StatusCode::OK, json!({"id": "resp_healthy", "ok": true})).await;
+    let queued_provider = claude_provider("queued", &queued_url, None);
+    let healthy_provider = claude_provider("healthy", &healthy_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router.clone()).expect("create forwarder");
+
+    db.save_provider("claude", &queued_provider)
+        .expect("save queued provider");
+    db.save_provider("claude", &healthy_provider)
+        .expect("save healthy provider");
+    db.set_current_provider("claude", &healthy_provider.id)
+        .expect("set non-queued current provider");
+    db.add_to_failover_queue("claude", &queued_provider.id)
+        .expect("queue negative provider");
+    let mut config = db
+        .get_proxy_config_for_app("claude")
+        .await
+        .expect("load proxy config");
+    config.auto_failover_enabled = true;
+    db.update_proxy_config_for_app(config)
+        .await
+        .expect("enable failover");
+
+    let selected = router
+        .select_providers("claude")
+        .await
+        .expect("select queued providers");
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].id, queued_provider.id);
+
+    let error = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            claude_request_body(),
+            &HeaderMap::new(),
+            selected,
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect_err(
+            "single queued negative provider should fail without using non-queued healthy provider",
+        );
+
+    assert!(matches!(
+        error,
+        ProxyError::UpstreamError { status: 500, .. }
+    ));
+    assert_eq!(queued_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(healthy_hits.count.load(Ordering::SeqCst), 0);
+
+    queued_server.abort();
+    healthy_server.abort();
+}
+
+#[tokio::test]
+async fn failover_enabled_multiple_queued_providers_transfer_by_queue_priority() {
+    let (primary_url, primary_hits, primary_server) = spawn_mock_upstream(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({"error": {"message": "primary down"}}),
+    )
+    .await;
+    let (secondary_url, secondary_hits, secondary_server) =
+        spawn_mock_upstream(StatusCode::OK, json!({"id": "resp_secondary", "ok": true})).await;
+    let primary_provider = claude_provider("primary", &primary_url, None);
+    let secondary_provider = claude_provider("secondary", &secondary_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router.clone()).expect("create forwarder");
+
+    db.save_provider("claude", &primary_provider)
+        .expect("save primary provider");
+    db.save_provider("claude", &secondary_provider)
+        .expect("save secondary provider");
+    db.add_to_failover_queue("claude", &primary_provider.id)
+        .expect("queue primary provider");
+    db.add_to_failover_queue("claude", &secondary_provider.id)
+        .expect("queue secondary provider");
+    let mut config = db
+        .get_proxy_config_for_app("claude")
+        .await
+        .expect("load proxy config");
+    config.auto_failover_enabled = true;
+    db.update_proxy_config_for_app(config)
+        .await
+        .expect("enable failover");
+
+    let selected = router
+        .select_providers("claude")
+        .await
+        .expect("select queued providers");
+    assert_eq!(selected[0].id, primary_provider.id);
+    assert_eq!(selected[1].id, secondary_provider.id);
+
+    let result = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            claude_request_body(),
+            &HeaderMap::new(),
+            selected,
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("secondary queued provider should succeed after primary failure");
+
+    assert_eq!(result.provider.id, secondary_provider.id);
+    assert_eq!(primary_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 1);
+
+    primary_server.abort();
+    secondary_server.abort();
+}
+
+#[tokio::test]
+async fn failover_enabled_all_queued_providers_unavailable_fails_after_attempting_queue() {
+    let (primary_url, primary_hits, primary_server) = spawn_mock_upstream(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({"error": {"message": "primary down"}}),
+    )
+    .await;
+    let (secondary_url, secondary_hits, secondary_server) = spawn_mock_upstream(
+        StatusCode::BAD_GATEWAY,
+        json!({"error": {"message": "secondary down"}}),
+    )
+    .await;
+    let primary_provider = claude_provider("primary", &primary_url, None);
+    let secondary_provider = claude_provider("secondary", &secondary_url, None);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router.clone()).expect("create forwarder");
+
+    db.save_provider("claude", &primary_provider)
+        .expect("save primary provider");
+    db.save_provider("claude", &secondary_provider)
+        .expect("save secondary provider");
+    db.add_to_failover_queue("claude", &primary_provider.id)
+        .expect("queue primary provider");
+    db.add_to_failover_queue("claude", &secondary_provider.id)
+        .expect("queue secondary provider");
+    let mut config = db
+        .get_proxy_config_for_app("claude")
+        .await
+        .expect("load proxy config");
+    config.auto_failover_enabled = true;
+    db.update_proxy_config_for_app(config)
+        .await
+        .expect("enable failover");
+
+    let selected = router
+        .select_providers("claude")
+        .await
+        .expect("select queued providers");
+
+    let error = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            claude_request_body(),
+            &HeaderMap::new(),
+            selected,
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect_err("all queued negative providers should fail");
+
+    assert!(matches!(
+        error,
+        ProxyError::UpstreamError { status: 502, .. }
+    ));
+    assert_eq!(primary_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 1);
+
+    primary_server.abort();
+    secondary_server.abort();
+}
 #[tokio::test]
 async fn plain_buffered_400_fails_over_to_next_provider() {
     let (primary_url, primary_hits, primary_server) = spawn_mock_upstream(
@@ -468,7 +661,7 @@ async fn plain_streaming_422_json_error_fails_over_to_next_provider() {
 }
 
 #[tokio::test]
-async fn single_candidate_with_failover_enabled_still_bypasses_open_breaker() {
+async fn single_candidate_with_failover_enabled_respects_open_breaker() {
     let (base_url, hits, server) = spawn_mock_upstream(StatusCode::OK, json!({"ok": true})).await;
     let provider = claude_provider("p1", &base_url, None);
     let (db, router) = test_router().await;
@@ -496,7 +689,7 @@ async fn single_candidate_with_failover_enabled_still_bypasses_open_breaker() {
         .await
         .expect("open breaker");
 
-    let result = forwarder
+    let error = forwarder
         .forward_buffered_response(
             &AppType::Claude,
             "/v1/messages",
@@ -511,10 +704,10 @@ async fn single_candidate_with_failover_enabled_still_bypasses_open_breaker() {
             RectifierConfig::default(),
         )
         .await
-        .expect("single candidate should still bypass breaker when it is the only provider");
+        .expect_err("single failover candidate should respect an open breaker");
 
-    assert_eq!(result.provider.id, provider.id);
-    assert_eq!(hits.count.load(Ordering::SeqCst), 1);
+    assert!(matches!(error, ProxyError::NoAvailableProvider));
+    assert_eq!(hits.count.load(Ordering::SeqCst), 0);
 
     server.abort();
 }

@@ -767,39 +767,52 @@ impl App {
                 self.settings_proxy_idx = (self.settings_proxy_idx + 1).min(items_len - 1);
                 Action::None
             }
-            KeyCode::Enter => {
-                if data.proxy.running {
-                    self.push_toast(
-                        texts::tui_toast_proxy_settings_stop_before_edit(),
-                        ToastKind::Info,
-                    );
-                    return Action::None;
-                }
-
-                match LocalProxySettingsItem::ALL.get(self.settings_proxy_idx) {
-                    Some(LocalProxySettingsItem::ListenAddress) => {
-                        self.overlay = Overlay::TextInput(TextInputState {
-                            title: texts::tui_settings_proxy_title().to_string(),
-                            prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
-                            buffer: data.proxy.configured_listen_address.clone(),
-                            submit: TextSubmit::SettingsProxyListenAddress,
-                            secret: false,
-                        });
-                        Action::None
+            KeyCode::Enter => match LocalProxySettingsItem::ALL.get(self.settings_proxy_idx) {
+                Some(LocalProxySettingsItem::AutoFailover) => {
+                    if !supports_failover_controls(&self.app_type) {
+                        return Action::None;
                     }
-                    Some(LocalProxySettingsItem::ListenPort) => {
-                        self.overlay = Overlay::TextInput(TextInputState {
-                            title: texts::tui_settings_proxy_title().to_string(),
-                            prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
-                            buffer: data.proxy.configured_listen_port.to_string(),
-                            submit: TextSubmit::SettingsProxyListenPort,
-                            secret: false,
-                        });
-                        Action::None
+                    Action::SetProxyAutoFailover {
+                        app_type: self.app_type.clone(),
+                        enabled: !data.proxy.auto_failover_enabled,
                     }
-                    None => Action::None,
                 }
-            }
+                Some(LocalProxySettingsItem::ListenAddress) => {
+                    if data.proxy.running {
+                        self.push_toast(
+                            texts::tui_toast_proxy_settings_stop_before_edit(),
+                            ToastKind::Info,
+                        );
+                        return Action::None;
+                    }
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_settings_proxy_title().to_string(),
+                        prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
+                        buffer: data.proxy.configured_listen_address.clone(),
+                        submit: TextSubmit::SettingsProxyListenAddress,
+                        secret: false,
+                    });
+                    Action::None
+                }
+                Some(LocalProxySettingsItem::ListenPort) => {
+                    if data.proxy.running {
+                        self.push_toast(
+                            texts::tui_toast_proxy_settings_stop_before_edit(),
+                            ToastKind::Info,
+                        );
+                        return Action::None;
+                    }
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_settings_proxy_title().to_string(),
+                        prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
+                        buffer: data.proxy.configured_listen_port.to_string(),
+                        submit: TextSubmit::SettingsProxyListenPort,
+                        secret: false,
+                    });
+                    Action::None
+                }
+                None => Action::None,
+            },
             _ => Action::None,
         }
     }

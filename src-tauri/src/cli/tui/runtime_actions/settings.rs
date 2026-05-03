@@ -46,6 +46,45 @@ pub(super) fn set_proxy_listen_port(
     })
 }
 
+pub(super) fn set_proxy_auto_failover(
+    ctx: &mut RuntimeActionContext<'_>,
+    app_type: AppType,
+    enabled: bool,
+) -> Result<(), AppError> {
+    let state = load_state()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
+
+    let queue_empty = state.db.get_failover_queue(app_type.as_str())?.is_empty();
+    runtime.block_on(async {
+        let mut config = state.db.get_proxy_config_for_app(app_type.as_str()).await?;
+        config.auto_failover_enabled = enabled;
+        state.db.update_proxy_config_for_app(config).await
+    })?;
+
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.push_toast(
+        if enabled {
+            crate::t!("Automatic failover enabled.", "自动故障转移已开启。")
+        } else {
+            crate::t!("Automatic failover disabled.", "自动故障转移已关闭。")
+        },
+        super::super::app::ToastKind::Success,
+    );
+    if enabled && queue_empty {
+        ctx.app.push_toast(
+            crate::t!(
+                "Add providers to the failover queue before routing traffic through the proxy.",
+                "请先将供应商加入故障转移队列，再让流量经过代理。"
+            ),
+            super::super::app::ToastKind::Warning,
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn set_openclaw_config_dir(
     ctx: &mut RuntimeActionContext<'_>,
     path: Option<String>,

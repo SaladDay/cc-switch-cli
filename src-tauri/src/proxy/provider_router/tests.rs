@@ -10,6 +10,7 @@ struct TempHome {
     dir: TempDir,
     original_home: Option<String>,
     original_userprofile: Option<String>,
+    original_config_dir: Option<String>,
 }
 
 impl TempHome {
@@ -17,15 +18,18 @@ impl TempHome {
         let dir = TempDir::new().expect("failed to create temp home");
         let original_home = env::var("HOME").ok();
         let original_userprofile = env::var("USERPROFILE").ok();
+        let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
 
         env::set_var("HOME", dir.path());
         env::set_var("USERPROFILE", dir.path());
+        env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
         crate::settings::reload_test_settings();
 
         Self {
             dir,
             original_home,
             original_userprofile,
+            original_config_dir,
         }
     }
 }
@@ -42,12 +46,17 @@ impl Drop for TempHome {
             None => env::remove_var("USERPROFILE"),
         }
 
+        match &self.original_config_dir {
+            Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
+            None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
+        }
+
         crate::settings::reload_test_settings();
     }
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_settings)]
 async fn test_provider_router_creation() {
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().unwrap());
@@ -58,7 +67,7 @@ async fn test_provider_router_creation() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_settings)]
 async fn test_failover_disabled_uses_current_provider() {
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().unwrap());
@@ -79,7 +88,7 @@ async fn test_failover_disabled_uses_current_provider() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_settings)]
 async fn test_failover_disabled_prefers_effective_current_provider_from_settings() {
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().unwrap());
@@ -100,7 +109,7 @@ async fn test_failover_disabled_prefers_effective_current_provider_from_settings
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_settings)]
 async fn test_failover_disabled_reloads_settings_for_long_lived_router() {
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().unwrap());
@@ -129,7 +138,7 @@ async fn test_failover_disabled_reloads_settings_for_long_lived_router() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_settings)]
 async fn test_failover_enabled_uses_queue_order_ignoring_current() {
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().unwrap());
@@ -160,7 +169,7 @@ async fn test_failover_enabled_uses_queue_order_ignoring_current() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_settings)]
 async fn test_failover_enabled_without_queue_returns_no_providers_configured() {
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().unwrap());
@@ -189,7 +198,52 @@ async fn test_failover_enabled_without_queue_returns_no_providers_configured() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_settings)]
+async fn test_failover_enabled_single_open_queued_provider_does_not_use_non_queued_current() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().unwrap());
+
+    db.update_circuit_breaker_config(&CircuitBreakerConfig {
+        failure_threshold: 1,
+        timeout_seconds: 3600,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let queued = Provider::with_id("queued".to_string(), "Queued".to_string(), json!({}), None);
+    let current = Provider::with_id(
+        "current".to_string(),
+        "Current".to_string(),
+        json!({}),
+        None,
+    );
+
+    db.save_provider("claude", &queued).unwrap();
+    db.save_provider("claude", &current).unwrap();
+    db.set_current_provider("claude", "current").unwrap();
+    db.add_to_failover_queue("claude", "queued").unwrap();
+
+    let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+    config.auto_failover_enabled = true;
+    db.update_proxy_config_for_app(config).await.unwrap();
+
+    let router = ProviderRouter::new(db.clone());
+    router
+        .record_result("queued", "claude", false, false, Some("fail".to_string()))
+        .await
+        .unwrap();
+
+    let error = router
+        .select_providers("claude")
+        .await
+        .expect_err("auto failover should not select a non-queued current provider");
+
+    assert!(matches!(error, ProxyError::AllProvidersCircuitOpen));
+}
+
+#[tokio::test]
+#[serial(home_settings)]
 async fn test_select_providers_does_not_consume_half_open_permit() {
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().unwrap());
@@ -228,7 +282,7 @@ async fn test_select_providers_does_not_consume_half_open_permit() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_settings)]
 async fn test_release_permit_neutral_frees_half_open_slot() {
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().unwrap());
@@ -273,7 +327,7 @@ async fn test_release_permit_neutral_frees_half_open_slot() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_settings)]
 async fn test_record_result_uses_app_failure_threshold_for_health_updates() {
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().unwrap());

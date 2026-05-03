@@ -216,6 +216,7 @@ pub struct ProxySnapshot {
     pub enabled: bool,
     pub running: bool,
     pub managed_runtime: bool,
+    pub auto_failover_enabled: bool,
     pub claude_takeover: bool,
     pub codex_takeover: bool,
     pub gemini_takeover: bool,
@@ -916,6 +917,7 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
 
     runtime.block_on(async {
         let config = state.proxy_service.get_global_config().await?;
+        let app_proxy_config = state.db.get_proxy_config_for_app(app_type.as_str()).await?;
         let runtime_status = state.proxy_service.get_status().await;
         let takeover = state
             .proxy_service
@@ -952,6 +954,7 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
             enabled: config.proxy_enabled,
             running: runtime_status.running,
             managed_runtime: runtime_status.managed_session_token.is_some(),
+            auto_failover_enabled: app_proxy_config.auto_failover_enabled,
             claude_takeover: takeover.claude,
             codex_takeover: takeover.codex,
             gemini_takeover: takeover.gemini,
@@ -1006,32 +1009,40 @@ mod tests {
     struct HomeGuard {
         old_home: Option<std::ffi::OsString>,
         old_userprofile: Option<std::ffi::OsString>,
+        old_config_dir: Option<std::ffi::OsString>,
     }
 
     impl HomeGuard {
         fn set(home: &Path) -> Self {
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
                 old_home,
                 old_userprofile,
+                old_config_dir,
             }
         }
     }
 
     impl Drop for HomeGuard {
         fn drop(&mut self) {
-            match self.old_home.take() {
+            match &self.old_home {
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),
             }
-            match self.old_userprofile.take() {
+            match &self.old_userprofile {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
+            }
+            match &self.old_config_dir {
+                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
             }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
@@ -1078,6 +1089,36 @@ mod tests {
             primary_model_id: None,
             default_model_id: None,
         }
+    }
+
+    #[test]
+    #[serial]
+    fn load_proxy_snapshot_reads_app_auto_failover_state() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let _home = HomeGuard::set(temp.path());
+
+        let state = load_state().expect("load state");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create runtime");
+        runtime.block_on(async {
+            let mut config = state
+                .db
+                .get_proxy_config_for_app("claude")
+                .await
+                .expect("read claude app proxy config");
+            config.auto_failover_enabled = true;
+            state
+                .db
+                .update_proxy_config_for_app(config)
+                .await
+                .expect("persist claude app proxy config");
+        });
+
+        let snapshot = load_proxy_snapshot(&AppType::Claude).expect("load proxy snapshot");
+        assert!(snapshot.auto_failover_enabled);
     }
 
     #[test]

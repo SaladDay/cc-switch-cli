@@ -152,7 +152,7 @@ impl RequestForwarder {
         }
 
         let claude_error_path = matches!(app_type, AppType::Claude);
-        let bypass_circuit_breaker = options.bypass_circuit_breaker || providers.len() == 1;
+        let bypass_circuit_breaker = options.bypass_circuit_breaker;
         let mut last_error = None;
         let mut attempted_provider = false;
         let mut pending_upstream_response = None;
@@ -389,7 +389,7 @@ impl RequestForwarder {
         }
 
         let claude_error_path = matches!(app_type, AppType::Claude);
-        let bypass_circuit_breaker = options.bypass_circuit_breaker || providers.len() == 1;
+        let bypass_circuit_breaker = options.bypass_circuit_breaker;
         let mut last_error = None;
         let mut attempted_provider = false;
         let mut pending_upstream_response = None;

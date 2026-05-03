@@ -254,6 +254,7 @@ pub(super) struct SettingsEnvGuard {
     _lock: TestHomeSettingsLock,
     old_home: Option<OsString>,
     old_userprofile: Option<OsString>,
+    old_config_dir: Option<OsString>,
 }
 
 impl SettingsEnvGuard {
@@ -261,14 +262,17 @@ impl SettingsEnvGuard {
         let lock = lock_test_home_and_settings();
         let old_home = std::env::var_os("HOME");
         let old_userprofile = std::env::var_os("USERPROFILE");
+        let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
         std::env::set_var("HOME", home);
         std::env::set_var("USERPROFILE", home);
+        std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
         set_test_home_override(Some(home));
         crate::settings::reload_test_settings();
         Self {
             _lock: lock,
             old_home,
             old_userprofile,
+            old_config_dir,
         }
     }
 }
@@ -282,6 +286,10 @@ impl Drop for SettingsEnvGuard {
         match &self.old_userprofile {
             Some(value) => std::env::set_var("USERPROFILE", value),
             None => std::env::remove_var("USERPROFILE"),
+        }
+        match &self.old_config_dir {
+            Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+            None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
         }
         set_test_home_override(self.old_home.as_deref().map(Path::new));
         crate::settings::reload_test_settings();
@@ -504,6 +512,30 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
         skills: SkillsSnapshot::default(),
         proxy: ProxySnapshot::default(),
         quota: Default::default(),
+    }
+}
+
+fn failover_provider_row(
+    id: &str,
+    name: &str,
+    is_current: bool,
+    in_failover_queue: bool,
+    sort_index: Option<usize>,
+) -> ProviderRow {
+    let mut provider = Provider::with_id(id.to_string(), name.to_string(), json!({}), None);
+    provider.in_failover_queue = in_failover_queue;
+    provider.sort_index = sort_index;
+
+    ProviderRow {
+        id: id.to_string(),
+        provider,
+        api_url: Some("https://example.com".to_string()),
+        is_current,
+        is_in_config: true,
+        is_saved: true,
+        is_default_model: false,
+        primary_model_id: Some("claude-sonnet-4".to_string()),
+        default_model_id: None,
     }
 }
 
@@ -6717,6 +6749,134 @@ fn openclaw_provider_list_key_bar_uses_additive_mode_actions() {
     assert!(all.contains("s add/remove"));
     assert!(all.contains("x set default"));
     assert!(!all.contains("s switch"));
+}
+
+#[test]
+fn failover_provider_list_key_bar_hides_move_hint_and_gates_switch_hint() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+
+    let disabled_text = all_text(&render_with_size(&app, &data, 180, 40));
+    let disabled_keys = line_with(&disabled_text, "manage failover");
+    assert!(disabled_keys.contains("Space"), "{disabled_keys}");
+    assert!(!disabled_keys.contains("</>"), "{disabled_keys}");
+
+    data.proxy.auto_failover_enabled = true;
+    let enabled_text = all_text(&render_with_size(&app, &data, 180, 40));
+    let enabled_keys = line_with(&enabled_text, "manage failover");
+    assert!(!enabled_keys.contains("Space"), "{enabled_keys}");
+    assert!(!enabled_keys.contains("</>"), "{enabled_keys}");
+}
+
+#[test]
+fn failover_provider_list_marks_queue_entries_when_enabled() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.auto_failover_enabled = true;
+    data.providers.current_id = "current".to_string();
+    data.providers.rows = vec![
+        failover_provider_row("current", "Current Provider", true, false, None),
+        failover_provider_row("queued", "Queued Provider", false, true, Some(1)),
+    ];
+
+    let buf = render(&app, &data);
+    let current_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("Current Provider") && line.contains("https://example.com"))
+        .expect("current provider row rendered");
+    let queued_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("Queued Provider") && line.contains("https://example.com"))
+        .expect("queued provider row rendered");
+
+    assert!(
+        !current_line.contains(texts::tui_marker_active()),
+        "{current_line}"
+    );
+    assert!(
+        queued_line.contains(texts::tui_marker_active()),
+        "{queued_line}"
+    );
+    assert!(queued_line.contains("#1"), "{queued_line}");
+}
+
+#[test]
+fn failover_provider_list_uses_current_marker_when_disabled() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.auto_failover_enabled = false;
+    data.providers.current_id = "current".to_string();
+    data.providers.rows = vec![
+        failover_provider_row("current", "Current Provider", true, false, None),
+        failover_provider_row("queued", "Queued Provider", false, true, Some(1)),
+    ];
+
+    let buf = render(&app, &data);
+    let current_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("Current Provider") && line.contains("https://example.com"))
+        .expect("current provider row rendered");
+
+    assert!(
+        current_line.contains(texts::tui_marker_active()),
+        "{current_line}"
+    );
+}
+
+#[test]
+fn failover_queue_overlay_renders_enabled_state_and_toggle_hint() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::FailoverQueueManager { selected: 0 };
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.auto_failover_enabled = true;
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("Automatic failover: enabled"), "{all}");
+    assert!(all.contains("f enable/disable"), "{all}");
+    assert!(
+        all.contains("Auto failover uses only checked providers"),
+        "{all}"
+    );
+}
+
+#[test]
+fn failover_queue_overlay_renders_disabled_state_and_toggle_hint() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::FailoverQueueManager { selected: 0 };
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.auto_failover_enabled = false;
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("Automatic failover: disabled"), "{all}");
+    assert!(all.contains("f enable/disable"), "{all}");
+    assert!(all.contains("Direct provider selection is used"), "{all}");
 }
 
 #[test]

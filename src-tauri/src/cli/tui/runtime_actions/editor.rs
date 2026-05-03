@@ -819,6 +819,7 @@ mod tests {
         _lock: TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
+        old_config_dir: Option<OsString>,
     }
 
     impl EnvGuard {
@@ -826,14 +827,17 @@ mod tests {
             let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
                 _lock: lock,
                 old_home,
                 old_userprofile,
+                old_config_dir,
             }
         }
     }
@@ -847,6 +851,10 @@ mod tests {
             match &self.old_userprofile {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
+            }
+            match &self.old_config_dir {
+                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
             }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
