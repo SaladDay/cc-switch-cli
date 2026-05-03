@@ -8,14 +8,8 @@ use std::path::PathBuf;
 
 /// Returns the OpenCode config directory path.
 ///
-/// Priority: `OPENCODE_CONFIG_DIR` env var > cc-switch settings override > `$HOME/.config/opencode`
+/// Priority: cc-switch settings override > `$HOME/.config/opencode`
 pub fn get_opencode_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("OPENCODE_CONFIG_DIR") {
-        let dir = PathBuf::from(dir);
-        if !dir.as_os_str().is_empty() && !dir.to_string_lossy().trim().is_empty() {
-            return dir;
-        }
-    }
     if let Some(override_dir) = get_opencode_override_dir() {
         return override_dir;
     }

@@ -21,14 +21,8 @@ const OPENCLAW_DEFAULT_SOURCE: &str =
     "{\n  models: {\n    mode: 'merge',\n    providers: {},\n  },\n}\n";
 /// Returns the OpenClaw config directory path.
 ///
-/// Priority: `OPENCLAW_CONFIG_DIR` env var > cc-switch settings override > `$HOME/.openclaw`
+/// Priority: cc-switch settings override > `$HOME/.openclaw`
 pub fn get_openclaw_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("OPENCLAW_CONFIG_DIR") {
-        let dir = PathBuf::from(dir);
-        if !dir.as_os_str().is_empty() && !dir.to_string_lossy().trim().is_empty() {
-            return dir;
-        }
-    }
     if let Some(override_dir) = get_openclaw_override_dir() {
         return override_dir;
     }

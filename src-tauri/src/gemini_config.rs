@@ -7,14 +7,8 @@ use std::path::PathBuf;
 
 /// Returns the Gemini config directory path.
 ///
-/// Priority: `GEMINI_CONFIG_DIR` env var > cc-switch settings override > `$HOME/.gemini`
+/// Priority: cc-switch settings override > `$HOME/.gemini`
 pub fn get_gemini_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("GEMINI_CONFIG_DIR") {
-        let dir = PathBuf::from(dir);
-        if !dir.as_os_str().is_empty() && !dir.to_string_lossy().trim().is_empty() {
-            return dir;
-        }
-    }
     if let Some(custom) = crate::settings::get_gemini_override_dir() {
         return custom;
     }
