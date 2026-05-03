@@ -21,9 +21,7 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 pub fn get_claude_config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         let dir = PathBuf::from(dir);
-        if !dir.as_os_str().is_empty()
-            && !dir.to_string_lossy().trim().is_empty()
-        {
+        if !dir.as_os_str().is_empty() && !dir.to_string_lossy().trim().is_empty() {
             return dir;
         }
     }
@@ -292,7 +290,10 @@ mod tests {
     #[test]
     fn get_app_config_dir_uses_env_override_when_set() {
         let _guard = lock_test_home_and_settings();
-        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("/tmp/cc-switch-config-override"));
+        let _env = ConfigDirEnvGuard::new(
+            "CC_SWITCH_CONFIG_DIR",
+            Some("/tmp/cc-switch-config-override"),
+        );
         set_test_home_override(Some(Path::new("/tmp/cc-switch-home-ignored")));
 
         assert_eq!(
@@ -323,10 +324,7 @@ mod tests {
         let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", Some("/tmp/claude-custom"));
         set_test_home_override(Some(Path::new("/tmp/claude-home")));
 
-        assert_eq!(
-            get_claude_config_dir(),
-            PathBuf::from("/tmp/claude-custom")
-        );
+        assert_eq!(get_claude_config_dir(), PathBuf::from("/tmp/claude-custom"));
 
         set_test_home_override(None);
     }
