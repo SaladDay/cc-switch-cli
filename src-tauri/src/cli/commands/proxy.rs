@@ -156,13 +156,9 @@ fn serve_proxy(
                     ))
                 );
             }
-            println!(
-                "{}",
-                info(crate::t!(
-                    "Manual takeover only. Automatic failover is disabled in this phase.",
-                    "仅支持手动接管；本阶段不包含自动故障转移。"
-                ))
-            );
+            for line in build_auto_failover_status_lines(&state) {
+                println!("{}", info(&line));
+            }
             println!(
                 "{}",
                 info(crate::t!(
@@ -284,8 +280,8 @@ fn build_proxy_overview_lines(
             listen_port
         ),
         crate::t!(
-            "Mode: manual takeover only (automatic failover disabled)",
-            "模式：仅支持手动接管（自动故障转移已禁用）"
+            "Mode: local proxy (manual takeover and automatic failover follow app settings)",
+            "模式：本地代理（手动接管和自动故障转移遵循各应用配置）"
         )
         .to_string(),
         format!(
@@ -339,8 +335,13 @@ fn build_proxy_overview_lines(
             }
         ),
         String::new(),
-        crate::t!("Current providers:", "当前供应商：").to_string(),
+        crate::t!("Auto failover:", "自动故障转移：").to_string(),
     ];
+    lines.extend(build_auto_failover_status_lines(state));
+    lines.extend([
+        String::new(),
+        crate::t!("Current providers:", "当前供应商：").to_string(),
+    ]);
     lines.extend(current_providers);
     lines.extend([
         String::new(),
@@ -366,8 +367,8 @@ fn build_proxy_overview_lines(
         .to_string(),
         String::new(),
         crate::t!(
-            "This is a foreground manual-takeover session. Automatic failover is intentionally not available.",
-            "这是前台手动接管会话；自动故障转移在当前阶段明确不提供。"
+            "Manual takeover is controlled with --takeover; automatic failover uses each app's proxy settings and failover queue.",
+            "手动接管通过 --takeover 控制；自动故障转移使用各应用的代理配置和故障转移队列。"
         )
         .to_string(),
         String::new(),
@@ -384,6 +385,28 @@ fn build_proxy_overview_lines(
     ]);
 
     lines
+}
+
+fn build_auto_failover_status_lines(state: &AppState) -> Vec<String> {
+    [
+        (AppType::Claude, "Claude"),
+        (AppType::Codex, "Codex"),
+        (AppType::Gemini, "Gemini"),
+    ]
+    .into_iter()
+    .map(|(app, label)| {
+        let (_, auto_failover_enabled) = state.db.get_proxy_flags_sync(app.as_str());
+        format!(
+            "- {}: {}",
+            label,
+            if auto_failover_enabled {
+                crate::t!("auto failover on", "自动故障转移开启")
+            } else {
+                crate::t!("auto failover off", "自动故障转移关闭")
+            }
+        )
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -442,6 +465,40 @@ mod tests {
         assert!(
             output.contains("Gemini: takeover on") || output.contains("Gemini: 已接管"),
             "proxy show output should include Gemini manual takeover state"
+        );
+    }
+
+    #[test]
+    fn proxy_overview_lines_report_configured_auto_failover_state() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        db.set_proxy_flags_sync("codex", false, true)
+            .expect("enable codex auto failover");
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db),
+        };
+        let global = GlobalProxyConfig {
+            proxy_enabled: true,
+            listen_address: "127.0.0.1".to_string(),
+            listen_port: 15721,
+            enable_logging: true,
+        };
+        let config = crate::ProxyConfig::default();
+        let status = ProxyStatus::default();
+        let takeover = ProxyTakeoverStatus::default();
+
+        let lines = build_proxy_overview_lines(&state, &global, &config, &status, &takeover);
+        let output = lines.join("\n");
+
+        assert!(
+            output.contains("Codex: auto failover on")
+                || output.contains("Codex: 自动故障转移开启"),
+            "proxy show output should reflect app-specific auto failover settings"
+        );
+        assert!(
+            !output.contains("automatic failover disabled"),
+            "proxy show output should not hard-code automatic failover as disabled"
         );
     }
 }
