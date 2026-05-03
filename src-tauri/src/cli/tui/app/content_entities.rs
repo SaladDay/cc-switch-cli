@@ -1,6 +1,46 @@
 use super::*;
 
 impl App {
+    fn provider_switch_action(&mut self, row: &super::data::ProviderRow, data: &UiData) -> Action {
+        if supports_failover_controls(&self.app_type) && data.proxy.auto_failover_enabled {
+            self.push_toast(
+                crate::t!(
+                    "Manage provider priority in the failover queue while automatic failover is enabled.",
+                    "自动故障转移开启时，请在故障转移队列中管理供应商优先级。"
+                ),
+                ToastKind::Info,
+            );
+            return Action::None;
+        }
+
+        if matches!(self.app_type, AppType::OpenCode) {
+            if row.is_in_config {
+                return Action::ProviderRemoveFromConfig { id: row.id.clone() };
+            }
+
+            return Action::ProviderSwitch { id: row.id.clone() };
+        }
+        if matches!(self.app_type, AppType::OpenClaw) {
+            if row.is_in_config {
+                if row.is_default_model {
+                    self.push_toast(
+                        texts::tui_toast_provider_cannot_remove_default_model(),
+                        ToastKind::Warning,
+                    );
+                    return Action::None;
+                }
+                return Action::ProviderRemoveFromConfig { id: row.id.clone() };
+            }
+
+            return Action::ProviderSwitch { id: row.id.clone() };
+        }
+        if row.is_current {
+            self.push_toast(texts::tui_toast_provider_already_in_use(), ToastKind::Info);
+            return Action::None;
+        }
+        Action::ProviderSwitch { id: row.id.clone() }
+    }
+
     pub(crate) fn on_providers_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         let visible = visible_providers(&self.app_type, &self.filter, data);
         match key.code {
@@ -38,36 +78,11 @@ impl App {
                 self.open_provider_edit_form(row);
                 Action::None
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char('s') | KeyCode::Char(' ') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                if matches!(self.app_type, AppType::OpenCode) {
-                    if row.is_in_config {
-                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
-                    }
-
-                    return Action::ProviderSwitch { id: row.id.clone() };
-                }
-                if matches!(self.app_type, AppType::OpenClaw) {
-                    if row.is_in_config {
-                        if row.is_default_model {
-                            self.push_toast(
-                                texts::tui_toast_provider_cannot_remove_default_model(),
-                                ToastKind::Warning,
-                            );
-                            return Action::None;
-                        }
-                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
-                    }
-
-                    return Action::ProviderSwitch { id: row.id.clone() };
-                }
-                if row.is_current {
-                    self.push_toast(texts::tui_toast_provider_already_in_use(), ToastKind::Info);
-                    return Action::None;
-                }
-                Action::ProviderSwitch { id: row.id.clone() }
+                self.provider_switch_action(row, data)
             }
             KeyCode::Char('x') => {
                 let Some(row) = visible.get(self.provider_idx) else {
@@ -149,6 +164,22 @@ impl App {
                 };
                 Action::ProviderStreamCheck { id: row.id.clone() }
             }
+            KeyCode::Char('f') => {
+                if !supports_failover_controls(&self.app_type) {
+                    return Action::None;
+                }
+                let selected = visible
+                    .get(self.provider_idx)
+                    .and_then(|row| {
+                        failover_queue_rows(data)
+                            .iter()
+                            .position(|provider_row| provider_row.id == row.id)
+                    })
+                    .unwrap_or(0);
+                self.overlay = Overlay::FailoverQueueManager { selected };
+                Action::None
+            }
+            KeyCode::Char('<') | KeyCode::Char('>') => Action::None,
             KeyCode::Char('r') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
@@ -179,34 +210,7 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => Action::None,
-            KeyCode::Char('s') => {
-                if matches!(self.app_type, AppType::OpenCode) {
-                    if row.is_in_config {
-                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
-                    }
-
-                    return Action::ProviderSwitch { id: row.id.clone() };
-                }
-                if matches!(self.app_type, AppType::OpenClaw) {
-                    if row.is_in_config {
-                        if row.is_default_model {
-                            self.push_toast(
-                                texts::tui_toast_provider_cannot_remove_default_model(),
-                                ToastKind::Warning,
-                            );
-                            return Action::None;
-                        }
-                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
-                    }
-
-                    return Action::ProviderSwitch { id: row.id.clone() };
-                }
-                if row.is_current {
-                    self.push_toast(texts::tui_toast_provider_already_in_use(), ToastKind::Info);
-                    return Action::None;
-                }
-                Action::ProviderSwitch { id: row.id.clone() }
-            }
+            KeyCode::Char('s') | KeyCode::Char(' ') => self.provider_switch_action(row, data),
             KeyCode::Char('x') => {
                 if !matches!(self.app_type, AppType::OpenClaw) {
                     return Action::None;
@@ -254,6 +258,18 @@ impl App {
                 };
                 Action::ProviderStreamCheck { id: row.id.clone() }
             }
+            KeyCode::Char('f') => {
+                if !supports_failover_controls(&self.app_type) {
+                    return Action::None;
+                }
+                let selected = failover_queue_rows(data)
+                    .iter()
+                    .position(|provider_row| provider_row.id == row.id)
+                    .unwrap_or(0);
+                self.overlay = Overlay::FailoverQueueManager { selected };
+                Action::None
+            }
+            KeyCode::Char('<') | KeyCode::Char('>') => Action::None,
             KeyCode::Char('r') => {
                 if data::quota_target_for_provider(&self.app_type, row).is_none() {
                     self.push_toast(texts::tui_toast_quota_not_available(), ToastKind::Info);

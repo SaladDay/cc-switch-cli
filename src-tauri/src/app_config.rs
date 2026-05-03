@@ -883,6 +883,7 @@ mod tests {
         _lock: crate::test_support::TestHomeSettingsLock,
         original_home: Option<OsString>,
         original_userprofile: Option<OsString>,
+        original_config_dir: Option<OsString>,
     }
 
     impl TempHome {
@@ -891,9 +892,11 @@ mod tests {
             let lock = crate::test_support::lock_test_home_and_settings();
             let original_home = env::var_os("HOME");
             let original_userprofile = env::var_os("USERPROFILE");
+            let original_config_dir = env::var_os("CC_SWITCH_CONFIG_DIR");
 
             env::set_var("HOME", dir.path());
             env::set_var("USERPROFILE", dir.path());
+            env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
             crate::test_support::set_test_home_override(Some(dir.path()));
             crate::settings::reload_test_settings();
 
@@ -902,6 +905,7 @@ mod tests {
                 _lock: lock,
                 original_home,
                 original_userprofile,
+                original_config_dir,
             }
         }
     }
@@ -916,6 +920,11 @@ mod tests {
             match &self.original_userprofile {
                 Some(value) => env::set_var("USERPROFILE", value),
                 None => env::remove_var("USERPROFILE"),
+            }
+
+            match &self.original_config_dir {
+                Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
             }
 
             crate::test_support::set_test_home_override(
@@ -936,7 +945,9 @@ mod tests {
     fn seed_stale_test_home_with_gemini_override(home: &std::path::Path) {
         let stale_gemini_dir = home.join("custom-gemini");
         let _lock = crate::test_support::lock_test_home_and_settings();
+        let original_config_dir = env::var_os("CC_SWITCH_CONFIG_DIR");
 
+        env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
         crate::test_support::set_test_home_override(Some(home));
         crate::settings::reload_test_settings();
 
@@ -944,6 +955,11 @@ mod tests {
         settings.gemini_config_dir = Some(stale_gemini_dir.to_string_lossy().into_owned());
         settings.save().expect("save stale settings");
         crate::settings::reload_test_settings();
+
+        match original_config_dir {
+            Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
+            None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
+        }
     }
 
     #[test]

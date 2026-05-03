@@ -39,6 +39,9 @@ impl App {
         if let Some(action) = self.handle_skills_import_picker_key(key) {
             return Some(action);
         }
+        if let Some(action) = self.handle_failover_queue_manager_key(key, data) {
+            return Some(action);
+        }
         None
     }
 
@@ -737,6 +740,78 @@ impl App {
                     .collect();
                 self.overlay = Overlay::None;
                 Action::SkillsImportFromApps { directories }
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_failover_queue_manager_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Option<Action> {
+        let Overlay::FailoverQueueManager { selected } = &mut self.overlay else {
+            return None;
+        };
+
+        let rows = failover_queue_rows(data);
+        if rows.is_empty() {
+            return Some(match key.code {
+                KeyCode::Esc => {
+                    self.overlay = Overlay::None;
+                    Action::None
+                }
+                KeyCode::Char('f') => Action::SetProxyAutoFailover {
+                    app_type: self.app_type.clone(),
+                    enabled: !data.proxy.auto_failover_enabled,
+                },
+                _ => Action::None,
+            });
+        }
+
+        *selected = (*selected).min(rows.len() - 1);
+        let selected_row = rows[*selected];
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(rows.len() - 1);
+                Action::None
+            }
+            KeyCode::Char('f') => Action::SetProxyAutoFailover {
+                app_type: self.app_type.clone(),
+                enabled: !data.proxy.auto_failover_enabled,
+            },
+            KeyCode::Char(' ') | KeyCode::Enter => Action::ProviderSetFailoverQueue {
+                id: selected_row.id.clone(),
+                enabled: !selected_row.provider.in_failover_queue,
+            },
+            KeyCode::Char('<') | KeyCode::Char('u') => {
+                if selected_row.provider.in_failover_queue {
+                    Action::ProviderMoveFailoverQueue {
+                        id: selected_row.id.clone(),
+                        direction: MoveDirection::Up,
+                    }
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Char('>') | KeyCode::Char('d') => {
+                if selected_row.provider.in_failover_queue {
+                    Action::ProviderMoveFailoverQueue {
+                        id: selected_row.id.clone(),
+                        direction: MoveDirection::Down,
+                    }
+                } else {
+                    Action::None
+                }
             }
             _ => Action::None,
         })

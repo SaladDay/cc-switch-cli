@@ -73,6 +73,14 @@ pub enum Action {
     ProviderStreamCheck {
         id: String,
     },
+    ProviderSetFailoverQueue {
+        id: String,
+        enabled: bool,
+    },
+    ProviderMoveFailoverQueue {
+        id: String,
+        direction: MoveDirection,
+    },
     ProviderQuotaRefresh {
         id: String,
     },
@@ -174,6 +182,10 @@ pub enum Action {
     },
     SetProxyListenPort {
         port: u16,
+    },
+    SetProxyAutoFailover {
+        app_type: AppType,
+        enabled: bool,
     },
     SetOpenClawConfigDir {
         path: Option<String>,
@@ -364,13 +376,21 @@ impl SettingsItem {
 pub enum LocalProxySettingsItem {
     ListenAddress,
     ListenPort,
+    AutoFailover,
 }
 
 impl LocalProxySettingsItem {
-    pub const ALL: [LocalProxySettingsItem; 2] = [
+    pub const ALL: [LocalProxySettingsItem; 3] = [
         LocalProxySettingsItem::ListenAddress,
         LocalProxySettingsItem::ListenPort,
+        LocalProxySettingsItem::AutoFailover,
     ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDirection {
+    Up,
+    Down,
 }
 
 #[derive(Debug, Clone)]

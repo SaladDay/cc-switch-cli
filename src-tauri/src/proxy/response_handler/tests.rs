@@ -25,6 +25,7 @@ struct TempHome {
     dir: TempDir,
     original_home: Option<String>,
     original_userprofile: Option<String>,
+    original_config_dir: Option<String>,
 }
 
 impl TempHome {
@@ -32,15 +33,18 @@ impl TempHome {
         let dir = TempDir::new().expect("create temp home");
         let original_home = env::var("HOME").ok();
         let original_userprofile = env::var("USERPROFILE").ok();
+        let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
 
         env::set_var("HOME", dir.path());
         env::set_var("USERPROFILE", dir.path());
+        env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
         crate::settings::reload_test_settings();
 
         Self {
             dir,
             original_home,
             original_userprofile,
+            original_config_dir,
         }
     }
 }
@@ -55,6 +59,11 @@ impl Drop for TempHome {
         match &self.original_userprofile {
             Some(value) => env::set_var("USERPROFILE", value),
             None => env::remove_var("USERPROFILE"),
+        }
+
+        match &self.original_config_dir {
+            Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
+            None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
         }
 
         crate::settings::reload_test_settings();
@@ -250,7 +259,7 @@ async fn buffered_success_streaming_responses_do_not_record_termination_error() 
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_settings)]
 async fn streaming_success_syncs_failover_state_after_body_drains() {
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().expect("memory db"));

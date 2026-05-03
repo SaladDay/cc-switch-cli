@@ -940,6 +940,32 @@ pub(crate) fn visible_providers<'a>(
         .collect()
 }
 
+pub(crate) fn failover_queue_rows(data: &UiData) -> Vec<&super::data::ProviderRow> {
+    let mut rows = data.providers.rows.iter().collect::<Vec<_>>();
+    rows.sort_by(
+        |a, b| match (a.provider.in_failover_queue, b.provider.in_failover_queue) {
+            (true, true) => match (a.provider.sort_index, b.provider.sort_index) {
+                (Some(a_idx), Some(b_idx)) => a_idx.cmp(&b_idx).then_with(|| a.id.cmp(&b.id)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.id.cmp(&b.id),
+            },
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => a.id.cmp(&b.id),
+        },
+    );
+    rows
+}
+
+pub(crate) fn failover_queue_position(data: &UiData, provider_id: &str) -> Option<usize> {
+    failover_queue_rows(data)
+        .into_iter()
+        .filter(|row| row.provider.in_failover_queue)
+        .position(|row| row.id == provider_id)
+        .map(|idx| idx + 1)
+}
+
 pub(crate) fn supports_provider_stream_check(app_type: &AppType) -> bool {
     !matches!(app_type, AppType::OpenClaw)
 }

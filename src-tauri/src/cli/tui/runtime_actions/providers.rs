@@ -3,6 +3,7 @@ use crate::cli::tui::form::ClaudeApiFormat;
 use crate::error::AppError;
 use crate::openclaw_config::OpenClawDefaultModel;
 use crate::proxy::providers::get_claude_api_format;
+use crate::services::provider::ProviderSortUpdate;
 use crate::services::ProviderService;
 use serde_json::Value;
 
@@ -11,6 +12,62 @@ use super::super::data::{load_state, UiData};
 use super::super::form::ProviderAddField;
 use super::super::runtime_systems::{next_model_fetch_request_id, ModelFetchReq, StreamCheckReq};
 use super::RuntimeActionContext;
+
+fn active_proxy_failover_queue_guard_message() -> &'static str {
+    crate::t!(
+        "At least one provider must remain in the failover queue while proxy failover is active.",
+        "代理故障转移激活时，故障转移队列中必须至少保留一个供应商。"
+    )
+}
+
+fn provider_is_last_active_failover_queue_entry(
+    ctx: &RuntimeActionContext<'_>,
+    provider_id: &str,
+) -> Result<bool, AppError> {
+    if !crate::cli::tui::app::supports_failover_controls(&ctx.app.app_type)
+        || !ctx
+            .data
+            .proxy
+            .routes_current_app_through_proxy(&ctx.app.app_type)
+            .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+
+    let state = load_state()?;
+    let app_key = ctx.app.app_type.as_str();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
+    let auto_failover_enabled = runtime
+        .block_on(async { state.db.get_proxy_config_for_app(app_key).await })?
+        .auto_failover_enabled;
+    if !auto_failover_enabled {
+        return Ok(false);
+    }
+
+    let queue = state.db.get_failover_queue(app_key)?;
+    Ok(queue.len() == 1
+        && queue
+            .first()
+            .is_some_and(|item| item.provider_id == provider_id))
+}
+
+fn guard_last_active_failover_queue_entry(
+    ctx: &mut RuntimeActionContext<'_>,
+    provider_id: &str,
+) -> Result<bool, AppError> {
+    if provider_is_last_active_failover_queue_entry(ctx, provider_id)? {
+        ctx.app.push_toast(
+            active_proxy_failover_queue_guard_message(),
+            ToastKind::Warning,
+        );
+        return Ok(true);
+    }
+
+    Ok(false)
+}
 
 pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
     do_switch(ctx, id)
@@ -122,7 +179,127 @@ fn provider_switch_proxy_notice_api_format(
     provider_requires_local_proxy(app_type, provider).filter(|_| !proxy_ready)
 }
 
+pub(super) fn set_failover_queue(
+    ctx: &mut RuntimeActionContext<'_>,
+    id: String,
+    enabled: bool,
+) -> Result<(), AppError> {
+    if !crate::cli::tui::app::supports_failover_controls(&ctx.app.app_type) {
+        return Ok(());
+    }
+    if ctx.data.providers.rows.iter().all(|row| row.id != id) {
+        return Err(AppError::InvalidInput(format!("Provider not found: {id}")));
+    }
+
+    let state = load_state()?;
+    if enabled {
+        state
+            .db
+            .add_to_failover_queue(ctx.app.app_type.as_str(), &id)?;
+    } else {
+        if guard_last_active_failover_queue_entry(ctx, &id)? {
+            return Ok(());
+        }
+        state
+            .db
+            .remove_from_failover_queue(ctx.app.app_type.as_str(), &id)?;
+    }
+
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.push_toast(
+        if enabled {
+            crate::t!(
+                "Provider added to the failover queue.",
+                "供应商已加入故障转移队列。"
+            )
+        } else {
+            crate::t!(
+                "Provider removed from the failover queue.",
+                "供应商已移出故障转移队列。"
+            )
+        },
+        ToastKind::Success,
+    );
+    Ok(())
+}
+
+pub(super) fn move_failover_queue(
+    ctx: &mut RuntimeActionContext<'_>,
+    id: String,
+    direction: crate::cli::tui::app::MoveDirection,
+) -> Result<(), AppError> {
+    if !crate::cli::tui::app::supports_failover_controls(&ctx.app.app_type) {
+        return Ok(());
+    }
+
+    let mut queued = ctx
+        .data
+        .providers
+        .rows
+        .iter()
+        .filter(|row| row.provider.in_failover_queue)
+        .cloned()
+        .collect::<Vec<_>>();
+    queued.sort_by(
+        |a, b| match (a.provider.sort_index, b.provider.sort_index) {
+            (Some(a_idx), Some(b_idx)) => a_idx.cmp(&b_idx).then_with(|| a.id.cmp(&b.id)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.id.cmp(&b.id),
+        },
+    );
+
+    let Some(index) = queued.iter().position(|row| row.id == id) else {
+        ctx.app.push_toast(
+            crate::t!(
+                "Add this provider to the failover queue before moving it.",
+                "请先将该供应商加入故障转移队列再调整顺序。"
+            ),
+            ToastKind::Info,
+        );
+        return Ok(());
+    };
+
+    let target = match direction {
+        crate::cli::tui::app::MoveDirection::Up if index > 0 => index - 1,
+        crate::cli::tui::app::MoveDirection::Down if index + 1 < queued.len() => index + 1,
+        _ => {
+            ctx.app.push_toast(
+                crate::t!(
+                    "Provider is already at the edge of the failover queue.",
+                    "该供应商已在故障转移队列边界。"
+                ),
+                ToastKind::Info,
+            );
+            return Ok(());
+        }
+    };
+
+    queued.swap(index, target);
+    let updates = queued
+        .iter()
+        .enumerate()
+        .map(|(sort_index, row)| ProviderSortUpdate {
+            id: row.id.clone(),
+            sort_index,
+        })
+        .collect::<Vec<_>>();
+
+    let state = load_state()?;
+    ProviderService::update_sort_order(&state, ctx.app.app_type.clone(), updates)?;
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.push_toast(
+        crate::t!("Failover queue order updated.", "故障转移队列顺序已更新。"),
+        ToastKind::Success,
+    );
+    Ok(())
+}
+
 pub(super) fn delete(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
+    if guard_last_active_failover_queue_entry(ctx, &id)? {
+        return Ok(());
+    }
+
     let state = load_state()?;
     ProviderService::delete(&state, ctx.app.app_type.clone(), &id)?;
     ctx.app
@@ -361,7 +538,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::cli::tui::app::App;
+    use crate::cli::tui::app::{App, MoveDirection};
     use crate::cli::tui::app::{ConfirmAction, ConfirmOverlay};
     use crate::cli::tui::runtime_systems::RequestTracker;
     use crate::cli::tui::terminal::TuiTerminal;
@@ -376,6 +553,7 @@ mod tests {
         _lock: TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
+        old_config_dir: Option<OsString>,
     }
 
     impl EnvGuard {
@@ -383,14 +561,17 @@ mod tests {
             let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
                 _lock: lock,
                 old_home,
                 old_userprofile,
+                old_config_dir,
             }
         }
     }
@@ -404,6 +585,10 @@ mod tests {
             match &self.old_userprofile {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
+            }
+            match &self.old_config_dir {
+                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
             }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
@@ -669,6 +854,384 @@ mod tests {
             app,
             data,
         })
+    }
+
+    fn claude_queue_provider(id: &str) -> Provider {
+        Provider::with_id(
+            id.to_string(),
+            format!("Provider {id}"),
+            json!({"env":{"ANTHROPIC_BASE_URL":format!("https://{id}.example.com")}}),
+            None,
+        )
+    }
+
+    struct RuntimeActionFixture {
+        terminal: TuiTerminal,
+        app: App,
+        data: UiData,
+        proxy_loading: RequestTracker,
+        webdav_loading: RequestTracker,
+        update_check: RequestTracker,
+    }
+
+    impl RuntimeActionFixture {
+        fn new(app_type: AppType) -> Self {
+            Self {
+                terminal: TuiTerminal::new_for_test().expect("create terminal"),
+                app: App::new(Some(app_type.clone())),
+                data: UiData::load(&app_type).expect("load ui data"),
+                proxy_loading: RequestTracker::default(),
+                webdav_loading: RequestTracker::default(),
+                update_check: RequestTracker::default(),
+            }
+        }
+
+        fn ctx(&mut self) -> RuntimeActionContext<'_> {
+            RuntimeActionContext {
+                terminal: &mut self.terminal,
+                app: &mut self.app,
+                data: &mut self.data,
+                speedtest_req_tx: None,
+                stream_check_req_tx: None,
+                skills_req_tx: None,
+                proxy_req_tx: None,
+                proxy_loading: &mut self.proxy_loading,
+                local_env_req_tx: None,
+                webdav_req_tx: None,
+                webdav_loading: &mut self.webdav_loading,
+                update_req_tx: None,
+                update_check: &mut self.update_check,
+                model_fetch_req_tx: None,
+            }
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn active_proxy_failover_rejects_removing_last_queued_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let state = load_state().expect("load state");
+        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
+            .expect("add provider");
+        state
+            .db
+            .add_to_failover_queue("claude", "p1")
+            .expect("queue provider");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create runtime");
+        runtime.block_on(async {
+            let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
+            config.auto_failover_enabled = true;
+            state.db.update_proxy_config_for_app(config).await.unwrap();
+        });
+
+        let mut fixture = RuntimeActionFixture::new(AppType::Claude);
+        fixture.data.proxy.running = true;
+        fixture.data.proxy.claude_takeover = true;
+        fixture.data.proxy.auto_failover_enabled = true;
+        set_failover_queue(&mut fixture.ctx(), "p1".to_string(), false)
+            .expect("attempt queue removal");
+
+        assert!(state
+            .db
+            .is_in_failover_queue("claude", "p1")
+            .expect("read queue membership"));
+        assert!(matches!(fixture.app.toast, Some(toast) if toast.kind == ToastKind::Warning));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn stopped_proxy_failover_allows_removing_last_queued_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let state = load_state().expect("load state");
+        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
+            .expect("add provider");
+        state
+            .db
+            .add_to_failover_queue("claude", "p1")
+            .expect("queue provider");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create runtime");
+        runtime.block_on(async {
+            let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
+            config.auto_failover_enabled = true;
+            state.db.update_proxy_config_for_app(config).await.unwrap();
+        });
+
+        let mut fixture = RuntimeActionFixture::new(AppType::Claude);
+        fixture.data.proxy.running = false;
+        fixture.data.proxy.claude_takeover = true;
+        fixture.data.proxy.auto_failover_enabled = true;
+        set_failover_queue(&mut fixture.ctx(), "p1".to_string(), false)
+            .expect("remove provider from stopped queue");
+
+        assert!(!state
+            .db
+            .is_in_failover_queue("claude", "p1")
+            .expect("read queue membership"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn active_proxy_failover_allows_removing_one_of_multiple_queued_providers() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let state = load_state().expect("load state");
+        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
+            .expect("add first provider");
+        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p2"))
+            .expect("add second provider");
+        state
+            .db
+            .add_to_failover_queue("claude", "p1")
+            .expect("queue first provider");
+        state
+            .db
+            .add_to_failover_queue("claude", "p2")
+            .expect("queue second provider");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create runtime");
+        runtime.block_on(async {
+            let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
+            config.auto_failover_enabled = true;
+            state.db.update_proxy_config_for_app(config).await.unwrap();
+        });
+
+        let mut fixture = RuntimeActionFixture::new(AppType::Claude);
+        fixture.data.proxy.running = true;
+        fixture.data.proxy.claude_takeover = true;
+        fixture.data.proxy.auto_failover_enabled = true;
+        set_failover_queue(&mut fixture.ctx(), "p1".to_string(), false)
+            .expect("remove one queued provider");
+
+        assert!(!state
+            .db
+            .is_in_failover_queue("claude", "p1")
+            .expect("read first queue membership"));
+        assert!(state
+            .db
+            .is_in_failover_queue("claude", "p2")
+            .expect("read second queue membership"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn active_proxy_failover_allows_reordering_queued_providers() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let state = load_state().expect("load state");
+        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
+            .expect("add first provider");
+        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p2"))
+            .expect("add second provider");
+        state
+            .db
+            .add_to_failover_queue("claude", "p1")
+            .expect("queue first provider");
+        state
+            .db
+            .add_to_failover_queue("claude", "p2")
+            .expect("queue second provider");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create runtime");
+        runtime.block_on(async {
+            let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
+            config.auto_failover_enabled = true;
+            state.db.update_proxy_config_for_app(config).await.unwrap();
+        });
+
+        let mut fixture = RuntimeActionFixture::new(AppType::Claude);
+        fixture.data.proxy.running = true;
+        fixture.data.proxy.claude_takeover = true;
+        fixture.data.proxy.auto_failover_enabled = true;
+        move_failover_queue(&mut fixture.ctx(), "p2".to_string(), MoveDirection::Up)
+            .expect("move queued provider up");
+
+        let queue = state.db.get_failover_queue("claude").expect("read queue");
+        assert_eq!(queue[0].provider_id, "p2");
+        assert_eq!(queue[1].provider_id, "p1");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn active_proxy_failover_rejects_deleting_last_queued_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let state = load_state().expect("load state");
+        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
+            .expect("add provider");
+        state
+            .db
+            .add_to_failover_queue("claude", "p1")
+            .expect("queue provider");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create runtime");
+        runtime.block_on(async {
+            let mut config = state.db.get_proxy_config_for_app("claude").await.unwrap();
+            config.auto_failover_enabled = true;
+            state.db.update_proxy_config_for_app(config).await.unwrap();
+        });
+
+        let mut fixture = RuntimeActionFixture::new(AppType::Claude);
+        fixture.data.proxy.running = true;
+        fixture.data.proxy.claude_takeover = true;
+        fixture.data.proxy.auto_failover_enabled = true;
+        delete(&mut fixture.ctx(), "p1".to_string()).expect("attempt delete provider");
+
+        assert!(state
+            .db
+            .get_provider_by_id("p1", "claude")
+            .expect("read provider")
+            .is_some());
+        assert!(state
+            .db
+            .is_in_failover_queue("claude", "p1")
+            .expect("read queue membership"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn provider_failover_queue_toggle_updates_database() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let state = load_state().expect("load state");
+        ProviderService::add(
+            &state,
+            AppType::Claude,
+            Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+                None,
+            ),
+        )
+        .expect("add provider");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::load(&AppType::Claude).expect("load data");
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        set_failover_queue(&mut ctx, "p1".to_string(), true).expect("enable failover queue");
+        assert!(state
+            .db
+            .is_in_failover_queue("claude", "p1")
+            .expect("read failover queue membership"));
+        assert!(ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .any(|row| row.id == "p1" && row.provider.in_failover_queue));
+
+        set_failover_queue(&mut ctx, "p1".to_string(), false).expect("disable failover queue");
+        assert!(!state
+            .db
+            .is_in_failover_queue("claude", "p1")
+            .expect("read failover queue membership"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn provider_failover_queue_move_updates_sort_order() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let state = load_state().expect("load state");
+        let mut first = Provider::with_id(
+            "first".to_string(),
+            "First".to_string(),
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://first.example.com"}}),
+            None,
+        );
+        first.sort_index = Some(0);
+        let mut second = Provider::with_id(
+            "second".to_string(),
+            "Second".to_string(),
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://second.example.com"}}),
+            None,
+        );
+        second.sort_index = Some(1);
+        ProviderService::add(&state, AppType::Claude, first).expect("add first provider");
+        ProviderService::add(&state, AppType::Claude, second).expect("add second provider");
+        state
+            .db
+            .add_to_failover_queue("claude", "first")
+            .expect("queue first provider");
+        state
+            .db
+            .add_to_failover_queue("claude", "second")
+            .expect("queue second provider");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::load(&AppType::Claude).expect("load data");
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        move_failover_queue(
+            &mut ctx,
+            "second".to_string(),
+            crate::cli::tui::app::MoveDirection::Up,
+        )
+        .expect("move second provider up");
+
+        let queue = state.db.get_failover_queue("claude").expect("read queue");
+        assert_eq!(queue[0].provider_id, "second");
+        assert_eq!(queue[1].provider_id, "first");
     }
 
     #[test]

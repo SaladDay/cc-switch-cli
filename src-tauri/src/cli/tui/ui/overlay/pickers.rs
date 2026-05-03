@@ -501,6 +501,134 @@ pub(super) fn render_openclaw_tools_profile_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+pub(super) fn render_failover_queue_manager_overlay(
+    frame: &mut Frame<'_>,
+    data: &UiData,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+) {
+    let area = centered_rect_fixed(OVERLAY_FIXED_LG.0, 16, content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(crate::t!("Failover Queue", "故障转移队列"));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("f", crate::t!("enable/disable", "启用/禁用")),
+            ("Space/Enter", texts::tui_key_toggle()),
+            ("</>/u/d", texts::tui_key_move()),
+            ("Esc", texts::tui_key_close()),
+        ],
+    );
+
+    let status = if data.proxy.auto_failover_enabled {
+        crate::t!("Automatic failover: enabled", "自动故障转移：已开启")
+    } else {
+        crate::t!("Automatic failover: disabled", "自动故障转移：已关闭")
+    };
+    frame.render_widget(
+        Paragraph::new(status)
+            .style(Style::default().fg(theme.dim))
+            .alignment(Alignment::Center),
+        chunks[1],
+    );
+
+    let body_area = inset_top(chunks[2], 1);
+    let rows = app::failover_queue_rows(data);
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(crate::t!("No providers configured.", "暂无提供商配置。"))
+                .style(Style::default().fg(theme.dim))
+                .alignment(Alignment::Center),
+            body_area,
+        );
+    } else {
+        let header = Row::new(vec![
+            Cell::from(""),
+            Cell::from(crate::t!("Queue", "队列")),
+            Cell::from(texts::header_name()),
+            Cell::from(texts::tui_header_api_url()),
+        ])
+        .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+
+        let table_rows = rows.iter().map(|row| {
+            let marker = if row.provider.in_failover_queue {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            };
+            let queue = app::failover_queue_position(data, &row.id)
+                .map(|position| format!("#{position}"))
+                .unwrap_or_else(|| "-".to_string());
+            let api_url = row.api_url.as_deref().unwrap_or_else(|| texts::tui_na());
+
+            Row::new(vec![
+                Cell::from(marker),
+                Cell::from(queue),
+                Cell::from(row.provider.name.as_str()),
+                Cell::from(api_url.to_string()),
+            ])
+        });
+
+        let table = Table::new(
+            table_rows,
+            [
+                Constraint::Length(2),
+                Constraint::Length(8),
+                Constraint::Percentage(35),
+                Constraint::Percentage(65),
+            ],
+        )
+        .header(header)
+        .block(Block::default().borders(Borders::NONE))
+        .row_highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+        let mut state = TableState::default();
+        state.select(Some(selected.min(rows.len().saturating_sub(1))));
+        frame.render_stateful_widget(table, body_area, &mut state);
+    }
+
+    frame.render_widget(
+        Paragraph::new(if data.proxy.auto_failover_enabled {
+            crate::t!(
+                "Auto failover uses only checked providers, in queue order.",
+                "自动故障转移仅按队列顺序使用已勾选的提供商。"
+            )
+        } else {
+            crate::t!(
+                "Direct provider selection is used. Enable failover to route by queue priority.",
+                "当前使用直接供应商选择。开启故障转移后将按队列优先级路由。"
+            )
+        })
+        .style(Style::default().fg(theme.dim))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false }),
+        chunks[3],
+    );
+}
+
 pub(super) fn render_mcp_apps_picker_overlay(
     frame: &mut Frame<'_>,
     content_area: Rect,

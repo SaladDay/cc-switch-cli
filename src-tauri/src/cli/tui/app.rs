@@ -32,8 +32,8 @@ mod tests;
 mod types;
 
 pub(crate) use app_state::{
-    Action, App, ConfigItem, LocalProxySettingsItem, ProxyVisualTransition, SettingsItem,
-    WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
+    Action, App, ConfigItem, LocalProxySettingsItem, MoveDirection, ProxyVisualTransition,
+    SettingsItem, WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
 };
 pub use editor_state::{EditorKind, EditorMode, EditorState, EditorSubmit};
 pub(crate) use helpers::*;
@@ -41,6 +41,10 @@ pub use types::{
     ConfirmAction, ConfirmOverlay, FilterState, Focus, LoadingKind, Overlay, TextInputState,
     TextSubmit, TextViewAction, TextViewState, Toast, ToastKind,
 };
+
+pub(crate) fn supports_failover_controls(app_type: &AppType) -> bool {
+    matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+}
 
 const PROVIDER_NOTES_MAX_CHARS: usize = 120;
 

@@ -958,19 +958,27 @@ mod tests {
 
     struct HomeGuard {
         old_home: Option<std::ffi::OsString>,
+        old_userprofile: Option<std::ffi::OsString>,
+        old_config_dir: Option<std::ffi::OsString>,
         old_test_home: Option<std::ffi::OsString>,
     }
 
     impl HomeGuard {
         fn set(home: &Path) -> Self {
             let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
             let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
             std::env::set_var("CC_SWITCH_TEST_HOME", home);
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
                 old_home,
+                old_userprofile,
+                old_config_dir,
                 old_test_home,
             }
         }
@@ -981,6 +989,14 @@ mod tests {
             match self.old_home.take() {
                 Some(value) => std::env::set_var("HOME", value),
                 None => std::env::remove_var("HOME"),
+            }
+            match self.old_userprofile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match self.old_config_dir.take() {
+                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
             }
             match self.old_test_home.take() {
                 Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),

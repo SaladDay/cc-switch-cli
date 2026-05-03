@@ -139,6 +139,7 @@ mod tests {
         dir: TempDir,
         original_home: Option<String>,
         original_userprofile: Option<String>,
+        original_config_dir: Option<String>,
     }
 
     impl TempHome {
@@ -146,15 +147,18 @@ mod tests {
             let dir = TempDir::new().expect("create temp home");
             let original_home = env::var("HOME").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
+            let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
 
             env::set_var("HOME", dir.path());
             env::set_var("USERPROFILE", dir.path());
+            env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
             crate::settings::reload_test_settings();
 
             Self {
                 dir,
                 original_home,
                 original_userprofile,
+                original_config_dir,
             }
         }
     }
@@ -169,6 +173,11 @@ mod tests {
             match &self.original_userprofile {
                 Some(value) => env::set_var("USERPROFILE", value),
                 None => env::remove_var("USERPROFILE"),
+            }
+
+            match &self.original_config_dir {
+                Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
             }
 
             crate::settings::reload_test_settings();
@@ -204,7 +213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(home_settings)]
     async fn load_uses_current_provider_id_at_request_start() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("create memory database"));
@@ -241,7 +250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(home_settings)]
     async fn load_uses_effective_current_provider_from_settings_at_request_start() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("create memory database"));
@@ -279,7 +288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(home_settings)]
     async fn load_captures_current_provider_before_later_awaits() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("create memory database"));

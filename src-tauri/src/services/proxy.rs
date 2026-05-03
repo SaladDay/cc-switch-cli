@@ -211,6 +211,7 @@ impl ProxyService {
         Self::ensure_managed_sessions_supported()?;
 
         let app_type = Self::takeover_app_from_str(app_type)?;
+        self.validate_app_proxy_activation(&app_type).await?;
         let current_status = self.get_status().await;
         if current_status.running {
             return Err(
@@ -884,6 +885,54 @@ impl ProxyService {
         Ok(())
     }
 
+    async fn validate_app_proxy_activation(&self, app_type: &AppType) -> Result<(), String> {
+        let app_key = app_type.as_str();
+        let app_proxy = self
+            .db
+            .get_proxy_config_for_app(app_key)
+            .await
+            .map_err(|error| format!("load proxy config for {app_key} failed: {error}"))?;
+
+        if app_proxy.auto_failover_enabled {
+            if self
+                .db
+                .get_failover_queue(app_key)
+                .map_err(|error| format!("load failover queue for {app_key} failed: {error}"))?
+                .is_empty()
+            {
+                return Err(
+                    "cannot enable proxy because automatic failover is enabled and the failover queue is empty"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+
+        let Some(provider_id) =
+            crate::settings::get_effective_current_provider(self.db.as_ref(), app_type).map_err(
+                |error| {
+                    format!(
+                        "load effective current provider for {} failed: {error}",
+                        app_type.as_str()
+                    )
+                },
+            )?
+        else {
+            return Err("cannot enable proxy because no active provider is selected".to_string());
+        };
+
+        if self
+            .db
+            .get_provider_by_id(&provider_id, app_key)
+            .map_err(|error| format!("load provider {provider_id} for {app_key} failed: {error}"))?
+            .is_none()
+        {
+            return Err("cannot enable proxy because no active provider is selected".to_string());
+        }
+
+        Ok(())
+    }
+
     pub async fn save_live_backup_snapshot(
         &self,
         app_type: &str,
@@ -912,6 +961,8 @@ impl ProxyService {
     }
 
     async fn enable_takeover_for_app_unlocked(&self, app_type: &AppType) -> Result<(), String> {
+        self.validate_app_proxy_activation(app_type).await?;
+
         if !self.is_running().await {
             let config = self.get_config().await.map_err(|e| e.to_string())?;
             self.start_with_resolved_config_unlocked(config).await?;
@@ -2024,6 +2075,7 @@ mod tests {
         _lock: crate::test_support::TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
+        old_config_dir: Option<OsString>,
     }
 
     impl TestHomeEnvGuard {
@@ -2031,14 +2083,17 @@ mod tests {
             let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
                 _lock: lock,
                 old_home,
                 old_userprofile,
+                old_config_dir,
             }
         }
     }
@@ -2053,9 +2108,220 @@ mod tests {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
             }
+            match &self.old_config_dir {
+                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
         }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_activation_rejects_missing_current_provider_when_failover_disabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+
+        let error = service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect_err("takeover should require an active provider when failover is disabled");
+
+        assert!(
+            error.contains("cannot enable proxy because no active provider is selected"),
+            "{error}"
+        );
+        assert!(
+            !db.get_proxy_config_for_app("claude")
+                .await
+                .expect("load claude proxy config")
+                .enabled,
+            "failed validation should not enable takeover state"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_activation_allows_current_provider_when_failover_disabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "fresh-live-token"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "stale-provider-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+        let mut runtime_config = service.get_config().await.expect("get proxy config");
+        runtime_config.listen_port = 0;
+        service
+            .update_config(&runtime_config)
+            .await
+            .expect("persist runtime config");
+
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("takeover should allow an active provider when failover is disabled");
+
+        assert!(
+            db.get_proxy_config_for_app("claude")
+                .await
+                .expect("load claude proxy config")
+                .enabled
+        );
+        service.stop().await.expect("stop proxy runtime");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_activation_rejects_empty_queue_when_failover_enabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+        let mut app_proxy = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load claude proxy config");
+        app_proxy.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(app_proxy)
+            .await
+            .expect("enable auto failover");
+
+        let error = service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect_err("takeover should require a non-empty failover queue");
+
+        assert!(
+            error.contains(
+                "cannot enable proxy because automatic failover is enabled and the failover queue is empty"
+            ),
+            "{error}"
+        );
+        assert!(
+            !db.get_proxy_config_for_app("claude")
+                .await
+                .expect("load claude proxy config")
+                .enabled,
+            "failed validation should not enable takeover state"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_activation_allows_non_empty_queue_when_failover_enabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "fresh-live-token"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "stale-provider-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.add_to_failover_queue("claude", &provider.id)
+            .expect("queue claude provider");
+        let mut app_proxy = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load claude proxy config");
+        app_proxy.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(app_proxy)
+            .await
+            .expect("enable auto failover");
+        let mut runtime_config = service.get_config().await.expect("get proxy config");
+        runtime_config.listen_port = 0;
+        service
+            .update_config(&runtime_config)
+            .await
+            .expect("persist runtime config");
+
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("takeover should allow a non-empty failover queue");
+
+        assert!(
+            db.get_proxy_config_for_app("claude")
+                .await
+                .expect("load claude proxy config")
+                .enabled
+        );
+        service.stop().await.expect("stop proxy runtime");
     }
 
     #[tokio::test]
@@ -2718,6 +2984,15 @@ base_url = "https://api.openai.com/v1"
     #[tokio::test]
     #[serial]
     async fn managed_session_ready_info_accepts_persisted_session_without_status_probe() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind unused proxy status port");
+        let port = listener
+            .local_addr()
+            .expect("read unused proxy status port")
+            .port();
+        drop(listener);
+
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());
 
@@ -2726,7 +3001,7 @@ base_url = "https://api.openai.com/v1"
             &serde_json::to_string(&PersistedProxyRuntimeSession {
                 pid: 4242,
                 address: "127.0.0.1".to_string(),
-                port: 15721,
+                port,
                 started_at: "2026-03-10T00:00:00Z".to_string(),
                 kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
                 session_token: Some("expected-session-token".to_string()),
@@ -2741,7 +3016,7 @@ base_url = "https://api.openai.com/v1"
             .expect("persisted managed runtime marker should be treated as ready");
 
         assert_eq!(info.address, "127.0.0.1");
-        assert_eq!(info.port, 15721);
+        assert_eq!(info.port, port);
         assert_eq!(info.started_at, "2026-03-10T00:00:00Z");
     }
 
