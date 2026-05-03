@@ -15,7 +15,7 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-/// Returns the Claude Code config directory path.
+/// 获取 Claude Code 配置目录路径
 ///
 /// Priority: `CLAUDE_CONFIG_DIR` env var > cc-switch settings override > `$HOME/.claude`
 pub fn get_claude_config_dir() -> PathBuf {
@@ -31,7 +31,7 @@ pub fn get_claude_config_dir() -> PathBuf {
         return custom;
     }
 
-    home_dir().expect("Could not determine home directory").join(".claude")
+    home_dir().expect("无法获取用户主目录").join(".claude")
 }
 
 /// 默认 Claude MCP 配置文件路径 (~/.claude.json)
