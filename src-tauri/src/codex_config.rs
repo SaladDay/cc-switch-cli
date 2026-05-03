@@ -24,13 +24,21 @@ const CODEX_RESERVED_MODEL_PROVIDER_IDS: &[&str] = &[
     "ollama-chat",
 ];
 
-/// 获取 Codex 配置目录路径
+/// Returns the Codex config directory path.
+///
+/// Priority: `CODEX_CONFIG_DIR` env var > cc-switch settings override > `$HOME/.codex`
 pub fn get_codex_config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CODEX_CONFIG_DIR") {
+        let dir = PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() && !dir.to_string_lossy().trim().is_empty() {
+            return dir;
+        }
+    }
     if let Some(custom) = crate::settings::get_codex_override_dir() {
         return custom;
     }
 
-    home_dir().expect("无法获取用户主目录").join(".codex")
+    home_dir().expect("Could not determine home directory").join(".codex")
 }
 
 /// 获取 Codex auth.json 路径
@@ -764,5 +772,57 @@ base_url = "https://aihubmix.example/v1"
                 .and_then(|v| v.as_str()),
             Some("aihubmix")
         );
+    }
+
+    mod codex_config_dir_tests {
+        use super::*;
+        use std::env;
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+
+        struct EnvGuard {
+            original: Option<OsString>,
+        }
+
+        impl EnvGuard {
+            fn set(value: Option<&str>) -> Self {
+                let original = env::var_os("CODEX_CONFIG_DIR");
+                match value {
+                    Some(v) => unsafe { env::set_var("CODEX_CONFIG_DIR", v) },
+                    None => unsafe { env::remove_var("CODEX_CONFIG_DIR") },
+                }
+                Self { original }
+            }
+        }
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.original.as_ref() {
+                    Some(value) => unsafe { env::set_var("CODEX_CONFIG_DIR", value) },
+                    None => unsafe { env::remove_var("CODEX_CONFIG_DIR") },
+                }
+            }
+        }
+
+        #[test]
+        fn get_codex_config_dir_respects_env_var() {
+            let _env = EnvGuard::set(Some("/tmp/codex-custom"));
+            assert_eq!(get_codex_config_dir(), PathBuf::from("/tmp/codex-custom"));
+        }
+
+        #[test]
+        fn get_codex_config_dir_ignores_blank_env_var() {
+            let _env = EnvGuard::set(Some("   "));
+            let result = get_codex_config_dir();
+            assert_ne!(result, PathBuf::from("   "));
+        }
+
+        #[test]
+        fn get_codex_config_dir_falls_back_when_not_set() {
+            let _env = EnvGuard::set(None);
+            let result = get_codex_config_dir();
+            // should end with /.codex (the default)
+            assert!(result.ends_with(".codex"));
+        }
     }
 }
