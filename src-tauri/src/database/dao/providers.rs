@@ -211,6 +211,8 @@ impl Database {
         Ok(false)
     }
 
+    /// Deep-merge `incoming` into the existing settings_config JSON,
+    /// preserving custom keys that are not present in the incoming value.
     fn merge_settings_config(existing_str: &str, incoming: &Value) -> Value {
         let existing: Value = serde_json::from_str(existing_str).unwrap_or(Value::Null);
         let mut merged = existing;
@@ -428,8 +430,8 @@ impl Database {
         Ok(())
     }
 
-    /// 更新供应商的 settings_config（仅更新配置，不改变其他字段）。
-    /// 默认增量合并到现有值，force=true 时全量替换。
+    /// Update provider's settings_config without touching other fields.
+    /// Default merges into the existing value; `force=true` replaces entirely.
     pub fn update_provider_settings_config(
         &self,
         app_type: &str,

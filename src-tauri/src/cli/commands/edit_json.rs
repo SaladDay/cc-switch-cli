@@ -33,6 +33,8 @@ pub fn execute(cmd: EditJsonCommand) -> Result<(), AppError> {
     }
 }
 
+/// Open the provider's settings_config in an external editor, validate the result,
+/// and persist — merging with existing keys by default, or fully replacing when `force` is set.
 fn edit_provider(app_type: &AppType, id: &str, force: bool) -> Result<(), AppError> {
     let state = crate::store::AppState::try_new()?;
 

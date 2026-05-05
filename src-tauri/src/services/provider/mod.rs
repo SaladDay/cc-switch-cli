@@ -74,6 +74,7 @@ struct PostCommitAction {
 }
 
 impl ProviderService {
+    /// Check whether a provider is an official Codex provider (via meta flag or category).
     pub(crate) fn is_codex_official_provider(provider: &Provider) -> bool {
         provider
             .meta
@@ -86,6 +87,7 @@ impl ProviderService {
                 .is_some_and(|value| value.eq_ignore_ascii_case("official"))
     }
 
+    /// Check whether a Codex TOML config text contains a non-empty `base_url`.
     pub(crate) fn codex_config_has_base_url(config_text: &str) -> bool {
         let Ok(table) = toml::from_str::<toml::Table>(config_text.trim()) else {
             return false;
