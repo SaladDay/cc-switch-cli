@@ -436,6 +436,7 @@ fn migrate_legacy_codex_configs(db: &Database, config: &mut MultiAppConfig) {
                 AppType::Codex.as_str(),
                 provider_id,
                 &provider.settings_config,
+                false, // merge to preserve custom keys
             ) {
                 log::warn!(
                     "Failed to persist migrated Codex config for provider '{}': {}",

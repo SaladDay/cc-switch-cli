@@ -6,8 +6,10 @@ use crate::database::dao::providers_seed::{is_official_seed_id, OFFICIAL_SEEDS};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
+use crate::services::provider::json_deep_merge;
 use indexmap::IndexMap;
 use rusqlite::params;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 impl Database {
@@ -292,6 +294,24 @@ impl Database {
         let (is_current, in_failover_queue) =
             existing.unwrap_or((false, provider.in_failover_queue));
 
+        // Merge settings_config: preserve custom keys from existing DB row
+        let final_settings_config = if is_update {
+            let existing_cfg_str: String = tx
+                .query_row(
+                    "SELECT settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
+                    params![provider.id, app_type],
+                    |row| row.get(0),
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let existing_cfg: Value =
+                serde_json::from_str(&existing_cfg_str).unwrap_or(Value::Null);
+            let mut merged = existing_cfg;
+            json_deep_merge(&mut merged, &provider.settings_config);
+            merged
+        } else {
+            provider.settings_config.clone()
+        };
+
         if is_update {
             // 更新模式：使用 UPDATE 避免触发 ON DELETE CASCADE
             tx.execute(
@@ -311,7 +331,7 @@ impl Database {
                 WHERE id = ?13 AND app_type = ?14",
                 params![
                     provider.name,
-                    serde_json::to_string(&provider.settings_config).map_err(|e| {
+                    serde_json::to_string(&final_settings_config).map_err(|e| {
                         AppError::Database(format!("Failed to serialize settings_config: {e}"))
                     })?,
                     provider.website_url,
@@ -342,7 +362,7 @@ impl Database {
                     provider.id,
                     app_type,
                     provider.name,
-                    serde_json::to_string(&provider.settings_config)
+                    serde_json::to_string(&final_settings_config)
                         .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?,
                     provider.website_url,
                     provider.category,
@@ -410,18 +430,40 @@ impl Database {
         Ok(())
     }
 
-    /// 更新供应商的 settings_config（仅更新配置，不改变其他字段）
+    /// 更新供应商的 settings_config（仅更新配置，不改变其他字段）。
+    /// 默认增量合并到现有值，force=true 时全量替换。
     pub fn update_provider_settings_config(
         &self,
         app_type: &str,
         provider_id: &str,
         settings_config: &serde_json::Value,
+        force: bool,
     ) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
+        let merged = if force {
+            settings_config.clone()
+        } else {
+            let existing_str: Option<String> = conn
+                .query_row(
+                    "SELECT settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
+                    params![provider_id, app_type],
+                    |row| row.get(0),
+                )
+                .ok();
+            match existing_str {
+                Some(s) => {
+                    let existing: Value = serde_json::from_str(&s).unwrap_or(Value::Null);
+                    let mut m = existing;
+                    json_deep_merge(&mut m, settings_config);
+                    m
+                }
+                None => settings_config.clone(),
+            }
+        };
         conn.execute(
             "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = ?3",
             params![
-                serde_json::to_string(settings_config).map_err(|e| AppError::Database(format!(
+                serde_json::to_string(&merged).map_err(|e| AppError::Database(format!(
                     "Failed to serialize settings_config: {e}"
                 )))?,
                 provider_id,

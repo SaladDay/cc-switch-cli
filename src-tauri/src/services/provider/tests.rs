@@ -4371,3 +4371,189 @@ fn import_openclaw_providers_from_live_skips_existing_ids_without_overwriting() 
         Some(true)
     );
 }
+
+#[test]
+fn build_effective_live_snapshot_codex_preserves_custom_keys() {
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "Test".to_string(),
+        json!({
+            "auth": {"OPENAI_API_KEY": "sk-test"},
+            "config": "[model_provider]\nprovider = \"custom\"\nbase_url = \"https://api.example.com\"\n",
+            "customKey": "custom-value"
+        }),
+        None,
+    );
+
+    let effective = ProviderService::build_effective_live_snapshot(
+        &AppType::Codex,
+        &provider,
+        None,
+        false,
+    )
+    .expect("build effective snapshot");
+
+    // canonical keys present
+    assert!(effective.get("auth").is_some(), "auth should be present");
+    assert!(effective.get("config").is_some(), "config should be present");
+    // custom key preserved
+    assert_eq!(
+        effective.get("customKey").and_then(Value::as_str),
+        Some("custom-value"),
+        "custom keys should be preserved in effective snapshot"
+    );
+}
+
+#[test]
+fn build_effective_live_snapshot_gemini_preserves_custom_keys() {
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "Test".to_string(),
+        json!({
+            "env": {"GEMINI_API_KEY": "sk-test"},
+            "config": {"temperature": 0.7},
+            "customKey": "custom-value"
+        }),
+        None,
+    );
+
+    let effective = ProviderService::build_effective_live_snapshot(
+        &AppType::Gemini,
+        &provider,
+        None,
+        false,
+    )
+    .expect("build effective snapshot");
+
+    assert!(effective.get("env").is_some(), "env should be present");
+    assert!(effective.get("config").is_some(), "config should be present");
+    assert_eq!(
+        effective.get("customKey").and_then(Value::as_str),
+        Some("custom-value"),
+        "custom keys should be preserved in effective snapshot"
+    );
+}
+
+#[test]
+#[serial]
+fn codex_switch_preserves_custom_keys_in_settings_config() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex dir");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "sk-test"},
+                    "config": "model_provider = \"custom\"\nbase_url = \"https://api.example.com\"\n",
+                    "customKey": "custom-value"
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+
+    // Switch triggers write_live_snapshot + refresh_provider_snapshot round-trip
+    ProviderService::switch(&state, AppType::Codex, "p1").expect("switch to p1");
+
+    // Check in-memory config
+    {
+        let guard = state.config.read().expect("read config");
+        let manager = guard.get_manager(&AppType::Codex).expect("codex manager");
+        let provider = manager.providers.get("p1").expect("p1 exists");
+        assert_eq!(
+            provider.settings_config.get("customKey").and_then(Value::as_str),
+            Some("custom-value"),
+            "custom keys should survive switch round-trip in memory"
+        );
+    }
+
+    // Check DB
+    let db_provider = state
+        .db
+        .get_provider_by_id("p1", AppType::Codex.as_str())
+        .expect("query")
+        .expect("exists");
+    assert_eq!(
+        db_provider.settings_config.get("customKey").and_then(Value::as_str),
+        Some("custom-value"),
+        "custom keys should survive switch round-trip in DB"
+    );
+}
+
+#[test]
+#[serial]
+fn gemini_switch_preserves_custom_keys_in_settings_config() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    let gemini_dir = crate::gemini_config::get_gemini_dir();
+    std::fs::create_dir_all(&gemini_dir).expect("create gemini dir");
+
+    // Write minimal .env so Gemini refresh doesn't bail on missing file
+    std::fs::write(
+        crate::gemini_config::get_gemini_env_path(),
+        "GEMINI_API_KEY=sk-test\n",
+    )
+    .expect("write .env");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Gemini);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Gemini)
+            .expect("gemini manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "env": {"GEMINI_API_KEY": "sk-test"},
+                    "config": {"temperature": 0.7},
+                    "customKey": "custom-value"
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+
+    ProviderService::switch(&state, AppType::Gemini, "p1").expect("switch to p1");
+
+    {
+        let guard = state.config.read().expect("read config");
+        let manager = guard.get_manager(&AppType::Gemini).expect("gemini manager");
+        let provider = manager.providers.get("p1").expect("p1 exists");
+        assert_eq!(
+            provider.settings_config.get("customKey").and_then(Value::as_str),
+            Some("custom-value"),
+            "custom keys should survive switch round-trip in memory"
+        );
+    }
+
+    let db_provider = state
+        .db
+        .get_provider_by_id("p1", AppType::Gemini.as_str())
+        .expect("query")
+        .expect("exists");
+    assert_eq!(
+        db_provider.settings_config.get("customKey").and_then(Value::as_str),
+        Some("custom-value"),
+        "custom keys should survive switch round-trip in DB"
+    );
+}

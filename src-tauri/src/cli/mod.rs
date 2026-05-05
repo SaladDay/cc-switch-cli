@@ -78,6 +78,10 @@ pub enum Commands {
 
     /// Generate, install, inspect, or uninstall shell completions
     Completions(commands::completions::CompletionsCommand),
+
+    /// Edit a provider's settings_config JSON in an external editor
+    #[command(subcommand)]
+    EditJson(commands::edit_json::EditJsonCommand),
 }
 
 /// Generate shell completions
