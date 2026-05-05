@@ -1982,7 +1982,7 @@ impl ProviderService {
                     common_config_snippet,
                     apply_common_config,
                 )?;
-                let mut effective_obj = match effective {
+                let effective_obj = match effective {
                     Value::Object(map) => map,
                     _ => {
                         return Err(AppError::Config(
@@ -1990,23 +1990,12 @@ impl ProviderService {
                         ))
                     }
                 };
-                let auth = effective_obj.get("auth").cloned();
-                let cfg_text = effective_obj
-                    .get("config")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-
-                if !cfg_text.trim().is_empty() {
-                    crate::codex_config::validate_config_toml(&cfg_text)?;
+                if let Some(cfg_text) = effective_obj.get("config").and_then(Value::as_str) {
+                    if !cfg_text.trim().is_empty() {
+                        crate::codex_config::validate_config_toml(cfg_text)?;
+                    }
                 }
 
-                // Preserve all existing keys; only update auth and config in-place
-                if let Some(auth) = auth {
-                    effective_obj.insert("auth".to_string(), auth);
-                }
-                effective_obj
-                    .insert("config".to_string(), Value::String(cfg_text));
                 Ok(Value::Object(effective_obj))
             }
             AppType::Gemini => {

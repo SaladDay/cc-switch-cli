@@ -2,7 +2,6 @@ use clap::Subcommand;
 use serde_json::Value;
 
 use crate::app_config::AppType;
-use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::services::provider::ProviderService;
@@ -60,7 +59,9 @@ fn edit_provider(app_type: &AppType, id: &str, force: bool) -> Result<(), AppErr
 
     let new_value = validate_edited_json(&edited, &provider, app_type)?;
 
-    apply_settings_config_update(&state.db, app_type, id, &new_value, force)?;
+    state
+        .db
+        .update_provider_settings_config(app_type.as_str(), id, &new_value, force)?;
 
     use crate::cli::ui::success;
     println!(
@@ -105,17 +106,6 @@ fn validate_edited_json(
     Ok(value)
 }
 
-/// Write the validated JSON value directly to the database.
-fn apply_settings_config_update(
-    db: &Database,
-    app_type: &AppType,
-    id: &str,
-    value: &Value,
-    force: bool,
-) -> Result<(), AppError> {
-    db.update_provider_settings_config(app_type.as_str(), id, value, force)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,20 +114,9 @@ mod tests {
     use serde_json::json;
 
     fn make_provider(id: &str, settings_config: Value) -> Provider {
-        Provider {
-            id: id.to_string(),
-            name: "Test Provider".to_string(),
-            settings_config,
-            website_url: None,
-            category: None,
-            created_at: None,
-            sort_index: None,
-            notes: None,
-            meta: Some(ProviderMeta::default()),
-            icon: None,
-            icon_color: None,
-            in_failover_queue: false,
-        }
+        let mut p = Provider::with_id(id.to_string(), "Test Provider".to_string(), settings_config, None);
+        p.meta = Some(ProviderMeta::default());
+        p
     }
 
     fn seed_provider(db: &Database, id: &str, app_type: &str, cfg: Value) {
@@ -303,24 +282,25 @@ mod tests {
     }
 
     #[test]
-    fn no_change_detection() {
+    fn update_with_identical_content_is_noop() {
         let db = Database::memory().expect("memory db");
-        let original = json!({"key": "value"});
+        let original = json!({"key": "value", "custom": "preserve-me"});
         seed_provider(&db, "test-id", "claude", original.clone());
 
-        let provider = db
-            .get_provider_by_id("test-id", "claude")
-            .expect("query")
-            .expect("exists");
-
-        let initial = serde_json::to_string_pretty(&provider.settings_config).unwrap();
-        assert_eq!(initial.trim(), initial.trim());
+        // Merge the same JSON — no actual change should occur
+        db.update_provider_settings_config(
+            "claude",
+            "test-id",
+            &json!({"key": "value"}),
+            false,
+        )
+        .expect("update should succeed");
 
         let after = db
             .get_provider_by_id("test-id", "claude")
             .expect("query")
             .expect("exists");
-        assert_eq!(after.settings_config, original);
+        assert_eq!(after.settings_config, original, "identical merge must not mutate data");
     }
 
     #[test]

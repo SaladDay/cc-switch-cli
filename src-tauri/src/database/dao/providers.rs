@@ -211,6 +211,13 @@ impl Database {
         Ok(false)
     }
 
+    fn merge_settings_config(existing_str: &str, incoming: &Value) -> Value {
+        let existing: Value = serde_json::from_str(existing_str).unwrap_or(Value::Null);
+        let mut merged = existing;
+        json_deep_merge(&mut merged, incoming);
+        merged
+    }
+
     fn next_sort_index_for_app(&self, app_type: &str) -> Result<usize, AppError> {
         let conn = lock_conn!(self.conn);
         let max: Option<i64> = conn
@@ -281,33 +288,24 @@ impl Database {
         let mut meta_clone = provider.meta.clone().unwrap_or_default();
         let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
 
-        // 检查是否存在（用于判断新增/更新，以及保留 is_current 和 in_failover_queue）
-        let existing: Option<(bool, bool)> = tx
+        // Fetch existing row in one query: is_current, in_failover_queue, and settings_config
+        let existing: Option<(bool, bool, String)> = tx
             .query_row(
-                "SELECT is_current, in_failover_queue FROM providers WHERE id = ?1 AND app_type = ?2",
+                "SELECT is_current, in_failover_queue, settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
                 params![provider.id, app_type],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .ok();
 
         let is_update = existing.is_some();
-        let (is_current, in_failover_queue) =
-            existing.unwrap_or((false, provider.in_failover_queue));
+        let (is_current, in_failover_queue) = existing
+            .as_ref()
+            .map(|(c, q, _)| (*c, *q))
+            .unwrap_or((false, provider.in_failover_queue));
 
         // Merge settings_config: preserve custom keys from existing DB row
-        let final_settings_config = if is_update {
-            let existing_cfg_str: String = tx
-                .query_row(
-                    "SELECT settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
-                    params![provider.id, app_type],
-                    |row| row.get(0),
-                )
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            let existing_cfg: Value =
-                serde_json::from_str(&existing_cfg_str).unwrap_or(Value::Null);
-            let mut merged = existing_cfg;
-            json_deep_merge(&mut merged, &provider.settings_config);
-            merged
+        let final_settings_config = if let Some((_, _, ref existing_cfg_str)) = existing {
+            Self::merge_settings_config(existing_cfg_str, &provider.settings_config)
         } else {
             provider.settings_config.clone()
         };
@@ -451,12 +449,7 @@ impl Database {
                 )
                 .ok();
             match existing_str {
-                Some(s) => {
-                    let existing: Value = serde_json::from_str(&s).unwrap_or(Value::Null);
-                    let mut m = existing;
-                    json_deep_merge(&mut m, settings_config);
-                    m
-                }
+                Some(ref s) => Self::merge_settings_config(s, settings_config),
                 None => settings_config.clone(),
             }
         };
