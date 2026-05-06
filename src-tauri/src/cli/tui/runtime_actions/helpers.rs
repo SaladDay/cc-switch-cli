@@ -7,6 +7,7 @@ use crate::commands::workspace;
 use crate::error::AppError;
 use crate::services::McpService;
 
+use super::super::app::visible_prompts;
 use super::super::app::{App, LoadingKind, Overlay, TextViewState, ToastKind};
 use super::super::data::{load_proxy_config, load_state, UiData};
 use super::super::runtime_systems::{ProxyReq, RequestTracker};
@@ -192,6 +193,26 @@ pub(super) fn text_view(title: String, content: String) -> Overlay {
         scroll: 0,
         action: None,
     })
+}
+
+pub(super) fn select_prompt_by_id(app: &mut App, data: &UiData, id: &str) {
+    let visible = visible_prompts(&app.filter, data);
+    if let Some(idx) = visible.iter().position(|row| row.id == id) {
+        app.prompt_idx = idx;
+        return;
+    }
+
+    if app.filter.active || !app.filter.buffer.trim().is_empty() {
+        app.filter.active = false;
+        app.filter.buffer.clear();
+        let visible = visible_prompts(&app.filter, data);
+        if let Some(idx) = visible.iter().position(|row| row.id == id) {
+            app.prompt_idx = idx;
+            return;
+        }
+    }
+
+    app.prompt_idx = 0;
 }
 
 pub(super) fn open_proxy_help(app: &mut App, data: &UiData) -> Result<(), AppError> {

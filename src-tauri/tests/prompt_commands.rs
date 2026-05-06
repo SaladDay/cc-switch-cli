@@ -156,3 +156,11 @@ fn prompt_create_command_uses_explicit_name() {
     assert_eq!(prompt.name, "Prompt One");
     assert_eq!(prompt.content, "system prompt body");
 }
+
+#[test]
+#[serial]
+fn generate_prompt_id_falls_back_when_name_has_no_valid_slug_chars() {
+    let ids = vec!["prompt".to_string(), "prompt-1".to_string()];
+    let generated = PromptService::generate_prompt_id("!!!", &ids);
+    assert_eq!(generated, "prompt-2");
+}

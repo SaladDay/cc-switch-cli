@@ -19,7 +19,9 @@ mod tests {
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::commands::workspace::{DailyMemoryFileInfo, DailyMemorySearchResult, ALLOWED_FILES};
     use crate::error::AppError;
+    use crate::prompt::Prompt;
     use crate::provider::Provider;
+    use crate::services::PromptService;
     use crate::settings::{get_settings, update_settings, AppSettings};
     use crate::test_support::{
         lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
@@ -7800,6 +7802,87 @@ mod tests {
             action,
             Action::PromptRename { id, name } if id == "pr1" && name == "Renamed"
         ));
+    }
+
+    #[test]
+    #[serial]
+    fn prompt_create_runtime_clears_filter_when_new_prompt_is_not_visible() {
+        let _guard = EnvGuard::set_home(tempfile::tempdir().expect("tempdir").path());
+        let state = crate::AppState::try_new().expect("load state");
+        state.save().expect("persist empty state");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.filter.buffer = "focus".to_string();
+        app.prompt_idx = 0;
+
+        let mut data = UiData::load(&app.app_type).expect("load ui data");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::EditorSubmit {
+                submit: EditorSubmit::PromptCreate {
+                    name: "Prompt One".to_string(),
+                },
+                content: "body".to_string(),
+            },
+        )
+        .expect("create prompt");
+
+        assert!(!app.filter.active);
+        assert!(app.filter.buffer.is_empty());
+        assert_eq!(app.prompt_idx, 0);
+        assert_eq!(data.prompts.rows.len(), 1);
+        assert_eq!(data.prompts.rows[0].id, "prompt-one");
+    }
+
+    #[test]
+    #[serial]
+    fn prompt_rename_runtime_clears_filter_when_renamed_prompt_is_not_visible() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set_home(temp.path());
+        let state = crate::AppState::try_new().expect("load state");
+        PromptService::upsert_prompt(
+            &state,
+            AppType::Claude,
+            "pr1",
+            Prompt {
+                id: "pr1".to_string(),
+                name: "Demo".to_string(),
+                content: "hello".to_string(),
+                description: None,
+                enabled: false,
+                created_at: Some(1),
+                updated_at: Some(1),
+            },
+        )
+        .expect("seed prompt");
+        state.save().expect("persist config");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.filter.buffer = "demo".to_string();
+        app.prompt_idx = 0;
+
+        let mut data = UiData::load(&app.app_type).expect("load ui data");
+        run_runtime_action(
+            &mut app,
+            &mut data,
+            Action::PromptRename {
+                id: "pr1".to_string(),
+                name: "Renamed".to_string(),
+            },
+        )
+        .expect("rename prompt");
+
+        assert!(!app.filter.active);
+        assert!(app.filter.buffer.is_empty());
+        assert_eq!(app.prompt_idx, 0);
+        assert_eq!(data.prompts.rows.len(), 1);
+        assert_eq!(data.prompts.rows[0].id, "pr1");
+        assert_eq!(data.prompts.rows[0].prompt.name, "Renamed");
     }
 
     #[test]

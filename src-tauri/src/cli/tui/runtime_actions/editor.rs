@@ -16,7 +16,9 @@ use crate::settings::{set_webdav_sync_settings, WebDavSyncSettings};
 use super::super::app::{EditorSubmit, Overlay, TextViewState, ToastKind};
 use super::super::data::{load_state, UiData};
 use super::super::form::FormState;
-use super::helpers::{refresh_openclaw_workspace_data, run_external_editor_for_current_editor};
+use super::helpers::{
+    refresh_openclaw_workspace_data, run_external_editor_for_current_editor, select_prompt_by_id,
+};
 use super::RuntimeActionContext;
 
 fn is_codex_official_provider(provider: &Provider) -> bool {
@@ -126,15 +128,7 @@ fn submit_prompt_create(
     ctx.app
         .push_toast(texts::tui_toast_prompt_created(), ToastKind::Success);
     *ctx.data = UiData::load(&ctx.app.app_type)?;
-    if let Some(idx) = ctx
-        .data
-        .prompts
-        .rows
-        .iter()
-        .position(|row| row.id == prompt.id)
-    {
-        ctx.app.prompt_idx = idx;
-    }
+    select_prompt_by_id(ctx.app, ctx.data, &prompt.id);
     Ok(())
 }
 

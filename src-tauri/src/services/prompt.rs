@@ -11,7 +11,7 @@ pub struct PromptService;
 
 impl PromptService {
     pub fn generate_prompt_id(name: &str, existing_ids: &[String]) -> String {
-        let base_id = name
+        let mut base_id = name
             .trim()
             .to_lowercase()
             .chars()
@@ -25,6 +25,10 @@ impl PromptService {
             .collect::<String>()
             .trim_matches('-')
             .to_string();
+
+        if base_id.is_empty() {
+            base_id = "prompt".to_string();
+        }
 
         if !existing_ids.contains(&base_id) {
             return base_id;
