@@ -289,7 +289,8 @@ cc-switch prompts list               # List prompt presets
 cc-switch prompts current            # Show current active prompt
 cc-switch prompts activate <id>      # Activate prompt
 cc-switch prompts deactivate         # Deactivate current active prompt
-cc-switch prompts create             # Create new prompt preset
+cc-switch prompts create [name]      # Create a prompt preset, optionally naming it up front
+cc-switch prompts rename <id> [name] # Rename prompt preset, interactive if name is omitted
 cc-switch prompts edit <id>          # Edit prompt preset
 cc-switch prompts show <id>          # Display full content
 cc-switch prompts delete <id>        # Delete prompt

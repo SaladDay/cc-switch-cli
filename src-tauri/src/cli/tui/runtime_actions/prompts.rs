@@ -24,6 +24,22 @@ pub(super) fn deactivate(ctx: &mut RuntimeActionContext<'_>, id: String) -> Resu
     Ok(())
 }
 
+pub(super) fn rename(
+    ctx: &mut RuntimeActionContext<'_>,
+    id: String,
+    name: String,
+) -> Result<(), AppError> {
+    let state = load_state()?;
+    PromptService::rename_prompt(&state, ctx.app.app_type.clone(), &id, &name)?;
+    ctx.app
+        .push_toast(texts::tui_toast_prompt_renamed(), ToastKind::Success);
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    if let Some(idx) = ctx.data.prompts.rows.iter().position(|row| row.id == id) {
+        ctx.app.prompt_idx = idx;
+    }
+    Ok(())
+}
+
 pub(super) fn delete(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
     let state = load_state()?;
     PromptService::delete_prompt(&state, ctx.app.app_type.clone(), &id)?;

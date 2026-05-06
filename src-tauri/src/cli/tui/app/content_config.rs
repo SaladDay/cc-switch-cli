@@ -1081,4 +1081,17 @@ impl App {
         self.editor = None;
         self.form = Some(FormState::McpAdd(McpAddFormState::from_server(&row.server)));
     }
+
+    pub(crate) fn open_prompt_create_name_input(&mut self) {
+        self.filter.active = false;
+        self.editor = None;
+        self.overlay = Overlay::TextInput(TextInputState {
+            title: texts::tui_prompt_create_title().to_string(),
+            prompt: texts::tui_prompt_create_prompt().to_string(),
+            buffer: format!("Prompt {}", chrono::Local::now().format("%Y-%m-%d %H:%M")),
+            submit: TextSubmit::PromptCreateName,
+            secret: false,
+        });
+        self.focus = Focus::Content;
+    }
 }

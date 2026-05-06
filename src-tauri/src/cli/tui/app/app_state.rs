@@ -102,6 +102,10 @@ pub enum Action {
     PromptDeactivate {
         id: String,
     },
+    PromptRename {
+        id: String,
+        name: String,
+    },
     PromptDelete {
         id: String,
     },

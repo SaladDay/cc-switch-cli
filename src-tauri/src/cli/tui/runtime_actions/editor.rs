@@ -75,6 +75,7 @@ pub(super) fn submit(
     content: String,
 ) -> Result<(), AppError> {
     match submit {
+        EditorSubmit::PromptCreate { name } => submit_prompt_create(ctx, name, content),
         EditorSubmit::PromptEdit { id } => submit_prompt_edit(ctx, id, content),
         EditorSubmit::ProviderFormApplyJson => submit_provider_form_apply_json(ctx, content),
         EditorSubmit::ProviderFormApplyOpenClawModels => {
@@ -104,6 +105,37 @@ pub(super) fn submit(
         EditorSubmit::ConfigOpenClawAgents => submit_openclaw_agents(ctx, content),
         EditorSubmit::ConfigWebDavSettings => submit_webdav_settings(ctx, content),
     }
+}
+
+fn submit_prompt_create(
+    ctx: &mut RuntimeActionContext<'_>,
+    name: String,
+    content: String,
+) -> Result<(), AppError> {
+    let state = load_state()?;
+    let prompt =
+        match PromptService::create_prompt(&state, ctx.app.app_type.clone(), &name, &content) {
+            Ok(prompt) => prompt,
+            Err(err) => {
+                ctx.app.push_toast(err.to_string(), ToastKind::Error);
+                return Ok(());
+            }
+        };
+
+    ctx.app.editor = None;
+    ctx.app
+        .push_toast(texts::tui_toast_prompt_created(), ToastKind::Success);
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    if let Some(idx) = ctx
+        .data
+        .prompts
+        .rows
+        .iter()
+        .position(|row| row.id == prompt.id)
+    {
+        ctx.app.prompt_idx = idx;
+    }
+    Ok(())
 }
 
 fn submit_openclaw_workspace_file(
@@ -901,6 +933,49 @@ mod tests {
             webdav_loading: RequestTracker::default(),
             update_check: RequestTracker::default(),
         }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_prompt_create_persists_prompt_and_refreshes_selection() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+        };
+
+        submit_prompt_create(&mut ctx, "Prompt One".to_string(), "hello".to_string())
+            .expect("create prompt succeeds");
+
+        let refreshed = UiData::load(&AppType::Claude).expect("reload ui data");
+        assert!(
+            refreshed
+                .prompts
+                .rows
+                .iter()
+                .any(|row| row.id == "prompt-one" && row.prompt.name == "Prompt One"),
+            "runtime create should persist the prompt"
+        );
+        assert!(matches!(
+            ctx.app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Success,
+                ..
+            })
+        ));
     }
 
     #[test]

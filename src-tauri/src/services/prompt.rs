@@ -10,6 +10,36 @@ use crate::store::AppState;
 pub struct PromptService;
 
 impl PromptService {
+    pub fn generate_prompt_id(name: &str, existing_ids: &[String]) -> String {
+        let base_id = name
+            .trim()
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_string();
+
+        if !existing_ids.contains(&base_id) {
+            return base_id;
+        }
+
+        let mut counter = 1;
+        loop {
+            let candidate = format!("{base_id}-{counter}");
+            if !existing_ids.contains(&candidate) {
+                return candidate;
+            }
+            counter += 1;
+        }
+    }
+
     pub fn get_prompts(
         state: &AppState,
         app: AppType,
@@ -75,6 +105,81 @@ impl PromptService {
         drop(cfg);
         state.save()?;
         Ok(())
+    }
+
+    pub fn rename_prompt(
+        state: &AppState,
+        app: AppType,
+        id: &str,
+        name: &str,
+    ) -> Result<(), AppError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::InvalidInput("提示词名称不能为空".to_string()));
+        }
+
+        let mut cfg = state.config.write()?;
+        let prompts = match app {
+            AppType::Claude => &mut cfg.prompts.claude.prompts,
+            AppType::Codex => &mut cfg.prompts.codex.prompts,
+            AppType::Gemini => &mut cfg.prompts.gemini.prompts,
+            AppType::OpenCode => &mut cfg.prompts.opencode.prompts,
+            AppType::OpenClaw => &mut cfg.prompts.openclaw.prompts,
+        };
+
+        let Some(prompt) = prompts.get_mut(id) else {
+            return Err(AppError::InvalidInput(format!("提示词 {id} 不存在")));
+        };
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        prompt.name = trimmed.to_string();
+        prompt.updated_at = Some(timestamp);
+
+        drop(cfg);
+        state.save()?;
+        Ok(())
+    }
+
+    pub fn create_prompt(
+        state: &AppState,
+        app: AppType,
+        name: &str,
+        content: &str,
+    ) -> Result<Prompt, AppError> {
+        let trimmed_name = name.trim();
+        if trimmed_name.is_empty() {
+            return Err(AppError::InvalidInput("提示词名称不能为空".to_string()));
+        }
+
+        let existing_ids = Self::get_prompts(state, app.clone())?
+            .into_keys()
+            .collect::<Vec<_>>();
+        let id = Self::generate_prompt_id(trimmed_name, &existing_ids);
+        if id.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "无法根据提示词名称生成有效 ID".to_string(),
+            ));
+        }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let prompt = Prompt {
+            id: id.clone(),
+            name: trimmed_name.to_string(),
+            content: content.trim_end().to_string(),
+            description: None,
+            enabled: false,
+            created_at: Some(timestamp),
+            updated_at: Some(timestamp),
+        };
+
+        Self::upsert_prompt(state, app, &id, prompt.clone())?;
+        Ok(prompt)
     }
 
     pub fn enable_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {

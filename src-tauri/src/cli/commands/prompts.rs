@@ -3,7 +3,6 @@ use clap::Subcommand;
 use crate::app_config::AppType;
 use crate::cli::ui::{create_table, highlight, info, success};
 use crate::error::AppError;
-use crate::prompt::Prompt;
 use crate::services::PromptService;
 use crate::store::AppState;
 
@@ -21,11 +20,21 @@ pub enum PromptsCommand {
     /// Deactivate the current active prompt
     Deactivate,
     /// Create a new prompt preset
-    Create,
+    Create {
+        /// Prompt preset name
+        name: Option<String>,
+    },
     /// Edit a prompt preset
     Edit {
         /// Prompt preset ID
         id: String,
+    },
+    /// Rename a prompt preset
+    Rename {
+        /// Prompt preset ID
+        id: String,
+        /// New prompt name
+        name: Option<String>,
     },
     /// Delete a prompt preset
     Delete {
@@ -47,8 +56,9 @@ pub fn execute(cmd: PromptsCommand, app: Option<AppType>) -> Result<(), AppError
         PromptsCommand::Current => show_current(app_type),
         PromptsCommand::Activate { id } => activate_prompt(app_type, &id),
         PromptsCommand::Deactivate => deactivate_prompt(app_type),
-        PromptsCommand::Create => create_prompt(app_type),
+        PromptsCommand::Create { name } => create_prompt(app_type, name),
         PromptsCommand::Edit { id } => edit_prompt(app_type, &id),
+        PromptsCommand::Rename { id, name } => rename_prompt(app_type, &id, name),
         PromptsCommand::Delete { id } => delete_prompt(app_type, &id),
         PromptsCommand::Show { id } => show_prompt(app_type, &id),
     }
@@ -296,36 +306,37 @@ fn show_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn create_prompt(_app_type: AppType) -> Result<(), AppError> {
+fn create_prompt(app_type: AppType, name: Option<String>) -> Result<(), AppError> {
     let state = get_state()?;
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let id = format!("prompt-{timestamp}");
+    let default_name = format!("Prompt {}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
+    let name = match name {
+        Some(name) => name,
+        None => inquire::Text::new("Prompt name:")
+            .with_initial_value(&default_name)
+            .prompt()
+            .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?,
+    };
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Prompt preset name cannot be empty".to_string(),
+        ));
+    }
 
-    let name = format!("Prompt {}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
     let initial = "# Write your prompt here\n";
 
     println!("{}", highlight("Create New Prompt Preset"));
     println!("{}", info("Opening external editor..."));
 
     let edited = crate::cli::editor::open_external_editor(initial)?;
+    let prompt = PromptService::create_prompt(&state, app_type.clone(), trimmed_name, &edited)?;
 
-    let content = edited.trim_end().to_string();
-    let prompt = Prompt {
-        id: id.clone(),
-        name,
-        content,
-        description: None,
-        enabled: false,
-        created_at: Some(timestamp),
-        updated_at: Some(timestamp),
-    };
-
-    PromptService::upsert_prompt(&state, _app_type.clone(), &id, prompt)?;
-
-    println!("{}", success(&format!("✓ Created prompt preset '{id}'")));
+    println!(
+        "{}",
+        success(&format!("✓ Created prompt preset '{}'", prompt.id))
+    );
+    println!("{}", info(&format!("  Name: {}", prompt.name)));
+    println!("{}", info(&format!("  Application: {}", app_type.as_str())));
     println!(
         "{}",
         info("Tip: Use 'cc-switch prompts list' to view all presets.")
@@ -397,5 +408,42 @@ fn edit_prompt(_app_type: AppType, id: &str) -> Result<(), AppError> {
     PromptService::upsert_prompt(&state, _app_type.clone(), id, prompt)?;
 
     println!("{}", success(&format!("✓ Updated prompt preset '{id}'")));
+    Ok(())
+}
+
+fn rename_prompt(app_type: AppType, id: &str, name: Option<String>) -> Result<(), AppError> {
+    let state = get_state()?;
+    let prompts = PromptService::get_prompts(&state, app_type.clone())?;
+    let Some(prompt) = prompts.get(id) else {
+        return Err(AppError::InvalidInput(format!(
+            "Prompt preset '{id}' not found"
+        )));
+    };
+
+    let new_name = match name {
+        Some(name) => name,
+        None => inquire::Text::new("New prompt name:")
+            .with_initial_value(&prompt.name)
+            .prompt()
+            .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?,
+    };
+
+    let trimmed = new_name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Prompt preset name cannot be empty".to_string(),
+        ));
+    }
+
+    if trimmed == prompt.name {
+        println!("{}", info("No changes detected."));
+        return Ok(());
+    }
+
+    PromptService::rename_prompt(&state, app_type.clone(), id, trimmed)?;
+
+    println!("{}", success(&format!("✓ Renamed prompt preset '{id}'")));
+    println!("{}", info(&format!("  Name: {}", trimmed)));
+    println!("{}", info(&format!("  Application: {}", app_type.as_str())));
     Ok(())
 }

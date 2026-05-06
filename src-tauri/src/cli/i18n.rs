@@ -509,9 +509,9 @@ pub mod texts {
 
     pub fn tui_footer_action_keys_prompts() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Enter 查看  a 激活  x 取消激活  e 编辑  d 删除  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用  c 新建  r 刷新  Enter 查看  a 激活  x 取消激活  n 重命名  e 编辑  d 删除  / 过滤  Esc 返回  ? 帮助"
         } else {
-            "[ ] switch app  Enter view  a activate  x deactivate  e edit  d delete  / filter  Esc back  ? help"
+            "[ ] switch app  c create  r refresh  Enter view  a activate  x deactivate  n rename  e edit  d delete  / filter  Esc back  ? help"
         }
     }
 
@@ -565,9 +565,9 @@ pub mod texts {
 
     pub fn tui_help_text() -> &'static str {
         if is_chinese() {
-            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，s 切换/添加移除，a 添加，e 编辑，d 删除，t 测速，c 健康检查\n- 供应商详情：s 切换/添加移除，e 编辑，t 测速，c 健康检查\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：Enter 查看，a 激活，x 取消激活(当前)，e 编辑，d 删除\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
+            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，s 切换/添加移除，a 添加，e 编辑，d 删除，t 测速，c 健康检查\n- 供应商详情：s 切换/添加移除，e 编辑，t 测速，c 健康检查\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：c 新建，r 刷新，Enter 查看，a 激活，x 取消激活(当前)，n 重命名，e 编辑，d 删除\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
         } else {
-            "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, s switch/add-remove, a add, e edit, d delete, t speedtest, c stream check\n- Provider Detail: s switch/add-remove, e edit, t speedtest, c stream check\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: Enter view, a activate, x deactivate active, e edit, d delete\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
+            "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, s switch/add-remove, a add, e edit, d delete, t speedtest, c stream check\n- Provider Detail: s switch/add-remove, e edit, t speedtest, c stream check\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: c create, r refresh, Enter view, a activate, x deactivate active, n rename, e edit, d delete\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
         }
     }
 
@@ -2447,6 +2447,14 @@ pub mod texts {
             "新建"
         } else {
             "create"
+        }
+    }
+
+    pub fn tui_key_rename() -> &'static str {
+        if is_chinese() {
+            "重命名"
+        } else {
+            "rename"
         }
     }
 
@@ -4499,6 +4507,38 @@ pub mod texts {
         }
     }
 
+    pub fn tui_prompt_rename_title() -> &'static str {
+        if is_chinese() {
+            "重命名提示词"
+        } else {
+            "Rename Prompt"
+        }
+    }
+
+    pub fn tui_prompt_create_title() -> &'static str {
+        if is_chinese() {
+            "创建提示词"
+        } else {
+            "Create Prompt"
+        }
+    }
+
+    pub fn tui_prompt_create_prompt() -> &'static str {
+        if is_chinese() {
+            "输入提示词名称："
+        } else {
+            "Enter a prompt name:"
+        }
+    }
+
+    pub fn tui_prompt_rename_prompt() -> &'static str {
+        if is_chinese() {
+            "输入新的提示词名称："
+        } else {
+            "Enter a new prompt name:"
+        }
+    }
+
     pub fn tui_toast_prompt_no_active_to_deactivate() -> &'static str {
         if is_chinese() {
             "没有可停用的活动提示词。"
@@ -4544,6 +4584,14 @@ pub mod texts {
             "提示词编辑完成"
         } else {
             "Prompt edit finished"
+        }
+    }
+
+    pub fn tui_toast_prompt_name_empty() -> &'static str {
+        if is_chinese() {
+            "提示词名称不能为空。"
+        } else {
+            "Prompt name cannot be empty."
         }
     }
 
@@ -5379,6 +5427,22 @@ pub mod texts {
             "提示词已删除。"
         } else {
             "Prompt deleted."
+        }
+    }
+
+    pub fn tui_toast_prompt_created() -> &'static str {
+        if is_chinese() {
+            "提示词已创建。"
+        } else {
+            "Prompt created."
+        }
+    }
+
+    pub fn tui_toast_prompt_renamed() -> &'static str {
+        if is_chinese() {
+            "提示词已重命名。"
+        } else {
+            "Prompt renamed."
         }
     }
 

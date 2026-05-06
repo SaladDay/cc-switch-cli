@@ -746,6 +746,22 @@ pub fn tui_toast_prompt_deleted() -> &'static str {
     }
 }
 
+pub fn tui_toast_prompt_created() -> &'static str {
+    if is_chinese() {
+        "提示词已创建。"
+    } else {
+        "Prompt created."
+    }
+}
+
+pub fn tui_toast_prompt_renamed() -> &'static str {
+    if is_chinese() {
+        "提示词已重命名。"
+    } else {
+        "Prompt renamed."
+    }
+}
+
 pub fn tui_toast_exported_to(path: &str) -> String {
     if is_chinese() {
         format!("已导出到 {}", path)

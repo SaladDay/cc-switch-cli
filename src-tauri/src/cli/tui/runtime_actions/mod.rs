@@ -232,6 +232,7 @@ pub(crate) fn handle_action(
         Action::McpImport => mcp::import_current_app(&mut ctx),
         Action::PromptActivate { id } => prompts::activate(&mut ctx, id),
         Action::PromptDeactivate { id } => prompts::deactivate(&mut ctx, id),
+        Action::PromptRename { id, name } => prompts::rename(&mut ctx, id, name),
         Action::PromptDelete { id } => prompts::delete(&mut ctx, id),
         Action::ConfigExport { path } => config::export(&mut ctx, path),
         Action::ConfigShowFull => config::show_full(&mut ctx),

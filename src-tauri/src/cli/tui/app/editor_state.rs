@@ -8,6 +8,7 @@ pub enum EditorKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditorSubmit {
+    PromptCreate { name: String },
     PromptEdit { id: String },
     ProviderFormApplyJson,
     ProviderFormApplyOpenClawModels,

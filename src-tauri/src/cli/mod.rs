@@ -44,7 +44,7 @@ pub enum Commands {
     #[command(subcommand)]
     Mcp(commands::mcp::McpCommand),
 
-    /// Manage prompts (list, activate, edit)
+    /// Manage prompts (list, activate, create, rename, edit)
     #[command(subcommand)]
     Prompts(commands::prompts::PromptsCommand),
 

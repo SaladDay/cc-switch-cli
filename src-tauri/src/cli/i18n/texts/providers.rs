@@ -630,6 +630,14 @@ pub fn tui_key_refresh() -> &'static str {
     }
 }
 
+pub fn tui_key_rename() -> &'static str {
+    if is_chinese() {
+        "重命名"
+    } else {
+        "rename"
+    }
+}
+
 pub fn tui_key_start_proxy() -> &'static str {
     if is_chinese() {
         "启动代理"

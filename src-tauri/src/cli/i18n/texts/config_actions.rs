@@ -792,6 +792,38 @@ pub fn tui_prompt_title(name: &str) -> String {
     }
 }
 
+pub fn tui_prompt_rename_title() -> &'static str {
+    if is_chinese() {
+        "重命名提示词"
+    } else {
+        "Rename Prompt"
+    }
+}
+
+pub fn tui_prompt_create_title() -> &'static str {
+    if is_chinese() {
+        "创建提示词"
+    } else {
+        "Create Prompt"
+    }
+}
+
+pub fn tui_prompt_create_prompt() -> &'static str {
+    if is_chinese() {
+        "输入提示词名称："
+    } else {
+        "Enter a prompt name:"
+    }
+}
+
+pub fn tui_prompt_rename_prompt() -> &'static str {
+    if is_chinese() {
+        "输入新的提示词名称："
+    } else {
+        "Enter a new prompt name:"
+    }
+}
+
 pub fn tui_toast_prompt_no_active_to_deactivate() -> &'static str {
     if is_chinese() {
         "没有可停用的活动提示词。"
@@ -837,6 +869,14 @@ pub fn tui_toast_prompt_edit_finished() -> &'static str {
         "提示词编辑完成"
     } else {
         "Prompt edit finished"
+    }
+}
+
+pub fn tui_toast_prompt_name_empty() -> &'static str {
+    if is_chinese() {
+        "提示词名称不能为空。"
+    } else {
+        "Prompt name cannot be empty."
     }
 }
 

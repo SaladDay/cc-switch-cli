@@ -58,9 +58,12 @@ pub(super) fn render_prompts(
             chunks[0],
             theme,
             &[
+                ("c", texts::tui_key_create()),
+                ("r", texts::tui_key_refresh()),
                 ("Enter", texts::tui_key_view()),
                 ("a", texts::tui_key_activate()),
                 ("x", texts::tui_key_deactivate_active()),
+                ("n", texts::tui_key_rename()),
                 ("e", texts::tui_key_edit()),
                 ("d", texts::tui_key_delete()),
             ],

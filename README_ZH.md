@@ -290,7 +290,8 @@ cc-switch prompts list               # 列出提示词预设
 cc-switch prompts current            # 显示当前活动提示词
 cc-switch prompts activate <id>      # 激活提示词
 cc-switch prompts deactivate         # 停用当前激活的提示词
-cc-switch prompts create             # 创建新提示词预设
+cc-switch prompts create [name]      # 创建新提示词预设，可直接指定名称
+cc-switch prompts rename <id> [name] # 重命名提示词预设，不传名称时进入交互
 cc-switch prompts edit <id>          # 编辑提示词预设
 cc-switch prompts show <id>          # 显示完整内容
 cc-switch prompts delete <id>        # 删除提示词

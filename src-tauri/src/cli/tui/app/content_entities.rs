@@ -330,6 +330,11 @@ impl App {
     pub(crate) fn on_prompts_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         let visible = visible_prompts(&self.filter, data);
         match key.code {
+            KeyCode::Char('c') => {
+                self.open_prompt_create_name_input();
+                Action::None
+            }
+            KeyCode::Char('r') => Action::ReloadData,
             KeyCode::Up => {
                 self.prompt_idx = self.prompt_idx.saturating_sub(1);
                 Action::None
@@ -399,6 +404,19 @@ impl App {
                     row.prompt.content.clone(),
                     EditorSubmit::PromptEdit { id: row.id.clone() },
                 );
+                Action::None
+            }
+            KeyCode::Char('n') => {
+                let Some(row) = visible.get(self.prompt_idx) else {
+                    return Action::None;
+                };
+                self.overlay = Overlay::TextInput(TextInputState {
+                    title: texts::tui_prompt_rename_title().to_string(),
+                    prompt: texts::tui_prompt_rename_prompt().to_string(),
+                    buffer: row.prompt.name.clone(),
+                    submit: TextSubmit::PromptRename { id: row.id.clone() },
+                    secret: false,
+                });
                 Action::None
             }
             _ => Action::None,

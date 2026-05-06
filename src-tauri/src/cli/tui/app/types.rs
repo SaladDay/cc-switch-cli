@@ -82,11 +82,15 @@ pub struct ConfirmOverlay {
     pub action: ConfirmAction,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextSubmit {
     ConfigExport,
     ConfigImport,
     ConfigBackupName,
+    PromptCreateName,
+    PromptRename {
+        id: String,
+    },
     SettingsProxyListenAddress,
     SettingsProxyListenPort,
     SettingsOpenClawConfigDir,
