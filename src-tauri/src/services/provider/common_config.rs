@@ -60,7 +60,8 @@ fn json_remove_array_items(target_arr: &mut Vec<Value>, source_arr: &[Value]) {
     }
 }
 
-fn json_deep_merge(target: &mut Value, source: &Value) {
+/// Deep-merge two JSON values. Objects are merged recursively; arrays and scalars are replaced.
+pub(crate) fn json_deep_merge(target: &mut Value, source: &Value) {
     match (target, source) {
         (Value::Object(target_map), Value::Object(source_map)) => {
             for (key, source_value) in source_map {

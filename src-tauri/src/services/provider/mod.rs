@@ -33,6 +33,7 @@ use gemini_auth::GeminiAuthType;
 use live::LiveSnapshot;
 
 pub use common::migrate_legacy_codex_config;
+pub(crate) use common_config::json_deep_merge;
 #[cfg(test)]
 use common::strip_codex_common_config_from_full_text;
 
@@ -73,7 +74,8 @@ struct PostCommitAction {
 }
 
 impl ProviderService {
-    fn is_codex_official_provider(provider: &Provider) -> bool {
+    /// Check whether a provider is an official Codex provider (via meta flag or category).
+    pub(crate) fn is_codex_official_provider(provider: &Provider) -> bool {
         provider
             .meta
             .as_ref()
@@ -85,7 +87,8 @@ impl ProviderService {
                 .is_some_and(|value| value.eq_ignore_ascii_case("official"))
     }
 
-    fn codex_config_has_base_url(config_text: &str) -> bool {
+    /// Check whether a Codex TOML config text contains a non-empty `base_url`.
+    pub(crate) fn codex_config_has_base_url(config_text: &str) -> bool {
         let Ok(table) = toml::from_str::<toml::Table>(config_text.trim()) else {
             return false;
         };
@@ -502,15 +505,25 @@ impl ProviderService {
                     common_snippet_for_strip.clone()
                 };
 
-                let mut raw_settings = serde_json::Map::new();
-                if let Some(auth) = auth {
-                    raw_settings.insert("auth".to_string(), auth);
+                // Start from existing provider settings; only update auth and config in-place
+                let mut settings_to_store = provider.settings_config.clone();
+                if let Value::Object(ref mut obj) = settings_to_store {
+                    if let Some(auth) = auth {
+                        obj.insert("auth".to_string(), auth);
+                    }
+                    obj.insert("config".to_string(), Value::String(cfg_text_for_storage));
+                } else {
+                    let mut obj = serde_json::Map::new();
+                    if let Some(auth) = auth {
+                        obj.insert("auth".to_string(), auth);
+                    }
+                    obj.insert("config".to_string(), Value::String(cfg_text_for_storage));
+                    settings_to_store = Value::Object(obj);
                 }
-                raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
-                let mut settings_to_store = Self::normalize_settings_config_for_storage(
+                settings_to_store = Self::normalize_settings_config_for_storage(
                     app_type,
                     &provider,
-                    Value::Object(raw_settings),
+                    settings_to_store,
                     effective_common_snippet.as_deref(),
                 )?;
                 Self::restore_codex_model_provider_for_storage_best_effort(
@@ -558,7 +571,7 @@ impl ProviderService {
                     ));
                 }
                 let env_map = read_gemini_env()?;
-                let mut live_after = env_to_json(&env_map);
+                let live_env = env_to_json(&env_map);
 
                 let settings_path = get_gemini_settings_path();
                 let config_value = if settings_path.exists() {
@@ -566,10 +579,6 @@ impl ProviderService {
                 } else {
                     json!({})
                 };
-
-                if let Some(obj) = live_after.as_object_mut() {
-                    obj.insert("config".to_string(), config_value);
-                }
 
                 let (provider, common_snippet) = {
                     let guard = state.config.read().map_err(AppError::from)?;
@@ -588,10 +597,19 @@ impl ProviderService {
                         guard.common_config_snippets.gemini.clone(),
                     )
                 };
+
+                // Start from existing provider settings; only update env and config in-place
+                let mut merged = provider.settings_config.clone();
+                if let Value::Object(ref mut obj) = merged {
+                    obj.insert("env".to_string(), live_env);
+                    obj.insert("config".to_string(), config_value);
+                } else {
+                    merged = json!({"env": live_env, "config": config_value});
+                }
                 let live_after = Self::normalize_settings_config_for_storage(
                     app_type,
                     &provider,
-                    live_after,
+                    merged,
                     common_snippet.as_deref(),
                 )?;
 
@@ -1966,22 +1984,21 @@ impl ProviderService {
                     common_config_snippet,
                     apply_common_config,
                 )?;
-                let settings = effective
-                    .as_object()
-                    .ok_or_else(|| AppError::Config("Codex 配置必须是 JSON 对象".into()))?;
-                let auth = settings.get("auth").cloned();
-                let cfg_text = settings.get("config").and_then(Value::as_str).unwrap_or("");
-
-                if !cfg_text.trim().is_empty() {
-                    crate::codex_config::validate_config_toml(cfg_text)?;
+                let effective_obj = match effective {
+                    Value::Object(map) => map,
+                    _ => {
+                        return Err(AppError::Config(
+                            "Codex 配置必须是 JSON 对象".into(),
+                        ))
+                    }
+                };
+                if let Some(cfg_text) = effective_obj.get("config").and_then(Value::as_str) {
+                    if !cfg_text.trim().is_empty() {
+                        crate::codex_config::validate_config_toml(cfg_text)?;
+                    }
                 }
 
-                let mut backup = serde_json::Map::new();
-                if let Some(auth) = auth {
-                    backup.insert("auth".to_string(), auth);
-                }
-                backup.insert("config".to_string(), Value::String(cfg_text.to_string()));
-                Ok(Value::Object(backup))
+                Ok(Value::Object(effective_obj))
             }
             AppType::Gemini => {
                 let content_to_write = common_config::build_effective_settings_with_common_config(
@@ -2046,10 +2063,18 @@ impl ProviderService {
                     json!({})
                 };
 
-                Ok(json!({
-                    "env": env_obj,
-                    "config": config_value,
-                }))
+                // Preserve all existing keys from content_to_write; only update env and config in-place
+                let mut result = match content_to_write {
+                    Value::Object(map) => map,
+                    other => {
+                        let mut map = serde_json::Map::new();
+                        map.insert("env".to_string(), other);
+                        map
+                    }
+                };
+                result.insert("env".to_string(), env_obj);
+                result.insert("config".to_string(), config_value);
+                Ok(Value::Object(result))
             }
             AppType::OpenCode => Err(AppError::Config(
                 "OpenCode does not support proxy takeover backups".into(),

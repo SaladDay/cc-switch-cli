@@ -1339,6 +1339,7 @@ impl ProxyService {
             app_type.as_str(),
             &provider_id,
             &provider.settings_config,
+            false, // merge to preserve custom keys
         ) {
             log::warn!(
                 "sync {} live token to provider {} failed: {error}",

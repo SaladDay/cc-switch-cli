@@ -1,4 +1,5 @@
 pub mod completions;
+pub mod edit_json;
 pub mod config;
 mod config_common;
 pub mod config_webdav;

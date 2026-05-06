@@ -6,8 +6,10 @@ use crate::database::dao::providers_seed::{is_official_seed_id, OFFICIAL_SEEDS};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
+use crate::services::provider::json_deep_merge;
 use indexmap::IndexMap;
 use rusqlite::params;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 impl Database {
@@ -209,6 +211,15 @@ impl Database {
         Ok(false)
     }
 
+    /// Deep-merge `incoming` into the existing settings_config JSON,
+    /// preserving custom keys that are not present in the incoming value.
+    fn merge_settings_config(existing_str: &str, incoming: &Value) -> Value {
+        let existing: Value = serde_json::from_str(existing_str).unwrap_or(Value::Null);
+        let mut merged = existing;
+        json_deep_merge(&mut merged, incoming);
+        merged
+    }
+
     fn next_sort_index_for_app(&self, app_type: &str) -> Result<usize, AppError> {
         let conn = lock_conn!(self.conn);
         let max: Option<i64> = conn
@@ -279,18 +290,27 @@ impl Database {
         let mut meta_clone = provider.meta.clone().unwrap_or_default();
         let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
 
-        // 检查是否存在（用于判断新增/更新，以及保留 is_current 和 in_failover_queue）
-        let existing: Option<(bool, bool)> = tx
+        // Fetch existing row in one query: is_current, in_failover_queue, and settings_config
+        let existing: Option<(bool, bool, String)> = tx
             .query_row(
-                "SELECT is_current, in_failover_queue FROM providers WHERE id = ?1 AND app_type = ?2",
+                "SELECT is_current, in_failover_queue, settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
                 params![provider.id, app_type],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .ok();
 
         let is_update = existing.is_some();
-        let (is_current, in_failover_queue) =
-            existing.unwrap_or((false, provider.in_failover_queue));
+        let (is_current, in_failover_queue) = existing
+            .as_ref()
+            .map(|(c, q, _)| (*c, *q))
+            .unwrap_or((false, provider.in_failover_queue));
+
+        // Merge settings_config: preserve custom keys from existing DB row
+        let final_settings_config = if let Some((_, _, ref existing_cfg_str)) = existing {
+            Self::merge_settings_config(existing_cfg_str, &provider.settings_config)
+        } else {
+            provider.settings_config.clone()
+        };
 
         if is_update {
             // 更新模式：使用 UPDATE 避免触发 ON DELETE CASCADE
@@ -311,7 +331,7 @@ impl Database {
                 WHERE id = ?13 AND app_type = ?14",
                 params![
                     provider.name,
-                    serde_json::to_string(&provider.settings_config).map_err(|e| {
+                    serde_json::to_string(&final_settings_config).map_err(|e| {
                         AppError::Database(format!("Failed to serialize settings_config: {e}"))
                     })?,
                     provider.website_url,
@@ -342,7 +362,7 @@ impl Database {
                     provider.id,
                     app_type,
                     provider.name,
-                    serde_json::to_string(&provider.settings_config)
+                    serde_json::to_string(&final_settings_config)
                         .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?,
                     provider.website_url,
                     provider.category,
@@ -410,18 +430,35 @@ impl Database {
         Ok(())
     }
 
-    /// 更新供应商的 settings_config（仅更新配置，不改变其他字段）
+    /// Update provider's settings_config without touching other fields.
+    /// Default merges into the existing value; `force=true` replaces entirely.
     pub fn update_provider_settings_config(
         &self,
         app_type: &str,
         provider_id: &str,
         settings_config: &serde_json::Value,
+        force: bool,
     ) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
+        let merged = if force {
+            settings_config.clone()
+        } else {
+            let existing_str: Option<String> = conn
+                .query_row(
+                    "SELECT settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
+                    params![provider_id, app_type],
+                    |row| row.get(0),
+                )
+                .ok();
+            match existing_str {
+                Some(ref s) => Self::merge_settings_config(s, settings_config),
+                None => settings_config.clone(),
+            }
+        };
         conn.execute(
             "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = ?3",
             params![
-                serde_json::to_string(settings_config).map_err(|e| AppError::Database(format!(
+                serde_json::to_string(&merged).map_err(|e| AppError::Database(format!(
                     "Failed to serialize settings_config: {e}"
                 )))?,
                 provider_id,

@@ -43,6 +43,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Some(Commands::Env(cmd)) => cc_switch_lib::cli::commands::env::execute(cmd, cli.app),
         Some(Commands::Update(cmd)) => cc_switch_lib::cli::commands::update::execute(cmd),
         Some(Commands::Completions(cmd)) => cc_switch_lib::cli::commands::completions::execute(cmd),
+        Some(Commands::EditJson(cmd)) => cc_switch_lib::cli::commands::edit_json::execute(cmd),
     }
 }
 
