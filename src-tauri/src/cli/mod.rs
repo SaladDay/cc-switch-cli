@@ -78,6 +78,9 @@ pub enum Commands {
 
     /// Generate, install, inspect, or uninstall shell completions
     Completions(commands::completions::CompletionsCommand),
+
+    #[command(name = "internal", hide = true, subcommand)]
+    Internal(commands::internal::InternalCommand),
 }
 
 /// Generate shell completions

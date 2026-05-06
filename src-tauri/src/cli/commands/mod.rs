@@ -3,6 +3,7 @@ pub mod config;
 mod config_common;
 pub mod config_webdav;
 pub mod env;
+pub mod internal;
 pub mod mcp;
 pub mod prompts;
 pub mod provider;

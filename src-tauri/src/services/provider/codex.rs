@@ -1,6 +1,77 @@
 use super::*;
+use std::fs;
+use std::path::Path;
 
 impl ProviderService {
+    pub(crate) fn capture_codex_temp_launch_snapshot(
+        state: &AppState,
+        provider_id: &str,
+        codex_home: &Path,
+    ) -> Result<(), AppError> {
+        let (provider, common_snippet) = {
+            let guard = state.config.read().map_err(AppError::from)?;
+            let provider = guard
+                .get_manager(&AppType::Codex)
+                .and_then(|manager| manager.providers.get(provider_id))
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::localized(
+                        "provider.not_found",
+                        format!("供应商不存在: {provider_id}"),
+                        format!("Provider not found: {provider_id}"),
+                    )
+                })?;
+            (provider, guard.common_config_snippets.codex.clone())
+        };
+
+        let config_path = codex_home.join("config.toml");
+        let cfg_text = if config_path.exists() {
+            fs::read_to_string(&config_path).map_err(|err| AppError::io(&config_path, err))?
+        } else {
+            provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        crate::codex_config::validate_config_toml(&cfg_text)?;
+        let cfg_text_for_storage = Self::strip_codex_mcp_servers_from_snapshot_config(&cfg_text)?;
+
+        let auth_path = codex_home.join("auth.json");
+        let auth = if auth_path.exists() {
+            read_json_file::<Value>(&auth_path)?
+        } else {
+            Value::Object(serde_json::Map::new())
+        };
+
+        let mut raw_settings = serde_json::Map::new();
+        raw_settings.insert("auth".to_string(), auth);
+        raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
+
+        let mut settings_to_store = Self::normalize_settings_config_for_storage(
+            &AppType::Codex,
+            &provider,
+            Value::Object(raw_settings),
+            common_snippet.as_deref(),
+        )?;
+        Self::restore_codex_model_provider_for_storage_best_effort(
+            &provider,
+            &mut settings_to_store,
+        );
+
+        {
+            let mut guard = state.config.write().map_err(AppError::from)?;
+            if let Some(manager) = guard.get_manager_mut(&AppType::Codex) {
+                if let Some(target) = manager.providers.get_mut(provider_id) {
+                    target.settings_config = settings_to_store;
+                }
+            }
+        }
+
+        state.save()
+    }
+
     pub(super) fn extract_codex_common_config_from_config_toml(
         config_toml: &str,
     ) -> Result<String, AppError> {
@@ -347,7 +418,6 @@ impl ProviderService {
         let auth = settings
             .get("auth")
             .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
-
         let cfg_text = settings
             .get("config")
             .and_then(Value::as_str)
@@ -355,7 +425,17 @@ impl ProviderService {
                 AppError::Config("Codex 供应商配置缺少 'config' 字段或不是字符串".to_string())
             })?;
 
-        crate::codex_config::write_codex_live_atomic_with_stable_provider(auth, Some(cfg_text))?;
+        let auth_to_write = if Self::is_codex_official_provider(provider)
+            && auth.as_object().is_some_and(|auth| auth.is_empty())
+        {
+            None
+        } else {
+            Some(auth)
+        };
+        crate::codex_config::write_codex_live_atomic_optional_auth_with_stable_provider(
+            auth_to_write,
+            Some(cfg_text),
+        )?;
 
         Ok(())
     }

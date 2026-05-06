@@ -76,6 +76,13 @@ pub fn write_codex_live_atomic(
     auth: &Value,
     config_text_opt: Option<&str>,
 ) -> Result<(), AppError> {
+    write_codex_live_atomic_optional_auth(Some(auth), config_text_opt)
+}
+
+pub fn write_codex_live_atomic_optional_auth(
+    auth: Option<&Value>,
+    config_text_opt: Option<&str>,
+) -> Result<(), AppError> {
     let auth_path = get_codex_auth_path();
     let config_path = get_codex_config_path();
 
@@ -105,7 +112,11 @@ pub fn write_codex_live_atomic(
     }
 
     // 第一步：写 auth.json
-    write_json_file(&auth_path, auth)?;
+    if let Some(auth) = auth {
+        write_json_file(&auth_path, auth)?;
+    } else {
+        delete_file(&auth_path)?;
+    }
 
     // 第二步：写 config.toml（失败则回滚 auth.json）
     if let Err(e) = write_text_file(&config_path, &cfg_text) {
@@ -432,6 +443,13 @@ pub fn write_codex_live_atomic_with_stable_provider(
     auth: &Value,
     config_text_opt: Option<&str>,
 ) -> Result<(), AppError> {
+    write_codex_live_atomic_optional_auth_with_stable_provider(Some(auth), config_text_opt)
+}
+
+pub fn write_codex_live_atomic_optional_auth_with_stable_provider(
+    auth: Option<&Value>,
+    config_text_opt: Option<&str>,
+) -> Result<(), AppError> {
     match config_text_opt {
         Some(config_text) => {
             let mut settings = serde_json::Map::new();
@@ -442,9 +460,9 @@ pub fn write_codex_live_atomic_with_stable_provider(
                 .get("config")
                 .and_then(|value| value.as_str())
                 .unwrap_or(config_text);
-            write_codex_live_atomic(auth, Some(config_text))
+            write_codex_live_atomic_optional_auth(auth, Some(config_text))
         }
-        None => write_codex_live_atomic(auth, None),
+        None => write_codex_live_atomic_optional_auth(auth, None),
     }
 }
 

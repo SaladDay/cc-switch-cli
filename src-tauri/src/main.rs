@@ -43,12 +43,15 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Some(Commands::Env(cmd)) => cc_switch_lib::cli::commands::env::execute(cmd, cli.app),
         Some(Commands::Update(cmd)) => cc_switch_lib::cli::commands::update::execute(cmd),
         Some(Commands::Completions(cmd)) => cc_switch_lib::cli::commands::completions::execute(cmd),
+        Some(Commands::Internal(cmd)) => cc_switch_lib::cli::commands::internal::execute(cmd),
     }
 }
 
 fn command_requires_startup_state(command: &Option<Commands>) -> bool {
     match command {
-        Some(Commands::Completions(_)) | Some(Commands::Update(_)) => false,
+        Some(Commands::Completions(_))
+        | Some(Commands::Update(_))
+        | Some(Commands::Internal(_)) => false,
         _ => true,
     }
 }
@@ -107,6 +110,13 @@ mod tests {
         let completions_status = Cli::parse_from(["cc-switch", "completions", "status"]);
         let completions_uninstall =
             Cli::parse_from(["cc-switch", "completions", "uninstall", "--shell", "bash"]);
+        let internal_capture = Cli::parse_from([
+            "cc-switch",
+            "internal",
+            "capture-codex-temp",
+            "official",
+            "/tmp/codex-home",
+        ]);
         let provider = Cli::parse_from(["cc-switch", "provider", "list"]);
 
         assert!(!command_requires_startup_state(&update.command));
@@ -120,6 +130,7 @@ mod tests {
         assert!(!command_requires_startup_state(
             &completions_uninstall.command
         ));
+        assert!(!command_requires_startup_state(&internal_capture.command));
         assert!(command_requires_startup_state(&provider.command));
     }
 
@@ -133,6 +144,24 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "update"]);
         initialize_startup_state_if_needed(&cli.command)
             .expect("update should not touch startup state");
+    }
+
+    #[test]
+    #[serial]
+    fn internal_commands_bypass_future_schema_database_gate() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        seed_future_schema_database(temp.path());
+        let _guard = ConfigDirEnvGuard::set(temp.path());
+
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "internal",
+            "capture-codex-temp",
+            "official",
+            "/tmp/codex-home",
+        ]);
+        initialize_startup_state_if_needed(&cli.command)
+            .expect("internal commands should not touch startup state");
     }
 
     #[test]

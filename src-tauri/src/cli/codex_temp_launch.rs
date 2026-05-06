@@ -12,6 +12,8 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedCodexLaunch {
     pub(crate) executable: PathBuf,
+    pub(crate) cc_switch_executable: PathBuf,
+    pub(crate) provider_id: String,
     pub(crate) codex_home: PathBuf,
 }
 
@@ -37,9 +39,18 @@ where
     Resolve: FnOnce() -> Result<PathBuf, AppError>,
 {
     let executable = resolve_codex_binary()?;
+    let cc_switch_executable = std::env::current_exe().map_err(|err| {
+        AppError::localized(
+            "codex.temp_launch_current_exe_failed",
+            format!("解析当前 cc-switch 可执行文件路径失败: {err}"),
+            format!("Failed to resolve current cc-switch executable path: {err}"),
+        )
+    })?;
     let codex_home = write_temp_codex_home(temp_dir, provider)?;
     Ok(PreparedCodexLaunch {
         executable,
+        cc_switch_executable,
+        provider_id: provider.id.clone(),
         codex_home,
     })
 }
@@ -76,11 +87,13 @@ pub(crate) fn build_handoff_command(
 ) -> std::process::Command {
     let mut command = std::process::Command::new("/bin/sh");
     command.arg("-c").arg(
-        "codex_home=\"$1\"; codex_bin=\"$2\"; shift 2; exit_status=0; cleanup() { rm -rf -- \"$codex_home\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Codex home: $codex_home\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; export CODEX_HOME=\"$codex_home\"; \"$codex_bin\" \"$@\"; exit_status=$?; cleanup; exit \"$exit_status\"",
+        "codex_home=\"$1\"; codex_bin=\"$2\"; cc_switch_bin=\"$3\"; provider_id=\"$4\"; shift 4; exit_status=0; persist() { \"$cc_switch_bin\" internal capture-codex-temp \"$provider_id\" \"$codex_home\"; persist_status=$?; if [ \"$persist_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: 持久化供应商 $provider_id 的临时 Codex 登录状态失败（failed to persist temporary Codex login state）\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$persist_status; fi; fi; }; cleanup() { rm -rf -- \"$codex_home\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Codex home: $codex_home\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; persist; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; export CODEX_HOME=\"$codex_home\"; \"$codex_bin\" \"$@\"; exit_status=$?; persist; cleanup; exit \"$exit_status\"",
     );
     command.arg("cc-switch-codex-handoff");
     command.arg(&prepared.codex_home);
     command.arg(&prepared.executable);
+    command.arg(&prepared.cc_switch_executable);
+    command.arg(&prepared.provider_id);
     command.args(native_args);
     command
 }
@@ -321,6 +334,8 @@ mod tests {
     fn unix_handoff_command_exports_codex_home_and_cleans_up_temp_dir() {
         let prepared = PreparedCodexLaunch {
             executable: PathBuf::from("/usr/local/bin/codex"),
+            cc_switch_executable: PathBuf::from("/usr/local/bin/cc-switch"),
+            provider_id: "demo".to_string(),
             codex_home: PathBuf::from("/tmp/cc-switch-codex-home"),
         };
         let native_args = vec![OsString::from("--model"), OsString::from("gpt-5.4")];
@@ -334,11 +349,13 @@ mod tests {
             vec![
                 OsString::from("-c"),
                 OsString::from(
-                    "codex_home=\"$1\"; codex_bin=\"$2\"; shift 2; exit_status=0; cleanup() { rm -rf -- \"$codex_home\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Codex home: $codex_home\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; export CODEX_HOME=\"$codex_home\"; \"$codex_bin\" \"$@\"; exit_status=$?; cleanup; exit \"$exit_status\""
+                    "codex_home=\"$1\"; codex_bin=\"$2\"; cc_switch_bin=\"$3\"; provider_id=\"$4\"; shift 4; exit_status=0; persist() { \"$cc_switch_bin\" internal capture-codex-temp \"$provider_id\" \"$codex_home\"; persist_status=$?; if [ \"$persist_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: 持久化供应商 $provider_id 的临时 Codex 登录状态失败（failed to persist temporary Codex login state）\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$persist_status; fi; fi; }; cleanup() { rm -rf -- \"$codex_home\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Codex home: $codex_home\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; persist; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; export CODEX_HOME=\"$codex_home\"; \"$codex_bin\" \"$@\"; exit_status=$?; persist; cleanup; exit \"$exit_status\""
                 ),
                 OsString::from("cc-switch-codex-handoff"),
                 OsString::from("/tmp/cc-switch-codex-home"),
                 OsString::from("/usr/local/bin/codex"),
+                OsString::from("/usr/local/bin/cc-switch"),
+                OsString::from("demo"),
                 OsString::from("--model"),
                 OsString::from("gpt-5.4"),
             ]
@@ -361,6 +378,8 @@ mod tests {
 
         let prepared = PreparedCodexLaunch {
             executable,
+            cc_switch_executable: PathBuf::from("/bin/true"),
+            provider_id: "demo".to_string(),
             codex_home: codex_home.clone(),
         };
         let mut command = build_handoff_command(&prepared, &[]);
@@ -394,6 +413,8 @@ mod tests {
         let executable = write_test_executable(&temp_dir, "codex-stub.sh", "exit 0");
         let prepared = PreparedCodexLaunch {
             executable,
+            cc_switch_executable: PathBuf::from("/bin/true"),
+            provider_id: "demo".to_string(),
             codex_home: PathBuf::from("."),
         };
 

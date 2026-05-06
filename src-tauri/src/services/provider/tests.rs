@@ -61,6 +61,106 @@ fn with_common_enabled(mut provider: Provider) -> Provider {
     provider
 }
 
+#[test]
+fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "official".to_string();
+        manager.providers.insert(
+            "official".to_string(),
+            Provider::with_id(
+                "official".to_string(),
+                "OpenAI Official".to_string(),
+                codex_settings("model_reasoning_effort = \"medium\"\n"),
+                None,
+            ),
+        );
+    }
+    let state = state_from_config(config);
+    let temp = TempDir::new().expect("create temp codex home");
+    std::fs::write(
+        temp.path().join("auth.json"),
+        r#"{"tokens":{"access_token":"new-access","refresh_token":"new-refresh"}}"#,
+    )
+    .expect("write auth");
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "model_reasoning_effort = \"high\"\n[mcp_servers.temp]\ncommand = \"npx\"\n",
+    )
+    .expect("write config");
+
+    ProviderService::capture_codex_temp_launch_snapshot(&state, "official", temp.path())
+        .expect("capture temp launch snapshot");
+
+    let providers = ProviderService::list(&state, AppType::Codex).expect("list providers");
+    let provider = providers.get("official").expect("provider should remain");
+    assert_eq!(
+        provider
+            .settings_config
+            .get("auth")
+            .and_then(|value| value.pointer("/tokens/refresh_token"))
+            .and_then(Value::as_str),
+        Some("new-refresh")
+    );
+    let stored_config = provider
+        .settings_config
+        .get("config")
+        .and_then(Value::as_str)
+        .expect("stored config");
+    assert!(stored_config.contains("model_reasoning_effort = \"high\""));
+    assert!(
+        !stored_config.contains("mcp_servers"),
+        "runtime MCP tables should not be backfilled into provider snapshots"
+    );
+}
+
+#[test]
+fn capture_codex_temp_launch_snapshot_clears_auth_when_auth_file_is_missing() {
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "official".to_string();
+        manager.providers.insert(
+            "official".to_string(),
+            Provider::with_id(
+                "official".to_string(),
+                "OpenAI Official".to_string(),
+                codex_settings("model_reasoning_effort = \"medium\"\n"),
+                None,
+            ),
+        );
+    }
+    let state = state_from_config(config);
+    let temp = TempDir::new().expect("create temp codex home");
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "model_reasoning_effort = \"high\"\n",
+    )
+    .expect("write config");
+
+    ProviderService::capture_codex_temp_launch_snapshot(&state, "official", temp.path())
+        .expect("capture temp launch snapshot");
+
+    let providers = ProviderService::list(&state, AppType::Codex).expect("list providers");
+    let provider = providers.get("official").expect("provider should remain");
+    let auth = provider
+        .settings_config
+        .get("auth")
+        .and_then(Value::as_object)
+        .expect("stored auth should remain explicit");
+    assert!(
+        auth.is_empty(),
+        "missing temporary auth.json should clear the saved auth snapshot"
+    );
+}
+
 fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState) {
     let temp_home = TempDir::new().expect("create temp home");
     let env = EnvGuard::set_home(temp_home.path());
@@ -482,6 +582,68 @@ fn codex_switch_overwrites_existing_auth_json_for_openai_official_provider() {
         live_auth["OPENAI_API_KEY"],
         json!("sk-openai-official"),
         "official provider should write its auth snapshot like upstream"
+    );
+}
+
+#[test]
+#[serial]
+fn codex_switch_removes_empty_auth_json_for_openai_official_provider() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+
+    let auth_path = crate::codex_config::get_codex_auth_path();
+    crate::config::write_json_file(&auth_path, &json!({ "OPENAI_API_KEY": "sk-existing" }))
+        .expect("write auth.json");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "Third Party".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-third-party" },
+                    "config": "model_provider = \"thirdparty\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.thirdparty]\nbase_url = \"https://third-party.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+                }),
+                None,
+            ),
+        );
+
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": {},
+                "config": "",
+            }),
+            None,
+        );
+        official.category = Some("official".to_string());
+        official.meta = Some(crate::provider::ProviderMeta {
+            codex_official: Some(true),
+            ..Default::default()
+        });
+        manager
+            .providers
+            .insert("codex-official".to_string(), official);
+    }
+
+    let state = state_from_config(config);
+
+    ProviderService::switch(&state, AppType::Codex, "codex-official")
+        .expect("switch to official should succeed without saved auth");
+
+    assert!(
+        !auth_path.exists(),
+        "empty official auth snapshot should remove live auth.json so Codex can prompt login"
     );
 }
 
