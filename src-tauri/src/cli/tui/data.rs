@@ -232,6 +232,8 @@ pub struct ProxySnapshot {
     pub current_provider: Option<String>,
     pub last_error: Option<String>,
     pub current_app_target: Option<ProxyTargetSnapshot>,
+    pub upstream_proxy_url: Option<String>,
+    pub upstream_proxy_enabled: bool,
 }
 
 impl ProxySnapshot {
@@ -947,6 +949,8 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        let upstream_proxy_url = state.db.get_global_proxy_url()?;
+        let upstream_proxy_enabled = state.db.get_global_proxy_enabled()?;
 
         Ok(ProxySnapshot {
             enabled: config.proxy_enabled,
@@ -979,6 +983,8 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
             current_app_target,
+            upstream_proxy_url,
+            upstream_proxy_enabled,
         })
     })
 }

@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::cli::tui::app::LocalProxySettingsItem;
+use crate::cli::tui::app::{LocalProxySettingsItem, UpstreamProxySettingsItem};
 use unicode_width::UnicodeWidthStr;
 
 pub(super) fn config_items_filtered(app: &App) -> Vec<ConfigItem> {
@@ -23,6 +23,12 @@ pub(super) fn local_proxy_settings_item_label(item: &LocalProxySettingsItem) -> 
     match item {
         LocalProxySettingsItem::ListenAddress => texts::tui_settings_proxy_listen_address_label(),
         LocalProxySettingsItem::ListenPort => texts::tui_settings_proxy_listen_port_label(),
+    }
+}
+
+pub(super) fn upstream_proxy_settings_item_label(item: &UpstreamProxySettingsItem) -> &'static str {
+    match item {
+        UpstreamProxySettingsItem::Url => texts::tui_settings_upstream_proxy_url_label(),
     }
 }
 
@@ -2421,6 +2427,18 @@ pub(super) fn render_settings(
                     data.proxy.configured_listen_address, data.proxy.configured_listen_port,
                 ),
             ),
+            super::app::SettingsItem::UpstreamProxy => (
+                texts::tui_settings_upstream_proxy_title().to_string(),
+                if data.proxy.upstream_proxy_enabled {
+                    if let Some(url) = &data.proxy.upstream_proxy_url {
+                        format!("{}: {}", texts::tui_settings_upstream_proxy_status_enabled().to_string(), url)
+                    } else {
+                        texts::tui_settings_upstream_proxy_status_enabled().to_string()
+                    }
+                } else {
+                    texts::tui_settings_upstream_proxy_status_disabled().to_string()
+                },
+            ),
             super::app::SettingsItem::CheckForUpdates => (
                 texts::tui_settings_check_for_updates().to_string(),
                 format!("v{}", env!("CARGO_PKG_VERSION")),
@@ -2565,4 +2583,98 @@ pub(super) fn render_settings_proxy(
         .style(Style::default().fg(theme.dim)),
         chunks[2],
     );
+}
+
+pub(super) fn render_settings_upstream_proxy(
+    frame: &mut Frame<'_>,
+    app: &App,
+    data: &UiData,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    // Always show both settings: URL and status
+    let all_rows = vec![
+        (
+            upstream_proxy_settings_item_label(&UpstreamProxySettingsItem::Url).to_string(),
+            data.proxy.upstream_proxy_url.clone().unwrap_or_else(|| texts::none().to_string()),
+        ),
+        (
+            "状态".to_string(),
+            if data.proxy.upstream_proxy_enabled {
+                texts::tui_settings_upstream_proxy_status_enabled().to_string()
+            } else {
+                texts::tui_settings_upstream_proxy_status_disabled().to_string()
+            },
+        ),
+    ];
+
+    let label_col_width = field_label_column_width(
+        all_rows
+            .iter()
+            .map(|(label, _value)| label.as_str())
+            .chain(std::iter::once(texts::tui_settings_header_setting())),
+        0,
+    );
+
+    let header = Row::new(vec![
+        Cell::from(texts::tui_settings_header_setting()),
+        Cell::from(texts::tui_settings_header_value()),
+    ])
+    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+
+    let rows = all_rows
+        .iter()
+        .map(|(label, value)| Row::new(vec![Cell::from(label.clone()), Cell::from(value.clone())]));
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(texts::tui_settings_upstream_proxy_title());
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    if app.focus == Focus::Content {
+        let mut key_bindings = vec![
+            ("Enter", texts::tui_key_edit()),
+        ];
+
+        // Add specific key bindings based on selected row
+        match app.settings_proxy_idx {
+            0 => { // URL row - allow editing
+                key_bindings.push(("e", texts::tui_key_edit()));
+            }
+            1 => { // Status row - allow toggle with space or Enter
+                if data.proxy.upstream_proxy_enabled {
+                    key_bindings.push((" ", "禁用"));
+                } else {
+                    key_bindings.push((" ", "启用"));
+                }
+            }
+            _ => {}
+        }
+
+        render_key_bar_center(frame, chunks[0], theme, &key_bindings);
+    }
+
+    let table = Table::new(
+        rows,
+        [Constraint::Length(label_col_width), Constraint::Min(10)],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::NONE))
+    .row_highlight_style(selection_style(theme))
+    .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = TableState::default();
+    state.select(Some(app.settings_proxy_idx));
+    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
 }

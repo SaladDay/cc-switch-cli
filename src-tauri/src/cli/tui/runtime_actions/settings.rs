@@ -197,6 +197,72 @@ fn update_proxy_config(
     Ok(())
 }
 
+pub(super) fn set_upstream_proxy_url(
+    ctx: &mut RuntimeActionContext<'_>,
+    url: Option<String>,
+) -> Result<(), AppError> {
+    let state = load_state()?;
+
+    // Save to database
+    state.db.set_global_proxy_url(url.as_deref())?;
+
+    // Get current enabled state
+    let enabled = state.db.get_global_proxy_enabled()?;
+
+    // Update HTTP client based on enabled state
+    let effective_url = if enabled {
+        url.as_deref().filter(|u| !u.trim().is_empty())
+    } else {
+        None
+    };
+    crate::proxy::http_client::update_proxy(effective_url)
+        .map_err(|e| AppError::Message(format!("Failed to update HTTP client: {}", e)))?;
+
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.push_toast(
+        if url.is_some() {
+            crate::t!("Upstream proxy URL updated.", "上游代理 URL 已更新。")
+        } else {
+            crate::t!("Upstream proxy cleared.", "上游代理已清除。")
+        },
+        super::super::app::ToastKind::Success,
+    );
+    Ok(())
+}
+
+pub(super) fn set_upstream_proxy_enabled(
+    ctx: &mut RuntimeActionContext<'_>,
+    enabled: bool,
+) -> Result<(), AppError> {
+    let state = load_state()?;
+
+    // Set enabled state in database
+    state.db.set_global_proxy_enabled(enabled)?;
+
+    // Get current URL
+    let url = state.db.get_global_proxy_url()?;
+
+    // Update HTTP client based on enabled state and URL
+    let effective_url = if enabled {
+        url.as_deref().filter(|u| !u.trim().is_empty())
+    } else {
+        None
+    };
+    crate::proxy::http_client::update_proxy(effective_url)
+        .map_err(|e| AppError::Message(format!("Failed to update HTTP client: {}", e)))?;
+
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.push_toast(
+        if enabled {
+            crate::t!("Upstream proxy enabled.", "上游代理已开启。")
+        } else {
+            crate::t!("Upstream proxy disabled.", "上游代理已关闭。")
+        },
+        super::super::app::ToastKind::Success,
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

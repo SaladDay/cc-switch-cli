@@ -20,6 +20,7 @@ pub enum Route {
     SkillDetail { directory: String },
     Settings,
     SettingsProxy,
+    SettingsUpstreamProxy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
