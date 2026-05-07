@@ -2,23 +2,20 @@ name: Rust CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [main, "feat*"]
     paths:
       - "src-tauri/**"
       - ".github/workflows/rust-ci.yml"
-      - ".github/workflows/release.yml"
-  pull_request_target:
+  pull_request:
     paths:
       - "src-tauri/**"
       - ".github/workflows/rust-ci.yml"
-      - ".github/workflows/release.yml"
 
 permissions:
   contents: read
 
 concurrency:
-  group: rust-ci-${{ github.workflow }}-${{ github.ref }}
+  group: rust-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -28,13 +25,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.91.1
+          toolchain: "1.91.1"
           components: rustfmt
 
       - name: Setup Rust cache
@@ -47,23 +42,125 @@ jobs:
         working-directory: src-tauri
         run: cargo fmt --check
 
+  clippy:
+    name: clippy (${{ matrix.os }})
+    needs: fmt
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.1"
+          components: clippy
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: clippy-${{ matrix.os }}
+
+      - name: Create frontend dist placeholder
+        run: mkdir -p dist
+        shell: bash
+
+      - name: Run Clippy
+        working-directory: src-tauri
+        run: cargo clippy -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: fmt
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.1"
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: test-${{ matrix.os }}
+
+      - name: Create frontend dist placeholder
+        run: mkdir -p dist
+        shell: bash
+
+      - name: Run tests
+        working-directory: src-tauri
+        run: cargo test
+
   failover-e2e:
     name: failover E2E test
+    needs: fmt
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.91.1
+          toolchain: "1.91.1"
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
           key: failover-e2e
+
+      - name: Create frontend dist placeholder
+        run: mkdir -p dist
 
       - name: Run failover E2E test
         working-directory: src-tauri
