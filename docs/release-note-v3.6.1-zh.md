@@ -2,7 +2,7 @@
 
 > 稳定性提升与用户体验优化（基于 v3.6.0）
 
-**[English Version →](../release-note-v3.6.1.md)**
+**[English Version →](./release-note-v3.6.1-en.md)**
 
 ---
 

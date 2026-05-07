@@ -2,7 +2,7 @@
 
 > 全栈架构重构，增强配置同步与数据保护
 
-**[English Version →](../release-note-v3.6.0.md)**
+**[English Version →](./release-note-v3.6.0-en.md)**
 
 ---
 

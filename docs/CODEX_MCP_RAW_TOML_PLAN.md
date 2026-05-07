@@ -1285,7 +1285,7 @@ pnpm add @codemirror/lang-toml
 - [Codex 官方 MCP 文档](https://codex.dev/docs/mcp)
 - [TOML 规范](https://toml.io/en/)
 - [CodeMirror 6 文档](https://codemirror.net/docs/)
-- [项目 CLAUDE.md](../CLAUDE.md)
+- [项目 README](../README_ZH.md)
 
 ---
 
