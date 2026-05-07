@@ -26,6 +26,7 @@ vitest-report.json
 skill.md
 scripts/*
 !scripts/generate_latest_json.py
+!scripts/windows-start-qa.ps1
 
 .agent/
 .agents/

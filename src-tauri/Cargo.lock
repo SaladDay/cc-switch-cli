@@ -522,6 +522,7 @@ dependencies = [
  "url",
  "uuid",
  "which 6.0.3",
+ "windows-sys 0.59.0",
  "winreg",
  "zip",
 ]

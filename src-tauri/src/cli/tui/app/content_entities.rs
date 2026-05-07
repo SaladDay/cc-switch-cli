@@ -536,7 +536,7 @@ mod tests {
         ));
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[test]
     fn claude_provider_o_key_is_noop_on_non_unix() {
         let mut app = App::new(Some(AppType::Claude));
@@ -550,7 +550,7 @@ mod tests {
         assert!(matches!(action, Action::None));
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[test]
     fn codex_provider_o_key_is_noop_on_non_unix() {
         let mut app = App::new(Some(AppType::Codex));
