@@ -927,9 +927,15 @@ mod tests {
             let original_userprofile = env::var_os("USERPROFILE");
             let original_config_dir = env::var_os("CC_SWITCH_CONFIG_DIR");
 
-            env::set_var("HOME", dir.path());
-            env::set_var("USERPROFILE", dir.path());
-            env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
+            unsafe {
+                env::set_var("HOME", dir.path());
+            }
+            unsafe {
+                env::set_var("USERPROFILE", dir.path());
+            }
+            unsafe {
+                env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
+            }
             crate::test_support::set_test_home_override(Some(dir.path()));
             crate::settings::reload_test_settings();
 
@@ -946,18 +952,18 @@ mod tests {
     impl Drop for TempHome {
         fn drop(&mut self) {
             match &self.original_home {
-                Some(value) => env::set_var("HOME", value),
-                None => env::remove_var("HOME"),
+                Some(value) => unsafe { env::set_var("HOME", value) },
+                None => unsafe { env::remove_var("HOME") },
             }
 
             match &self.original_userprofile {
-                Some(value) => env::set_var("USERPROFILE", value),
-                None => env::remove_var("USERPROFILE"),
+                Some(value) => unsafe { env::set_var("USERPROFILE", value) },
+                None => unsafe { env::remove_var("USERPROFILE") },
             }
 
             match &self.original_config_dir {
-                Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
-                None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
+                Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
+                None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
             }
 
             crate::test_support::set_test_home_override(
@@ -980,7 +986,9 @@ mod tests {
         let _lock = crate::test_support::lock_test_home_and_settings();
         let original_config_dir = env::var_os("CC_SWITCH_CONFIG_DIR");
 
-        env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+        unsafe {
+            env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+        }
         crate::test_support::set_test_home_override(Some(home));
         crate::settings::reload_test_settings();
 
@@ -990,8 +998,8 @@ mod tests {
         crate::settings::reload_test_settings();
 
         match original_config_dir {
-            Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
-            None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
         }
     }
 

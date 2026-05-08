@@ -399,20 +399,22 @@ mod tests {
         ];
 
         for key in &keys {
-            std::env::remove_var(key);
+            unsafe { std::env::remove_var(key) };
         }
 
-        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:15721");
-        assert!(system_proxy_points_to_loopback());
+        unsafe {
+            std::env::set_var("HTTP_PROXY", "http://127.0.0.1:15721");
+            assert!(system_proxy_points_to_loopback());
 
-        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:7890");
-        assert!(!system_proxy_points_to_loopback());
+            std::env::set_var("HTTP_PROXY", "http://127.0.0.1:7890");
+            assert!(!system_proxy_points_to_loopback());
 
-        std::env::set_var("HTTP_PROXY", "http://10.0.0.2:7890");
-        assert!(!system_proxy_points_to_loopback());
+            std::env::set_var("HTTP_PROXY", "http://10.0.0.2:7890");
+            assert!(!system_proxy_points_to_loopback());
+        }
 
         for key in &keys {
-            std::env::remove_var(key);
+            unsafe { std::env::remove_var(key) };
         }
     }
 }
