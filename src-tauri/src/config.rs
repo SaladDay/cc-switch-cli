@@ -332,6 +332,10 @@ mod tests {
     #[test]
     fn get_claude_config_dir_ignores_blank_env_var() {
         let _guard = lock_test_home_and_settings();
+        let original_settings = crate::settings::get_settings();
+        let mut settings = original_settings.clone();
+        settings.claude_config_dir = None;
+        crate::settings::update_settings(settings).unwrap();
         let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", Some("   "));
         set_test_home_override(Some(Path::new("/tmp/claude-home-blank")));
 
@@ -340,12 +344,17 @@ mod tests {
             PathBuf::from("/tmp/claude-home-blank").join(".claude")
         );
 
+        crate::settings::update_settings(original_settings).unwrap();
         set_test_home_override(None);
     }
 
     #[test]
     fn get_claude_config_dir_falls_back_to_default_when_nothing_set() {
         let _guard = lock_test_home_and_settings();
+        let original_settings = crate::settings::get_settings();
+        let mut settings = original_settings.clone();
+        settings.claude_config_dir = None;
+        crate::settings::update_settings(settings).unwrap();
         let _env = ConfigDirEnvGuard::new("CLAUDE_CONFIG_DIR", None);
         set_test_home_override(Some(Path::new("/tmp/default-home")));
 
@@ -354,6 +363,7 @@ mod tests {
             PathBuf::from("/tmp/default-home").join(".claude")
         );
 
+        crate::settings::update_settings(original_settings).unwrap();
         set_test_home_override(None);
     }
 

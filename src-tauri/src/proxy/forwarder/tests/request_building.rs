@@ -15,6 +15,7 @@ use crate::{
         types::{OptimizerConfig, RectifierConfig},
     },
     services::CodexOAuthService,
+    test_support::lock_codex_oauth_test,
     test_support::lock_test_home_and_settings,
 };
 
@@ -242,8 +243,13 @@ async fn non_claude_prepare_request_skips_claude_specific_headers() {
     );
 }
 
-#[tokio::test]
+// FIXME: flaky under concurrency — env::set_var("CC_SWITCH_CONFIG_DIR") is
+// process-global and races with the ~35 other tests that mutate the same var.
+// Passes reliably with `--test-threads=1`. Root fix: migrate all env::set_var
+// calls to set_test_home_override().
+#[tokio::test(flavor = "current_thread")]
 async fn codex_oauth_prepare_request_injects_bound_account_headers() {
+    let _codex_lock = lock_codex_oauth_test();
     let _lock = lock_test_home_and_settings();
     let temp = tempfile::tempdir().expect("create temp dir");
     let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
@@ -276,8 +282,10 @@ async fn codex_oauth_prepare_request_injects_bound_account_headers() {
     assert_eq!(header_value(&request, "originator"), Some("cc-switch"));
 }
 
-#[tokio::test]
+// FIXME: flaky under concurrency — same root cause as injects_bound_account_headers.
+#[tokio::test(flavor = "current_thread")]
 async fn codex_oauth_prepare_request_falls_back_to_default_account() {
+    let _codex_lock = lock_codex_oauth_test();
     let _lock = lock_test_home_and_settings();
     let temp = tempfile::tempdir().expect("create temp dir");
     let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
@@ -305,8 +313,9 @@ async fn codex_oauth_prepare_request_falls_back_to_default_account() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn codex_oauth_prepare_request_errors_without_available_account() {
+    let _codex_lock = lock_codex_oauth_test();
     let _lock = lock_test_home_and_settings();
     let temp = tempfile::tempdir().expect("create temp dir");
     let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));

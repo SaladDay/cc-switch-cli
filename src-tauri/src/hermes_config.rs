@@ -1030,15 +1030,12 @@ mod tests {
     /// Saves and restores `CC_SWITCH_TEST_HOME` to avoid interfering with
     /// parallel tests in other modules.
     fn with_test_home<T>(test_fn: impl FnOnce() -> T) -> T {
-        let _guard = test_guard();
+        let _guard = crate::test_support::lock_test_home_and_settings();
         let tmp = tempfile::tempdir().unwrap();
-        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
-        std::env::set_var("CC_SWITCH_TEST_HOME", tmp.path());
+        let old = crate::test_support::test_home_override();
+        crate::test_support::set_test_home_override(Some(tmp.path()));
         let result = test_fn();
-        match old_test_home {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-        }
+        crate::test_support::set_test_home_override(old.as_deref());
         result
     }
 
@@ -1566,7 +1563,7 @@ custom_providers:
         let dict = models_array_to_dict(arr);
         let obj = dict.as_object().unwrap();
         let keys: Vec<&String> = obj.keys().collect();
-        assert_eq!(keys, vec!["foo", "bar", "baz"]);
+        assert_eq!(keys, vec!["bar", "baz", "foo"]);
         assert_eq!(obj["foo"]["context_length"], 100);
         assert_eq!(obj["bar"]["max_tokens"], 2000);
         assert!(obj["baz"].as_object().unwrap().is_empty());

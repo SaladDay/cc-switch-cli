@@ -258,9 +258,11 @@ async fn buffered_success_streaming_responses_do_not_record_termination_error() 
     assert!(snapshot.estimated_output_tokens_total > 0);
 }
 
-#[tokio::test]
-#[serial(home_settings)]
+// FIXME: flaky under concurrency — TempHome sets env::set_var("HOME") and
+// "CC_SWITCH_CONFIG_DIR" which are process-global and race with ~35 other tests.
+#[tokio::test(flavor = "current_thread")]
 async fn streaming_success_syncs_failover_state_after_body_drains() {
+    let _settings_lock = crate::test_support::lock_test_home_and_settings();
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().expect("memory db"));
     let current = test_provider_with_settings(
