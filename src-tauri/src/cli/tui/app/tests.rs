@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn skills_apps_picker_from_openclaw_targets_opencode_last_visible_row() {
+    fn skills_apps_picker_from_openclaw_targets_hermes_last_visible_row() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Skills;
         app.focus = Focus::Content;
@@ -322,7 +322,7 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
-            Overlay::SkillsAppsPicker { selected, .. } if *selected == 3
+            Overlay::SkillsAppsPicker { selected, .. } if *selected == 4
         ));
 
         let action = app.on_key(key(KeyCode::Char('x')), &data);
@@ -330,11 +330,12 @@ mod tests {
         assert!(matches!(
             &app.overlay,
             Overlay::SkillsAppsPicker { selected, apps, .. }
-                if *selected == 3
+                if *selected == 4
                     && !apps.claude
                     && !apps.codex
                     && !apps.gemini
-                    && apps.opencode
+                    && !apps.opencode
+                    && apps.hermes
         ));
     }
 
@@ -1784,7 +1785,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_apps_picker_from_openclaw_targets_opencode_last_visible_row() {
+    fn mcp_apps_picker_from_openclaw_targets_hermes_last_visible_row() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Mcp;
         app.focus = Focus::Content;
@@ -1808,7 +1809,7 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
-            Overlay::McpAppsPicker { selected, .. } if *selected == 3
+            Overlay::McpAppsPicker { selected, .. } if *selected == 4
         ));
 
         let action = app.on_key(key(KeyCode::Char('x')), &data);
@@ -1816,11 +1817,12 @@ mod tests {
         assert!(matches!(
             &app.overlay,
             Overlay::McpAppsPicker { selected, apps, .. }
-                if *selected == 3
+                if *selected == 4
                     && !apps.claude
                     && !apps.codex
                     && !apps.gemini
-                    && apps.opencode
+                    && !apps.opencode
+                    && apps.hermes
         ));
     }
 

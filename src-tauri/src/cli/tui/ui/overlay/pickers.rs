@@ -644,13 +644,7 @@ pub(super) fn render_mcp_apps_picker_overlay(
         texts::tui_mcp_apps_title(name),
         selected,
         apps,
-        &[
-            crate::app_config::AppType::Claude,
-            crate::app_config::AppType::Codex,
-            crate::app_config::AppType::Gemini,
-            crate::app_config::AppType::OpenCode,
-            crate::app_config::AppType::Hermes,
-        ],
+        crate::app_config::MCP_PICKER_APPS,
     );
 }
 
@@ -719,14 +713,7 @@ pub(super) fn render_visible_apps_picker_overlay(
         texts::tui_settings_visible_apps_title().to_string(),
         selected,
         apps,
-        &[
-            crate::app_config::AppType::Claude,
-            crate::app_config::AppType::Codex,
-            crate::app_config::AppType::Gemini,
-            crate::app_config::AppType::OpenCode,
-            crate::app_config::AppType::OpenClaw,
-            crate::app_config::AppType::Hermes,
-        ],
+        crate::app_config::VISIBLE_PICKER_APPS,
     );
 }
 
@@ -745,13 +732,7 @@ pub(super) fn render_skills_apps_picker_overlay(
         texts::tui_skill_apps_title(name),
         selected,
         apps,
-        &[
-            crate::app_config::AppType::Claude,
-            crate::app_config::AppType::Codex,
-            crate::app_config::AppType::Gemini,
-            crate::app_config::AppType::OpenCode,
-            crate::app_config::AppType::Hermes,
-        ],
+        crate::app_config::SKILLS_PICKER_APPS,
     );
 }
 

@@ -523,11 +523,11 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(4);
+                *selected = (*selected + 1).min(crate::app_config::MCP_PICKER_APPS.len() - 1);
                 Action::None
             }
             KeyCode::Char('x') | KeyCode::Char(' ') => {
-                let app_type = app_type_for_picker_index(*selected);
+                let app_type = crate::app_config::MCP_PICKER_APPS[*selected];
                 let enabled = apps.is_enabled_for(&app_type);
                 apps.set_enabled_for(&app_type, !enabled);
                 Action::None
@@ -604,11 +604,11 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(5);
+                *selected = (*selected + 1).min(crate::app_config::VISIBLE_PICKER_APPS.len() - 1);
                 Action::None
             }
             KeyCode::Char('x') | KeyCode::Char(' ') => {
-                let app_type = app_type_for_picker_index(*selected);
+                let app_type = crate::app_config::VISIBLE_PICKER_APPS[*selected];
                 let enabled = apps.is_enabled_for(&app_type);
                 apps.set_enabled_for(&app_type, !enabled);
                 Action::None
@@ -656,11 +656,11 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(4);
+                *selected = (*selected + 1).min(crate::app_config::SKILLS_PICKER_APPS.len() - 1);
                 Action::None
             }
             KeyCode::Char('x') | KeyCode::Char(' ') => {
-                let app_type = app_type_for_picker_index(*selected);
+                let app_type = crate::app_config::SKILLS_PICKER_APPS[*selected];
                 let enabled = apps.is_enabled_for(&app_type);
                 apps.set_enabled_for(&app_type, !enabled);
                 Action::None

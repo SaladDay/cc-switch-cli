@@ -284,7 +284,7 @@ use crate::prompt_files::prompt_file_path;
 use crate::provider::ProviderManager;
 
 /// 应用类型
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum AppType {
     Claude,
@@ -294,6 +294,34 @@ pub enum AppType {
     OpenClaw,
     Hermes,
 }
+
+/// Apps shown in the MCP server picker (no OpenClaw — it has no MCP support).
+pub const MCP_PICKER_APPS: &[AppType] = &[
+    AppType::Claude,
+    AppType::Codex,
+    AppType::Gemini,
+    AppType::OpenCode,
+    AppType::Hermes,
+];
+
+/// Apps shown in the "Visible Apps" settings picker (all apps).
+pub const VISIBLE_PICKER_APPS: &[AppType] = &[
+    AppType::Claude,
+    AppType::Codex,
+    AppType::Gemini,
+    AppType::OpenCode,
+    AppType::OpenClaw,
+    AppType::Hermes,
+];
+
+/// Apps shown in the skills picker (no OpenClaw — it has no skills support).
+pub const SKILLS_PICKER_APPS: &[AppType] = &[
+    AppType::Claude,
+    AppType::Codex,
+    AppType::Gemini,
+    AppType::OpenCode,
+    AppType::Hermes,
+];
 
 impl AppType {
     pub fn as_str(&self) -> &'static str {
