@@ -45,7 +45,7 @@ fn default_visible_app_openclaw() -> bool {
 }
 
 fn default_visible_app_hermes() -> bool {
-    false
+    true
 }
 
 pub fn default_visible_apps() -> VisibleApps {
