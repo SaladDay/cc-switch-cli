@@ -115,6 +115,7 @@ impl ProviderType {
                 ProviderType::Gemini
             }
             AppType::OpenCode | AppType::OpenClaw => ProviderType::Codex,
+            AppType::Hermes => ProviderType::Codex,
         }
     }
 
@@ -165,6 +166,7 @@ pub fn get_adapter(app_type: &AppType) -> Box<dyn ProviderAdapter> {
         AppType::Gemini => Box::new(GeminiAdapter::new()),
         AppType::OpenCode => Box::new(CodexAdapter::new()),
         AppType::OpenClaw => Box::new(CodexAdapter::new()),
+        AppType::Hermes => Box::new(CodexAdapter::new()),
     }
 }
 

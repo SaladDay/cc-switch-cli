@@ -180,7 +180,7 @@ impl AuthService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::lock_test_home_and_settings;
+    use crate::test_support::{lock_codex_oauth_test, lock_test_home_and_settings};
     use std::{env, ffi::OsString};
 
     struct ConfigDirEnvGuard {
@@ -207,8 +207,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn auth_status_marks_default_account() {
+        let _codex_lock = lock_codex_oauth_test();
         let _lock = lock_test_home_and_settings();
         let temp = tempfile::tempdir().expect("create temp dir");
         let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));

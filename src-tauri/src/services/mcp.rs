@@ -164,6 +164,9 @@ impl McpService {
                 mcp::sync_single_server_to_opencode(cfg, &server.id, &server.server)?;
             }
             AppType::OpenClaw => {}
+            AppType::Hermes => {
+                mcp::sync_single_server_to_hermes(cfg, &server.id, &server.server)?;
+            }
         }
         Ok(())
     }
@@ -188,6 +191,7 @@ impl McpService {
             AppType::Gemini => mcp::remove_server_from_gemini(id)?,
             AppType::OpenCode => mcp::remove_server_from_opencode(id)?,
             AppType::OpenClaw => {}
+            AppType::Hermes => mcp::remove_server_from_hermes(id)?,
         }
         Ok(())
     }
@@ -292,6 +296,15 @@ impl McpService {
     pub fn import_from_opencode(state: &AppState) -> Result<usize, AppError> {
         let mut cfg = state.config.write()?;
         let count = mcp::import_from_opencode(&mut cfg)?;
+        drop(cfg);
+        state.save()?;
+        Ok(count)
+    }
+
+    /// 从 Hermes 导入 MCP
+    pub fn import_from_hermes(state: &AppState) -> Result<usize, AppError> {
+        let mut cfg = state.config.write()?;
+        let count = mcp::import_from_hermes(&mut cfg)?;
         drop(cfg);
         state.save()?;
         Ok(count)

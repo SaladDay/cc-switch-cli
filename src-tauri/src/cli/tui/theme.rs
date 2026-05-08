@@ -184,6 +184,7 @@ fn accent_rgb(app: &AppType) -> (u8, u8, u8) {
         AppType::Gemini => DRACULA_PINK,
         AppType::OpenCode => DRACULA_ORANGE,
         AppType::OpenClaw => OPENCLAW_CORAL,
+        AppType::Hermes => DRACULA_YELLOW,
     }
 }
 

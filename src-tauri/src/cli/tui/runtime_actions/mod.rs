@@ -366,9 +366,11 @@ mod tests {
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
             let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+            unsafe {
+                std::env::set_var("HOME", home);
+                std::env::set_var("USERPROFILE", home);
+                std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+            }
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
@@ -383,16 +385,16 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
+                Some(value) => unsafe { std::env::set_var("HOME", value) },
+                None => unsafe { std::env::remove_var("HOME") },
             }
             match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
+                Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+                None => unsafe { std::env::remove_var("USERPROFILE") },
             }
             match &self.old_config_dir {
-                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
-                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+                Some(value) => unsafe { std::env::set_var("CC_SWITCH_CONFIG_DIR", value) },
+                None => unsafe { std::env::remove_var("CC_SWITCH_CONFIG_DIR") },
             }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
@@ -523,6 +525,7 @@ mod tests {
             gemini: true,
             opencode: true,
             openclaw: true,
+            hermes: false,
         })
         .expect("save initial visible apps");
 
@@ -532,6 +535,7 @@ mod tests {
             gemini: false,
             opencode: false,
             openclaw: false,
+            hermes: false,
         };
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ConfigOpenClawTools;
@@ -591,6 +595,7 @@ mod tests {
             gemini: false,
             opencode: true,
             openclaw: true,
+            hermes: false,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
             .expect("save initial visible apps");
@@ -612,6 +617,7 @@ mod tests {
                     gemini: false,
                     opencode: false,
                     openclaw: false,
+                    hermes: false,
                 },
             },
         )
@@ -639,6 +645,7 @@ mod tests {
             gemini: false,
             opencode: true,
             openclaw: true,
+            hermes: false,
         })
         .expect("save initial visible apps");
         write_invalid_legacy_config(temp_home.path());
@@ -649,6 +656,7 @@ mod tests {
             gemini: false,
             opencode: true,
             openclaw: false,
+            hermes: false,
         };
         let mut app = App::new(Some(AppType::Claude));
         let mut data = UiData::default();
@@ -685,6 +693,7 @@ mod tests {
             gemini: false,
             opencode: true,
             openclaw: true,
+            hermes: false,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
             .expect("save initial visible apps");
@@ -703,6 +712,7 @@ mod tests {
                     gemini: false,
                     opencode: false,
                     openclaw: false,
+                    hermes: false,
                 },
             },
         )

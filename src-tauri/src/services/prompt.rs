@@ -55,6 +55,7 @@ impl PromptService {
             AppType::Gemini => &cfg.prompts.gemini.prompts,
             AppType::OpenCode => &cfg.prompts.opencode.prompts,
             AppType::OpenClaw => &cfg.prompts.openclaw.prompts,
+            AppType::Hermes => &cfg.prompts.hermes.prompts,
         };
         Ok(prompts.clone())
     }
@@ -75,6 +76,7 @@ impl PromptService {
             AppType::Gemini => &mut cfg.prompts.gemini.prompts,
             AppType::OpenCode => &mut cfg.prompts.opencode.prompts,
             AppType::OpenClaw => &mut cfg.prompts.openclaw.prompts,
+            AppType::Hermes => &mut cfg.prompts.hermes.prompts,
         };
         prompts.insert(id.to_string(), prompt.clone());
         drop(cfg);
@@ -97,6 +99,7 @@ impl PromptService {
             AppType::Gemini => &mut cfg.prompts.gemini.prompts,
             AppType::OpenCode => &mut cfg.prompts.opencode.prompts,
             AppType::OpenClaw => &mut cfg.prompts.openclaw.prompts,
+            AppType::Hermes => &mut cfg.prompts.hermes.prompts,
         };
 
         if let Some(prompt) = prompts.get(id) {
@@ -129,6 +132,7 @@ impl PromptService {
             AppType::Gemini => &mut cfg.prompts.gemini.prompts,
             AppType::OpenCode => &mut cfg.prompts.opencode.prompts,
             AppType::OpenClaw => &mut cfg.prompts.openclaw.prompts,
+            AppType::Hermes => &mut cfg.prompts.hermes.prompts,
         };
 
         let Some(prompt) = prompts.get_mut(id) else {
@@ -199,6 +203,7 @@ impl PromptService {
                         AppType::Gemini => &mut cfg.prompts.gemini.prompts,
                         AppType::OpenCode => &mut cfg.prompts.opencode.prompts,
                         AppType::OpenClaw => &mut cfg.prompts.openclaw.prompts,
+                        AppType::Hermes => &mut cfg.prompts.hermes.prompts,
                     };
 
                     // 尝试回填到当前已启用的提示词
@@ -260,6 +265,7 @@ impl PromptService {
             AppType::Gemini => &mut cfg.prompts.gemini.prompts,
             AppType::OpenCode => &mut cfg.prompts.opencode.prompts,
             AppType::OpenClaw => &mut cfg.prompts.openclaw.prompts,
+            AppType::Hermes => &mut cfg.prompts.hermes.prompts,
         };
 
         for prompt in prompts.values_mut() {
@@ -286,6 +292,7 @@ impl PromptService {
             AppType::Gemini => &mut cfg.prompts.gemini.prompts,
             AppType::OpenCode => &mut cfg.prompts.opencode.prompts,
             AppType::OpenClaw => &mut cfg.prompts.openclaw.prompts,
+            AppType::Hermes => &mut cfg.prompts.hermes.prompts,
         };
 
         // 验证提示词是否存在且已启用
@@ -362,6 +369,7 @@ impl PromptService {
                     AppType::Gemini => &cfg.prompts.gemini.prompts,
                     AppType::OpenCode => &cfg.prompts.opencode.prompts,
                     AppType::OpenClaw => &cfg.prompts.openclaw.prompts,
+                    AppType::Hermes => &cfg.prompts.hermes.prompts,
                 };
 
                 if let Some(prompt) = select_active_prompt(prompts) {

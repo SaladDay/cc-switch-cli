@@ -67,5 +67,5 @@ pub(crate) async fn acquire_restore_mutation_guard() -> Result<RestoreMutationGu
 }
 
 pub(crate) fn clear_restore_mutation_guard_bypass_env() {
-    std::env::remove_var(RESTORE_GUARD_BYPASS_ENV_KEY);
+    unsafe { std::env::remove_var(RESTORE_GUARD_BYPASS_ENV_KEY) };
 }

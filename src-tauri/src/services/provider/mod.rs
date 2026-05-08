@@ -645,6 +645,25 @@ impl ProviderService {
                 }
                 state.save()?;
             }
+            AppType::Hermes => {
+                let providers = crate::hermes_config::get_providers()?;
+                let live_after = providers.get(provider_id).cloned().unwrap_or_else(|| {
+                    log::warn!(
+                        "Hermes live config missing provider '{provider_id}', using empty config"
+                    );
+                    serde_json::Value::Object(serde_json::Map::new())
+                });
+
+                {
+                    let mut guard = state.config.write().map_err(AppError::from)?;
+                    if let Some(manager) = guard.get_manager_mut(app_type) {
+                        if let Some(target) = manager.providers.get_mut(provider_id) {
+                            target.settings_config = live_after;
+                        }
+                    }
+                }
+                state.save()?;
+            }
         }
         Ok(())
     }
@@ -701,6 +720,7 @@ impl ProviderService {
                 old_snippet,
             ),
             AppType::OpenCode | AppType::OpenClaw => Ok(()),
+            AppType::Hermes => Ok(()),
         };
 
         match result {
@@ -1346,6 +1366,7 @@ impl ProviderService {
             }
             AppType::OpenCode => unreachable!("additive mode apps are handled earlier"),
             AppType::OpenClaw => unreachable!("additive mode apps are handled earlier"),
+            AppType::Hermes => unreachable!("additive mode apps are handled earlier"),
         };
 
         let mut provider = Provider::with_id(
@@ -1453,6 +1474,10 @@ impl ProviderService {
                     ));
                 }
                 crate::openclaw_config::read_openclaw_config()
+            }
+            AppType::Hermes => {
+                let yaml = crate::hermes_config::read_hermes_config()?;
+                crate::hermes_config::yaml_to_json(&yaml)
             }
         }
     }
@@ -1757,6 +1782,7 @@ impl ProviderService {
                 )?,
                 AppType::OpenCode => unreachable!("additive mode handled above"),
                 AppType::OpenClaw => unreachable!("additive mode handled above"),
+                AppType::Hermes => unreachable!("additive mode handled above"),
             };
 
             let action = PostCommitAction {
@@ -1843,6 +1869,10 @@ impl ProviderService {
                     crate::openclaw_config::set_typed_provider(&provider.id, &config).map(|_| ());
 
                 write_result.map_err(Self::normalize_openclaw_live_write_error)
+            }
+            AppType::Hermes => {
+                crate::hermes_config::set_provider(&provider.id, provider.settings_config.clone())
+                    .map(|_| ())
             }
         }
     }
@@ -2057,6 +2087,9 @@ impl ProviderService {
             AppType::OpenClaw => Err(AppError::Config(
                 "OpenClaw does not support proxy takeover backups".into(),
             )),
+            AppType::Hermes => Err(AppError::Config(
+                "Hermes does not support proxy takeover backups".into(),
+            )),
         }
     }
 
@@ -2141,6 +2174,16 @@ impl ProviderService {
             AppType::OpenClaw => {
                 let config = Self::parse_openclaw_provider_settings(&provider.settings_config)?;
                 Self::validate_openclaw_provider_models(&provider.id, &config)?;
+            }
+            AppType::Hermes => {
+                // Hermes uses flexible YAML config; basic check that settings is an object
+                if !provider.settings_config.is_object() {
+                    return Err(AppError::localized(
+                        "provider.hermes.settings.not_object",
+                        "Hermes 供应商配置必须是 JSON 对象",
+                        "Hermes provider configuration must be a JSON object",
+                    ));
+                }
             }
         }
 
@@ -2296,6 +2339,9 @@ impl ProviderService {
                 let _ = provider_snapshot;
             }
             AppType::OpenClaw => {
+                let _ = provider_snapshot;
+            }
+            AppType::Hermes => {
                 let _ = provider_snapshot;
             }
         }

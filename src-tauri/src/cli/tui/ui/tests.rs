@@ -263,9 +263,11 @@ impl SettingsEnvGuard {
         let old_home = std::env::var_os("HOME");
         let old_userprofile = std::env::var_os("USERPROFILE");
         let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
-        std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+        }
         set_test_home_override(Some(home));
         crate::settings::reload_test_settings();
         Self {
@@ -280,16 +282,16 @@ impl SettingsEnvGuard {
 impl Drop for SettingsEnvGuard {
     fn drop(&mut self) {
         match &self.old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
         }
         match &self.old_userprofile {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
+            Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+            None => unsafe { std::env::remove_var("USERPROFILE") },
         }
         match &self.old_config_dir {
-            Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
-            None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            Some(value) => unsafe { std::env::set_var("CC_SWITCH_CONFIG_DIR", value) },
+            None => unsafe { std::env::remove_var("CC_SWITCH_CONFIG_DIR") },
         }
         set_test_home_override(self.old_home.as_deref().map(Path::new));
         crate::settings::reload_test_settings();
@@ -299,13 +301,13 @@ impl Drop for SettingsEnvGuard {
 impl EnvGuard {
     pub(super) fn set(key: &'static str, value: &str) -> Self {
         let prev = std::env::var(key).ok();
-        std::env::set_var(key, value);
+        unsafe { std::env::set_var(key, value) };
         Self { key, prev }
     }
 
     pub(super) fn remove(key: &'static str) -> Self {
         let prev = std::env::var(key).ok();
-        std::env::remove_var(key);
+        unsafe { std::env::remove_var(key) };
         Self { key, prev }
     }
 }
@@ -313,8 +315,8 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         match &self.prev {
-            None => std::env::remove_var(self.key),
-            Some(v) => std::env::set_var(self.key, v),
+            None => unsafe { std::env::remove_var(self.key) },
+            Some(v) => unsafe { std::env::set_var(self.key, v) },
         }
     }
 }
@@ -575,6 +577,7 @@ fn installed_skill(directory: &str, name: &str) -> InstalledSkill {
             codex: false,
             gemini: false,
             opencode: false,
+            hermes: false,
         },
         installed_at: 1,
     }
@@ -737,6 +740,7 @@ fn header_only_renders_selected_visible_apps() {
         gemini: false,
         opencode: false,
         openclaw: true,
+        hermes: false,
     })
     .expect("save visible apps");
 
@@ -765,6 +769,7 @@ fn header_keeps_all_app_tabs_visible_with_proxy_chip() {
         gemini: true,
         opencode: true,
         openclaw: true,
+        hermes: false,
     })
     .expect("save visible apps");
 
@@ -793,6 +798,7 @@ fn settings_page_shows_visible_apps_row_value() {
         gemini: true,
         opencode: false,
         openclaw: true,
+        hermes: false,
     })
     .expect("save visible apps");
 
@@ -873,6 +879,7 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
             gemini: false,
             opencode: false,
             openclaw: false,
+            hermes: false,
         },
     };
     app.push_toast(
@@ -1412,6 +1419,7 @@ fn home_connection_card_labels_mcp_and_skills_with_active_counts() {
                 codex: false,
                 gemini: false,
                 opencode: false,
+                hermes: false,
             },
             installed_at: 0,
         },
@@ -2154,6 +2162,7 @@ fn skills_page_shows_opencode_summary() {
         codex: false,
         gemini: false,
         opencode: true,
+        hermes: false,
     };
     data.skills.installed = vec![skill];
 
@@ -2181,6 +2190,7 @@ fn skill_detail_page_shows_opencode_enabled_state() {
         codex: false,
         gemini: false,
         opencode: true,
+        hermes: false,
     };
     data.skills.installed = vec![skill];
 
@@ -2451,7 +2461,7 @@ fn editor_unsaved_changes_confirm_overlay_shows_three_actions_and_is_compact() {
     let _lock = lock_env();
 
     let prev = std::env::var("NO_COLOR").ok();
-    std::env::set_var("NO_COLOR", "1");
+    unsafe { std::env::set_var("NO_COLOR", "1") };
     let _restore_no_color = EnvGuard {
         key: "NO_COLOR",
         prev,
@@ -2508,7 +2518,7 @@ fn form_save_before_close_confirm_overlay_shows_save_exit_and_cancel_actions() {
     let _lang = use_test_language(Language::English);
 
     let prev = std::env::var("NO_COLOR").ok();
-    std::env::set_var("NO_COLOR", "1");
+    unsafe { std::env::set_var("NO_COLOR", "1") };
     let _restore_no_color = EnvGuard {
         key: "NO_COLOR",
         prev,
@@ -2646,7 +2656,7 @@ fn footer_shows_only_global_actions() {
     let _lock = lock_env();
 
     let prev = std::env::var("NO_COLOR").ok();
-    std::env::set_var("NO_COLOR", "1");
+    unsafe { std::env::set_var("NO_COLOR", "1") };
     let _restore_no_color = EnvGuard {
         key: "NO_COLOR",
         prev,

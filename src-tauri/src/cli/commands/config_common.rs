@@ -133,7 +133,11 @@ fn set(
     };
 
     let snippet = match app_type {
-        AppType::Claude | AppType::Gemini | AppType::OpenCode | AppType::OpenClaw => {
+        AppType::Claude
+        | AppType::Gemini
+        | AppType::OpenCode
+        | AppType::OpenClaw
+        | AppType::Hermes => {
             let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
                 AppError::InvalidInput(texts::tui_toast_invalid_json(&e.to_string()))
             })?;
@@ -236,8 +240,10 @@ mod tests {
             let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
+            unsafe {
+                std::env::set_var("HOME", home);
+                std::env::set_var("USERPROFILE", home);
+            }
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
@@ -251,12 +257,12 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
+                Some(value) => unsafe { std::env::set_var("HOME", value) },
+                None => unsafe { std::env::remove_var("HOME") },
             }
             match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
+                Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+                None => unsafe { std::env::remove_var("USERPROFILE") },
             }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();

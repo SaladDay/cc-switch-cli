@@ -29,6 +29,9 @@ pub(super) enum LiveSnapshot {
     OpenClaw {
         config_source: Option<String>,
     },
+    Hermes {
+        config: Option<Value>,
+    },
 }
 
 impl LiveSnapshot {
@@ -96,6 +99,18 @@ impl LiveSnapshot {
                     delete_file(&path)?;
                 }
             }
+            LiveSnapshot::Hermes { config } => {
+                let path = crate::hermes_config::get_hermes_config_path();
+                if let Some(value) = config {
+                    let yaml_value = crate::hermes_config::json_to_yaml(&value)?;
+                    let yaml_str = serde_yaml::to_string(&yaml_value).map_err(|e| {
+                        AppError::Config(format!("Failed to serialize Hermes config: {e}"))
+                    })?;
+                    crate::config::atomic_write(&path, yaml_str.as_bytes())?;
+                } else if path.exists() {
+                    crate::config::delete_file(&path)?;
+                }
+            }
         }
         Ok(())
     }
@@ -158,6 +173,16 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
         AppType::OpenClaw => {
             let config_source = crate::openclaw_config::read_openclaw_config_source()?;
             Ok(LiveSnapshot::OpenClaw { config_source })
+        }
+        AppType::Hermes => {
+            let path = crate::hermes_config::get_hermes_config_path();
+            let config = if path.exists() {
+                let yaml = crate::hermes_config::read_hermes_config()?;
+                Some(crate::hermes_config::yaml_to_json(&yaml)?)
+            } else {
+                None
+            };
+            Ok(LiveSnapshot::Hermes { config })
         }
     }
 }

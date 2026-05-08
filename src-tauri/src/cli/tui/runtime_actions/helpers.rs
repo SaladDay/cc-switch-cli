@@ -40,6 +40,7 @@ pub(crate) fn import_mcp_for_current_app(app: &mut App, data: &mut UiData) -> Re
                 AppType::Gemini => McpService::import_from_gemini(&state),
                 AppType::OpenCode => McpService::import_from_opencode(&state),
                 AppType::OpenClaw => Ok(0),
+                AppType::Hermes => Ok(0),
             }
         },
         UiData::load,
@@ -66,6 +67,7 @@ pub(crate) fn app_display_name(app_type: &AppType) -> &'static str {
         AppType::Gemini => "Gemini",
         AppType::OpenCode => "OpenCode",
         AppType::OpenClaw => "OpenClaw",
+        AppType::Hermes => "Hermes",
     }
 }
 

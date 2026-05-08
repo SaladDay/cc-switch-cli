@@ -10,6 +10,7 @@ mod app_config {
         Gemini,
         OpenCode,
         OpenClaw,
+        Hermes,
     }
 
     impl AppType {
@@ -20,6 +21,7 @@ mod app_config {
                 AppType::Gemini => "gemini",
                 AppType::OpenCode => "opencode",
                 AppType::OpenClaw => "openclaw",
+                AppType::Hermes => "hermes",
             }
         }
     }

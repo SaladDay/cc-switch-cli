@@ -169,6 +169,7 @@ pub(super) fn provider_builtin_template_defs(app_type: &AppType) -> &'static [Pr
         AppType::Gemini => &PROVIDER_TEMPLATE_DEFS_GEMINI,
         AppType::OpenCode => &PROVIDER_TEMPLATE_DEFS_OPENCODE,
         AppType::OpenClaw => &PROVIDER_TEMPLATE_DEFS_OPENCLAW,
+        AppType::Hermes => &[], // TODO: Hermes templates in Tier 2
     }
 }
 
@@ -179,6 +180,7 @@ pub(super) fn provider_sponsor_presets(app_type: &AppType) -> &'static [SponsorP
         AppType::Gemini => &SPONSOR_PROVIDER_PRESETS_GEMINI,
         AppType::OpenCode => &SPONSOR_PROVIDER_PRESETS_OPENCODE,
         AppType::OpenClaw => &SPONSOR_PROVIDER_PRESETS_OPENCLAW,
+        AppType::Hermes => &[], // TODO: Hermes sponsor presets in Tier 2
     }
 }
 
@@ -409,6 +411,9 @@ impl ProviderAddFormState {
                     self.opencode_model_context_limit.set("200000");
                     self.opencode_model_original_id = Some("claude-opus-4-6".to_string());
                 }
+            }
+            AppType::Hermes => {
+                // TODO: Implement Hermes preset application in Tier 2
             }
         }
     }

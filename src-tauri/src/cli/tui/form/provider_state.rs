@@ -194,6 +194,9 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::OpenClawUserAgent);
                 fields.push(ProviderAddField::OpenClawModels);
             }
+            AppType::Hermes => {
+                // TODO: Implement Hermes provider fields in Tier 2
+            }
         }
 
         if !matches!(self.app_type, AppType::OpenClaw) {

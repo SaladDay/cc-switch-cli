@@ -1388,3 +1388,269 @@ pub fn remove_server_from_opencode(id: &str) -> Result<(), AppError> {
 
     crate::opencode_config::remove_mcp_server(id)
 }
+
+// ============================================================================
+// Hermes MCP: format conversion, sync, import
+// ============================================================================
+
+/// Hermes-specific fields preserved on merge-on-write, stripped on import.
+const HERMES_EXTRA_FIELDS: &[&str] = &[
+    "enabled",
+    "timeout",
+    "connect_timeout",
+    "tools",
+    "sampling",
+    "roots",
+    "auth",
+];
+
+fn should_sync_hermes_mcp() -> bool {
+    crate::hermes_config::get_hermes_dir().exists()
+}
+
+/// Convert CC Switch unified format to Hermes format
+fn convert_to_hermes_format(spec: &Value) -> Result<Value, AppError> {
+    let obj = spec
+        .as_object()
+        .ok_or_else(|| AppError::McpValidation("MCP spec must be a JSON object".into()))?;
+
+    let typ = obj.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
+
+    let mut result = serde_json::Map::new();
+
+    match typ {
+        "stdio" => {
+            if let Some(command) = obj.get("command") {
+                result.insert("command".into(), command.clone());
+            }
+            if let Some(args) = obj.get("args") {
+                if args.is_array() && !args.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                    result.insert("args".into(), args.clone());
+                }
+            }
+            if let Some(env) = obj.get("env") {
+                if env.is_object() && !env.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                    result.insert("env".into(), env.clone());
+                }
+            }
+        }
+        "sse" | "http" => {
+            if let Some(url) = obj.get("url") {
+                result.insert("url".into(), url.clone());
+            }
+            if let Some(headers) = obj.get("headers") {
+                if headers.is_object() && !headers.as_object().map(|o| o.is_empty()).unwrap_or(true)
+                {
+                    result.insert("headers".into(), headers.clone());
+                }
+            }
+        }
+        _ => {
+            return Err(AppError::McpValidation(format!("Unknown MCP type: {typ}")));
+        }
+    }
+
+    result.insert("enabled".into(), json!(true));
+
+    Ok(Value::Object(result))
+}
+
+/// Convert Hermes format to CC Switch unified format
+fn convert_from_hermes_format(id: &str, spec: &Value) -> Result<Value, AppError> {
+    let obj = spec
+        .as_object()
+        .ok_or_else(|| AppError::McpValidation("Hermes MCP spec must be a JSON object".into()))?;
+
+    let mut result = serde_json::Map::new();
+
+    if obj.contains_key("command") {
+        result.insert("type".into(), json!("stdio"));
+        if let Some(command) = obj.get("command") {
+            result.insert("command".into(), command.clone());
+        }
+        if let Some(args) = obj.get("args") {
+            if args.is_array() && !args.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                result.insert("args".into(), args.clone());
+            }
+        }
+        if let Some(env) = obj.get("env") {
+            if env.is_object() && !env.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                result.insert("env".into(), env.clone());
+            }
+        }
+    } else if obj.contains_key("url") {
+        result.insert("type".into(), json!("sse"));
+        if let Some(url) = obj.get("url") {
+            result.insert("url".into(), url.clone());
+        }
+        if let Some(headers) = obj.get("headers") {
+            if headers.is_object() && !headers.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                result.insert("headers".into(), headers.clone());
+            }
+        }
+    } else {
+        return Err(AppError::McpValidation(format!(
+            "Hermes MCP server '{id}' has neither 'command' nor 'url' field"
+        )));
+    }
+
+    Ok(Value::Object(result))
+}
+
+/// Merge new spec into existing Hermes spec, preserving Hermes-specific fields.
+fn merge_hermes_spec(existing: &Value, new_spec: &Value) -> Value {
+    let mut result = serde_json::Map::new();
+
+    if let Some(existing_obj) = existing.as_object() {
+        for &field in HERMES_EXTRA_FIELDS {
+            if let Some(val) = existing_obj.get(field) {
+                result.insert(field.to_string(), val.clone());
+            }
+        }
+    }
+
+    if let Some(new_obj) = new_spec.as_object() {
+        for (key, val) in new_obj {
+            if HERMES_EXTRA_FIELDS.contains(&key.as_str()) && result.contains_key(key) {
+                continue;
+            }
+            result.insert(key.clone(), val.clone());
+        }
+    }
+
+    Value::Object(result)
+}
+
+/// Sync a single MCP server to Hermes live config (merge-on-write)
+pub fn sync_single_server_to_hermes(
+    _config: &MultiAppConfig,
+    id: &str,
+    server_spec: &Value,
+) -> Result<(), AppError> {
+    if !should_sync_hermes_mcp() {
+        return Ok(());
+    }
+
+    let hermes_spec = convert_to_hermes_format(server_spec)?;
+    let id_owned = id.to_string();
+
+    crate::hermes_config::update_mcp_servers_yaml(|servers| {
+        let id_yaml = serde_yaml::Value::String(id_owned.clone());
+
+        let merged_json = if let Some(existing_yaml) = servers.get(&id_yaml) {
+            let existing_json = crate::hermes_config::yaml_to_json(existing_yaml)?;
+            merge_hermes_spec(&existing_json, &hermes_spec)
+        } else {
+            hermes_spec.clone()
+        };
+
+        let merged_yaml_value = crate::hermes_config::json_to_yaml(&merged_json)?;
+        servers.insert(id_yaml, merged_yaml_value);
+        Ok(())
+    })
+}
+
+/// Remove a single MCP server from Hermes live config
+pub fn remove_server_from_hermes(id: &str) -> Result<(), AppError> {
+    if !should_sync_hermes_mcp() {
+        return Ok(());
+    }
+
+    let id_owned = id.to_string();
+    crate::hermes_config::update_mcp_servers_yaml(|servers| {
+        servers.remove(serde_yaml::Value::String(id_owned.clone()));
+        Ok(())
+    })
+}
+
+/// Import MCP servers from Hermes config to unified structure
+pub fn import_from_hermes(config: &mut MultiAppConfig) -> Result<usize, AppError> {
+    use crate::app_config::{McpApps, McpServer};
+
+    let yaml_map = crate::hermes_config::get_mcp_servers_yaml()?;
+    if yaml_map.is_empty() {
+        return Ok(0);
+    }
+
+    if config.mcp.servers.is_none() {
+        config.mcp.servers = Some(HashMap::new());
+    }
+    let servers = config.mcp.servers.as_mut().unwrap();
+
+    let mut changed = 0;
+    let mut errors = Vec::new();
+
+    for (key, spec_yaml) in &yaml_map {
+        let id = match key.as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                log::warn!("Skip Hermes MCP server with non-string key");
+                continue;
+            }
+        };
+
+        let spec_json = match crate::hermes_config::yaml_to_json(spec_yaml) {
+            Ok(j) => j,
+            Err(e) => {
+                log::warn!("Skip Hermes MCP server '{id}': failed to convert YAML to JSON: {e}");
+                errors.push(format!("{id}: {e}"));
+                continue;
+            }
+        };
+
+        let unified_spec = match convert_from_hermes_format(&id, &spec_json) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Skip invalid Hermes MCP server '{id}': {e}");
+                errors.push(format!("{id}: {e}"));
+                continue;
+            }
+        };
+
+        if let Err(e) = validate_server_spec(&unified_spec) {
+            log::warn!("Skip invalid MCP server '{id}' after conversion: {e}");
+            errors.push(format!("{id}: {e}"));
+            continue;
+        }
+
+        if let Some(existing) = servers.get_mut(&id) {
+            if !existing.apps.hermes {
+                existing.apps.hermes = true;
+                changed += 1;
+                log::info!("MCP server '{id}' enabled for Hermes");
+            }
+        } else {
+            servers.insert(
+                id.clone(),
+                McpServer {
+                    id: id.clone(),
+                    name: id.clone(),
+                    server: unified_spec,
+                    apps: McpApps {
+                        claude: false,
+                        codex: false,
+                        gemini: false,
+                        opencode: false,
+                        hermes: true,
+                    },
+                    description: None,
+                    homepage: None,
+                    docs: None,
+                    tags: Vec::new(),
+                },
+            );
+            changed += 1;
+            log::info!("Imported new MCP server '{id}' from Hermes");
+        }
+    }
+
+    if !errors.is_empty() {
+        log::warn!(
+            "Import completed with {} failures: {:?}",
+            errors.len(),
+            errors
+        );
+    }
+
+    Ok(changed)
+}

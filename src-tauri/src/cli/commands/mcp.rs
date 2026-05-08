@@ -266,6 +266,7 @@ fn import_servers(app_type: AppType) -> Result<(), AppError> {
         AppType::Gemini => McpService::import_from_gemini(&state)?,
         AppType::OpenCode => 0,
         AppType::OpenClaw => 0,
+        AppType::Hermes => McpService::import_from_hermes(&state)?,
     };
 
     if count > 0 {

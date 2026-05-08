@@ -399,6 +399,9 @@ impl ProviderAddFormState {
                     settings_obj.insert("models".to_string(), Value::Array(models));
                 }
             }
+            AppType::Hermes => {
+                // TODO: Implement Hermes provider JSON in Tier 2
+            }
         }
 
         Value::Object(provider_obj)
@@ -413,7 +416,10 @@ impl ProviderAddFormState {
         if snippet.is_empty() {
             return Ok(provider_value);
         }
-        if matches!(self.app_type, AppType::OpenCode | AppType::OpenClaw) {
+        if matches!(
+            self.app_type,
+            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes
+        ) {
             return Ok(provider_value);
         }
 
@@ -567,7 +573,7 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::OpenCode | AppType::OpenClaw => {}
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,

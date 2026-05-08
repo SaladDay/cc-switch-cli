@@ -86,6 +86,7 @@ pub fn prompt_settings_config_for_add(
         (AppType::Gemini, _) => prompt_gemini_config(None),
         (AppType::OpenCode, _) => Ok(json!({})),
         (AppType::OpenClaw, _) => Ok(json!({})),
+        (AppType::Hermes, _) => Ok(json!({})),
     }
 }
 
@@ -322,6 +323,7 @@ pub fn prompt_settings_config(
         AppType::Gemini => prompt_gemini_config(current),
         AppType::OpenCode => Ok(current.cloned().unwrap_or_else(|| json!({}))),
         AppType::OpenClaw => Ok(current.cloned().unwrap_or_else(|| json!({}))),
+        AppType::Hermes => Ok(current.cloned().unwrap_or_else(|| json!({}))),
     }
 }
 
@@ -853,6 +855,9 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
             {
                 println!("  {}: {}", texts::model_label(), models.len());
             }
+        }
+        AppType::Hermes => {
+            // TODO: Implement Hermes display config in Tier 2
         }
     }
 

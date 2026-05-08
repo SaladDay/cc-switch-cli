@@ -449,6 +449,11 @@ impl SkillService {
                     return Ok(custom.join("skills"));
                 }
             }
+            AppType::Hermes => {
+                if let Some(custom) = crate::settings::get_hermes_override_dir() {
+                    return Ok(custom.join("skills"));
+                }
+            }
         }
 
         let home = dirs::home_dir().ok_or_else(|| {
@@ -465,6 +470,7 @@ impl SkillService {
             AppType::Gemini => home.join(".gemini").join("skills"),
             AppType::OpenCode => home.join(".config").join("opencode").join("skills"),
             AppType::OpenClaw => home.join(".openclaw").join("skills"),
+            AppType::Hermes => home.join(".hermes").join("skills"),
         })
     }
 

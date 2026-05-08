@@ -10,6 +10,7 @@ mod deeplink;
 mod error;
 mod gemini_config;
 mod gemini_mcp;
+mod hermes_config;
 mod import_export;
 mod init_status;
 mod mcp;

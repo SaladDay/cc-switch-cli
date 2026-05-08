@@ -1,0 +1,20 @@
+#!/bin/bash
+
+echo "Checking Rust code format ..."
+has_issues=0
+edition=2021
+
+for file in $(git diff --name-only --staged | grep '\.rs$'); do
+    if [ -f "${file}" ] && ! rustfmt --edition ${edition} --check --color auto "${file}"; then
+        echo ""
+        has_issues=1
+        rustfmt --edition ${edition} "${file}"
+    fi
+done
+
+if [ ${has_issues} -eq 0 ]; then
+    exit 0
+fi
+
+echo "Your code contains formatting issues and has been corrected. Please run \`git add\` to add them and commit them."
+exit 1

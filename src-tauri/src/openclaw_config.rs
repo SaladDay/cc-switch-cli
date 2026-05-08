@@ -969,10 +969,18 @@ mod tests {
             let old_userprofile = std::env::var_os("USERPROFILE");
             let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
             let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
-            std::env::set_var("CC_SWITCH_TEST_HOME", home);
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+            unsafe {
+                std::env::set_var("USERPROFILE", home);
+            }
+            unsafe {
+                std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+            }
+            unsafe {
+                std::env::set_var("CC_SWITCH_TEST_HOME", home);
+            }
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
@@ -987,20 +995,20 @@ mod tests {
     impl Drop for HomeGuard {
         fn drop(&mut self) {
             match self.old_home.take() {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
+                Some(value) => unsafe { std::env::set_var("HOME", value) },
+                None => unsafe { std::env::remove_var("HOME") },
             }
             match self.old_userprofile.take() {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
+                Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+                None => unsafe { std::env::remove_var("USERPROFILE") },
             }
             match self.old_config_dir.take() {
-                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
-                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+                Some(value) => unsafe { std::env::set_var("CC_SWITCH_CONFIG_DIR", value) },
+                None => unsafe { std::env::remove_var("CC_SWITCH_CONFIG_DIR") },
             }
             match self.old_test_home.take() {
-                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+                Some(value) => unsafe { std::env::set_var("CC_SWITCH_TEST_HOME", value) },
+                None => unsafe { std::env::remove_var("CC_SWITCH_TEST_HOME") },
             }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();

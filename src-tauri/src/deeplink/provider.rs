@@ -140,6 +140,7 @@ fn build_provider_from_request(
         AppType::Gemini => build_gemini_settings(request),
         AppType::OpenCode => build_opencode_settings(request),
         AppType::OpenClaw => build_openclaw_settings(request),
+        AppType::Hermes => build_openclaw_settings(request), // Hermes uses same structure as OpenClaw
     };
 
     let meta = build_provider_meta(request)?;

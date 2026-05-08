@@ -355,6 +355,13 @@ fn model_fetch_target(
                 })?,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
+        AppType::Hermes => {
+            // TODO: Implement Hermes model fetch in Tier 2
+            Err(AppError::Message(format!(
+                "Hermes model fetch not yet implemented for provider '{}'",
+                provider.id
+            )))
+        }
     }
 }
 
