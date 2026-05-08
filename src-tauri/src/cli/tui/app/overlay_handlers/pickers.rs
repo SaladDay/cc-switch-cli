@@ -523,7 +523,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(3);
+                *selected = (*selected + 1).min(4);
                 Action::None
             }
             KeyCode::Char('x') | KeyCode::Char(' ') => {
@@ -604,7 +604,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(4);
+                *selected = (*selected + 1).min(5);
                 Action::None
             }
             KeyCode::Char('x') | KeyCode::Char(' ') => {
@@ -656,7 +656,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(3);
+                *selected = (*selected + 1).min(4);
                 Action::None
             }
             KeyCode::Char('x') | KeyCode::Char(' ') => {
