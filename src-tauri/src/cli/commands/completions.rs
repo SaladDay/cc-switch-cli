@@ -604,14 +604,14 @@ mod tests {
         let bash = completion_paths(ManagedShell::Bash, &home);
         assert_eq!(
             bash.completion_file,
-            home.join(".local/share/bash-completion/completions/cc-switch")
+            home.join(".local/share/bash-completion/completions/cc-switch-tui")
         );
         assert_eq!(bash.rc_file, home.join(".bashrc"));
 
         let zsh = completion_paths(ManagedShell::Zsh, &home);
         assert_eq!(
             zsh.completion_file,
-            home.join(".local/share/zsh/site-functions/_cc-switch")
+            home.join(".local/share/zsh/site-functions/_cc-switch-tui")
         );
         assert_eq!(zsh.rc_file, home.join(".zshrc"));
     }
@@ -632,9 +632,9 @@ mod tests {
         let script = fs::read_to_string(&paths.completion_file).expect("read bash completion");
         let rc = fs::read_to_string(&paths.rc_file).expect("read bash rc");
 
-        assert!(script.contains("_cc-switch"));
+        assert!(script.contains("_cc-switch-tui"));
         assert_eq!(marker_count(&rc), 1);
-        assert!(rc.contains(". \"$HOME/.local/share/bash-completion/completions/cc-switch\""));
+        assert!(rc.contains(". \"$HOME/.local/share/bash-completion/completions/cc-switch-tui\""));
     }
 
     #[test]
