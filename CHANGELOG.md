@@ -7,6 +7,83 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.5.1] - 2026-05-09
+
+### Changed
+
+- **Updater / Minisign**: Replace minisign public key with own keypair for self-hosted update signing.
+- **CI / Cross Target**: Ensure cross-compilation targets are installed on the rust-toolchain.toml stable toolchain.
+
+### Commits (since v5.5.0)
+
+- cc39894 chore(updater): replace minisign public key with own keypair
+- 70f6937 fix(ci): ensure cross target is installed on stable toolchain
+
+## [5.5.0] - 2026-05-09
+
+### Added
+
+- **Hermes Agent**: Full support as the 6th AppType in additive mode — provider config via YAML read/write (`~/.hermes/config.yaml`), TUI form with templates and JSON builder, CLI commands, MCP server sync, skills management, and AGENTS.md prompt file management.
+- **Prompts / CLI+TUI**: Add create and rename flows for prompt presets.
+- **TUI / Failover**: Add failover controls for proxy failover management.
+- **Nix / Flake**: Add Nix flake packaging with cargo-zigbuild cross-compilation via `nix develop`.
+- **Proxy / Anthropic**: Strip Anthropic billing header from OpenAI-compatible proxy prompts.
+- **Provider / Live Import**: Import live providers on startup from app config directories.
+- **TUI / Claude**: Add hide attribution toggle for Claude Code.
+
+### Changed
+
+- **CI**: Add multi-platform clippy and test matrix, merge rust-ci configs, use `feat/**` branch pattern for CI triggers.
+- **Picker / TUI**: Replace hardcoded picker bounds with const app arrays for the 6-app layout.
+
+### Fixed
+
+- **Proxy / Streaming**: Emit valid tool stream events without usage fields so downstream clients don't choke on malformed events.
+- **Proxy / Failover**: Fix failover status output formatting.
+- **Codex / Auth**: Persist official temp auth snapshots across restarts.
+- **Codex / History**: Keep conversation history stable across provider switches.
+- **Claude / Config**: Respect `CLAUDE_CONFIG_DIR` env var for Claude Code config discovery.
+- **Test**: Harden flaky env-guard concurrency tests and fix db-vs-memory assertions in import tests.
+
+### Commits (since v5.4.0)
+
+- 2cdd94d refactor(picker): replace hardcoded bounds with const app arrays
+- b888738 fix(hermes): fix TUI picker navigation bounds for 6-app layout
+- 353f040 feat(hermes): wire Hermes into all hardcoded app iteration lists
+- 49e0e7b feat(hermes): add enabled_hermes column to skills DAO queries
+- a928194 feat(hermes): implement Tier 2 TUI form, templates, JSON builder, and CLI commands
+- b344f84 feat(hermes): make Hermes visible by default in app switcher
+- 9e07c70 fix(test): check db instead of in-memory config after openclaw import
+- e78a32b fix(test): harden flaky env-guard tests and mark as ignored
+- a378b25 Merge branch 'feat/hermes-agent'
+- 4697d0c ci: merge rust-ci configs, add unsafe blocks, and simplify test step
+- 39c4021 feat: add cargo-zigbuild cross-compilation via nix develop
+- 6980e73 fix tests: concurrency, Windows, and flaky test improvements
+- 62e5509 fix(i18n): update help text assertion to match actual prompt format
+- 7b3c8d8 ci: remove -D warnings from clippy to avoid blocking on existing warnings
+- 3cab839 ci: add clippy and test jobs with multi-platform matrix
+- 1a05dae fix(hermes): add hermes field to test VisibleApps/SkillApps struct literals
+- 4d730e5 feat(hermes): implement Tier 2 config module and service wiring
+- f1f6a37 fix(ci): use feat/** branch pattern to match slash in branch names
+- 27e4745 chore(ci): move rustfmt check from CI to pre-commit hook
+- 5976886 add rust-ci
+- e70d2c9 feat(app-config): wire AppType::Hermes through remaining CLI, TUI, and service match arms
+- 0ef8192 feat(app-config): wire AppType::Hermes through provider, config, and CLI match arms
+- 4b5d472 feat(app-config): add AppType::Hermes variant and wire through core types
+- 84495e3 fix(proxy): fix failover status output (#144)
+- 6aebff3 feat: add Nix flake packaging (#156)
+- 103f341 fix(codex): persist official temp auth snapshots (#159)
+- f2daf4e feat(prompts): add create and rename flows for CLI and TUI (#160)
+- c0f5cb5 feat(tui): add failover controls (#155)
+- 54ae40e style(config): fix cargo fmt formatting
+- 0f8c638 ci(workflow): trigger CI on fork PRs via pull_request_target
+- 27a1c12 feat: respect CLAUDE_CONFIG_DIR env var for Claude Code (#152)
+- 5a809aa feat: import live providers on startup
+- 8018bba feat(tui): add Claude hide attribution toggle
+- 49b7142 feat(proxy): strip Anthropic billing header from OpenAI prompts (#149)
+- bccd85a fix(codex): keep history stable across provider switches
+- ca1a76b fix(proxy): emit valid tool stream events without usage (#146)
+
 ## [5.4.0] - 2026-04-29
 
 ### Added
