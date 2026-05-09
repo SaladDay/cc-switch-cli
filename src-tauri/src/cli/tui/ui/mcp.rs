@@ -29,6 +29,7 @@ pub(super) fn render_mcp(
         Cell::from(crate::app_config::AppType::Codex.as_str()),
         Cell::from(crate::app_config::AppType::Gemini.as_str()),
         Cell::from(crate::app_config::AppType::OpenCode.as_str()),
+        Cell::from(crate::app_config::AppType::Hermes.as_str()),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
@@ -51,6 +52,11 @@ pub(super) fn render_mcp(
                 texts::tui_marker_inactive()
             }),
             Cell::from(if row.server.apps.opencode {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            }),
+            Cell::from(if row.server.apps.hermes {
                 texts::tui_marker_active()
             } else {
                 texts::tui_marker_inactive()
@@ -112,17 +118,23 @@ pub(super) fn render_mcp(
             .iter()
             .filter(|row| row.server.apps.opencode)
             .count(),
+        data.mcp
+            .rows
+            .iter()
+            .filter(|row| row.server.apps.hermes)
+            .count(),
     );
     render_summary_bar(frame, chunks[1], theme, summary);
 
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(50),
+            Constraint::Percentage(40),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(10),
+            Constraint::Length(9),
         ],
     )
     .header(header)
