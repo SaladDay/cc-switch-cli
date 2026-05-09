@@ -18,8 +18,8 @@ use crate::app_config::AppType;
 #[command(
     name = "cc-switch",
     version,
-    about = "All-in-One Assistant for Claude Code, Codex, Gemini & OpenCode CLI",
-    long_about = "Unified management for Claude Code, Codex, Gemini, and OpenCode CLI provider configurations, MCP servers, skills, prompts, local proxy routes, and environment checks.\n\nRun without arguments to enter interactive mode."
+    about = "All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode, OpenClaw & Hermes",
+    long_about = "Unified management for Claude Code, Codex, Gemini, OpenCode, OpenClaw, and Hermes provider configurations, MCP servers, skills, prompts, local proxy routes, and environment checks.\n\nRun without arguments to enter interactive mode."
 )]
 pub struct Cli {
     /// Specify the application type

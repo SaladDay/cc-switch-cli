@@ -1,7 +1,7 @@
 [package]
 name = "cc-switch"
-version = "5.4.0"
-description = "All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode & OpenClaw"
+version = "0.0.1"
+description = "All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode, OpenClaw & Hermes"
 authors = ["Jason Young", "saladday"]
 license = "MIT"
 repository = "https://github.com/saladday/cc-switch-cli"
