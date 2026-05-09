@@ -7,9 +7,6 @@ fn main() {
     // 解析命令行参数
     let cli = Cli::parse();
 
-    // 首次运行时自动迁移旧版 ~/.cc-switch/ 配置到 ~/.cc-switch-tui/
-    cc_switch_lib::migrate_legacy_config_dir_if_needed();
-
     // 初始化日志（交互模式和命令行模式都避免干扰输出）
     let log_level = if cli.verbose {
         "debug"

@@ -105,9 +105,20 @@ pub fn get_app_config_dir() -> PathBuf {
     //     return custom;
     // }
 
-    home_dir()
+    let path = home_dir()
         .expect("无法获取用户主目录")
-        .join(".cc-switch-tui")
+        .join(".cc-switch-tui");
+
+    // 一次性迁移老旧 ~/.cc-switch/ → ~/.cc-switch-tui/
+    // 嵌入 get_app_config_dir 内部，杜绝"新路径先于迁移创建"窗口
+    // AtomicBool guard: 进程内只跑一次，避免测试并发和重复 stat 调用
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static MIGRATED: AtomicBool = AtomicBool::new(false);
+    if !MIGRATED.swap(true, Ordering::Relaxed) {
+        migrate_legacy_config_dir_if_needed();
+    }
+
+    path
 }
 
 /// 获取应用配置文件路径
