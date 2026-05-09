@@ -1,0 +1,119 @@
+#!/bin/bash
+
+# pre-push hook: check version consistency and key values before pushing tags
+# Validates Cargo.toml, Cargo.lock, and cli/mod.rs against the tag being pushed
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+CARGO_TOML="src-tauri/Cargo.toml"
+CARGO_LOCK="src-tauri/Cargo.lock"
+CLI_MOD="src-tauri/src/cli/mod.rs"
+PACKAGE_NAME="cc-switch"
+REPO_URL="https://github.com/handy-sun/cc-switch-cli"
+
+APPS="Claude Codex Gemini OpenCode OpenClaw Hermes"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if [[ "$remote_ref" != refs/tags/* ]]; then
+        continue
+    fi
+
+    tag_name="${remote_ref#refs/tags/}"
+    tag_version="${tag_name#v}"
+
+    if [[ ! "$tag_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${YELLOW}Warning: Tag '$tag_name' doesn't follow semver (vX.Y.Z), skipping checks${NC}"
+        continue
+    fi
+
+    echo "=== Pre-push checks for tag: $tag_name ==="
+    errors=0
+
+    ## Cargo.toml version
+    if [ -f "$CARGO_TOML" ]; then
+        cargo_version=$(grep -E '^version\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"' "$CARGO_TOML" | head -1 | sed 's/.*"\([0-9.]*\)".*/\1/')
+        if [ -z "$cargo_version" ]; then
+            echo -e "${RED}  ✗ Could not extract version from $CARGO_TOML${NC}"
+            errors=$((errors + 1))
+        elif [ "$cargo_version" != "$tag_version" ]; then
+            echo -e "${RED}  ✗ $CARGO_TOML version ($cargo_version) != tag ($tag_version)${NC}"
+            errors=$((errors + 1))
+        else
+            echo -e "${GREEN}  ✓ $CARGO_TOML version: $cargo_version${NC}"
+        fi
+    else
+        echo -e "${RED}  ✗ $CARGO_TOML not found${NC}"
+        errors=$((errors + 1))
+    fi
+
+    ## Cargo.lock version
+    if [ -f "$CARGO_LOCK" ]; then
+        lock_version=$(awk '/^\[\[package\]\]/{found=0} /name = "'"${PACKAGE_NAME}"'"/{found=1} found && /^version = /{print; exit}' "$CARGO_LOCK" | sed 's/.*"\([0-9.]*\)".*/\1/')
+        if [ -z "$lock_version" ]; then
+            echo -e "${RED}  ✗ Could not extract $PACKAGE_NAME version from $CARGO_LOCK${NC}"
+            errors=$((errors + 1))
+        elif [ "$lock_version" != "$tag_version" ]; then
+            echo -e "${RED}  ✗ $CARGO_LOCK version ($lock_version) != tag ($tag_version)${NC}"
+            echo -e "${YELLOW}     Hint: run 'cd src-tauri && cargo check' to sync Cargo.lock${NC}"
+            errors=$((errors + 1))
+        else
+            echo -e "${GREEN}  ✓ $CARGO_LOCK version: $lock_version${NC}"
+        fi
+    else
+        echo -e "${RED}  ✗ $CARGO_LOCK not found${NC}"
+        errors=$((errors + 1))
+    fi
+
+    ## Cargo.toml description includes all apps
+    if [ -f "$CARGO_TOML" ]; then
+        desc=$(grep '^description' "$CARGO_TOML" || true)
+        for app in $APPS; do
+            if ! echo "$desc" | grep -q "$app"; then
+                echo -e "${RED}  ✗ $CARGO_TOML description missing '$app'${NC}"
+                errors=$((errors + 1))
+            fi
+        done
+        echo -e "${GREEN}  ✓ $CARGO_TOML description includes all apps${NC}"
+    fi
+
+    ## cli/mod.rs about text includes all apps
+    if [ -f "$CLI_MOD" ]; then
+        about=$(grep 'about = "' "$CLI_MOD" || true)
+        for app in $APPS; do
+            if ! echo "$about" | grep -q "$app"; then
+                echo -e "${RED}  ✗ $CLI_MOD about text missing '$app'${NC}"
+                errors=$((errors + 1))
+            fi
+        done
+        echo -e "${GREEN}  ✓ $CLI_MOD about text includes all apps${NC}"
+    else
+        echo -e "${RED}  ✗ $CLI_MOD not found${NC}"
+        errors=$((errors + 1))
+    fi
+
+    ## Repository URL
+    if [ -f "$CARGO_TOML" ]; then
+        repo=$(grep '^repository' "$CARGO_TOML" | head -1 | sed 's/.*= *"//;s/"$//')
+        if [ "$repo" != "$REPO_URL" ]; then
+            echo -e "${RED}  ✗ $CARGO_TOML repository URL ($repo) != expected ($REPO_URL)${NC}"
+            errors=$((errors + 1))
+        else
+            echo -e "${GREEN}  ✓ $CARGO_TOML repository: $repo${NC}"
+        fi
+    fi
+
+    if [ $errors -gt 0 ]; then
+        echo ""
+        echo -e "${RED}Pre-push checks failed ($errors errors)! Fix the issues above before pushing '$tag_name'.${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}All pre-push checks passed for $tag_name${NC}"
+done
+
+exit 0
