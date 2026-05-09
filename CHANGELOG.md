@@ -7,6 +7,21 @@ All notable changes to CC Switch TUI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Rename**: Project renamed from cc-switch-cli to cc-switch-tui. Binary, docs, CI artifacts,
+  and config directory (`~/.cc-switch/` → `~/.cc-switch-tui/`) all follow the new name.
+- **Config env var**: New `CC_SWITCH_TUI_CONFIG_DIR` replaces `CC_SWITCH_CONFIG_DIR`.
+  The old name still works but prints a deprecation warning.
+
+### Added
+
+- **Auto-migration**: On first run, old `~/.cc-switch/` data (db, settings, skills,
+  recent backups) is automatically copied to `~/.cc-switch-tui/`. Old directory is
+  left untouched. Migration is one-shot, guarded by a marker file, and non-blocking.
+
 ## [5.5.1] - 2026-05-09
 
 ### Changed

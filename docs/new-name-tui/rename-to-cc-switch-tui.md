@@ -69,7 +69,7 @@ Commit 1 (core rename) + Commit 2 (docs).
 
 ### Tests (rebuild verification)
 
-- [ ] Fix `CARGO_BIN_EXE_cc-switch` → `CARGO_BIN_EXE_cc-switch-tui` (separate task)
+- [x] Fix `CARGO_BIN_EXE_cc-switch` → `CARGO_BIN_EXE_cc-switch-tui` (separate task)
 
 ---
 
@@ -85,7 +85,7 @@ Commit 1 (core rename) + Commit 2 (docs).
 ### CHANGELOG.md
 
 - [x] Headline `cc-switch-cli` → `cc-switch-tui`
-- [ ] Add rename entry for next version
+- [x] Add rename entry for next version
 
 ### AGENTS.md / CLAUDE.md (if they exist)
 
@@ -118,9 +118,11 @@ Users who have data in `~/.cc-switch/` will start with a fresh `~/.cc-switch-tui
 
 ## Auto-Migration
 
-On first run, if `~/.cc-switch/` exists but `~/.cc-switch-tui/` doesn't:
-- Copy `cc-switch.db`, `settings.json`, `skills/`, `backups/` to new directory
-- Print a message telling the user what was migrated
-- Keep the old directory untouched (no delete)
+On first run, if `~/.cc-switch/` exists and `CC_SWITCH_TUI_CONFIG_DIR` is not set:
+- Checks for `.migrated-from-cc-switch` marker in new directory
+- If absent: copies `config.json`, `skills/`, and 3 most recent `backups/`
+- Writes marker file on success; subsequent runs skip migration
+- Old directory preserved untouched; errors log to stderr, never block startup
 
-Implementation point: `src-tauri/src/config.rs` `get_app_config_dir()` — after determining the config dir path, check for legacy dir and do a one-shot copy.
+Implementation point: embedded in `get_app_config_dir()` with an `AtomicBool` guard,
+so migration runs before any config file I/O, regardless of which code path is taken first.
