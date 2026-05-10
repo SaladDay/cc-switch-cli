@@ -2,7 +2,7 @@
 
 # CC-Switch TUI
 
-[![Version](https://img.shields.io/badge/version-0.0.1-blue.svg)](https://github.com/handy-sun/cc-switch-tui/releases)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/handy-sun/cc-switch-tui/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/handy-sun/cc-switch-tui/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -24,7 +24,7 @@
 
 **致谢：** 原始架构和核心功能来自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)
 
-**更新日志：** [CHANGELOG.md](CHANGELOG.md)
+**更新日志：** [docs/cc-switch-tui/CHANGELOG.md](docs/cc-switch-tui/CHANGELOG.md)
 
 ---
 
