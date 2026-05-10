@@ -40,7 +40,9 @@ pub use claude_plugin::{
 };
 pub use codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic};
 pub use config::{
-    get_app_config_dir, get_claude_mcp_path, get_claude_settings_path, read_json_file,
+    check_legacy_config_dir_migration_needed, get_app_config_dir, get_claude_mcp_path,
+    get_claude_settings_path, migrate_legacy_config_dir_if_needed, read_json_file,
+    skip_legacy_config_dir_migration,
 };
 pub use database::{Database, FailoverQueueItem};
 pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkImportRequest};

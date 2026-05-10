@@ -1,6 +1,7 @@
 use cc_switch_lib::cli::{Cli, Commands};
 use cc_switch_lib::AppError;
 use clap::Parser;
+use std::io::{self, Write};
 use std::process;
 
 fn main() {
@@ -23,6 +24,7 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), AppError> {
+    prompt_legacy_config_migration();
     initialize_startup_state_if_needed(&cli.command)?;
 
     match cli.command {
@@ -45,6 +47,38 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Some(Commands::Completions(cmd)) => cc_switch_lib::cli::commands::completions::execute(cmd),
         Some(Commands::Internal(cmd)) => cc_switch_lib::cli::commands::internal::execute(cmd),
     }
+}
+
+/// 提示用户是否迁移旧版 ~/.cc-switch/ 配置目录到 ~/.cc-switch-tui/
+///
+/// 用户选 Y（默认）：后续 get_app_config_dir() 自动执行迁移。
+/// 用户选 N：写入 .migrated-from-cc-switch 标记，永不再次提示。
+fn prompt_legacy_config_migration() {
+    if !cc_switch_lib::check_legacy_config_dir_migration_needed() {
+        return;
+    }
+
+    eprintln!(
+        "Detected legacy config at ~/.cc-switch/\n\
+         Migrate config to ~/.cc-switch-tui/? (old directory will be preserved)"
+    );
+    eprint!("[Y/n] ");
+    let _ = io::stdout().flush();
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        // Can't read input, proceed with auto-migrate
+        return;
+    }
+
+    let answer = input.trim().to_lowercase();
+    if answer.is_empty() || answer == "y" || answer == "yes" {
+        // User approved, auto-migrate will happen inside get_app_config_dir()
+        return;
+    }
+
+    // User declined, write skip marker to prevent future prompts
+    cc_switch_lib::skip_legacy_config_dir_migration();
+    eprintln!("cc-switch: migration skipped (marker written)");
 }
 
 fn command_requires_startup_state(command: &Option<Commands>) -> bool {

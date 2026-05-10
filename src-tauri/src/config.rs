@@ -731,6 +731,59 @@ fn copy_recent_backups(src: &Path, dst: &Path, limit: usize) -> std::io::Result<
     Ok(())
 }
 
+/// 提取迁移前置检查逻辑，返回 (old_dir, new_dir, marker) 若条件满足，否则 None。
+fn migration_guard() -> Option<(PathBuf, PathBuf, PathBuf)> {
+    if env::var_os("CC_SWITCH_TUI_CONFIG_DIR").is_some()
+        || env::var_os("CC_SWITCH_CONFIG_DIR").is_some()
+    {
+        return None;
+    }
+
+    let home = home_dir()?;
+    let old_dir = home.join(".cc-switch");
+    let new_dir = home.join(".cc-switch-tui");
+    let marker = new_dir.join(".migrated-from-cc-switch");
+
+    if !old_dir.exists() || !old_dir.is_dir() {
+        return None;
+    }
+    if marker.exists() {
+        return None;
+    }
+    let has_contents = fs::read_dir(&old_dir).map_or(false, |mut rd| rd.next().is_some());
+    if !has_contents {
+        return None;
+    }
+
+    Some((old_dir, new_dir, marker))
+}
+
+/// 检查是否存在尚未迁移的旧版配置目录。
+///
+/// 返回 true 表示 ~/.cc-switch/ 存在且未迁移，应提示用户确认。
+pub fn check_legacy_config_dir_migration_needed() -> bool {
+    migration_guard().is_some()
+}
+
+/// 用户拒绝迁移：写入标记文件以永不再次提示。
+///
+/// 错误仅记录到 stderr，绝不阻塞启动。
+pub fn skip_legacy_config_dir_migration() {
+    let (_, new_dir, marker) = match migration_guard() {
+        Some(v) => v,
+        None => return,
+    };
+
+    if let Err(e) = std::fs::create_dir_all(&new_dir)
+        .and_then(|_| std::fs::write(&marker, "User declined migration"))
+    {
+        eprintln!(
+            "cc-switch: failed to write skip-migration marker at {}: {e}",
+            marker.display()
+        );
+    }
+}
+
 /// 首次运行时自动将旧版 ~/.cc-switch/ 迁移到 ~/.cc-switch-tui/
 ///
 /// 仅在以下条件全部满足时执行：
@@ -740,35 +793,10 @@ fn copy_recent_backups(src: &Path, dst: &Path, limit: usize) -> std::io::Result<
 ///
 /// 非破坏性：旧目录完好保留。错误仅记录警告，绝不阻塞启动。
 pub fn migrate_legacy_config_dir_if_needed() {
-    // Skip if any env override is set — user has explicit config location
-    if env::var_os("CC_SWITCH_TUI_CONFIG_DIR").is_some()
-        || env::var_os("CC_SWITCH_CONFIG_DIR").is_some()
-    {
-        return;
-    }
-
-    let home = match home_dir() {
-        Some(h) => h,
+    let (old_dir, new_dir, marker) = match migration_guard() {
+        Some(v) => v,
         None => return,
     };
-
-    let old_dir = home.join(".cc-switch");
-    let new_dir = home.join(".cc-switch-tui");
-    let marker = new_dir.join(".migrated-from-cc-switch");
-
-    // Guard: old dir must exist
-    if !old_dir.exists() || !old_dir.is_dir() {
-        return;
-    }
-    // Guard: skip if already migrated
-    if marker.exists() {
-        return;
-    }
-    // Guard: old dir must be non-empty
-    let has_contents = fs::read_dir(&old_dir).map_or(false, |mut rd| rd.next().is_some());
-    if !has_contents {
-        return;
-    }
 
     // Perform migration (errors caught, never propagate)
     if let Err(e) = try_migrate(&old_dir, &new_dir, &marker) {
