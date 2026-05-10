@@ -8,6 +8,7 @@ repository = "https://github.com/handy-sun/cc-switch-tui"
 keywords = ["opencode", "hermes", "claude-code", "openclaw", "llm"]
 edition = "2021"
 rust-version = "1.91.1"
+build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -104,3 +105,6 @@ strip = "symbols"
 minisign = "0.9.1"
 serial_test = "3"
 tempfile = "3"
+
+[build-dependencies]
+chrono = "0.4"

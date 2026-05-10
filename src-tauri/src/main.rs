@@ -8,6 +8,11 @@ fn main() {
     // 解析命令行参数
     let cli = Cli::parse();
 
+    if cli.version {
+        println!("{}", cc_switch_lib::cli::version_string());
+        return;
+    }
+
     // 初始化日志（交互模式和命令行模式都避免干扰输出）
     let log_level = if cli.verbose {
         "debug"

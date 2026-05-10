@@ -17,11 +17,15 @@ use crate::app_config::AppType;
 #[derive(Parser)]
 #[command(
     name = "cc-switch-tui",
-    version,
+    disable_version_flag = true,
     about = "All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode, OpenClaw & Hermes",
     long_about = "Unified management for Claude Code, Codex, Gemini, OpenCode, OpenClaw, and Hermes provider configurations, MCP servers, skills, prompts, local proxy routes, and environment checks.\n\nRun without arguments to enter interactive mode."
 )]
 pub struct Cli {
+    /// Show version information
+    #[arg(short = 'V', long = "version", global = true)]
+    pub version: bool,
+
     /// Specify the application type
     #[arg(short, long, global = true, value_enum)]
     pub app: Option<AppType>,
@@ -96,12 +100,57 @@ pub(crate) fn generate_completions_to<W: Write>(shell: Shell, writer: &mut W) {
     clap_complete::generate(shell, &mut cmd, name, writer);
 }
 
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn format_version_string(
+    name: &str,
+    version: &str,
+    git_hash: Option<&str>,
+    build_time: Option<&str>,
+    is_clean_commit: bool,
+) -> String {
+    let mut metadata = Vec::new();
+
+    if let Some(git_hash) = non_empty(git_hash) {
+        if is_clean_commit {
+            metadata.push(git_hash.to_string());
+        } else {
+            metadata.push(format!("{git_hash}-dirty"));
+        }
+    }
+
+    if let Some(build_time) = non_empty(build_time) {
+        metadata.push(build_time.to_string());
+    }
+
+    if metadata.is_empty() {
+        format!("{name} {version}")
+    } else {
+        format!("{name} {version} ({})", metadata.join(" "))
+    }
+}
+
+pub fn version_string() -> String {
+    let version = non_empty(option_env!("CC_SWITCH_TUI_GIT_TAG_VERSION"))
+        .unwrap_or(env!("CARGO_PKG_VERSION"));
+
+    format_version_string(
+        env!("CARGO_PKG_NAME"),
+        version,
+        option_env!("CC_SWITCH_TUI_BUILD_GIT_HASH"),
+        option_env!("CC_SWITCH_TUI_BUILD_TIME"),
+        option_env!("CC_SWITCH_TUI_GIT_IS_CLEAN_COMMIT").is_some(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
     use std::ffi::OsString;
 
-    use super::{Cli, Commands};
+    use super::{format_version_string, Cli, Commands};
     use crate::cli::commands::completions::{
         CompletionLifecycleCommand, CompletionsAction, ManagedShellSelection,
     };
@@ -112,6 +161,43 @@ mod tests {
         let help = cmd.render_long_help().to_string();
 
         assert!(help.contains("prompts, local proxy routes, and environment checks"));
+    }
+
+    #[test]
+    fn parses_manual_version_flags_without_stealing_verbose() {
+        let long = Cli::parse_from(["cc-switch-tui", "--version"]);
+        let short = Cli::parse_from(["cc-switch-tui", "-V"]);
+        let subcommand = Cli::parse_from(["cc-switch-tui", "provider", "list", "--version"]);
+        let verbose = Cli::parse_from(["cc-switch-tui", "-v"]);
+
+        assert!(long.version);
+        assert!(short.version);
+        assert!(subcommand.version);
+        assert!(!verbose.version);
+        assert!(verbose.verbose);
+    }
+
+    #[test]
+    fn version_string_includes_dirty_suffix_for_unclean_builds() {
+        let version = format_version_string(
+            "cc-switch-tui",
+            "0.1.0",
+            Some("abc1234"),
+            Some("2026-05-11 12:34:56 +08:00"),
+            false,
+        );
+
+        assert_eq!(
+            version,
+            "cc-switch-tui 0.1.0 (abc1234-dirty 2026-05-11 12:34:56 +08:00)"
+        );
+    }
+
+    #[test]
+    fn version_string_omits_metadata_when_build_env_is_missing() {
+        let version = format_version_string("cc-switch-tui", "0.1.0", None, None, true);
+
+        assert_eq!(version, "cc-switch-tui 0.1.0");
     }
 
     #[test]
