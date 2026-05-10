@@ -32,56 +32,6 @@ This project is a **TUI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 ---
 
-## ❤️ Sponsor
-
-<table>
-  <tr>
-    <td width="180">
-      <a href="https://www.packyapi.com/register?aff=cc-switch-tui">
-        <img src="assets/partners/logos/packycode.png" alt="PackyCode" width="150">
-      </a>
-    </td>
-    <td>
-      Thanks to <b>PackyCode</b> for sponsoring this project! PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more. <br/>
-      PackyCode provides special discounts for our software users: register via <a href="https://www.packyapi.com/register?aff=cc-switch-tui">this link</a> and use promo code <code>cc-switch-tui</code> when recharging to get <b>10% off</b>.
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">
-        <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
-      </a>
-    </td>
-    <td>
-      Thanks to <b>AICodeMirror</b> for sponsoring this project! <b>AICodeMirror</b> provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at <b>38% / 2% / 9%</b> of original price, with extra discounts on top-ups! <b>AICodeMirror</b> offers special benefits for cc-switch-tui users: register via <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">this link</a> to enjoy <b>20% off</b> your first top-up, and enterprise customers can get up to <b>25% off</b>!
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://www.right.codes/register?aff=ccswitch-cli">
-        <img src="assets/partners/logos/rightcode.jpg" alt="RightCode" width="150">
-      </a>
-    </td>
-    <td>
-      Thanks to <b>RightCode</b> for sponsoring this project! RightCode reliably provides routing services for models such as Claude Code, Codex, and Gemini. It features a highly cost-effective Codex monthly subscription plan and <b>supports quota rollovers—unused quota from one day can be carried over and used the next day.</b> <br/>
-      RightCode offers a special deal for CC-Switch TUI users: register via <a href="https://www.right.codes/register?aff=ccswitch-cli">this link</a> and get <b>25% bonus pay-as-you-go credits</b> on every top-up!
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://ddshub.short.gy/ccscli">
-        <img src="assets/partners/logos/DDSHub.png" alt="DDS" width="150">
-      </a>
-    </td>
-    <td>
-      Thanks to <b>DDS</b> for sponsoring this project! DDS Hub is a reliable and high-performance Claude API proxy service. DDS Hub provides cost-effective domestic Claude direct acceleration services for both individual and enterprise users. We offer stable and low-latency Claude Max number pools, with full support for <b>Claude Haiku, Opus, Sonnet</b> and other flagship models. Invoices are available for recharges of 1000 RMB or more. Enterprise customers can also enjoy customized grouping and dedicated technical support services. <br/>
-      Exclusive benefit for CC-Switch TUI users: register via <a href="https://ddshub.short.gy/ccscli">this link</a> and enjoy <b>an extra 10% credit</b> on your first recharge (please contact the group admin to claim after recharging)!
-    </td>
-  </tr>
-</table>
-
----
-
 ## 📸 Screenshots
 
 <div align="center">

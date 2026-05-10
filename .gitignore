@@ -29,6 +29,7 @@ scripts/*
 
 .agent/
 .agents/
+.remember/
 .worktrees/
 docs/superpowers/
 .omx/
