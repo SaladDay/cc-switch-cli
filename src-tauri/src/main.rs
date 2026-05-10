@@ -54,16 +54,18 @@ fn run(cli: Cli) -> Result<(), AppError> {
 /// 用户选 Y（默认）：后续 get_app_config_dir() 自动执行迁移。
 /// 用户选 N：写入 .migrated-from-cc-switch 标记，永不再次提示。
 fn prompt_legacy_config_migration() {
-    if !cc_switch_lib::check_legacy_config_dir_migration_needed() {
+    let Some((old_dir, new_dir)) = cc_switch_lib::legacy_config_migration_paths() else {
         return;
-    }
+    };
 
     eprintln!(
-        "Detected legacy config at ~/.cc-switch/\n\
-         Migrate config to ~/.cc-switch-tui/? (old directory will be preserved)"
+        "Detected legacy config at {}\n\
+         Migrate config to {}? (old directory will be preserved)",
+        old_dir.display(),
+        new_dir.display()
     );
     eprint!("[Y/n] ");
-    let _ = io::stdout().flush();
+    let _ = io::stderr().flush();
     let mut input = String::new();
     if io::stdin().read_line(&mut input).is_err() {
         // Can't read input, proceed with auto-migrate

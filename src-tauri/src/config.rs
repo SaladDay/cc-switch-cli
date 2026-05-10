@@ -70,6 +70,21 @@ fn derive_mcp_path_from_override(dir: &Path) -> Option<PathBuf> {
     Some(parent.join(format!("{file_name}.json")))
 }
 
+fn effective_app_config_dir_without_migration(home: &Path) -> Option<PathBuf> {
+    if let Some(custom) = env::var_os("CC_SWITCH_TUI_CONFIG_DIR") {
+        let custom = PathBuf::from(custom);
+        if !custom.to_string_lossy().trim().is_empty() {
+            return Some(expand_tilde(custom));
+        }
+    }
+
+    if env::var_os("CC_SWITCH_CONFIG_DIR").is_some() {
+        return None;
+    }
+
+    Some(home.join(".cc-switch-tui"))
+}
+
 /// 获取 Claude MCP 配置文件路径，若设置了目录覆盖则与覆盖目录同级
 pub fn get_claude_mcp_path() -> PathBuf {
     if let Some(custom_dir) = crate::settings::get_claude_override_dir() {
@@ -583,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_skips_when_env_override_set() {
+    fn migration_skips_when_legacy_env_override_set() {
         let _guard = lock_test_home_and_settings();
         let _tui = ConfigDirEnvGuard::new("CC_SWITCH_TUI_CONFIG_DIR", None);
         let _old =
@@ -605,6 +620,69 @@ mod tests {
             !new_dir.exists(),
             "should not create target dir when env override set"
         );
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn migration_uses_new_env_override_as_target() {
+        let _guard = lock_test_home_and_settings();
+        let _tui =
+            ConfigDirEnvGuard::new("CC_SWITCH_TUI_CONFIG_DIR", Some("~/.config/cc-switch-tui"));
+        let _old = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", None);
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let home = temp.path();
+        set_test_home_override(Some(home));
+
+        let old_dir = home.join(".cc-switch");
+        let new_dir = home.join(".config").join("cc-switch-tui");
+        let marker = new_dir.join(".migrated-from-cc-switch");
+
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("config.json"), "v1").unwrap();
+
+        assert_eq!(
+            legacy_config_migration_paths(),
+            Some((old_dir.clone(), new_dir.clone()))
+        );
+
+        migrate_legacy_config_dir_if_needed();
+
+        assert!(new_dir.join("config.json").exists());
+        assert!(marker.exists());
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn migration_skips_when_target_already_has_contents() {
+        let _guard = lock_test_home_and_settings();
+        let _tui =
+            ConfigDirEnvGuard::new("CC_SWITCH_TUI_CONFIG_DIR", Some("~/.config/cc-switch-tui"));
+        let _old = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", None);
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let home = temp.path();
+        set_test_home_override(Some(home));
+
+        let old_dir = home.join(".cc-switch");
+        let new_dir = home.join(".config").join("cc-switch-tui");
+
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("config.json"), "legacy").unwrap();
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(new_dir.join("config.json"), "current").unwrap();
+
+        assert_eq!(legacy_config_migration_paths(), None);
+
+        migrate_legacy_config_dir_if_needed();
+
+        assert_eq!(
+            fs::read_to_string(new_dir.join("config.json")).unwrap(),
+            "current"
+        );
+        assert!(!new_dir.join(".migrated-from-cc-switch").exists());
 
         set_test_home_override(None);
     }
@@ -785,17 +863,14 @@ fn copy_recent_backups(src: &Path, dst: &Path, limit: usize) -> std::io::Result<
 
 /// 提取迁移前置检查逻辑，返回 (old_dir, new_dir, marker) 若条件满足，否则 None。
 fn migration_guard() -> Option<(PathBuf, PathBuf, PathBuf)> {
-    if env::var_os("CC_SWITCH_TUI_CONFIG_DIR").is_some()
-        || env::var_os("CC_SWITCH_CONFIG_DIR").is_some()
-    {
-        return None;
-    }
-
     let home = home_dir()?;
     let old_dir = home.join(".cc-switch");
-    let new_dir = home.join(".cc-switch-tui");
+    let new_dir = effective_app_config_dir_without_migration(&home)?;
     let marker = new_dir.join(".migrated-from-cc-switch");
 
+    if old_dir == new_dir {
+        return None;
+    }
     if !old_dir.exists() || !old_dir.is_dir() {
         return None;
     }
@@ -806,15 +881,29 @@ fn migration_guard() -> Option<(PathBuf, PathBuf, PathBuf)> {
     if !has_contents {
         return None;
     }
+    if new_dir.exists() {
+        if !new_dir.is_dir() {
+            return None;
+        }
+        let target_has_contents = fs::read_dir(&new_dir).map_or(true, |mut rd| rd.next().is_some());
+        if target_has_contents {
+            return None;
+        }
+    }
 
     Some((old_dir, new_dir, marker))
+}
+
+/// 返回待迁移的旧配置目录和当前配置目录。
+pub fn legacy_config_migration_paths() -> Option<(PathBuf, PathBuf)> {
+    migration_guard().map(|(old_dir, new_dir, _)| (old_dir, new_dir))
 }
 
 /// 检查是否存在尚未迁移的旧版配置目录。
 ///
 /// 返回 true 表示 ~/.cc-switch/ 存在且未迁移，应提示用户确认。
 pub fn check_legacy_config_dir_migration_needed() -> bool {
-    migration_guard().is_some()
+    legacy_config_migration_paths().is_some()
 }
 
 /// 用户拒绝迁移：写入标记文件以永不再次提示。
