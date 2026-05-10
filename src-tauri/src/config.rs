@@ -15,6 +15,25 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
+/// If `path` starts with `~` / `~/`, replace the tilde with the home directory.
+/// Otherwise return the path unchanged.
+fn expand_tilde(path: PathBuf) -> PathBuf {
+    let lossy = path.to_string_lossy();
+    // Bare "~"
+    if lossy == "~" {
+        return home_dir().unwrap_or(path);
+    }
+    // "~/" or "~\" prefix
+    if lossy.starts_with("~/") || lossy.starts_with("~\\") {
+        let home = home_dir();
+        if let Some(home) = home {
+            let rest = Path::new(&lossy[1..]);
+            return home.join(rest);
+        }
+    }
+    path
+}
+
 /// 获取 Claude Code 配置目录路径
 ///
 /// Priority: `CLAUDE_CONFIG_DIR` env var > cc-switch settings override > `$HOME/.claude`
@@ -22,7 +41,7 @@ pub fn get_claude_config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         let dir = PathBuf::from(dir);
         if !dir.as_os_str().is_empty() && !dir.to_string_lossy().trim().is_empty() {
-            return dir;
+            return expand_tilde(dir);
         }
     }
     if let Some(custom) = crate::settings::get_claude_override_dir() {
@@ -84,7 +103,7 @@ pub fn get_app_config_dir() -> PathBuf {
     if let Some(custom) = env::var_os("CC_SWITCH_TUI_CONFIG_DIR") {
         let custom = PathBuf::from(custom);
         if !custom.to_string_lossy().trim().is_empty() {
-            return custom;
+            return expand_tilde(custom);
         }
     }
 
@@ -97,7 +116,7 @@ pub fn get_app_config_dir() -> PathBuf {
                 .join(".cc-switch-tui");
         }
         eprintln!("deprecated: CC_SWITCH_CONFIG_DIR is set; use CC_SWITCH_TUI_CONFIG_DIR instead");
-        return custom;
+        return expand_tilde(custom);
     }
 
     // CLI mode: no app store override, always use default
