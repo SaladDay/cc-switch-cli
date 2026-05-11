@@ -17,7 +17,8 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::services::webdav;
 use crate::settings::{
-    get_webdav_sync_settings, update_webdav_sync_status, WebDavSyncSettings, WebDavSyncStatus,
+    get_settings, get_webdav_sync_settings, update_settings, update_webdav_sync_status,
+    CustomEndpoint, SecuritySettings, WebDavSyncSettings, WebDavSyncStatus,
 };
 
 use self::archive::{restore_skills_zip, zip_skills_ssot, SkillsBackup};
@@ -55,6 +56,7 @@ const LEGACY_DB_COMPAT_VERSION: u32 = 5;
 const REMOTE_DB_SQL: &str = "db.sql";
 const REMOTE_SKILLS_ZIP: &str = "skills.zip";
 const REMOTE_MANIFEST: &str = "manifest.json";
+const REMOTE_V1_SETTINGS_SYNC: &str = "settings.sync.json";
 
 const MAX_DEVICE_NAME_LEN: usize = 64;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024; // 1 MB
@@ -762,17 +764,30 @@ struct V1Manifest {
 struct V1ManifestArtifacts {
     db_sql: V1ArtifactMeta,
     skills_zip: V1ArtifactMeta,
-    #[allow(dead_code)]
     settings_sync: V1ArtifactMeta,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct V1ArtifactMeta {
-    #[allow(dead_code)]
     path: String,
     sha256: String,
     size: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct V1SyncableSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+    #[serde(default)]
+    skill_sync_method: crate::services::skill::SyncMethod,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    security: Option<SecuritySettings>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    custom_endpoints_claude: BTreeMap<String, CustomEndpoint>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    custom_endpoints_codex: BTreeMap<String, CustomEndpoint>,
 }
 
 fn v1_remote_dir_segments(settings: &WebDavSyncSettings) -> Vec<String> {
@@ -833,14 +848,20 @@ async fn download_v1_artifact(
         ));
     }
 
-    let url = build_v1_artifact_url(settings, file_name)?;
+    let remote_path = meta.path.trim();
+    let remote_path = if remote_path.is_empty() {
+        file_name
+    } else {
+        remote_path
+    };
+    let url = build_v1_artifact_url(settings, remote_path)?;
     let (bytes, _) = webdav::get_bytes(&url, auth, Some(MAX_SYNC_ARTIFACT_BYTES))
         .await?
         .ok_or_else(|| {
             localized(
                 "webdav.sync.v1_artifact_missing",
-                format!("V1 远端缺少 artifact: {file_name}"),
-                format!("V1 remote artifact missing: {file_name}"),
+                format!("V1 远端缺少 artifact: {remote_path}"),
+                format!("V1 remote artifact missing: {remote_path}"),
             )
         })?;
 
@@ -862,6 +883,23 @@ async fn download_v1_artifact(
     }
 
     Ok(bytes)
+}
+
+fn parse_v1_syncable_settings(raw: &[u8]) -> Result<V1SyncableSettings, AppError> {
+    serde_json::from_slice(raw).map_err(|e| AppError::Json {
+        path: REMOTE_V1_SETTINGS_SYNC.to_string(),
+        source: e,
+    })
+}
+
+fn apply_v1_syncable_settings(incoming: V1SyncableSettings) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.language = incoming.language;
+    settings.skill_sync_method = incoming.skill_sync_method;
+    settings.security = incoming.security;
+    settings.custom_endpoints_claude = incoming.custom_endpoints_claude.into_iter().collect();
+    settings.custom_endpoints_codex = incoming.custom_endpoints_codex.into_iter().collect();
+    update_settings(settings)
 }
 
 /// 删除 V1 远端目录（best-effort）
@@ -893,7 +931,10 @@ async fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
         )
     })?;
 
-    // 2. 下载 V1 artifacts（V1 的 settings_sync 不迁移，V2 不再同步该数据）
+    ensure_restore_allowed().await?;
+
+    // 2. 下载 V1 artifacts。V2 不再继续同步 settingsSync，但迁移时需要
+    //    一次性应用旧协议中的跨设备设置，避免丢失用户配置。
     let db_sql = download_v1_artifact(
         &settings,
         &auth,
@@ -908,6 +949,14 @@ async fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
         &v1_manifest.artifacts.skills_zip,
     )
     .await?;
+    let settings_sync = download_v1_artifact(
+        &settings,
+        &auth,
+        REMOTE_V1_SETTINGS_SYNC,
+        &v1_manifest.artifacts.settings_sync,
+    )
+    .await?;
+    let syncable_settings = parse_v1_syncable_settings(&settings_sync)?;
 
     // 3. 应用到本地
     let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
@@ -915,6 +964,7 @@ async fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
         .map_err(AppError::Message)?;
     ensure_restore_allowed().await?;
     apply_snapshot(&db_sql, &skills_zip)?;
+    apply_v1_syncable_settings(syncable_settings)?;
     drop(_guard);
 
     // 4. 重新上传为 V2 格式（upload 内部会 best-effort 清理 V1 远端数据）

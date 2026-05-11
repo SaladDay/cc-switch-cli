@@ -14,8 +14,8 @@ use axum::{
     Router,
 };
 use cc_switch_lib::{
-    set_webdav_sync_settings, AppState as CcAppState, Provider, WebDavSyncService,
-    WebDavSyncSettings, WebDavSyncStatus,
+    get_app_config_dir, set_webdav_sync_settings, AppState as CcAppState, Provider,
+    WebDavSyncService, WebDavSyncSettings, WebDavSyncStatus,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
@@ -1034,6 +1034,107 @@ fn webdav_migrate_v1_to_v2_rejects_when_takeover_is_active() {
             .await
             .expect("clear takeover state");
     });
+}
+
+#[test]
+fn webdav_migrate_v1_to_v2_applies_settings_sync() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let server = TestWebDavServer::start(ProbeReadback::Stored);
+    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
+        .expect("save test WebDAV settings");
+
+    let state = CcAppState::try_new().expect("create app state");
+    seed_claude_remote_provider(&state);
+
+    let db_sql = state
+        .db
+        .export_sql_string()
+        .expect("export local db for v1 snapshot")
+        .into_bytes();
+    let skills_zip = empty_zip_bytes();
+    let settings_sync = serde_json::to_vec_pretty(&serde_json::json!({
+        "language": "zh",
+        "skillSyncMethod": "copy",
+        "security": {
+            "auth": {
+                "selectedType": "gemini-api-key"
+            }
+        },
+        "customEndpointsClaude": {
+            "endpoint-a": {
+                "url": "https://claude.example.com",
+                "addedAt": 123,
+                "lastUsed": 456
+            }
+        }
+    }))
+    .expect("serialize v1 settings sync");
+    let manifest = serde_json::json!({
+        "format": "cc-switch-webdav-sync",
+        "version": 1,
+        "updatedAt": "2026-04-15T00:00:00Z",
+        "updatedBy": "test",
+        "artifacts": {
+            "dbSql": {
+                "path": "db.sql",
+                "sha256": sha256_hex(&db_sql),
+                "size": db_sql.len()
+            },
+            "skillsZip": {
+                "path": "skills.zip",
+                "sha256": sha256_hex(&skills_zip),
+                "size": skills_zip.len()
+            },
+            "settingsSync": {
+                "path": "settings-sync.json",
+                "sha256": sha256_hex(&settings_sync),
+                "size": settings_sync.len()
+            }
+        }
+    });
+
+    server.seed_file(
+        "/dav/sync-root/v1/default-profile/manifest.json",
+        serde_json::to_vec(&manifest).expect("serialize v1 manifest"),
+    );
+    server.seed_file("/dav/sync-root/v1/default-profile/db.sql", db_sql);
+    server.seed_file("/dav/sync-root/v1/default-profile/skills.zip", skills_zip);
+    server.seed_file(
+        "/dav/sync-root/v1/default-profile/settings-sync.json",
+        settings_sync,
+    );
+
+    let summary = WebDavSyncService::migrate_v1_to_v2().expect("migrate v1 to v2");
+    assert_eq!(summary.decision, cc_switch_lib::SyncDecision::Download);
+
+    let settings_path = get_app_config_dir().join("settings.json");
+    let raw = std::fs::read_to_string(&settings_path).expect("read settings.json");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("parse settings.json");
+
+    assert_eq!(value["language"], "zh");
+    assert_eq!(value["skillSyncMethod"], "copy");
+    assert_eq!(
+        value
+            .pointer("/security/auth/selectedType")
+            .and_then(|value| value.as_str()),
+        Some("gemini-api-key")
+    );
+    assert_eq!(
+        value
+            .pointer("/customEndpointsClaude/endpoint-a/url")
+            .and_then(|value| value.as_str()),
+        Some("https://claude.example.com")
+    );
+    assert_eq!(
+        value
+            .pointer("/webdavSync/baseUrl")
+            .and_then(|value| value.as_str()),
+        Some(server.base_url.as_str()),
+        "local WebDAV connection settings must survive applying v1 settings sync"
+    );
 }
 
 #[test]
