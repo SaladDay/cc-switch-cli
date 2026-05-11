@@ -1755,6 +1755,51 @@ mod tests {
 
     #[test]
     #[serial]
+    fn load_openclaw_ui_data_accepts_string_default_model() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        std::fs::write(
+            openclaw_dir.join("openclaw.json"),
+            r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      demo: {
+        baseUrl: 'https://api.example.com/v1',
+        models: [{ id: 'model-a' }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: 'demo/model-a',
+    },
+  },
+}
+"#,
+        )
+        .expect("write openclaw config");
+
+        let data = UiData::load(&AppType::OpenClaw)
+            .expect("string default model should not abort OpenClaw UI loading");
+
+        let row = data
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "demo")
+            .expect("demo provider should be visible");
+        assert!(row.is_default_model);
+        assert_eq!(row.default_model_id.as_deref(), Some("model-a"));
+    }
+
+    #[test]
+    #[serial]
     fn load_providers_openclaw_skips_modeless_live_provider() {
         let _guard = lock_test_home_and_settings();
         let temp = tempdir().expect("create tempdir");

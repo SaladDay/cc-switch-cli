@@ -1512,7 +1512,7 @@ fn provider_service_switch_openclaw_syncs_only_target_entry() {
                 json!({
                     "apiKey": "sk-target",
                     "baseUrl": "https://target.example/v1",
-                    "models": [{ "id": "target-model" }]
+                    "models": [{ "id": "target-model", "metadata": {} }]
                 }),
                 None,
             ),
@@ -1552,8 +1552,7 @@ fn provider_service_switch_openclaw_syncs_only_target_entry() {
     ProviderService::switch(&state, AppType::OpenClaw, "target")
         .expect("switch openclaw provider should succeed");
 
-    let live_after: serde_json::Value =
-        read_json_file(&openclaw_path).expect("read openclaw live config after switch");
+    let live_after = read_openclaw_live_config_json5(&openclaw_path);
     let providers = live_after["models"]["providers"]
         .as_object()
         .expect("openclaw config should contain providers map");
@@ -1562,6 +1561,11 @@ fn provider_service_switch_openclaw_syncs_only_target_entry() {
     assert_eq!(
         providers["target"]["baseUrl"], "https://target.example/v1",
         "switch should sync the selected provider into live config"
+    );
+    assert_eq!(
+        providers["target"]["models"][0]["metadata"],
+        json!({}),
+        "switch should preserve empty object values in OpenClaw provider settings"
     );
 
     let guard = state
@@ -4121,8 +4125,7 @@ fn provider_service_delete_openclaw_removes_provider_from_live_and_state() {
     );
     assert!(manager.providers.contains_key("keep"));
 
-    let live_after: serde_json::Value =
-        read_json_file(&openclaw_path).expect("read openclaw live config after delete");
+    let live_after = read_openclaw_live_config_json5(&openclaw_path);
     assert_eq!(live_after["models"]["mode"], "merge");
     let providers = live_after["models"]["providers"]
         .as_object()

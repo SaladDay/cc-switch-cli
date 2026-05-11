@@ -3,6 +3,14 @@ use super::*;
 const PROXY_ACTIVITY_WINDOW: usize = 48;
 const PROXY_ACTIVITY_POLL_INTERVAL_TICKS: u64 = 5;
 
+fn is_prev_app_switch_key(c: char) -> bool {
+    matches!(c, '[' | '［' | '【')
+}
+
+fn is_next_app_switch_key(c: char) -> bool {
+    matches!(c, ']' | '］' | '】')
+}
+
 impl App {
     pub(crate) fn clear_openclaw_daily_memory_search_state(&mut self) {
         self.filter.active = false;
@@ -263,6 +271,22 @@ impl App {
         self.overlay = self.pending_overlay.take().unwrap_or(Overlay::None);
     }
 
+    fn cycle_visible_app_type(&mut self, dir: i8) -> Action {
+        match cycle_app_type(&self.app_type, dir) {
+            Some(next) => Action::SetAppType(next),
+            None => {
+                self.push_toast(
+                    crate::t!(
+                        "Only one app is visible. Enable more apps in Settings to switch.",
+                        "只有一个可见 App，请在设置里启用更多 App 后再切换。"
+                    ),
+                    ToastKind::Info,
+                );
+                Action::None
+            }
+        }
+    }
+
     fn structured_form_is_editing_text_field(&self) -> bool {
         match self.route {
             Route::ConfigOpenClawTools => false,
@@ -334,21 +358,23 @@ impl App {
                 self.filter.active = true;
                 return Action::None;
             }
-            KeyCode::Char('[') => {
-                return cycle_app_type(&self.app_type, -1)
-                    .map(Action::SetAppType)
-                    .unwrap_or(Action::None);
+            KeyCode::Char(c) if is_prev_app_switch_key(c) => {
+                return self.cycle_visible_app_type(-1);
             }
-            KeyCode::Char(']') => {
-                return cycle_app_type(&self.app_type, 1)
-                    .map(Action::SetAppType)
-                    .unwrap_or(Action::None);
+            KeyCode::Char(c) if is_next_app_switch_key(c) => {
+                return self.cycle_visible_app_type(1);
             }
             KeyCode::Left => {
+                if matches!(self.route, Route::Main) {
+                    return self.cycle_visible_app_type(-1);
+                }
                 self.focus = Focus::Nav;
                 return Action::None;
             }
             KeyCode::Right => {
+                if matches!(self.route, Route::Main) {
+                    return self.cycle_visible_app_type(1);
+                }
                 if route_has_content_list(&self.route) {
                     self.focus = Focus::Content;
                 } else {
