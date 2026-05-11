@@ -159,10 +159,99 @@ jobs:
           path: universal/cc-switch-tui
           if-no-files-found: error
 
+  publish-crate:
+    name: Publish crate to crates.io
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: publish-crate
+
+      - name: Validate tag matches crate version
+        id: crate-version
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          crate_version="$(
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name == "cc-switch-tui") | .version'
+          )"
+
+          if [ -z "${crate_version}" ] || [ "${crate_version}" = "null" ]; then
+            echo "Could not read cc-switch-tui version from Cargo metadata" >&2
+            exit 1
+          fi
+
+          if [ "${crate_version}" != "${tag_version}" ]; then
+            echo "Tag version (${tag_version}) does not match Cargo.toml version (${crate_version})" >&2
+            exit 1
+          fi
+
+          echo "version=${crate_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check whether crate version is already published
+        id: crates-io
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(
+            curl -sS \
+              -o /tmp/cc-switch-tui-crate-version.json \
+              -w "%{http_code}" \
+              "https://crates.io/api/v1/crates/cc-switch-tui/${{ steps.crate-version.outputs.version }}"
+          )"
+
+          if [ "${status}" = "200" ]; then
+            echo "cc-switch-tui ${{ steps.crate-version.outputs.version }} is already published; skipping cargo publish."
+            echo "published=true" >> "${GITHUB_OUTPUT}"
+          elif [ "${status}" = "404" ]; then
+            echo "published=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Unexpected crates.io response: HTTP ${status}" >&2
+            cat /tmp/cc-switch-tui-crate-version.json >&2 || true
+            exit 1
+          fi
+
+      - name: Verify crates.io token is configured
+        if: steps.crates-io.outputs.published != 'true'
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "CARGO_REGISTRY_TOKEN secret is not configured" >&2
+            exit 1
+          fi
+
+      - name: Dry-run cargo publish
+        if: steps.crates-io.outputs.published != 'true'
+        working-directory: src-tauri
+        run: cargo publish --locked --dry-run
+
+      - name: Publish to crates.io
+        if: steps.crates-io.outputs.published != 'true'
+        working-directory: src-tauri
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
   release:
     name: Create Release
     runs-on: ubuntu-22.04
-    needs: [build, universal-macos]
+    needs: [build, universal-macos, publish-crate]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
