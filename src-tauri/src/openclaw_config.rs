@@ -10,7 +10,7 @@ use json_five::rt::parser::{
     JSONObjectContext as RtJSONObjectContext, JSONText as RtJSONText, JSONValue as RtJSONValue,
     KeyValuePairContext as RtKeyValuePairContext,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -65,13 +65,79 @@ pub struct OpenClawWriteOutcome {
     pub warnings: Vec<OpenClawHealthWarning>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct OpenClawDefaultModel {
     pub primary: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fallbacks: Vec<String>,
-    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(flatten, skip_serializing_if = "HashMap::is_empty")]
     pub extra: HashMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct OpenClawDefaultModelObject {
+    #[serde(default)]
+    primary: String,
+    #[serde(default, deserialize_with = "deserialize_openclaw_model_fallbacks")]
+    fallbacks: Vec<String>,
+    #[serde(flatten, default)]
+    extra: HashMap<String, Value>,
+}
+
+impl<'de> Deserialize<'de> for OpenClawDefaultModel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::String(primary) => Ok(Self {
+                primary,
+                fallbacks: Vec::new(),
+                extra: HashMap::new(),
+            }),
+            Value::Object(_) => {
+                let parsed = serde_json::from_value::<OpenClawDefaultModelObject>(value)
+                    .map_err(de::Error::custom)?;
+                Ok(Self {
+                    primary: parsed.primary,
+                    fallbacks: parsed.fallbacks,
+                    extra: parsed.extra,
+                })
+            }
+            Value::Null => Ok(Self {
+                primary: String::new(),
+                fallbacks: Vec::new(),
+                extra: HashMap::new(),
+            }),
+            other => Err(de::Error::custom(format!(
+                "expected string or object for OpenClaw default model, got {other}"
+            ))),
+        }
+    }
+}
+
+fn deserialize_openclaw_model_fallbacks<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::String(value)) => Ok(vec![value]),
+        Some(Value::Array(values)) => values
+            .into_iter()
+            .map(|value| match value {
+                Value::String(value) => Ok(value),
+                other => Err(de::Error::custom(format!(
+                    "expected string fallback model reference, got {other}"
+                ))),
+            })
+            .collect(),
+        Some(other) => Err(de::Error::custom(format!(
+            "expected array, string, or null for OpenClaw fallback models, got {other}"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -1349,6 +1415,91 @@ mod tests {
             providers.contains_key("demo"),
             "writing default model should not drop provider entries"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn default_model_reader_accepts_string_shape() {
+        let _guard = lock_test_home_and_settings();
+        let dir = tempdir().expect("create tempdir");
+        let _settings = SettingsGuard::with_openclaw_dir(dir.path());
+
+        fs::write(
+            get_openclaw_config_path(),
+            r#"{
+  agents: {
+    defaults: {
+      model: 'demo/gpt-4.1',
+    },
+  },
+}
+"#,
+        )
+        .expect("seed openclaw config");
+
+        let model = get_default_model()
+            .expect("read string-shaped default model")
+            .expect("default model should exist");
+
+        assert_eq!(model.primary, "demo/gpt-4.1");
+        assert!(model.fallbacks.is_empty());
+
+        let defaults = get_agents_defaults()
+            .expect("read agents defaults")
+            .expect("agents defaults should exist");
+        assert_eq!(defaults.model, Some(model));
+    }
+
+    #[test]
+    #[serial]
+    fn default_model_reader_accepts_null_and_string_fallbacks() {
+        let _guard = lock_test_home_and_settings();
+        let dir = tempdir().expect("create tempdir");
+        let _settings = SettingsGuard::with_openclaw_dir(dir.path());
+
+        fs::write(
+            get_openclaw_config_path(),
+            r#"{
+  agents: {
+    defaults: {
+      model: {
+        primary: 'demo/gpt-4.1',
+        fallbacks: 'demo/gpt-4.1-mini',
+      },
+    },
+  },
+}
+"#,
+        )
+        .expect("seed openclaw config");
+
+        let model = get_default_model()
+            .expect("read string fallback default model")
+            .expect("default model should exist");
+        assert_eq!(model.primary, "demo/gpt-4.1");
+        assert_eq!(model.fallbacks, vec!["demo/gpt-4.1-mini".to_string()]);
+
+        fs::write(
+            get_openclaw_config_path(),
+            r#"{
+  agents: {
+    defaults: {
+      model: {
+        primary: 'demo/gpt-4.1',
+        fallbacks: null,
+      },
+    },
+  },
+}
+"#,
+        )
+        .expect("seed openclaw config");
+
+        let model = get_default_model()
+            .expect("read null fallback default model")
+            .expect("default model should exist");
+        assert_eq!(model.primary, "demo/gpt-4.1");
+        assert!(model.fallbacks.is_empty());
     }
 
     #[test]
