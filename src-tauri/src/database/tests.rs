@@ -399,6 +399,14 @@ fn schema_create_tables_include_usage_daily_rollups() {
         normalize_default(&skill_enabled_hermes.default).as_deref(),
         Some("0")
     );
+
+    let skill_enabled_openclaw = get_column_info(&conn, "skills", "enabled_openclaw");
+    assert_eq!(skill_enabled_openclaw.r#type, "BOOLEAN");
+    assert_eq!(skill_enabled_openclaw.notnull, 1);
+    assert_eq!(
+        normalize_default(&skill_enabled_openclaw.default).as_deref(),
+        Some("0")
+    );
 }
 
 #[test]
@@ -941,6 +949,42 @@ fn schema_migration_v9_adds_hermes_columns() {
 }
 
 #[test]
+fn schema_migration_v10_adds_openclaw_skill_column() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE skills (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+            enabled_codex BOOLEAN NOT NULL DEFAULT 0,
+            enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
+            enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            enabled_hermes BOOLEAN NOT NULL DEFAULT 0,
+            installed_at INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+        "#,
+    )
+    .expect("seed v10 schema");
+
+    Database::set_user_version(&conn, 10).expect("set user_version=10");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+    assert!(
+        Database::has_column(&conn, "skills", "enabled_openclaw")
+            .expect("check skills enabled_openclaw"),
+        "skills.enabled_openclaw should exist after v10 -> v11 migration"
+    );
+}
+
+#[test]
 fn mcp_dao_roundtrip_preserves_hermes_enablement() {
     let db = Database::memory().expect("create memory db");
 
@@ -987,6 +1031,49 @@ fn mcp_dao_roundtrip_preserves_hermes_enablement() {
         .expect("read enabled_hermes after save")
     };
     assert_eq!(enabled_hermes, 1, "save should not clear enabled_hermes");
+}
+
+#[test]
+fn skill_dao_roundtrip_preserves_openclaw_enablement() {
+    let db = Database::memory().expect("create memory db");
+
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "INSERT INTO skills (
+                id, name, directory,
+                enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_openclaw, enabled_hermes, installed_at
+            ) VALUES (?1, ?2, ?3, 0, 0, 0, 0, 1, 0, 1)",
+            params!["local:openclaw-skill", "OpenClaw Skill", "openclaw-skill"],
+        )
+        .expect("seed openclaw-enabled skill row");
+    }
+
+    let mut skills = db.get_all_installed_skills().expect("load skills");
+    let mut skill = skills
+        .shift_remove("local:openclaw-skill")
+        .expect("find seeded skill");
+    assert!(
+        skill.apps.openclaw,
+        "DAO load should preserve enabled_openclaw in memory"
+    );
+
+    skill.description = Some("updated".to_string());
+    db.save_skill(&skill).expect("save skill");
+
+    let enabled_openclaw: i64 = {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.query_row(
+            "SELECT enabled_openclaw FROM skills WHERE id = 'local:openclaw-skill'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read enabled_openclaw after save")
+    };
+    assert_eq!(
+        enabled_openclaw, 1,
+        "save should not clear enabled_openclaw"
+    );
 }
 
 #[test]

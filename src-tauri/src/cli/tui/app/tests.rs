@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn skills_apps_picker_from_openclaw_targets_hermes_last_visible_row() {
+    fn skills_apps_picker_from_openclaw_targets_openclaw_row() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Skills;
         app.focus = Focus::Content;
@@ -335,7 +335,8 @@ mod tests {
                     && !apps.codex
                     && !apps.gemini
                     && !apps.opencode
-                    && apps.hermes
+                    && apps.openclaw
+                    && !apps.hermes
         ));
     }
 

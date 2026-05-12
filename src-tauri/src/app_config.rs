@@ -83,6 +83,8 @@ pub struct SkillApps {
     #[serde(default)]
     pub opencode: bool,
     #[serde(default)]
+    pub openclaw: bool,
+    #[serde(default)]
     pub hermes: bool,
 }
 
@@ -93,7 +95,7 @@ impl SkillApps {
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
             AppType::OpenCode => self.opencode,
-            AppType::OpenClaw => false,
+            AppType::OpenClaw => self.openclaw,
             AppType::Hermes => self.hermes,
         }
     }
@@ -104,13 +106,18 @@ impl SkillApps {
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
             AppType::OpenCode => self.opencode = enabled,
-            AppType::OpenClaw => {}
+            AppType::OpenClaw => self.openclaw = enabled,
             AppType::Hermes => self.hermes = enabled,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes
+        !self.claude
+            && !self.codex
+            && !self.gemini
+            && !self.opencode
+            && !self.openclaw
+            && !self.hermes
     }
 
     pub fn only(app: &AppType) -> Self {
@@ -134,6 +141,7 @@ impl SkillApps {
         self.codex |= other.codex;
         self.gemini |= other.gemini;
         self.opencode |= other.opencode;
+        self.openclaw |= other.openclaw;
         self.hermes |= other.hermes;
     }
 }
@@ -314,12 +322,13 @@ pub const VISIBLE_PICKER_APPS: &[AppType] = &[
     AppType::Hermes,
 ];
 
-/// Apps shown in the skills picker (no OpenClaw — it has no skills support).
+/// Apps shown in the skills picker.
 pub const SKILLS_PICKER_APPS: &[AppType] = &[
     AppType::Claude,
     AppType::Codex,
     AppType::Gemini,
     AppType::OpenCode,
+    AppType::OpenClaw,
     AppType::Hermes,
 ];
 

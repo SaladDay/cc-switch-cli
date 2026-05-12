@@ -34,7 +34,9 @@ fn list_installed_triggers_initial_ssot_migration() {
         "skill should be enabled for claude"
     );
 
-    let ssot_skill_dir = home.join(".cc-switch").join("skills").join("hello-skill");
+    let ssot_skill_dir = SkillService::get_ssot_dir()
+        .expect("get ssot dir")
+        .join("hello-skill");
     assert!(
         ssot_skill_dir.exists(),
         "SSOT directory should be created and populated"
@@ -110,7 +112,9 @@ fn import_from_apps_imports_agents_skill_with_lock_metadata() {
         "agents source should not enable app flags"
     );
 
-    let ssot_skill_dir = home.join(".cc-switch").join("skills").join("hello-skill");
+    let ssot_skill_dir = SkillService::get_ssot_dir()
+        .expect("get ssot dir")
+        .join("hello-skill");
     assert!(ssot_skill_dir.exists(), "skill should be copied into SSOT");
 }
 
@@ -125,11 +129,8 @@ fn scan_unmanaged_includes_agents_and_ssot_sources() {
         "Agents Skill",
         "Found in agents",
     );
-    write_skill_md(
-        &home.join(".cc-switch").join("skills").join("ssot-skill"),
-        "SSOT Skill",
-        "Found in ssot",
-    );
+    let ssot_dir = SkillService::get_ssot_dir().expect("get ssot dir");
+    write_skill_md(&ssot_dir.join("ssot-skill"), "SSOT Skill", "Found in ssot");
 
     let unmanaged = SkillService::scan_unmanaged().expect("scan unmanaged skills");
 
@@ -155,7 +156,7 @@ fn scan_unmanaged_includes_agents_and_ssot_sources() {
 }
 
 #[test]
-fn toggle_app_openclaw_skips_live_skill_side_effects() {
+fn toggle_app_openclaw_syncs_live_skill_directory() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -175,12 +176,11 @@ fn toggle_app_openclaw_skips_live_skill_side_effects() {
         .expect("openclaw toggle should not fail");
 
     assert!(
-        !home
-            .join(".openclaw")
+        home.join(".openclaw")
             .join("skills")
             .join("hello-skill")
             .exists(),
-        "OpenClaw toggle should not create ~/.openclaw/skills entries"
+        "OpenClaw toggle should create ~/.openclaw/skills entries"
     );
 
     let installed = SkillService::list_installed().expect("list installed skills");
@@ -192,10 +192,14 @@ fn toggle_app_openclaw_skips_live_skill_side_effects() {
         skill.apps.claude,
         "existing supported app state should be preserved"
     );
+    assert!(
+        skill.apps.openclaw,
+        "OpenClaw enablement should be persisted"
+    );
 }
 
 #[test]
-fn scan_unmanaged_ignores_openclaw_skill_directory() {
+fn scan_unmanaged_includes_openclaw_skill_directory() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -207,16 +211,15 @@ fn scan_unmanaged_ignores_openclaw_skill_directory() {
     );
 
     let unmanaged = SkillService::scan_unmanaged().expect("scan unmanaged skills");
-    assert!(
-        unmanaged
-            .iter()
-            .all(|skill| skill.directory != "openclaw-skill"),
-        "scan_unmanaged should ignore ~/.openclaw/skills"
-    );
+    let skill = unmanaged
+        .iter()
+        .find(|skill| skill.directory == "openclaw-skill")
+        .expect("scan_unmanaged should include ~/.openclaw/skills");
+    assert!(skill.found_in.iter().any(|source| source == "openclaw"));
 }
 
 #[test]
-fn import_from_apps_ignores_openclaw_skill_directory() {
+fn import_from_apps_imports_openclaw_skill_directory() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -229,17 +232,17 @@ fn import_from_apps_ignores_openclaw_skill_directory() {
 
     let imported = SkillService::import_from_apps(vec!["openclaw-skill".to_string()])
         .expect("import should not fail");
+    assert_eq!(imported.len(), 1);
     assert!(
-        imported.is_empty(),
-        "import_from_apps should not import OpenClaw skill directories"
+        imported[0].apps.openclaw,
+        "import_from_apps should enable OpenClaw when importing from ~/.openclaw/skills"
     );
     assert!(
-        !home
-            .join(".cc-switch")
-            .join("skills")
+        SkillService::get_ssot_dir()
+            .expect("get ssot dir")
             .join("openclaw-skill")
             .exists(),
-        "OpenClaw-only skills should not be copied into SSOT"
+        "OpenClaw-only skills should be copied into SSOT"
     );
 }
 
@@ -267,7 +270,7 @@ fn pending_migration_with_existing_managed_list_does_not_claim_unmanaged_skills(
         .expect("import managed-skill from apps");
 
     // Remove SSOT copy to ensure pending migration performs a best-effort re-copy.
-    let ssot_dir = home.join(".cc-switch").join("skills");
+    let ssot_dir = SkillService::get_ssot_dir().expect("get ssot dir");
     if ssot_dir.join("managed-skill").exists() {
         std::fs::remove_dir_all(ssot_dir.join("managed-skill"))
             .expect("remove managed-skill ssot dir");

@@ -577,6 +577,7 @@ fn installed_skill(directory: &str, name: &str) -> InstalledSkill {
             codex: false,
             gemini: false,
             opencode: false,
+            openclaw: false,
             hermes: false,
         },
         installed_at: 1,
@@ -1419,6 +1420,7 @@ fn home_connection_card_labels_mcp_and_skills_with_active_counts() {
                 codex: false,
                 gemini: false,
                 opencode: false,
+                openclaw: false,
                 hermes: false,
             },
             installed_at: 0,
@@ -2103,7 +2105,7 @@ fn skills_page_renders_sync_method_and_installed_rows() {
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    assert!(all.contains(&texts::tui_skills_installed_counts(1, 0, 0, 0, 0)));
+    assert!(all.contains(&texts::tui_skills_installed_counts(1, 0, 0, 0, 0, 0)));
     assert!(!all.contains(texts::tui_header_directory()));
     assert!(!all.contains("hello-skill"));
     assert!(all.contains("Hello Skill"));
@@ -2111,6 +2113,7 @@ fn skills_page_renders_sync_method_and_installed_rows() {
     assert!(all.contains("Codex"));
     assert!(all.contains("Gemini"));
     assert!(all.contains("OpenCode"));
+    assert!(all.contains("OpenClaw"));
     assert!(all.contains("Hermes"));
 }
 
@@ -2168,6 +2171,7 @@ fn skills_page_shows_opencode_summary() {
         codex: false,
         gemini: false,
         opencode: true,
+        openclaw: false,
         hermes: false,
     };
     data.skills.installed = vec![skill];
@@ -2176,6 +2180,34 @@ fn skills_page_shows_opencode_summary() {
     let all = all_text(&buf);
 
     assert!(all.contains("OpenCode: 1"));
+}
+
+#[test]
+fn skills_page_shows_openclaw_summary_and_column() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::Skills;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    let mut skill = installed_skill("hello-skill", "Hello Skill");
+    skill.apps = SkillApps {
+        claude: false,
+        codex: false,
+        gemini: false,
+        opencode: false,
+        openclaw: true,
+        hermes: false,
+    };
+    data.skills.installed = vec![skill];
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains("OpenClaw"));
+    assert!(all.contains("OpenClaw: 1"));
 }
 
 #[test]
@@ -2194,6 +2226,7 @@ fn skills_page_shows_hermes_summary_and_column() {
         codex: false,
         gemini: false,
         opencode: false,
+        openclaw: false,
         hermes: true,
     };
     data.skills.installed = vec![skill];
@@ -2223,6 +2256,7 @@ fn skill_detail_page_shows_opencode_enabled_state() {
         codex: false,
         gemini: false,
         opencode: true,
+        openclaw: false,
         hermes: false,
     };
     data.skills.installed = vec![skill];
@@ -2233,6 +2267,37 @@ fn skill_detail_page_shows_opencode_enabled_state() {
     assert!(all.contains(texts::tui_label_enabled_for()));
     assert!(all.contains("OpenCode"));
     assert!(!all.contains("opencode=true"));
+}
+
+#[test]
+fn skill_detail_page_shows_openclaw_enabled_state() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::SkillDetail {
+        directory: "hello-skill".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    let mut skill = installed_skill("hello-skill", "Hello Skill");
+    skill.apps = SkillApps {
+        claude: false,
+        codex: false,
+        gemini: false,
+        opencode: false,
+        openclaw: true,
+        hermes: false,
+    };
+    data.skills.installed = vec![skill];
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains(texts::tui_label_enabled_for()));
+    assert!(all.contains("OpenClaw"));
+    assert!(!all.contains("openclaw=true"));
 }
 
 #[test]
@@ -2253,6 +2318,7 @@ fn skill_detail_page_shows_hermes_enabled_state() {
         codex: false,
         gemini: false,
         opencode: false,
+        openclaw: false,
         hermes: true,
     };
     data.skills.installed = vec![skill];

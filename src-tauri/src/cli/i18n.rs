@@ -3164,15 +3164,16 @@ pub mod texts {
         codex: usize,
         gemini: usize,
         opencode: usize,
+        openclaw: usize,
         hermes: usize,
     ) -> String {
         if is_chinese() {
             format!(
-                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
+                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · OpenClaw: {openclaw} · Hermes: {hermes}"
             )
         } else {
             format!(
-                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
+                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · OpenClaw: {openclaw} · Hermes: {hermes}"
             )
         }
     }

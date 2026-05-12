@@ -54,6 +54,7 @@ pub(super) fn render_skills_installed(
         centered_cell("Codex"),
         centered_cell("Gemini"),
         centered_cell("OpenCode"),
+        centered_cell("OpenClaw"),
         centered_cell("Hermes"),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
@@ -65,6 +66,7 @@ pub(super) fn render_skills_installed(
             centered_cell(skill_marker(skill.apps.codex)),
             centered_cell(skill_marker(skill.apps.gemini)),
             centered_cell(skill_marker(skill.apps.opencode)),
+            centered_cell(skill_marker(skill.apps.openclaw)),
             centered_cell(skill_marker(skill.apps.hermes)),
         ])
     });
@@ -76,6 +78,7 @@ pub(super) fn render_skills_installed(
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
+            Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(8),
         ],
@@ -115,6 +118,12 @@ fn installed_summary(data: &UiData) -> String {
         .iter()
         .filter(|s| s.apps.opencode)
         .count();
+    let enabled_openclaw = data
+        .skills
+        .installed
+        .iter()
+        .filter(|s| s.apps.openclaw)
+        .count();
     let enabled_hermes = data
         .skills
         .installed
@@ -127,6 +136,7 @@ fn installed_summary(data: &UiData) -> String {
         enabled_codex,
         enabled_gemini,
         enabled_opencode,
+        enabled_openclaw,
         enabled_hermes,
     )
 }

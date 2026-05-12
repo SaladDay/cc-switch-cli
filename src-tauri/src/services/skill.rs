@@ -382,7 +382,15 @@ pub struct SkillService {
 
 impl SkillService {
     fn app_supports_skills(app: &AppType) -> bool {
-        !matches!(app, AppType::OpenClaw)
+        matches!(
+            app,
+            AppType::Claude
+                | AppType::Codex
+                | AppType::Gemini
+                | AppType::OpenCode
+                | AppType::OpenClaw
+                | AppType::Hermes
+        )
     }
 
     fn supported_skill_apps() -> impl Iterator<Item = AppType> {
@@ -391,6 +399,7 @@ impl SkillService {
             AppType::Codex,
             AppType::Gemini,
             AppType::OpenCode,
+            AppType::OpenClaw,
             AppType::Hermes,
         ]
         .into_iter()
@@ -948,13 +957,7 @@ impl SkillService {
             .ok_or_else(|| AppError::Message(format!("未找到已安装的 Skill: {dir}")))?;
 
         // Remove from app dirs (best effort).
-        for app in [
-            AppType::Claude,
-            AppType::Codex,
-            AppType::Gemini,
-            AppType::OpenCode,
-            AppType::Hermes,
-        ] {
+        for app in Self::supported_skill_apps() {
             if let Err(e) = Self::remove_from_app(&dir, &app) {
                 log::warn!("从 {app:?} 删除 Skill {dir} 失败: {e}");
             }

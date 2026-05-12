@@ -3,7 +3,7 @@
 //! 提供 Skills 和 Skill Repos 的 CRUD 操作。
 //!
 //! v3.10.0+ 统一管理架构：
-//! - Skills 使用统一的 id 主键，支持四应用启用标志
+//! - Skills 使用统一的 id 主键，支持多应用启用标志
 //! - 实际文件存储在 ~/.cc-switch-tui/skills/，同步到各应用目录
 
 use crate::app_config::{InstalledSkill, SkillApps};
@@ -22,7 +22,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, description, directory, repo_owner, repo_name, repo_branch,
-                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes, installed_at
+                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_openclaw, enabled_hermes, installed_at
                  FROM skills ORDER BY name ASC",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -43,9 +43,10 @@ impl Database {
                         codex: row.get(9)?,
                         gemini: row.get(10)?,
                         opencode: row.get(11)?,
-                        hermes: row.get(12)?,
+                        openclaw: row.get(12)?,
+                        hermes: row.get(13)?,
                     },
-                    installed_at: row.get(13)?,
+                    installed_at: row.get(14)?,
                 })
             })
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -64,7 +65,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, description, directory, repo_owner, repo_name, repo_branch,
-                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes, installed_at
+                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_openclaw, enabled_hermes, installed_at
                  FROM skills WHERE id = ?1",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -84,9 +85,10 @@ impl Database {
                     codex: row.get(9)?,
                     gemini: row.get(10)?,
                     opencode: row.get(11)?,
-                    hermes: row.get(12)?,
+                    openclaw: row.get(12)?,
+                    hermes: row.get(13)?,
                 },
-                installed_at: row.get(13)?,
+                installed_at: row.get(14)?,
             })
         });
 
@@ -103,8 +105,8 @@ impl Database {
         conn.execute(
             "INSERT OR REPLACE INTO skills
              (id, name, description, directory, repo_owner, repo_name, repo_branch,
-              readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes, installed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_openclaw, enabled_hermes, installed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 skill.id,
                 skill.name,
@@ -118,6 +120,7 @@ impl Database {
                 skill.apps.codex,
                 skill.apps.gemini,
                 skill.apps.opencode,
+                skill.apps.openclaw,
                 skill.apps.hermes,
                 skill.installed_at,
             ],
@@ -148,8 +151,8 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let affected = conn
             .execute(
-                "UPDATE skills SET enabled_claude = ?1, enabled_codex = ?2, enabled_gemini = ?3, enabled_opencode = ?4, enabled_hermes = ?5 WHERE id = ?6",
-                params![apps.claude, apps.codex, apps.gemini, apps.opencode, apps.hermes, id],
+                "UPDATE skills SET enabled_claude = ?1, enabled_codex = ?2, enabled_gemini = ?3, enabled_opencode = ?4, enabled_openclaw = ?5, enabled_hermes = ?6 WHERE id = ?7",
+                params![apps.claude, apps.codex, apps.gemini, apps.opencode, apps.openclaw, apps.hermes, id],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(affected > 0)
