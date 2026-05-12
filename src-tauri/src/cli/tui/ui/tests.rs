@@ -1001,9 +1001,9 @@ fn header_centers_tabs_when_room_allows() {
         .find(AppType::Claude.as_str())
         .expect("claude tab should render");
     let last_label_end = lane
-        .rfind(AppType::OpenClaw.as_str())
-        .map(|idx| idx + AppType::OpenClaw.as_str().len())
-        .expect("openclaw tab should render");
+        .rfind(AppType::Hermes.as_str())
+        .map(|idx| idx + AppType::Hermes.as_str().len())
+        .expect("hermes tab should render");
     let left_gap = first_label;
     let right_gap = lane.len().saturating_sub(last_label_end);
 
@@ -7301,8 +7301,9 @@ fn openclaw_provider_list_key_bar_shows_edit_for_tracked_provider() {
     let all = all_text(&buf);
 
     assert!(all.contains("e edit"), "{all}");
-    assert!(all.contains("Space set default"), "{all}");
-    assert!(!all.contains("x set default"), "{all}");
+    assert!(all.contains("Space switch"), "{all}");
+    assert!(all.contains("x set default"), "{all}");
+    assert!(!all.contains("Space set default"), "{all}");
 }
 
 #[test]
@@ -7320,8 +7321,9 @@ fn openclaw_provider_detail_key_bar_shows_edit_for_tracked_provider() {
     let all = all_text(&buf);
 
     assert!(all.contains("e edit"), "{all}");
-    assert!(all.contains("Space set default"), "{all}");
-    assert!(!all.contains("x set default"), "{all}");
+    assert!(all.contains("Space switch"), "{all}");
+    assert!(all.contains("x set default"), "{all}");
+    assert!(!all.contains("Space set default"), "{all}");
 }
 
 #[test]

@@ -51,6 +51,42 @@ fn seed_codex_live(auth: &Value, config_text: &str) {
     write_codex_live_atomic(auth, Some(config_text)).expect("write codex live config");
 }
 
+fn seed_claude_current_provider(db: &Database) {
+    let provider = Provider::with_id(
+        "claude-provider".to_string(),
+        "Claude Provider".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_API_KEY": "provider-key",
+                "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
+            }
+        }),
+        Some("claude".to_string()),
+    );
+    db.save_provider("claude", &provider)
+        .expect("save claude provider");
+    db.set_current_provider("claude", &provider.id)
+        .expect("set current claude provider");
+}
+
+fn seed_codex_current_provider(db: &Database) {
+    let provider = Provider::with_id(
+        "codex-provider".to_string(),
+        "Codex Provider".to_string(),
+        json!({
+            "auth": {
+                "OPENAI_API_KEY": "provider-key"
+            },
+            "config": "model_provider = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\n"
+        }),
+        Some("codex".to_string()),
+    );
+    db.save_provider("codex", &provider)
+        .expect("save codex provider");
+    db.set_current_provider("codex", &provider.id)
+        .expect("set current codex provider");
+}
+
 #[cfg(unix)]
 fn load_runtime_session_pid(state: &AppState) -> u32 {
     let session: Value = serde_json::from_str(
@@ -237,6 +273,7 @@ async fn reloading_app_state_does_not_recover_an_active_takeover_session() {
     let _home = ensure_test_home();
 
     let state = AppState::try_new().expect("create app state");
+    seed_claude_current_provider(&state.db);
     seed_claude_live(&json!({
         "env": {
             "ANTHROPIC_API_KEY": "original-key"
@@ -718,6 +755,7 @@ async fn disabling_managed_proxy_session_restores_current_app_takeover_state() {
     seed_claude_live(&original_live);
 
     let state = AppState::try_new().expect("create app state");
+    seed_claude_current_provider(&state.db);
     let mut config = state
         .proxy_service
         .get_config()
@@ -798,6 +836,7 @@ async fn startup_recovery_skips_owned_managed_session_when_probe_is_unreachable(
     seed_claude_live(&original_live);
 
     let state = AppState::try_new().expect("create app state");
+    seed_claude_current_provider(&state.db);
     let mut config = state
         .proxy_service
         .get_config()
@@ -935,6 +974,8 @@ async fn disabling_one_managed_app_restores_only_that_app_while_shared_runtime_k
     seed_codex_live(&original_codex_auth, original_codex_config);
 
     let state = AppState::try_new().expect("create app state");
+    seed_claude_current_provider(&state.db);
+    seed_codex_current_provider(&state.db);
     let mut config = state
         .proxy_service
         .get_config()

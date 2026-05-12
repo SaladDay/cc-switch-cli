@@ -8934,7 +8934,7 @@ mod tests {
         let help = texts::tui_help_text();
         assert!(help.contains("文本输入：Ctrl+A/E 行首/行尾"));
         assert!(help.contains("供应商：Enter 详情"));
-        assert!(help.contains("供应商详情：s 切换/添加移除"));
+        assert!(help.contains("供应商详情：Space 切换"));
         assert!(help.contains("提示词：c 新建，r 刷新，Enter 查看"));
         assert!(help.contains("技能：Enter 详情"));
         assert!(help.contains("配置：Enter 打开/执行"));

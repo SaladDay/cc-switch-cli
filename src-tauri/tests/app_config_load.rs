@@ -12,23 +12,40 @@ fn cfg_path() -> PathBuf {
 }
 
 struct ConfigDirEnvGuard {
-    original: Option<OsString>,
+    tui_original: Option<OsString>,
+    legacy_original: Option<OsString>,
 }
 
 impl ConfigDirEnvGuard {
-    fn set(value: Option<&str>) -> Self {
-        let original = std::env::var_os("CC_SWITCH_CONFIG_DIR");
-        match value {
-            Some(value) => unsafe { std::env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-            None => unsafe { std::env::remove_var("CC_SWITCH_CONFIG_DIR") },
+    fn clear() -> Self {
+        let tui_original = std::env::var_os("CC_SWITCH_TUI_CONFIG_DIR");
+        let legacy_original = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+        unsafe {
+            std::env::remove_var("CC_SWITCH_TUI_CONFIG_DIR");
+            std::env::remove_var("CC_SWITCH_CONFIG_DIR");
         }
-        Self { original }
+        Self {
+            tui_original,
+            legacy_original,
+        }
+    }
+
+    fn set_legacy(value: &str) -> Self {
+        let guard = Self::clear();
+        unsafe {
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", value);
+        }
+        guard
     }
 }
 
 impl Drop for ConfigDirEnvGuard {
     fn drop(&mut self) {
-        match self.original.as_ref() {
+        match self.tui_original.as_ref() {
+            Some(value) => unsafe { std::env::set_var("CC_SWITCH_TUI_CONFIG_DIR", value) },
+            None => unsafe { std::env::remove_var("CC_SWITCH_TUI_CONFIG_DIR") },
+        }
+        match self.legacy_original.as_ref() {
             Some(value) => unsafe { std::env::set_var("CC_SWITCH_CONFIG_DIR", value) },
             None => unsafe { std::env::remove_var("CC_SWITCH_CONFIG_DIR") },
         }
@@ -150,14 +167,14 @@ fn default_config_contains_openclaw_prompt_root_and_manager() {
 fn update_settings_persists_openclaw_override_dir() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
-    let _config_dir = ConfigDirEnvGuard::set(None);
+    let _home = ensure_test_home();
+    let _config_dir = ConfigDirEnvGuard::clear();
 
     let mut settings = AppSettings::default();
     settings.openclaw_config_dir = Some("~/custom-openclaw".to_string());
     update_settings(settings).expect("save settings with openclaw override");
 
-    let path = home.join(".cc-switch").join("settings.json");
+    let path = get_app_config_dir().join("settings.json");
     let raw = fs::read_to_string(&path).expect("read settings.json");
     let value: serde_json::Value = serde_json::from_str(&raw).expect("parse settings.json");
     assert_eq!(
@@ -174,7 +191,7 @@ fn update_settings_uses_cc_switch_config_dir_override_for_settings_path() {
     reset_test_fs();
     let home = ensure_test_home();
     let override_dir = home.join("custom-config-root");
-    let _config_dir = ConfigDirEnvGuard::set(Some(override_dir.to_string_lossy().as_ref()));
+    let _config_dir = ConfigDirEnvGuard::set_legacy(override_dir.to_string_lossy().as_ref());
 
     let mut settings = AppSettings::default();
     settings.openclaw_config_dir = Some("~/custom-openclaw".to_string());
@@ -193,7 +210,7 @@ fn update_settings_uses_cc_switch_config_dir_override_for_settings_path() {
             .and_then(|entry| entry.as_str()),
         Some("~/custom-openclaw")
     );
-    let default_settings = home.join(".cc-switch").join("settings.json");
+    let default_settings = home.join(".cc-switch-tui").join("settings.json");
     assert_ne!(
         override_settings, default_settings,
         "override path should differ from default path"

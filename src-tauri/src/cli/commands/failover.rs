@@ -82,10 +82,9 @@ fn create_runtime() -> Result<tokio::runtime::Runtime, AppError> {
 fn ensure_failover_supported(app_type: &AppType) -> Result<(), AppError> {
     match app_type {
         AppType::Claude | AppType::Codex | AppType::Gemini => Ok(()),
-        AppType::OpenCode | AppType::OpenClaw => Err(AppError::InvalidInput(format!(
-            "failover is not supported for {}",
-            app_type.as_str()
-        ))),
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => Err(AppError::InvalidInput(
+            format!("failover is not supported for {}", app_type.as_str()),
+        )),
     }
 }
 
@@ -375,7 +374,7 @@ fn takeover_enabled_for(takeovers: &ProxyTakeoverStatus, app_type: &AppType) -> 
         AppType::Claude => takeovers.claude,
         AppType::Codex => takeovers.codex,
         AppType::Gemini => takeovers.gemini,
-        AppType::OpenCode | AppType::OpenClaw => false,
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => false,
     }
 }
 

@@ -363,7 +363,8 @@ mod tests {
     #[test]
     fn get_app_config_dir_defaults_to_home_dot_cc_switch() {
         let _guard = lock_test_home_and_settings();
-        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", None);
+        let _tui = ConfigDirEnvGuard::new("CC_SWITCH_TUI_CONFIG_DIR", None);
+        let _old = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", None);
         set_test_home_override(Some(Path::new("/tmp/cc-switch-home-default")));
 
         assert_eq!(
@@ -377,7 +378,8 @@ mod tests {
     #[test]
     fn get_app_config_dir_uses_env_override_when_set() {
         let _guard = lock_test_home_and_settings();
-        let _env = ConfigDirEnvGuard::new(
+        let _tui = ConfigDirEnvGuard::new("CC_SWITCH_TUI_CONFIG_DIR", None);
+        let _old = ConfigDirEnvGuard::new(
             "CC_SWITCH_CONFIG_DIR",
             Some("/tmp/cc-switch-config-override"),
         );
@@ -394,7 +396,8 @@ mod tests {
     #[test]
     fn get_app_config_dir_ignores_blank_env_override() {
         let _guard = lock_test_home_and_settings();
-        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("   "));
+        let _tui = ConfigDirEnvGuard::new("CC_SWITCH_TUI_CONFIG_DIR", None);
+        let _old = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("   "));
         set_test_home_override(Some(Path::new("/tmp/cc-switch-home-blank")));
 
         assert_eq!(

@@ -102,7 +102,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 printf '%s' "$url" > "${CC_SWITCH_TEST_LOG_DIR}/last-url"
-if [ "${CC_SWITCH_TEST_FAIL_MUSL:-0}" = "1" ] && [ "${url##*/}" = "cc-switch-tui-linux-x64-musl.tar.gz" ]; then
+if [ "${url##*/}" = "latest.json" ]; then
+  printf '{\n  "version": "v0.0.0"\n}\n' > "$output"
+  exit 0
+fi
+if [ "${CC_SWITCH_TEST_FAIL_MUSL:-0}" = "1" ] && [[ "${url##*/}" == *linux-x64-musl.tar.gz ]]; then
   exit 22
 fi
 cp "${CC_SWITCH_TEST_ARCHIVE_PATH}" "$output"
@@ -178,7 +182,12 @@ fn install_script_force_overwrites_and_warns_about_shadowed_path() {
     );
 
     let output = harness.run(&[("CC_SWITCH_FORCE", "1")], Some(&shadow_dir));
-    assert!(output.status.success(), "force overwrite should succeed");
+    assert!(
+        output.status.success(),
+        "force overwrite should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("shadow"), "stderr was: {stderr}");
@@ -196,13 +205,15 @@ fn install_script_supports_linux_glibc_override() {
     let output = harness.run(&[("CC_SWITCH_LINUX_LIBC", "glibc")], None);
     assert!(
         output.status.success(),
-        "glibc override install should succeed"
+        "glibc override install should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 
     let requested_url = fs::read_to_string(harness.logs_dir.join("last-url"))
         .expect("download url should be logged");
     assert!(
-        requested_url.ends_with("/cc-switch-tui-linux-x64.tar.gz"),
+        requested_url.ends_with("/cc-switch-tui-v0.0.0-linux-x64.tar.gz"),
         "expected glibc asset request, got {requested_url}"
     );
 }
@@ -215,13 +226,15 @@ fn install_script_falls_back_to_glibc_when_musl_download_fails() {
     let output = harness.run(&[("CC_SWITCH_TEST_FAIL_MUSL", "1")], None);
     assert!(
         output.status.success(),
-        "glibc fallback install should succeed"
+        "glibc fallback install should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 
     let requested_url = fs::read_to_string(harness.logs_dir.join("last-url"))
         .expect("download url should be logged");
     assert!(
-        requested_url.ends_with("/cc-switch-tui-linux-x64.tar.gz"),
+        requested_url.ends_with("/cc-switch-tui-v0.0.0-linux-x64.tar.gz"),
         "expected fallback glibc asset request, got {requested_url}"
     );
 }

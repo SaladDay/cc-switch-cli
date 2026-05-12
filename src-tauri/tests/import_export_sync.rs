@@ -3,8 +3,8 @@ use serde_json::json;
 use std::{fs, path::Path};
 
 use cc_switch_lib::{
-    get_claude_settings_path, read_json_file, AppError, AppType, ConfigService, Database,
-    MultiAppConfig, Provider, ProviderMeta, ProviderService,
+    get_app_config_dir, get_claude_settings_path, read_json_file, AppError, AppType, ConfigService,
+    Database, MultiAppConfig, Provider, ProviderMeta, ProviderService,
 };
 
 #[path = "support.rs"]
@@ -992,8 +992,8 @@ fn import_from_claude_merges_into_config() {
 fn create_backup_skips_missing_file() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
-    let db_path = home.join(".cc-switch").join("cc-switch.db");
+    let _home = ensure_test_home();
+    let db_path = get_app_config_dir().join("cc-switch.db");
 
     // 未创建数据库文件时应返回空字符串，不报错
     let result = ConfigService::create_backup(&db_path, None).expect("create backup");
@@ -1007,8 +1007,9 @@ fn create_backup_skips_missing_file() {
 fn create_backup_generates_snapshot_file() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
-    let db_path = home.join(".cc-switch").join("cc-switch.db");
+    let _home = ensure_test_home();
+    let app_config_dir = get_app_config_dir();
+    let db_path = app_config_dir.join("cc-switch.db");
 
     // Seed DB with at least one provider so the SQL dump contains data.
     let mut config = MultiAppConfig::default();
@@ -1038,8 +1039,7 @@ fn create_backup_generates_snapshot_file() {
         "backup id should contain timestamp information"
     );
 
-    let backup_path = home
-        .join(".cc-switch")
+    let backup_path = app_config_dir
         .join("backups")
         .join(format!("{backup_id}.sql"));
     assert!(
@@ -1063,14 +1063,15 @@ fn create_backup_generates_snapshot_file() {
 fn create_backup_retains_only_latest_entries() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
-    let db_path = home.join(".cc-switch").join("cc-switch.db");
+    let _home = ensure_test_home();
+    let app_config_dir = get_app_config_dir();
+    let db_path = app_config_dir.join("cc-switch.db");
 
     // Ensure DB exists so backups are created.
     let state = state_from_config(MultiAppConfig::default());
     state.save().expect("persist db");
 
-    let backups_dir = home.join(".cc-switch").join("backups");
+    let backups_dir = app_config_dir.join("backups");
     fs::create_dir_all(&backups_dir).expect("create backups dir");
     for idx in 0..12 {
         let manual = backups_dir.join(format!("manual_{idx:02}.sql"));
@@ -1119,7 +1120,8 @@ fn create_backup_retains_only_latest_entries() {
 fn import_config_from_path_overwrites_state_and_creates_backup() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
+    let _home = ensure_test_home();
+    let app_config_dir = get_app_config_dir();
 
     // Seed current DB with a provider so pre-import backup is meaningful.
     let mut config = MultiAppConfig::default();
@@ -1144,7 +1146,7 @@ fn import_config_from_path_overwrites_state_and_creates_backup() {
     app_state.save().expect("persist initial db");
 
     // Build an import SQL file using an in-memory database.
-    let import_path = home.join(".cc-switch").join("import.sql");
+    let import_path = app_config_dir.join("import.sql");
     let import_db = Database::memory().expect("create import db");
     let provider = Provider::with_id(
         "p-new".to_string(),
@@ -1171,8 +1173,7 @@ fn import_config_from_path_overwrites_state_and_creates_backup() {
         "expected pre-import backup id when database exists"
     );
 
-    let backup_path = home
-        .join(".cc-switch")
+    let backup_path = app_config_dir
         .join("backups")
         .join(format!("{backup_id}.sql"));
     assert!(
@@ -1214,9 +1215,9 @@ fn import_config_from_path_overwrites_state_and_creates_backup() {
 fn import_config_from_path_invalid_json_returns_error() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
+    let _home = ensure_test_home();
 
-    let config_dir = home.join(".cc-switch");
+    let config_dir = get_app_config_dir();
     fs::create_dir_all(&config_dir).expect("create config dir");
 
     let invalid_path = config_dir.join("broken.sql");
@@ -1253,7 +1254,7 @@ fn import_config_from_path_missing_file_produces_io_error() {
 fn sync_gemini_packycode_sets_security_selected_type() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
+    let _home = ensure_test_home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -1280,7 +1281,7 @@ fn sync_gemini_packycode_sets_security_selected_type() {
     ConfigService::sync_current_providers_to_live(&mut config)
         .expect("syncing gemini live should succeed");
 
-    let settings_path = home.join(".cc-switch").join("settings.json");
+    let settings_path = get_app_config_dir().join("settings.json");
     assert!(
         settings_path.exists(),
         "settings.json should exist at {}",
@@ -1330,13 +1331,13 @@ fn sync_gemini_google_official_sets_oauth_security() {
     ConfigService::sync_current_providers_to_live(&mut config)
         .expect("syncing google official gemini should succeed");
 
-    let cc_settings = home.join(".cc-switch").join("settings.json");
+    let cc_settings = get_app_config_dir().join("settings.json");
     assert!(
         cc_settings.exists(),
         "app settings should exist at {}",
         cc_settings.display()
     );
-    let cc_raw = std::fs::read_to_string(&cc_settings).expect("read .cc-switch settings");
+    let cc_raw = std::fs::read_to_string(&cc_settings).expect("read app settings");
     let cc_value: serde_json::Value = serde_json::from_str(&cc_raw).expect("parse app settings");
     assert_eq!(
         cc_value

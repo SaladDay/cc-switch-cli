@@ -6,7 +6,7 @@ use std::{
 
 use cc_switch_lib::{
     get_claude_settings_path, get_codex_config_path, write_codex_live_atomic, AppState, AppType,
-    Database, ProxyService,
+    Database, Provider, ProxyService,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -53,6 +53,42 @@ fn seed_codex_live_config(auth: serde_json::Value, config_text: &str) {
     std::fs::create_dir_all(get_codex_config_path().parent().expect("codex dir"))
         .expect("create codex config dir");
     write_codex_live_atomic(&auth, Some(config_text)).expect("seed codex live config");
+}
+
+fn seed_current_provider(db: &Database, app_type: AppType) {
+    let (provider_id, provider_name, provider_config) = match app_type {
+        AppType::Claude => (
+            "claude-provider",
+            "Claude Provider",
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "provider-key",
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
+                }
+            }),
+        ),
+        AppType::Codex => (
+            "codex-provider",
+            "Codex Provider",
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "provider-key"
+                },
+                "config": "model_provider = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\n"
+            }),
+        ),
+        other => panic!("unsupported test provider seed for {}", other.as_str()),
+    };
+    let provider = Provider::with_id(
+        provider_id.to_string(),
+        provider_name.to_string(),
+        provider_config,
+        None,
+    );
+    db.save_provider(app_type.as_str(), &provider)
+        .expect("save current provider");
+    db.set_current_provider(app_type.as_str(), &provider.id)
+        .expect("set current provider");
 }
 
 fn load_runtime_session_pid(state: &AppState) -> u32 {
@@ -480,6 +516,7 @@ async fn proxy_service_can_stop_managed_external_proxy_session() {
     .expect("seed claude live config");
 
     let state = AppState::try_new().expect("create app state");
+    seed_current_provider(&state.db, AppType::Claude);
     let mut config = state
         .proxy_service
         .get_config()
@@ -557,6 +594,7 @@ async fn managed_proxy_session_is_detached_from_parent_terminal_session() {
     .expect("seed claude live config");
 
     let state = AppState::try_new().expect("create app state");
+    seed_current_provider(&state.db, AppType::Claude);
     let mut config = state
         .proxy_service
         .get_config()
@@ -624,6 +662,7 @@ async fn managed_proxy_session_is_detached_from_parent_terminal_session() {
 #[tokio::test]
 async fn proxy_service_rejects_managed_session_start_when_foreground_runtime_is_running() {
     let db = Arc::new(Database::memory().expect("create database"));
+    seed_current_provider(&db, AppType::Claude);
     let service = ProxyService::new(db);
 
     let mut config = service.get_config().await.expect("get proxy config");
@@ -655,6 +694,7 @@ async fn proxy_service_rejects_managed_session_start_when_foreground_runtime_is_
 #[tokio::test]
 async fn proxy_service_rejects_managed_session_attach_when_foreground_runtime_is_running() {
     let db = Arc::new(Database::memory().expect("create database"));
+    seed_current_provider(&db, AppType::Claude);
     let service = ProxyService::new(db);
 
     let mut config = service.get_config().await.expect("get proxy config");
@@ -704,6 +744,7 @@ async fn proxy_service_reloaded_app_state_keeps_managed_session_running_for_curr
     .expect("seed claude live config");
 
     let state = AppState::try_new().expect("create app state");
+    seed_current_provider(&state.db, AppType::Claude);
     let mut config = state
         .proxy_service
         .get_config()
@@ -766,6 +807,8 @@ async fn managed_session_allows_second_supported_app_to_reuse_existing_runtime()
     );
 
     let state = AppState::try_new().expect("create app state");
+    seed_current_provider(&state.db, AppType::Claude);
+    seed_current_provider(&state.db, AppType::Codex);
     let mut config = state
         .proxy_service
         .get_config()
@@ -838,6 +881,7 @@ async fn proxy_service_stop_preserves_takeover_state_until_explicit_restore() {
     }));
 
     let state = AppState::try_new().expect("create app state");
+    seed_current_provider(&state.db, AppType::Claude);
     let mut config = state
         .proxy_service
         .get_config()
@@ -934,6 +978,8 @@ async fn managed_session_keeps_runtime_alive_while_another_supported_app_is_atta
     );
 
     let state = AppState::try_new().expect("create app state");
+    seed_current_provider(&state.db, AppType::Claude);
+    seed_current_provider(&state.db, AppType::Codex);
     let mut config = state
         .proxy_service
         .get_config()
@@ -1010,6 +1056,7 @@ async fn managed_session_disable_last_app_terminates_external_process_even_when_
     }));
 
     let state = AppState::try_new().expect("create app state");
+    seed_current_provider(&state.db, AppType::Claude);
     let mut config = state
         .proxy_service
         .get_config()

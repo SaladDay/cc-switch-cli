@@ -111,6 +111,17 @@ impl AppState {
 
     fn import_live_provider_configs_on_startup(&self) -> Result<(), AppError> {
         for app_type in crate::app_config::AppType::all().filter(|app| !app.is_additive_mode()) {
+            if self
+                .proxy_service
+                .detect_takeover_in_live_config_for_app(&app_type)
+            {
+                log::debug!(
+                    "○ {} live config is managed by proxy; live import skipped",
+                    app_type.as_str()
+                );
+                continue;
+            }
+
             match crate::services::provider::ProviderService::import_default_config(
                 self,
                 app_type.clone(),

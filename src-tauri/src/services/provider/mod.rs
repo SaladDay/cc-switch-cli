@@ -1399,6 +1399,15 @@ impl ProviderService {
         state
             .db
             .set_current_provider(app_type.as_str(), &provider.id)?;
+        {
+            let mut guard = state.config.write().map_err(AppError::from)?;
+            guard.ensure_app(&app_type);
+            let manager = guard
+                .get_manager_mut(&app_type)
+                .ok_or_else(|| AppError::Config("manager missing after ensure_app".into()))?;
+            manager.current = provider.id.clone();
+            manager.providers.insert(provider.id.clone(), provider);
+        }
         Ok(true)
     }
 

@@ -11,24 +11,33 @@ use serde_json::json;
 use std::{collections::HashMap, ffi::OsString, path::Path};
 
 struct ConfigDirEnvGuard {
+    key: &'static str,
     original: Option<OsString>,
 }
 
 impl ConfigDirEnvGuard {
-    fn set(path: &Path) -> Self {
-        let original = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+    fn set(key: &'static str, path: &Path) -> Self {
+        let original = std::env::var_os(key);
         unsafe {
-            std::env::set_var("CC_SWITCH_CONFIG_DIR", path);
+            std::env::set_var(key, path);
         }
-        Self { original }
+        Self { key, original }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let original = std::env::var_os(key);
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, original }
     }
 }
 
 impl Drop for ConfigDirEnvGuard {
     fn drop(&mut self) {
         match self.original.as_ref() {
-            Some(value) => unsafe { std::env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-            None => unsafe { std::env::remove_var("CC_SWITCH_CONFIG_DIR") },
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
         }
     }
 }
@@ -211,7 +220,8 @@ fn schema_migration_rejects_future_version() {
 fn init_rejects_future_schema_before_creating_tables() {
     let _lock = crate::test_support::lock_test_home_and_settings();
     let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let _tui = ConfigDirEnvGuard::set("CC_SWITCH_TUI_CONFIG_DIR", temp.path());
+    let _old = ConfigDirEnvGuard::remove("CC_SWITCH_CONFIG_DIR");
     let db_path = temp.path().join("cc-switch.db");
     let conn = Connection::open(&db_path).expect("open db");
     Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");

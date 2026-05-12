@@ -2,9 +2,9 @@ use serde_json::json;
 use std::collections::HashMap;
 
 use cc_switch_lib::{
-    get_claude_settings_path, read_json_file, update_settings, write_codex_live_atomic, AppError,
-    AppSettings, AppState, AppType, McpApps, McpServer, MultiAppConfig, Provider, ProviderMeta,
-    ProviderService,
+    get_app_config_dir, get_claude_settings_path, read_json_file, update_settings,
+    write_codex_live_atomic, AppError, AppSettings, AppState, AppType, McpApps, McpServer,
+    MultiAppConfig, Provider, ProviderMeta, ProviderService,
 };
 use indexmap::IndexMap;
 
@@ -1117,7 +1117,7 @@ fn switch_gemini_when_uninitialized_skips_live_sync_and_succeeds() {
 fn switch_packycode_gemini_updates_security_selected_type() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
+    let _home = ensure_test_home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -1146,7 +1146,7 @@ fn switch_packycode_gemini_updates_security_selected_type() {
     ProviderService::switch(&state, AppType::Gemini, "packy-gemini")
         .expect("switching to PackyCode Gemini should succeed");
 
-    let settings_path = home.join(".cc-switch").join("settings.json");
+    let settings_path = get_app_config_dir().join("settings.json");
     assert!(
         settings_path.exists(),
         "settings.json should exist at {}",
@@ -1169,7 +1169,7 @@ fn switch_packycode_gemini_updates_security_selected_type() {
 fn packycode_partner_meta_triggers_security_flag_even_without_keywords() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let home = ensure_test_home();
+    let _home = ensure_test_home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -1200,7 +1200,7 @@ fn packycode_partner_meta_triggers_security_flag_even_without_keywords() {
     ProviderService::switch(&state, AppType::Gemini, "packy-meta")
         .expect("switching to partner meta provider should succeed");
 
-    let settings_path = home.join(".cc-switch").join("settings.json");
+    let settings_path = get_app_config_dir().join("settings.json");
     assert!(
         settings_path.exists(),
         "settings.json should exist at {}",
@@ -1254,7 +1254,7 @@ fn switch_google_official_gemini_sets_oauth_security() {
     ProviderService::switch(&state, AppType::Gemini, "google-official")
         .expect("switching to Google official Gemini should succeed");
 
-    let settings_path = home.join(".cc-switch").join("settings.json");
+    let settings_path = get_app_config_dir().join("settings.json");
     assert!(
         settings_path.exists(),
         "settings.json should exist at {}",

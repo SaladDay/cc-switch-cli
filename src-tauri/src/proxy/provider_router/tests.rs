@@ -10,6 +10,7 @@ struct TempHome {
     dir: TempDir,
     original_home: Option<String>,
     original_userprofile: Option<String>,
+    original_tui_config_dir: Option<String>,
     original_config_dir: Option<String>,
 }
 
@@ -18,6 +19,7 @@ impl TempHome {
         let dir = TempDir::new().expect("failed to create temp home");
         let original_home = env::var("HOME").ok();
         let original_userprofile = env::var("USERPROFILE").ok();
+        let original_tui_config_dir = env::var("CC_SWITCH_TUI_CONFIG_DIR").ok();
         let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
 
         unsafe {
@@ -25,6 +27,12 @@ impl TempHome {
         }
         unsafe {
             env::set_var("USERPROFILE", dir.path());
+        }
+        unsafe {
+            env::set_var(
+                "CC_SWITCH_TUI_CONFIG_DIR",
+                dir.path().join(".cc-switch-tui"),
+            );
         }
         unsafe {
             env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
@@ -35,6 +43,7 @@ impl TempHome {
             dir,
             original_home,
             original_userprofile,
+            original_tui_config_dir,
             original_config_dir,
         }
     }
@@ -50,6 +59,11 @@ impl Drop for TempHome {
         match &self.original_userprofile {
             Some(value) => unsafe { env::set_var("USERPROFILE", value) },
             None => unsafe { env::remove_var("USERPROFILE") },
+        }
+
+        match &self.original_tui_config_dir {
+            Some(value) => unsafe { env::set_var("CC_SWITCH_TUI_CONFIG_DIR", value) },
+            None => unsafe { env::remove_var("CC_SWITCH_TUI_CONFIG_DIR") },
         }
 
         match &self.original_config_dir {

@@ -357,6 +357,7 @@ mod tests {
         _lock: TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
+        old_tui_config_dir: Option<OsString>,
         old_config_dir: Option<OsString>,
     }
 
@@ -365,10 +366,12 @@ mod tests {
             let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_tui_config_dir = std::env::var_os("CC_SWITCH_TUI_CONFIG_DIR");
             let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
             unsafe {
                 std::env::set_var("HOME", home);
                 std::env::set_var("USERPROFILE", home);
+                std::env::set_var("CC_SWITCH_TUI_CONFIG_DIR", home.join(".cc-switch-tui"));
                 std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
             }
             set_test_home_override(Some(home));
@@ -377,6 +380,7 @@ mod tests {
                 _lock: lock,
                 old_home,
                 old_userprofile,
+                old_tui_config_dir,
                 old_config_dir,
             }
         }
@@ -391,6 +395,10 @@ mod tests {
             match &self.old_userprofile {
                 Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
                 None => unsafe { std::env::remove_var("USERPROFILE") },
+            }
+            match &self.old_tui_config_dir {
+                Some(value) => unsafe { std::env::set_var("CC_SWITCH_TUI_CONFIG_DIR", value) },
+                None => unsafe { std::env::remove_var("CC_SWITCH_TUI_CONFIG_DIR") },
             }
             match &self.old_config_dir {
                 Some(value) => unsafe { std::env::set_var("CC_SWITCH_CONFIG_DIR", value) },
@@ -431,6 +439,12 @@ mod tests {
         fs::create_dir_all(&config_dir).expect("create config dir");
         fs::write(config_dir.join("config.json"), "{ not valid json }")
             .expect("write invalid legacy config");
+
+        let active_config_path = crate::config::get_app_config_path();
+        if let Some(parent) = active_config_path.parent() {
+            fs::create_dir_all(parent).expect("create active config dir");
+        }
+        fs::write(active_config_path, "{ not valid json }").expect("write invalid active config");
     }
 
     #[test]

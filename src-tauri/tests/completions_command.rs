@@ -33,7 +33,7 @@ fn marker_count(content: &str) -> usize {
 }
 
 fn bash_completion_file(home: &Path) -> PathBuf {
-    home.join(".local/share/bash-completion/completions/cc-switch")
+    home.join(".local/share/bash-completion/completions/cc-switch-tui")
 }
 
 fn bash_rc_file(home: &Path) -> PathBuf {

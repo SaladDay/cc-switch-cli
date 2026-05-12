@@ -532,7 +532,7 @@ fn set_tools_config_writes_effectively_empty_tools_object() {
 
         assert_eq!(parsed["tools"], json!({}));
         assert!(
-            written.contains("tools: {}"),
+            written.contains("\"tools\": {}"),
             "empty tools config should stay a valid empty object: {written}"
         );
     });
@@ -721,7 +721,7 @@ fn set_provider_allows_agents_defaults_models_refs_to_become_dangling_and_keeps_
 
 #[test]
 #[serial]
-fn remove_provider_allows_agents_defaults_models_refs_to_become_dangling_and_keeps_agents_text() {
+fn remove_provider_prunes_agents_defaults_models_refs_for_removed_provider() {
     let source = r#"{
   // preserve root comment
   models: {
@@ -756,9 +756,11 @@ fn remove_provider_allows_agents_defaults_models_refs_to_become_dangling_and_kee
         let written = fs::read_to_string(config_path).expect("read config after remove");
         let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
         assert!(parsed["models"]["providers"].get("keep").is_none());
-        assert_eq!(
-            parsed["agents"]["defaults"]["models"]["keep/fallback-model"]["alias"],
-            json!("Fallback")
+        assert!(
+            parsed["agents"]["defaults"]["models"]
+                .get("keep/fallback-model")
+                .is_none(),
+            "removed provider catalog entry should be pruned"
         );
     });
 }
@@ -812,7 +814,7 @@ fn set_provider_ignores_invalid_default_model_reference_format() {
 
 #[test]
 #[serial]
-fn remove_provider_ignores_invalid_model_catalog_reference_format() {
+fn remove_provider_prunes_matching_model_catalog_prefix_even_with_extra_segments() {
     let source = r#"{
   models: {
     mode: 'merge',
@@ -842,9 +844,11 @@ fn remove_provider_ignores_invalid_model_catalog_reference_format() {
         let written = fs::read_to_string(config_path).expect("read config after remove");
         let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
         assert!(parsed["models"]["providers"].get("keep").is_none());
-        assert_eq!(
-            parsed["agents"]["defaults"]["models"]["keep/primary-model/extra"]["alias"],
-            json!("Broken")
+        assert!(
+            parsed["agents"]["defaults"]["models"]
+                .get("keep/primary-model/extra")
+                .is_none(),
+            "removed provider catalog prefix should be pruned"
         );
     });
 }
