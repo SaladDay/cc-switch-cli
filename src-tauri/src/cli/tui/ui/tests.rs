@@ -434,6 +434,13 @@ fn line_with<'a>(text: &'a str, needle: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing `{needle}` in:\n{text}"))
 }
 
+fn app_columns_header_line(text: &str) -> &str {
+    let name = buffer_cell_text(texts::header_name());
+    text.lines()
+        .find(|line| line.contains(&name) && line.contains("Claude") && line.contains("OpenCode"))
+        .unwrap_or_else(|| panic!("missing app columns header in:\n{text}"))
+}
+
 fn column_in_line(line: &str, needle: &str) -> usize {
     line.find(needle)
         .unwrap_or_else(|| panic!("missing `{needle}` in line:\n{line}"))
@@ -2274,6 +2281,40 @@ fn skills_page_shows_hermes_summary_and_column() {
 }
 
 #[test]
+fn skills_page_app_columns_start_like_mcp_page() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut skills_app = App::new(Some(AppType::Claude));
+    skills_app.route = Route::Skills;
+    skills_app.focus = Focus::Content;
+
+    let mut skills_data = minimal_data(&skills_app.app_type);
+    skills_data.skills.installed = vec![installed_skill("hello-skill", "Hello Skill")];
+
+    let skills_buf = render(&skills_app, &skills_data);
+    let skills_content = content_text(&skills_app, &skills_buf);
+    let skills_header = app_columns_header_line(&skills_content);
+
+    let mut mcp_app = App::new(Some(AppType::Claude));
+    mcp_app.route = Route::Mcp;
+    mcp_app.focus = Focus::Content;
+    let mcp_data = minimal_data(&mcp_app.app_type);
+
+    let mcp_buf = render(&mcp_app, &mcp_data);
+    let mcp_content = content_text(&mcp_app, &mcp_buf);
+    let mcp_header = app_columns_header_line(&mcp_content);
+
+    let skills_claude_col = display_column_in_line(skills_header, "Claude");
+    let mcp_claude_col = display_column_in_line(mcp_header, "Claude");
+
+    assert!(
+        skills_claude_col.abs_diff(mcp_claude_col) <= 4,
+        "skills columns should start near MCP columns\nskills: {skills_header}\nmcp:    {mcp_header}"
+    );
+}
+
+#[test]
 fn skill_detail_page_shows_opencode_enabled_state() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -2426,9 +2467,12 @@ fn mcp_page_renders_opencode_column() {
     }];
 
     let buf = render(&app, &data);
-    let all = all_text(&buf);
+    let content = content_text(&app, &buf);
+    let header = app_columns_header_line(&content);
 
-    assert!(all.contains("opencode"));
+    assert!(header.contains("OpenCode"), "{header}");
+    assert!(header.contains("Hermes"), "{header}");
+    assert!(!header.contains("opencode"), "{header}");
 }
 
 #[test]

@@ -74,7 +74,7 @@ pub(super) fn render_skills_installed(
     let table = Table::new(
         rows,
         [
-            Constraint::Min(18),
+            Constraint::Percentage(40),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),

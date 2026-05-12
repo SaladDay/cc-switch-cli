@@ -25,38 +25,38 @@ pub(super) fn render_mcp(
 
     let header = Row::new(vec![
         Cell::from(texts::header_name()),
-        Cell::from(crate::app_config::AppType::Claude.as_str()),
-        Cell::from(crate::app_config::AppType::Codex.as_str()),
-        Cell::from(crate::app_config::AppType::Gemini.as_str()),
-        Cell::from(crate::app_config::AppType::OpenCode.as_str()),
-        Cell::from(crate::app_config::AppType::Hermes.as_str()),
+        centered_cell("Claude"),
+        centered_cell("Codex"),
+        centered_cell("Gemini"),
+        centered_cell("OpenCode"),
+        centered_cell("Hermes"),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     let rows = visible.iter().map(|row| {
         Row::new(vec![
             Cell::from(row.server.name.clone()),
-            Cell::from(if row.server.apps.claude {
+            centered_cell(if row.server.apps.claude {
                 texts::tui_marker_active()
             } else {
                 texts::tui_marker_inactive()
             }),
-            Cell::from(if row.server.apps.codex {
+            centered_cell(if row.server.apps.codex {
                 texts::tui_marker_active()
             } else {
                 texts::tui_marker_inactive()
             }),
-            Cell::from(if row.server.apps.gemini {
+            centered_cell(if row.server.apps.gemini {
                 texts::tui_marker_active()
             } else {
                 texts::tui_marker_inactive()
             }),
-            Cell::from(if row.server.apps.opencode {
+            centered_cell(if row.server.apps.opencode {
                 texts::tui_marker_active()
             } else {
                 texts::tui_marker_inactive()
             }),
-            Cell::from(if row.server.apps.hermes {
+            centered_cell(if row.server.apps.hermes {
                 texts::tui_marker_active()
             } else {
                 texts::tui_marker_inactive()
@@ -146,4 +146,8 @@ pub(super) fn render_mcp(
     state.select(Some(app.mcp_idx));
 
     frame.render_stateful_widget(table, inset_left(chunks[2], CONTENT_INSET_LEFT), &mut state);
+}
+
+fn centered_cell(text: impl Into<String>) -> Cell<'static> {
+    Cell::from(Line::from(text.into()).alignment(Alignment::Center))
 }
