@@ -378,6 +378,14 @@ fn write_root_section(section: &str, value: &Value) -> Result<OpenClawWriteOutco
     document.save()
 }
 
+fn write_root_sections(sections: &[(&str, Value)]) -> Result<OpenClawWriteOutcome, AppError> {
+    let mut document = OpenClawConfigDocument::load()?;
+    for (section, value) in sections {
+        document.set_root_section(section, value)?;
+    }
+    document.save()
+}
+
 fn create_openclaw_backup(source: &str) -> Result<PathBuf, AppError> {
     let backup_dir = get_app_config_dir().join("backups").join("openclaw");
     fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
@@ -618,6 +626,22 @@ fn remove_legacy_timeout(defaults_value: &mut Value) {
     }
 }
 
+fn remove_provider_model_catalog_entries(config: &mut Value, provider_id: &str) -> bool {
+    let Some(catalog) = config
+        .get_mut("agents")
+        .and_then(|agents| agents.get_mut("defaults"))
+        .and_then(|defaults| defaults.get_mut("models"))
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+
+    let prefix = format!("{provider_id}/");
+    let original_len = catalog.len();
+    catalog.retain(|model_ref, _| !model_ref.starts_with(&prefix));
+    catalog.len() != original_len
+}
+
 fn default_model_from_config(config: &Value) -> Result<Option<OpenClawDefaultModel>, AppError> {
     let Some(model_value) = config
         .get("agents")
@@ -687,13 +711,22 @@ pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
         return Ok(OpenClawWriteOutcome::default());
     }
 
+    let pruned_catalog = remove_provider_model_catalog_entries(&mut config, id);
     let models_value = config.get("models").cloned().unwrap_or_else(|| {
         json!({
             "mode": "merge",
             "providers": {}
         })
     });
-    write_root_section("models", &models_value)
+    if pruned_catalog {
+        let agents_value = config
+            .get("agents")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        write_root_sections(&[("models", models_value), ("agents", agents_value)])
+    } else {
+        write_root_section("models", &models_value)
+    }
 }
 
 pub fn get_default_model() -> Result<Option<OpenClawDefaultModel>, AppError> {
@@ -1076,6 +1109,67 @@ mod tests {
         assert!(providers.contains_key("keep"));
         assert!(providers.contains_key("added"));
         assert!(!providers.contains_key("remove"));
+    }
+
+    #[test]
+    #[serial]
+    fn remove_provider_prunes_matching_agents_default_model_catalog_entries() {
+        let _guard = lock_test_home_and_settings();
+        let dir = tempdir().expect("create tempdir");
+        let _settings = SettingsGuard::with_openclaw_dir(dir.path());
+
+        fs::write(
+            get_openclaw_config_path(),
+            r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        models: [{ id: 'primary' }],
+      },
+      remove: {
+        models: [{ id: 'primary' }, { id: 'fallback' }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'keep/primary',
+      },
+      models: {
+        'keep/primary': { alias: 'Keep Primary' },
+        'remove/primary': { alias: 'Remove Primary' },
+        'remove/fallback': { alias: 'Remove Fallback' },
+      },
+    },
+  },
+}
+"#,
+        )
+        .expect("seed json5 config");
+
+        remove_provider("remove").expect("remove provider");
+
+        let config = read_openclaw_config().expect("read config after provider removal");
+        assert!(config["models"]["providers"].get("keep").is_some());
+        assert!(config["models"]["providers"].get("remove").is_none());
+        assert_eq!(
+            config["agents"]["defaults"]["models"]["keep/primary"]["alias"],
+            json!("Keep Primary")
+        );
+        assert!(
+            config["agents"]["defaults"]["models"]
+                .get("remove/primary")
+                .is_none(),
+            "removed provider primary catalog entry should be pruned"
+        );
+        assert!(
+            config["agents"]["defaults"]["models"]
+                .get("remove/fallback")
+                .is_none(),
+            "removed provider fallback catalog entry should be pruned"
+        );
     }
 
     #[test]
