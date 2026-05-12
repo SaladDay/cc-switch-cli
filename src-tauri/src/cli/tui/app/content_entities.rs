@@ -1,6 +1,29 @@
 use super::*;
 
 impl App {
+    fn openclaw_set_default_model_action(&mut self, row: &super::data::ProviderRow) -> Action {
+        if !row.is_in_config {
+            self.push_toast(
+                texts::tui_toast_provider_default_requires_live_config(),
+                ToastKind::Warning,
+            );
+            return Action::None;
+        }
+
+        let Some(model_id) = row.primary_model_id.clone() else {
+            self.push_toast(
+                texts::tui_toast_provider_default_model_missing(),
+                ToastKind::Warning,
+            );
+            return Action::None;
+        };
+
+        Action::ProviderSetDefaultModel {
+            provider_id: row.id.clone(),
+            model_id,
+        }
+    }
+
     fn provider_switch_action(&mut self, row: &super::data::ProviderRow, data: &UiData) -> Action {
         if supports_failover_controls(&self.app_type) && data.proxy.auto_failover_enabled {
             self.push_toast(
@@ -78,10 +101,19 @@ impl App {
                 self.open_provider_edit_form(row);
                 Action::None
             }
-            KeyCode::Char('s') | KeyCode::Char(' ') => {
+            KeyCode::Char('s') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
+                self.provider_switch_action(row, data)
+            }
+            KeyCode::Char(' ') => {
+                let Some(row) = visible.get(self.provider_idx) else {
+                    return Action::None;
+                };
+                if matches!(self.app_type, AppType::OpenClaw) && row.is_in_config {
+                    return self.openclaw_set_default_model_action(row);
+                }
                 self.provider_switch_action(row, data)
             }
             KeyCode::Char('x') => {
@@ -91,24 +123,7 @@ impl App {
                 if !matches!(self.app_type, AppType::OpenClaw) {
                     return Action::None;
                 }
-                if !row.is_in_config {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_requires_live_config(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                }
-                let Some(model_id) = row.primary_model_id.clone() else {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_model_missing(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                };
-                Action::ProviderSetDefaultModel {
-                    provider_id: row.id.clone(),
-                    model_id,
-                }
+                self.openclaw_set_default_model_action(row)
             }
             KeyCode::Char('d') => {
                 let Some(row) = visible.get(self.provider_idx) else {
@@ -210,29 +225,18 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => Action::None,
-            KeyCode::Char('s') | KeyCode::Char(' ') => self.provider_switch_action(row, data),
+            KeyCode::Char('s') => self.provider_switch_action(row, data),
+            KeyCode::Char(' ') => {
+                if matches!(self.app_type, AppType::OpenClaw) && row.is_in_config {
+                    return self.openclaw_set_default_model_action(row);
+                }
+                self.provider_switch_action(row, data)
+            }
             KeyCode::Char('x') => {
                 if !matches!(self.app_type, AppType::OpenClaw) {
                     return Action::None;
                 }
-                if !row.is_in_config {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_requires_live_config(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                }
-                let Some(model_id) = row.primary_model_id.clone() else {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_model_missing(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                };
-                Action::ProviderSetDefaultModel {
-                    provider_id: row.id.clone(),
-                    model_id,
-                }
+                self.openclaw_set_default_model_action(row)
             }
             KeyCode::Char('t') => {
                 let Some(url) = row.api_url.clone() else {

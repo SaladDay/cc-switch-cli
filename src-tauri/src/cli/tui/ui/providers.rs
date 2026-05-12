@@ -149,7 +149,7 @@ pub(super) fn render_providers(
                     if matches!(app.app_type, crate::app_config::AppType::OpenClaw)
                         && row.is_in_config
                     {
-                        keys.push(("x", texts::tui_key_set_default()));
+                        keys.push(("Space", texts::tui_key_set_default()));
                     }
                 }
                 if matches!(app.app_type, crate::app_config::AppType::OpenCode) {
@@ -320,7 +320,7 @@ pub(super) fn render_provider_detail(
         }
         keys.push(("t", texts::tui_key_speedtest()));
         if matches!(app.app_type, crate::app_config::AppType::OpenClaw) && row.is_in_config {
-            keys.push(("x", texts::tui_key_set_default()));
+            keys.push(("Space", texts::tui_key_set_default()));
         } else if matches!(app.app_type, crate::app_config::AppType::OpenCode) {
             keys.push(("c", texts::tui_key_stream_check()));
         } else if !matches!(

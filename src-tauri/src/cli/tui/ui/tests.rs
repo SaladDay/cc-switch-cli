@@ -6965,7 +6965,8 @@ fn openclaw_provider_list_key_bar_uses_additive_mode_actions() {
     }
 
     assert!(all.contains("s add/remove"));
-    assert!(all.contains("x set default"));
+    assert!(all.contains("Space set default"));
+    assert!(!all.contains("x set default"));
     assert!(!all.contains("s switch"));
 }
 
@@ -7113,6 +7114,7 @@ fn opencode_provider_list_key_bar_uses_config_membership_actions() {
     assert!(all.contains("c stream check"), "{all}");
     assert!(!all.contains("s switch"), "{all}");
     assert!(!all.contains("x set default"), "{all}");
+    assert!(!all.contains("Space set default"), "{all}");
 }
 
 #[test]
@@ -7184,7 +7186,8 @@ fn openclaw_provider_detail_key_bar_uses_additive_mode_actions() {
     }
 
     assert!(all.contains("s add/remove"));
-    assert!(all.contains("x set default"));
+    assert!(all.contains("Space set default"));
+    assert!(!all.contains("x set default"));
     assert!(!all.contains("s switch"));
 }
 
@@ -7210,6 +7213,7 @@ fn opencode_provider_detail_key_bar_uses_config_membership_actions() {
     );
     assert!(!all.contains("s switch"), "{all}");
     assert!(!all.contains("x set default"), "{all}");
+    assert!(!all.contains("Space set default"), "{all}");
 }
 
 #[test]
@@ -7225,7 +7229,8 @@ fn openclaw_provider_list_key_bar_shows_edit_for_tracked_provider() {
     let all = all_text(&buf);
 
     assert!(all.contains("e edit"), "{all}");
-    assert!(all.contains("x set default"), "{all}");
+    assert!(all.contains("Space set default"), "{all}");
+    assert!(!all.contains("x set default"), "{all}");
 }
 
 #[test]
@@ -7243,7 +7248,8 @@ fn openclaw_provider_detail_key_bar_shows_edit_for_tracked_provider() {
     let all = all_text(&buf);
 
     assert!(all.contains("e edit"), "{all}");
-    assert!(all.contains("x set default"), "{all}");
+    assert!(all.contains("Space set default"), "{all}");
+    assert!(!all.contains("x set default"), "{all}");
 }
 
 #[test]
@@ -7526,7 +7532,8 @@ fn openclaw_provider_list_key_bar_localizes_actions_in_chinese() {
     let compact = all.replace(' ', "");
 
     assert!(compact.contains("s添加/移除"), "{all}");
-    assert!(compact.contains("x设为默认"), "{all}");
+    assert!(compact.contains("Space设为默认"), "{all}");
+    assert!(!compact.contains("x设为默认"), "{all}");
     assert!(!all.contains("add/remove"), "{all}");
     assert!(!all.contains("set default"), "{all}");
 }
@@ -7547,7 +7554,8 @@ fn openclaw_provider_detail_key_bar_localizes_actions_in_chinese() {
     let compact = all.replace(' ', "");
 
     assert!(compact.contains("s添加/移除"), "{all}");
-    assert!(compact.contains("x设为默认"), "{all}");
+    assert!(compact.contains("Space设为默认"), "{all}");
+    assert!(!compact.contains("x设为默认"), "{all}");
     assert!(!all.contains("add/remove"), "{all}");
     assert!(!all.contains("set default"), "{all}");
 }

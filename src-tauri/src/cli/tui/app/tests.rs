@@ -1156,6 +1156,38 @@ mod tests {
     }
 
     #[test]
+    fn openclaw_providers_space_key_sets_default_model_from_selected_config_provider() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("claude-sonnet-4".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p1" && model_id == "claude-sonnet-4"
+        ));
+    }
+
+    #[test]
     fn openclaw_providers_s_key_allows_removing_fallback_only_default_provider() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Providers;
@@ -1439,6 +1471,40 @@ mod tests {
         });
 
         let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p1" && model_id == "claude-sonnet-4"
+        ));
+    }
+
+    #[test]
+    fn openclaw_provider_detail_space_key_sets_default_model() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("claude-sonnet-4".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(
             action,
             Action::ProviderSetDefaultModel { provider_id, model_id }
