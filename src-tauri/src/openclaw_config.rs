@@ -707,25 +707,43 @@ pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
         removed = providers.remove(id).is_some();
     }
 
-    if !removed {
+    let pruned_catalog = remove_provider_model_catalog_entries(&mut config, id);
+
+    if !removed && !pruned_catalog {
         return Ok(OpenClawWriteOutcome::default());
     }
 
-    let pruned_catalog = remove_provider_model_catalog_entries(&mut config, id);
-    let models_value = config.get("models").cloned().unwrap_or_else(|| {
-        json!({
-            "mode": "merge",
-            "providers": {}
-        })
-    });
-    if pruned_catalog {
-        let agents_value = config
-            .get("agents")
-            .cloned()
-            .unwrap_or_else(|| Value::Object(Map::new()));
-        write_root_sections(&[("models", models_value), ("agents", agents_value)])
-    } else {
-        write_root_section("models", &models_value)
+    match (removed, pruned_catalog) {
+        (true, true) => {
+            let models_value = config.get("models").cloned().unwrap_or_else(|| {
+                json!({
+                    "mode": "merge",
+                    "providers": {}
+                })
+            });
+            let agents_value = config
+                .get("agents")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Map::new()));
+            write_root_sections(&[("models", models_value), ("agents", agents_value)])
+        }
+        (true, false) => {
+            let models_value = config.get("models").cloned().unwrap_or_else(|| {
+                json!({
+                    "mode": "merge",
+                    "providers": {}
+                })
+            });
+            write_root_section("models", &models_value)
+        }
+        (false, true) => {
+            let agents_value = config
+                .get("agents")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Map::new()));
+            write_root_section("agents", &agents_value)
+        }
+        (false, false) => Ok(OpenClawWriteOutcome::default()),
     }
 }
 
@@ -1169,6 +1187,56 @@ mod tests {
                 .get("remove/fallback")
                 .is_none(),
             "removed provider fallback catalog entry should be pruned"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn remove_provider_prunes_stale_agents_catalog_even_when_provider_is_already_missing() {
+        let _guard = lock_test_home_and_settings();
+        let dir = tempdir().expect("create tempdir");
+        let _settings = SettingsGuard::with_openclaw_dir(dir.path());
+
+        fs::write(
+            get_openclaw_config_path(),
+            r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        models: [{ id: 'primary' }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'keep/primary',
+      },
+      models: {
+        'keep/primary': { alias: 'Keep Primary' },
+        'stale/primary': {},
+      },
+    },
+  },
+}
+"#,
+        )
+        .expect("seed json5 config");
+
+        remove_provider("stale").expect("remove stale catalog references");
+
+        let config = read_openclaw_config().expect("read config after stale cleanup");
+        assert!(config["models"]["providers"].get("keep").is_some());
+        assert_eq!(
+            config["agents"]["defaults"]["models"]["keep/primary"]["alias"],
+            json!("Keep Primary")
+        );
+        assert!(
+            config["agents"]["defaults"]["models"]
+                .get("stale/primary")
+                .is_none(),
+            "stale provider catalog entry should be pruned even when provider is already absent"
         );
     }
 
