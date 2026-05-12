@@ -50,31 +50,34 @@ pub(super) fn render_skills_installed(
 
     let header = Row::new(vec![
         Cell::from(texts::header_name()),
-        Cell::from(texts::tui_header_claude_short()),
-        Cell::from(texts::tui_header_codex_short()),
-        Cell::from(texts::tui_header_gemini_short()),
-        Cell::from(texts::tui_header_opencode_short()),
+        centered_cell("Claude"),
+        centered_cell("Codex"),
+        centered_cell("Gemini"),
+        centered_cell("OpenCode"),
+        centered_cell("Hermes"),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     let rows = visible.iter().map(|skill| {
         Row::new(vec![
             Cell::from(skill_display_name(&skill.name, &skill.directory).to_string()),
-            Cell::from(skill_marker(skill.apps.claude)),
-            Cell::from(skill_marker(skill.apps.codex)),
-            Cell::from(skill_marker(skill.apps.gemini)),
-            Cell::from(skill_marker(skill.apps.opencode)),
+            centered_cell(skill_marker(skill.apps.claude)),
+            centered_cell(skill_marker(skill.apps.codex)),
+            centered_cell(skill_marker(skill.apps.gemini)),
+            centered_cell(skill_marker(skill.apps.opencode)),
+            centered_cell(skill_marker(skill.apps.hermes)),
         ])
     });
 
     let table = Table::new(
         rows,
         [
-            Constraint::Min(10),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Min(18),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(8),
         ],
     )
     .header(header)
@@ -112,12 +115,19 @@ fn installed_summary(data: &UiData) -> String {
         .iter()
         .filter(|s| s.apps.opencode)
         .count();
+    let enabled_hermes = data
+        .skills
+        .installed
+        .iter()
+        .filter(|s| s.apps.hermes)
+        .count();
 
     texts::tui_skills_installed_counts(
         enabled_claude,
         enabled_codex,
         enabled_gemini,
         enabled_opencode,
+        enabled_hermes,
     )
 }
 
@@ -168,4 +178,8 @@ fn skill_marker(enabled: bool) -> &'static str {
     } else {
         texts::tui_marker_inactive()
     }
+}
+
+fn centered_cell(text: impl Into<String>) -> Cell<'static> {
+    Cell::from(Line::from(text.into()).alignment(Alignment::Center))
 }

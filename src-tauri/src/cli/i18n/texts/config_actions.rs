@@ -315,14 +315,15 @@ pub fn tui_skills_installed_counts(
     codex: usize,
     gemini: usize,
     opencode: usize,
+    hermes: usize,
 ) -> String {
     if is_chinese() {
         format!(
-            "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+            "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
         )
     } else {
         format!(
-            "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+            "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
         )
     }
 }

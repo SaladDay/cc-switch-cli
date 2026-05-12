@@ -2103,10 +2103,15 @@ fn skills_page_renders_sync_method_and_installed_rows() {
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    assert!(all.contains(&texts::tui_skills_installed_counts(1, 0, 0, 0)));
+    assert!(all.contains(&texts::tui_skills_installed_counts(1, 0, 0, 0, 0)));
     assert!(!all.contains(texts::tui_header_directory()));
     assert!(!all.contains("hello-skill"));
     assert!(all.contains("Hello Skill"));
+    assert!(all.contains("Claude"));
+    assert!(all.contains("Codex"));
+    assert!(all.contains("Gemini"));
+    assert!(all.contains("OpenCode"));
+    assert!(all.contains("Hermes"));
 }
 
 #[test]
@@ -2174,6 +2179,33 @@ fn skills_page_shows_opencode_summary() {
 }
 
 #[test]
+fn skills_page_shows_hermes_summary_and_column() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Hermes));
+    app.route = Route::Skills;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    let mut skill = installed_skill("hello-skill", "Hello Skill");
+    skill.apps = SkillApps {
+        claude: false,
+        codex: false,
+        gemini: false,
+        opencode: false,
+        hermes: true,
+    };
+    data.skills.installed = vec![skill];
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains("Hermes"));
+    assert!(all.contains("Hermes: 1"));
+}
+
+#[test]
 fn skill_detail_page_shows_opencode_enabled_state() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -2201,6 +2233,36 @@ fn skill_detail_page_shows_opencode_enabled_state() {
     assert!(all.contains(texts::tui_label_enabled_for()));
     assert!(all.contains("OpenCode"));
     assert!(!all.contains("opencode=true"));
+}
+
+#[test]
+fn skill_detail_page_shows_hermes_enabled_state() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Hermes));
+    app.route = Route::SkillDetail {
+        directory: "hello-skill".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    let mut skill = installed_skill("hello-skill", "Hello Skill");
+    skill.apps = SkillApps {
+        claude: false,
+        codex: false,
+        gemini: false,
+        opencode: false,
+        hermes: true,
+    };
+    data.skills.installed = vec![skill];
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains(texts::tui_label_enabled_for()));
+    assert!(all.contains("Hermes"));
+    assert!(!all.contains("hermes=true"));
 }
 
 #[test]
