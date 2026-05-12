@@ -26,6 +26,13 @@ const CODEX_RESERVED_MODEL_PROVIDER_IDS: &[&str] = &[
 
 /// 获取 Codex 配置目录路径
 pub fn get_codex_config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CODEX_HOME") {
+        let dir = PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() && !dir.to_string_lossy().trim().is_empty() && dir.is_dir() {
+            return dir;
+        }
+    }
+
     if let Some(custom) = crate::settings::get_codex_override_dir() {
         return custom;
     }
@@ -499,6 +506,153 @@ pub fn clean_codex_provider_key(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
+    use std::env;
+    use std::ffi::OsString;
+
+    struct CodexHomeEnvGuard {
+        original: Option<OsString>,
+    }
+
+    impl CodexHomeEnvGuard {
+        fn new(value: Option<&str>) -> Self {
+            let original = env::var_os("CODEX_HOME");
+            match value {
+                Some(value) => unsafe { env::set_var("CODEX_HOME", value) },
+                None => unsafe { env::remove_var("CODEX_HOME") },
+            }
+            Self { original }
+        }
+    }
+
+    impl Drop for CodexHomeEnvGuard {
+        fn drop(&mut self) {
+            match self.original.as_ref() {
+                Some(value) => unsafe { env::set_var("CODEX_HOME", value) },
+                None => unsafe { env::remove_var("CODEX_HOME") },
+            }
+        }
+    }
+
+    struct SettingsGuard {
+        original: crate::settings::AppSettings,
+    }
+
+    impl SettingsGuard {
+        fn with_codex_config_dir(dir: Option<&str>) -> Self {
+            let original = crate::settings::get_settings();
+            let mut settings = original.clone();
+            settings.codex_config_dir = dir.map(str::to_string);
+            crate::settings::update_settings(settings).unwrap();
+            Self { original }
+        }
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            let _ = crate::settings::update_settings(self.original.clone());
+        }
+    }
+
+    #[test]
+    fn get_codex_config_dir_respects_codex_home_env_var_when_directory_exists() {
+        let _guard = lock_test_home_and_settings();
+        set_test_home_override(Some(Path::new("/tmp/codex-home-env-home")));
+        let _settings = SettingsGuard::with_codex_config_dir(None);
+        let codex_home =
+            std::env::temp_dir().join(format!("cc-switch-codex-home-env-{}", std::process::id()));
+        fs::create_dir_all(&codex_home).unwrap();
+        let _env = CodexHomeEnvGuard::new(codex_home.to_str());
+
+        assert_eq!(get_codex_config_dir(), codex_home);
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn get_codex_config_dir_falls_back_to_home_dot_codex_when_codex_home_unset() {
+        let _guard = lock_test_home_and_settings();
+        set_test_home_override(Some(Path::new("/tmp/codex-default-home")));
+        let _settings = SettingsGuard::with_codex_config_dir(None);
+        let _env = CodexHomeEnvGuard::new(None);
+
+        assert_eq!(
+            get_codex_config_dir(),
+            PathBuf::from("/tmp/codex-default-home").join(".codex")
+        );
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn get_codex_config_dir_blank_codex_home_falls_back_to_home_dot_codex() {
+        let _guard = lock_test_home_and_settings();
+        set_test_home_override(Some(Path::new("/tmp/codex-blank-env-home")));
+        let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
+        let _env = CodexHomeEnvGuard::new(Some("   "));
+
+        assert_eq!(
+            get_codex_config_dir(),
+            PathBuf::from("/tmp/codex-blank-env-home").join(".codex")
+        );
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn get_codex_config_dir_nonexistent_codex_home_falls_back_to_home_dot_codex() {
+        let _guard = lock_test_home_and_settings();
+        set_test_home_override(Some(Path::new("/tmp/codex-nonexistent-env-home")));
+        let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
+        let missing = std::env::temp_dir().join(format!(
+            "cc-switch-codex-missing-env-{}",
+            std::process::id()
+        ));
+        let _env = CodexHomeEnvGuard::new(missing.to_str());
+
+        assert_eq!(
+            get_codex_config_dir(),
+            PathBuf::from("/tmp/codex-nonexistent-env-home").join(".codex")
+        );
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn get_codex_config_dir_file_codex_home_falls_back_to_home_dot_codex() {
+        let _guard = lock_test_home_and_settings();
+        set_test_home_override(Some(Path::new("/tmp/codex-file-env-home")));
+        let _settings = SettingsGuard::with_codex_config_dir(None);
+        let codex_home_file = std::env::temp_dir().join(format!(
+            "cc-switch-codex-home-env-file-{}",
+            std::process::id()
+        ));
+        fs::write(&codex_home_file, "not a directory").unwrap();
+        let _env = CodexHomeEnvGuard::new(codex_home_file.to_str());
+
+        assert_eq!(
+            get_codex_config_dir(),
+            PathBuf::from("/tmp/codex-file-env-home").join(".codex")
+        );
+
+        let _ = fs::remove_file(codex_home_file);
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn get_codex_config_dir_ignores_settings_override() {
+        let _guard = lock_test_home_and_settings();
+        set_test_home_override(Some(Path::new("/tmp/codex-precedence-home")));
+        let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
+        let _env = CodexHomeEnvGuard::new(None);
+
+        assert_eq!(
+            get_codex_config_dir(),
+            PathBuf::from("/tmp/codex-precedence-home").join(".codex")
+        );
+
+        set_test_home_override(None);
+    }
 
     #[test]
     fn normalize_live_config_preserves_current_custom_model_provider_id() {
