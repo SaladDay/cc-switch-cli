@@ -1,6 +1,19 @@
+use super::common::merge_json_values;
 use super::*;
 
 impl ProviderService {
+    const CLAUDE_PROVIDER_ENV_KEYS: &'static [&'static str] = &[
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_REASONING_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    ];
+
     pub(super) fn parse_common_claude_config_snippet(snippet: &str) -> Result<Value, AppError> {
         let value: Value = serde_json::from_str(snippet).map_err(|e| {
             AppError::localized(
@@ -119,6 +132,104 @@ impl ProviderService {
         )
     }
 
+    fn strip_claude_provider_owned_live_keys(settings: &mut Value) {
+        let Some(env) = settings.get_mut("env").and_then(Value::as_object_mut) else {
+            return;
+        };
+
+        for key in Self::CLAUDE_PROVIDER_ENV_KEYS {
+            env.remove(*key);
+        }
+    }
+
+    pub(super) fn merge_claude_provider_owned_values_from_live(snapshot: &mut Value, live: &Value) {
+        let Some(live_env) = live.get("env").and_then(Value::as_object) else {
+            return;
+        };
+
+        if !snapshot.is_object() {
+            *snapshot = json!({});
+        }
+
+        let snapshot_obj = snapshot
+            .as_object_mut()
+            .expect("snapshot should be object after normalization");
+        let env_value = snapshot_obj
+            .entry("env".to_string())
+            .or_insert_with(|| json!({}));
+        if !env_value.is_object() {
+            *env_value = json!({});
+        }
+        let snapshot_env = env_value
+            .as_object_mut()
+            .expect("env should be object after normalization");
+
+        for key in Self::CLAUDE_PROVIDER_ENV_KEYS {
+            snapshot_env.remove(*key);
+            if let Some(value) = live_env.get(*key) {
+                snapshot_env.insert((*key).to_string(), value.clone());
+            }
+        }
+    }
+
+    pub(super) fn build_claude_live_snapshot_for_write(
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        previous_common_config_snippet: Option<&str>,
+        apply_common_config: bool,
+        existing_live_settings: Option<Value>,
+    ) -> Result<Value, AppError> {
+        let apply_common_config = Self::resolve_live_apply_common_config(
+            &AppType::Claude,
+            provider,
+            common_config_snippet,
+            apply_common_config,
+        );
+
+        let mut live_base = existing_live_settings.unwrap_or_else(|| json!({}));
+        if !live_base.is_object() {
+            live_base = json!({});
+        }
+
+        Self::strip_claude_provider_owned_live_keys(&mut live_base);
+
+        if let Some(snippet) = previous_common_config_snippet.map(str::trim) {
+            if !snippet.is_empty() {
+                match common_config::remove_common_config_from_settings(
+                    &AppType::Claude,
+                    &live_base,
+                    snippet,
+                ) {
+                    Ok(settings) => live_base = settings,
+                    Err(err)
+                        if Self::should_skip_common_config_migration_error(
+                            &AppType::Claude,
+                            &err,
+                        ) =>
+                    {
+                        log::warn!(
+                            "skip stripping invalid stored Claude common config snippet from live base: {err}"
+                        );
+                        live_base = json!({});
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+
+        let mut provider_content = common_config::build_effective_settings_with_common_config(
+            &AppType::Claude,
+            provider,
+            common_config_snippet,
+            apply_common_config,
+        )?;
+        let _ = Self::normalize_claude_models_in_value(&mut provider_content);
+        merge_json_values(&mut live_base, &provider_content);
+        let _ = Self::normalize_claude_models_in_value(&mut live_base);
+
+        Ok(live_base)
+    }
+
     pub(super) fn prepare_switch_claude(
         config: &mut MultiAppConfig,
         provider_id: &str,
@@ -180,7 +291,10 @@ impl ProviderService {
         );
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
             if let Some(current) = manager.providers.get_mut(current_id) {
-                current.settings_config = live;
+                Self::merge_claude_provider_owned_values_from_live(
+                    &mut current.settings_config,
+                    &live,
+                );
             }
         }
 
@@ -214,6 +328,7 @@ impl ProviderService {
     pub(super) fn write_claude_live(
         provider: &Provider,
         common_config_snippet: Option<&str>,
+        previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
         if !crate::sync_policy::should_sync_live(&AppType::Claude) {
@@ -221,11 +336,17 @@ impl ProviderService {
         }
 
         let settings_path = get_claude_settings_path();
-        let content_to_write = Self::build_effective_live_snapshot(
-            &AppType::Claude,
+        let existing_live_settings = if settings_path.exists() {
+            Some(read_json_file::<Value>(&settings_path)?)
+        } else {
+            None
+        };
+        let content_to_write = Self::build_claude_live_snapshot_for_write(
             provider,
             common_config_snippet,
+            previous_common_config_snippet,
             apply_common_config,
+            existing_live_settings,
         )?;
 
         write_json_file(&settings_path, &content_to_write)?;

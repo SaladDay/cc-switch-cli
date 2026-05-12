@@ -160,31 +160,3 @@ pub(super) fn merge_json_values(base: &mut Value, overlay: &Value) {
         }
     }
 }
-
-pub(super) fn strip_common_values(target: &mut Value, common: &Value) {
-    match (target, common) {
-        (Value::Object(target_map), Value::Object(common_map)) => {
-            for (key, common_value) in common_map {
-                let should_remove = match target_map.get_mut(key) {
-                    Some(target_value) => match target_value {
-                        Value::Object(_) if matches!(common_value, Value::Object(_)) => {
-                            strip_common_values(target_value, common_value);
-                            target_value.as_object().is_some_and(|m| m.is_empty())
-                        }
-                        _ => target_value == common_value,
-                    },
-                    None => false,
-                };
-
-                if should_remove {
-                    target_map.remove(key);
-                }
-            }
-        }
-        (target_value, common_value) => {
-            if target_value == common_value {
-                *target_value = Value::Null;
-            }
-        }
-    }
-}
