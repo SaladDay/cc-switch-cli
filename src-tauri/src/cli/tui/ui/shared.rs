@@ -719,13 +719,70 @@ where
 }
 
 pub(super) fn mask_api_key(key: &str) -> String {
-    let mut iter = key.chars();
-    let prefix: String = iter.by_ref().take(8).collect();
-    if iter.next().is_some() {
-        format!("{prefix}...")
-    } else {
-        prefix
+    let key = key.trim();
+    if key.is_empty() || key == redacted_secret_placeholder() {
+        return key.to_string();
     }
+
+    let chars = key.chars().collect::<Vec<_>>();
+    match chars.len() {
+        0 => String::new(),
+        1..=4 => "****".to_string(),
+        5..=8 => format!(
+            "{}****{}",
+            chars.iter().take(1).collect::<String>(),
+            chars.iter().skip(chars.len() - 1).collect::<String>()
+        ),
+        9..=12 => format!(
+            "{}****{}",
+            chars.iter().take(2).collect::<String>(),
+            chars.iter().skip(chars.len() - 2).collect::<String>()
+        ),
+        _ => format!(
+            "{}****{}",
+            chars.iter().take(8).collect::<String>(),
+            chars.iter().skip(chars.len() - 4).collect::<String>()
+        ),
+    }
+}
+
+pub(super) fn provider_api_key<'a>(
+    settings_config: &'a Value,
+    app_type: &AppType,
+) -> Option<&'a str> {
+    let value = match app_type {
+        AppType::Claude => settings_config.get("env").and_then(|env| {
+            env.get("ANTHROPIC_AUTH_TOKEN")
+                .or_else(|| env.get("ANTHROPIC_API_KEY"))
+        }),
+        AppType::Codex => settings_config
+            .get("auth")
+            .and_then(|auth| auth.get("OPENAI_API_KEY")),
+        AppType::Gemini => settings_config
+            .get("env")
+            .and_then(|env| env.get("GEMINI_API_KEY")),
+        AppType::OpenCode => settings_config.get("options").and_then(|options| {
+            options
+                .get("apiKey")
+                .or_else(|| options.get("api_key"))
+                .or_else(|| options.get("api-key"))
+        }),
+        AppType::OpenClaw | AppType::Hermes => settings_config
+            .get("apiKey")
+            .or_else(|| settings_config.get("api_key")),
+    };
+
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+}
+
+pub(super) fn masked_provider_api_key(
+    settings_config: &Value,
+    app_type: &AppType,
+) -> Option<String> {
+    provider_api_key(settings_config, app_type).map(mask_api_key)
 }
 
 pub(super) fn redacted_secret_placeholder() -> &'static str {

@@ -41,11 +41,19 @@ use crate::{
 fn mask_api_key_handles_multibyte_safely() {
     let short = "你你你"; // 3 chars, 9 bytes
     let masked = super::mask_api_key(short);
-    assert_eq!(masked, short);
+    assert_eq!(masked, "****");
 
-    let long = "你".repeat(9);
+    assert_eq!(
+        super::mask_api_key("sk-test-1234567890"),
+        "sk-test-****7890"
+    );
+    assert_eq!(super::mask_api_key("[redacted]"), "[redacted]");
+
+    let long = format!("{}abcd", "你".repeat(9));
     let masked = super::mask_api_key(&long);
-    assert!(masked.ends_with("..."));
+    assert!(masked.starts_with(&"你".repeat(8)));
+    assert!(masked.ends_with("abcd"));
+    assert!(masked.contains("****"));
 }
 
 #[test]
@@ -85,7 +93,7 @@ fn openclaw_tui_form_masks_api_key_in_default_view() {
 
     let all = all_text(&render(&app, &minimal_data(&app.app_type)));
 
-    assert!(all.contains("[redacted]"), "{all}");
+    assert!(all.contains("sk-openc****cret"), "{all}");
     assert!(!all.contains("sk-openclaw-secret"), "{all}");
 }
 
@@ -177,7 +185,8 @@ fn provider_detail_uses_legacy_claude_api_format_for_display() {
         "Demo Provider".to_string(),
         json!({
             "env": {
-                "ANTHROPIC_BASE_URL": "https://example.com"
+                "ANTHROPIC_BASE_URL": "https://example.com",
+                "ANTHROPIC_API_KEY": "sk-ant-1234567890"
             },
             "api_format": "openai_chat"
         }),
@@ -188,6 +197,8 @@ fn provider_detail_uses_legacy_claude_api_format_for_display() {
     let all = all_text(&buf);
 
     assert!(all.contains("OpenAI Chat Completions"));
+    assert!(all.contains("sk-ant-1****7890"), "{all}");
+    assert!(!all.contains("sk-ant-1234567890"), "{all}");
 }
 
 #[test]
@@ -1464,6 +1475,30 @@ fn home_opencode_reports_configured_provider_count_instead_of_current_provider_n
     assert!(all.contains("Provider"), "{all}");
     assert!(all.contains("1/1 in config"), "{all}");
     assert!(!all.contains("None"), "{all}");
+}
+
+#[test]
+fn home_shows_current_api_key_masked() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Main;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_current = true;
+    data.providers.rows[0].provider.settings_config = json!({
+        "env": {
+            "ANTHROPIC_API_KEY": "sk-home-1234567890"
+        }
+    });
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("API Key"), "{all}");
+    assert!(all.contains("sk-home-****7890"), "{all}");
+    assert!(!all.contains("sk-home-1234567890"), "{all}");
 }
 
 #[test]

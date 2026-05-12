@@ -176,7 +176,7 @@ pub(crate) fn render_provider_add_form(
         if let Some(input) = provider.input(field) {
             if !editor_active && should_redact_provider_field(provider, field) {
                 frame.render_widget(
-                    Paragraph::new(Line::raw(redacted_secret_placeholder()))
+                    Paragraph::new(Line::raw(mask_api_key(&input.value)))
                         .wrap(Wrap { trim: false }),
                     editor_inner,
                 );
@@ -394,7 +394,7 @@ pub(crate) fn provider_field_label_and_value(
             .input(field)
             .map(|v| {
                 if should_redact_provider_field(provider, field) && !v.value.trim().is_empty() {
-                    redacted_secret_placeholder().to_string()
+                    mask_api_key(&v.value)
                 } else {
                     v.value.trim().to_string()
                 }

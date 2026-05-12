@@ -365,6 +365,16 @@ pub(super) fn render_provider_detail(
             Span::raw(url),
         ]));
     }
+    if let Some(api_key) = masked_provider_api_key(&row.provider.settings_config, &app.app_type) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                texts::tui_label_api_key(),
+                Style::default().fg(theme.accent),
+            ),
+            Span::raw(": "),
+            Span::raw(api_key),
+        ]));
+    }
 
     if matches!(app.app_type, crate::app_config::AppType::OpenClaw) {
         lines.push(Line::raw(""));
@@ -428,12 +438,6 @@ pub(super) fn render_provider_detail(
             .get("env")
             .and_then(|v| v.as_object())
         {
-            let api_key = env
-                .get("ANTHROPIC_AUTH_TOKEN")
-                .or_else(|| env.get("ANTHROPIC_API_KEY"))
-                .and_then(|v| v.as_str())
-                .map(mask_api_key)
-                .unwrap_or_else(|| texts::tui_na().to_string());
             let base_url = env
                 .get("ANTHROPIC_BASE_URL")
                 .and_then(|v| v.as_str())
@@ -457,14 +461,6 @@ pub(super) fn render_provider_detail(
                 ),
                 Span::raw(": "),
                 Span::raw(texts::tui_claude_api_format_value(api_format)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled(
-                    texts::tui_label_api_key(),
-                    Style::default().fg(theme.accent),
-                ),
-                Span::raw(": "),
-                Span::raw(api_key),
             ]));
         }
     }

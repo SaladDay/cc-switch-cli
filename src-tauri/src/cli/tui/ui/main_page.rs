@@ -18,30 +18,34 @@ fn main_provider_status(app: &App, data: &UiData) -> String {
         );
     }
 
-    data.providers
-        .rows
-        .iter()
-        .find(|p| p.is_current)
+    main_connection_provider_row(app, data)
         .map(|row| data::provider_display_name(&app.app_type, row))
         .unwrap_or_else(|| texts::none().to_string())
 }
 
 fn main_api_url(app: &App, data: &UiData) -> String {
-    let api_url = if matches!(app.app_type, AppType::OpenCode) {
-        data.providers
-            .rows
-            .iter()
-            .find(|p| p.is_in_config)
-            .and_then(|p| p.api_url.as_deref())
-    } else {
-        data.providers
-            .rows
-            .iter()
-            .find(|p| p.is_current)
-            .and_then(|p| p.api_url.as_deref())
-    };
+    let api_url = main_connection_provider_row(app, data).and_then(|p| p.api_url.as_deref());
 
     api_url.unwrap_or(texts::tui_na()).to_string()
+}
+
+fn main_api_key(app: &App, data: &UiData) -> String {
+    main_connection_provider_row(app, data)
+        .and_then(|row| masked_provider_api_key(&row.provider.settings_config, &app.app_type))
+        .unwrap_or_else(|| texts::tui_na().to_string())
+}
+
+fn main_connection_provider_row<'a>(app: &App, data: &'a UiData) -> Option<&'a ProviderRow> {
+    match app.app_type {
+        AppType::OpenCode => data.providers.rows.iter().find(|p| p.is_in_config),
+        AppType::OpenClaw => data
+            .providers
+            .rows
+            .iter()
+            .find(|p| p.is_default_model)
+            .or_else(|| data.providers.rows.iter().find(|p| p.is_in_config)),
+        _ => data.providers.rows.iter().find(|p| p.is_current),
+    }
 }
 
 pub(super) fn render_main(
@@ -67,6 +71,7 @@ pub(super) fn render_main(
         .count();
 
     let api_url = main_api_url(app, data);
+    let api_key = main_api_key(app, data);
 
     let label_width = 14;
     let value_style = Style::default().fg(theme.cyan);
@@ -152,6 +157,12 @@ pub(super) fn render_main(
             texts::tui_label_api_url(),
             label_width,
             vec![Span::styled(api_url, value_style)],
+        ),
+        kv_line(
+            theme,
+            texts::tui_label_api_key(),
+            label_width,
+            vec![Span::styled(api_key, value_style)],
         ),
     ];
     if let Some(quota) = current_quota_line {
