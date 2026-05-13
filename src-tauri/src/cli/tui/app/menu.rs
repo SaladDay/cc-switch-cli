@@ -69,7 +69,6 @@ impl App {
             openclaw_daily_memory_search_results: Vec::new(),
             config_webdav_idx: 0,
             webdav_quick_setup_username: None,
-            language_idx: 0,
             settings_idx: 0,
             settings_proxy_idx: 0,
         }

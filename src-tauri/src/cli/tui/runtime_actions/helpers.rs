@@ -8,7 +8,7 @@ use crate::error::AppError;
 use crate::services::McpService;
 
 use super::super::app::visible_prompts;
-use super::super::app::{App, LoadingKind, Overlay, TextViewState, ToastKind};
+use super::super::app::{App, LoadingKind, Overlay, ToastKind};
 use super::super::data::{load_proxy_config, load_state, UiData};
 use super::super::runtime_systems::{ProxyReq, RequestTracker};
 
@@ -186,15 +186,6 @@ pub(super) fn refresh_openclaw_daily_memory_search_results(app: &mut App) -> Res
             .min(app.openclaw_daily_memory_search_results.len() - 1);
     }
     Ok(())
-}
-
-pub(super) fn text_view(title: String, content: String) -> Overlay {
-    Overlay::TextView(TextViewState {
-        title,
-        lines: content.lines().map(|s| s.to_string()).collect(),
-        scroll: 0,
-        action: None,
-    })
 }
 
 pub(super) fn select_prompt_by_id(app: &mut App, data: &UiData, id: &str) {

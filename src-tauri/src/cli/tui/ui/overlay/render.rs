@@ -188,15 +188,6 @@ pub(crate) fn render_overlay(
             *selected_idx,
             selected,
         ),
-        Overlay::SkillsSyncMethodPicker { selected } => {
-            super::pickers::render_skills_sync_method_picker_overlay(
-                frame,
-                data,
-                content_area,
-                theme,
-                *selected,
-            )
-        }
         Overlay::McpEnvPicker { selected } => super::mcp_env::render_mcp_env_picker_overlay(
             frame,
             app,

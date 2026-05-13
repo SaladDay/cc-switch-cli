@@ -71,7 +71,6 @@ pub enum ConfirmAction {
     ProviderApiFormatProxyNotice,
     OpenClawDailyMemoryDelete { filename: String },
     FormSaveBeforeClose,
-    EditorDiscard,
     EditorSaveBeforeClose,
     WebDavMigrateV1ToV2,
 }
@@ -95,7 +94,6 @@ pub enum TextSubmit {
     SettingsProxyListenAddress,
     SettingsProxyListenPort,
     SettingsOpenClawConfigDir,
-    SkillsInstallSpec,
     SkillsDiscoverQuery,
     SkillsRepoAdd,
     OpenClawDailyMemoryFilename,
@@ -129,16 +127,7 @@ pub struct TextViewState {
 
 #[derive(Debug, Clone)]
 pub enum TextViewAction {
-    ProxyToggleTakeover { app_type: AppType, enabled: bool },
-}
-
-impl TextViewAction {
-    pub fn key_label(&self) -> &'static str {
-        match self {
-            TextViewAction::ProxyToggleTakeover { enabled: true, .. } => texts::tui_key_takeover(),
-            TextViewAction::ProxyToggleTakeover { enabled: false, .. } => texts::tui_key_restore(),
-        }
-    }
+    ProxyToggleTakeover,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,9 +239,6 @@ pub enum Overlay {
         skills: Vec<crate::services::skill::UnmanagedSkill>,
         selected_idx: usize,
         selected: HashSet<String>,
-    },
-    SkillsSyncMethodPicker {
-        selected: usize,
     },
     McpEnvPicker {
         selected: usize,

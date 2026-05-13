@@ -393,45 +393,6 @@ fn pad_display_width(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(width - used))
 }
 
-fn compact_two_column_lines(lines: &[String], total_width: u16) -> Option<Vec<String>> {
-    if lines.len() != 4 {
-        return None;
-    }
-
-    let gap = 4usize;
-    let total_width = total_width as usize;
-    let left_width = lines
-        .iter()
-        .step_by(2)
-        .map(|line| UnicodeWidthStr::width(line.as_str()))
-        .max()
-        .unwrap_or(0);
-    let right_width = lines
-        .iter()
-        .skip(1)
-        .step_by(2)
-        .map(|line| UnicodeWidthStr::width(line.as_str()))
-        .max()
-        .unwrap_or(0);
-
-    if left_width + gap + right_width > total_width {
-        return None;
-    }
-
-    Some(vec![
-        format!(
-            "{}{}",
-            pad_display_width(&lines[0], left_width + gap),
-            lines[1]
-        ),
-        format!(
-            "{}{}",
-            pad_display_width(&lines[2], left_width + gap),
-            lines[3]
-        ),
-    ])
-}
-
 struct OpenClawEnvStyledRow {
     plain_text: String,
     line: Line<'static>,

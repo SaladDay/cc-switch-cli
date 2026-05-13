@@ -124,15 +124,6 @@ pub enum CodexPreviewSection {
     Config,
 }
 
-impl CodexPreviewSection {
-    pub fn toggle(self) -> Self {
-        match self {
-            Self::Auth => Self::Config,
-            Self::Config => Self::Auth,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormMode {
     Add,
@@ -158,8 +149,11 @@ pub enum ProviderAddField {
     ClaudeHideAttribution,
     CodexBaseUrl,
     CodexModel,
+    #[allow(dead_code)]
     CodexWireApi,
+    #[allow(dead_code)]
     CodexRequiresOpenaiAuth,
+    #[allow(dead_code)]
     CodexEnvKey,
     CodexApiKey,
     GeminiAuthType,

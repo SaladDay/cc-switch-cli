@@ -935,69 +935,6 @@ fn render_skill_import_picker_overlay(
     frame.render_stateful_widget(table, body_area, &mut state);
 }
 
-pub(super) fn render_skills_sync_method_picker_overlay(
-    frame: &mut Frame<'_>,
-    data: &UiData,
-    content_area: Rect,
-    theme: &theme::Theme,
-    selected: usize,
-) {
-    let area = centered_rect_fixed(OVERLAY_FIXED_LG.0, 12, content_area);
-    frame.render_widget(Clear, area);
-
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(overlay_border_style(theme, false))
-        .title(texts::tui_skills_sync_method_title());
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(inner);
-
-    render_key_bar_center(
-        frame,
-        chunks[0],
-        theme,
-        &[
-            ("←→", texts::tui_key_select()),
-            ("Enter", texts::tui_key_apply()),
-            ("Esc", texts::tui_key_cancel()),
-        ],
-    );
-
-    let body_area = inset_top(chunks[1], 1);
-    let current = data.skills.sync_method;
-    let methods = [
-        crate::services::skill::SyncMethod::Auto,
-        crate::services::skill::SyncMethod::Symlink,
-        crate::services::skill::SyncMethod::Copy,
-    ];
-
-    let items = methods.into_iter().map(|method| {
-        let marker = if method == current {
-            texts::tui_marker_active()
-        } else {
-            texts::tui_marker_inactive()
-        };
-        ListItem::new(Line::from(Span::raw(format!(
-            "{marker}  {}",
-            texts::tui_skills_sync_method_name(method)
-        ))))
-    });
-
-    let list = List::new(items)
-        .highlight_style(selection_style(theme))
-        .highlight_symbol(highlight_symbol(theme));
-
-    let mut state = ListState::default();
-    state.select(Some(selected));
-    frame.render_stateful_widget(list, body_area, &mut state);
-}
-
 fn render_apps_picker_overlay<A>(
     frame: &mut Frame<'_>,
     content_area: Rect,

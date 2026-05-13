@@ -879,13 +879,6 @@ impl<'a> OpenClawDailyMemoryListItem<'a> {
             Self::Search(row) => &row.filename,
         }
     }
-
-    pub(crate) fn preview(&self) -> &str {
-        match self {
-            Self::File(row) => &row.preview,
-            Self::Search(row) => &row.snippet,
-        }
-    }
 }
 
 pub(crate) fn route_has_content_list(route: &Route) -> bool {
@@ -1124,6 +1117,7 @@ pub(crate) fn openclaw_workspace_entry_count() -> usize {
     OpenClawWorkspaceRow::all().len()
 }
 
+#[cfg(test)]
 pub(crate) fn openclaw_workspace_rows() -> Vec<OpenClawWorkspaceRow> {
     OpenClawWorkspaceRow::all()
 }
@@ -1211,22 +1205,6 @@ pub(crate) fn snippet_picker_index_for_app_type(app_type: &AppType) -> usize {
 
 pub(crate) fn snippet_picker_app_type(index: usize) -> AppType {
     app_type_for_picker_index(index)
-}
-
-pub(crate) fn sync_method_picker_index(method: SyncMethod) -> usize {
-    match method {
-        SyncMethod::Auto => 0,
-        SyncMethod::Symlink => 1,
-        SyncMethod::Copy => 2,
-    }
-}
-
-pub(crate) fn sync_method_for_picker_index(index: usize) -> SyncMethod {
-    match index {
-        1 => SyncMethod::Symlink,
-        2 => SyncMethod::Copy,
-        _ => SyncMethod::Auto,
-    }
 }
 
 pub(crate) fn openclaw_tools_profile_picker_index(profile: Option<&str>) -> Option<usize> {

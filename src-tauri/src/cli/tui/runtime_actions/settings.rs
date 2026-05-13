@@ -2,31 +2,8 @@ use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 
-use super::super::data::{load_proxy_config, load_state, UiData};
-use super::helpers::open_proxy_help_overlay_with;
+use super::super::data::{load_state, UiData};
 use super::RuntimeActionContext;
-
-pub(super) fn set_proxy_enabled(
-    ctx: &mut RuntimeActionContext<'_>,
-    enabled: bool,
-) -> Result<(), AppError> {
-    let state = load_state()?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
-    runtime.block_on(state.proxy_service.set_global_enabled(enabled))?;
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    ctx.app.push_toast(
-        if enabled {
-            crate::t!("Local proxy enabled.", "本地代理已开启。")
-        } else {
-            crate::t!("Local proxy disabled.", "本地代理已关闭。")
-        },
-        super::super::app::ToastKind::Success,
-    );
-    Ok(())
-}
 
 pub(super) fn set_proxy_listen_address(
     ctx: &mut RuntimeActionContext<'_>,
@@ -118,43 +95,6 @@ pub(super) fn set_openclaw_config_dir(
         );
     }
 
-    Ok(())
-}
-
-pub(super) fn set_proxy_takeover(
-    ctx: &mut RuntimeActionContext<'_>,
-    app_type: AppType,
-    enabled: bool,
-) -> Result<(), AppError> {
-    let state = load_state()?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
-
-    let status = runtime.block_on(state.proxy_service.get_status());
-    if enabled && !status.running {
-        ctx.app.push_toast(
-            texts::tui_toast_proxy_takeover_requires_running(),
-            super::super::app::ToastKind::Warning,
-        );
-        return Ok(());
-    }
-
-    runtime
-        .block_on(
-            state
-                .proxy_service
-                .set_takeover_for_app(app_type.as_str(), enabled),
-        )
-        .map_err(AppError::Message)?;
-
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    open_proxy_help_overlay_with(ctx.app, ctx.data, load_proxy_config)?;
-    ctx.app.push_toast(
-        texts::tui_toast_proxy_takeover_updated(app_type.as_str(), enabled),
-        super::super::app::ToastKind::Success,
-    );
     Ok(())
 }
 

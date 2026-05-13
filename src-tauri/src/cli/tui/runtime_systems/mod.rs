@@ -3,6 +3,7 @@ mod types;
 mod workers;
 
 #[cfg(test)]
+#[cfg(test)]
 pub(crate) use handlers::{apply_webdav_jianguoyun_quick_setup, update_webdav_last_error_with};
 pub(crate) use handlers::{
     handle_local_env_msg, handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg,

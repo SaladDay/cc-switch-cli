@@ -1,10 +1,9 @@
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 use crate::services::SyncDecision;
-use crate::settings::{
-    get_webdav_sync_settings, set_webdav_sync_settings, webdav_jianguoyun_preset,
-    WebDavSyncSettings,
-};
+#[cfg(test)]
+use crate::settings::webdav_jianguoyun_preset;
+use crate::settings::{get_webdav_sync_settings, set_webdav_sync_settings, WebDavSyncSettings};
 
 use super::super::app::{App, ConfirmAction, ConfirmOverlay, LoadingKind, Overlay, ToastKind};
 use super::super::data::{load_state, UiData};
@@ -302,7 +301,8 @@ pub(crate) fn handle_webdav_msg(
                             }
                         }
                     }
-                    WebDavDone::V1Migrated { message: _ } => {
+                    WebDavDone::V1Migrated { message } => {
+                        let _ = message;
                         if let Ok(state) = load_state() {
                             if let Err(e) =
                                 crate::services::provider::ProviderService::sync_current_to_live(
@@ -457,6 +457,7 @@ pub(crate) fn handle_proxy_msg(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn apply_webdav_jianguoyun_quick_setup<FSave, FCheck>(
     username: &str,
     password: &str,

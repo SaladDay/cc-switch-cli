@@ -6,9 +6,6 @@ impl App {
         key: KeyEvent,
         data: &UiData,
     ) -> Option<Action> {
-        if let Some(action) = self.handle_sync_method_picker_key(key, data) {
-            return Some(action);
-        }
         if let Some(action) = self.handle_claude_api_format_picker_key(key, data) {
             return Some(action);
         }
@@ -49,38 +46,6 @@ impl App {
             return Some(action);
         }
         None
-    }
-
-    fn handle_sync_method_picker_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
-        let Overlay::SkillsSyncMethodPicker { selected } = &mut self.overlay else {
-            return None;
-        };
-
-        Some(match key.code {
-            KeyCode::Esc => {
-                self.overlay = Overlay::None;
-                Action::None
-            }
-            KeyCode::Up => {
-                *selected = selected.saturating_sub(1);
-                Action::None
-            }
-            KeyCode::Down => {
-                *selected = (*selected + 1).min(3);
-                Action::None
-            }
-            KeyCode::Enter => {
-                let method = sync_method_for_picker_index(*selected);
-                let unchanged = method == data.skills.sync_method;
-                self.overlay = Overlay::None;
-                if unchanged {
-                    Action::None
-                } else {
-                    Action::SkillsSetSyncMethod { method }
-                }
-            }
-            _ => Action::None,
-        })
     }
 
     fn handle_claude_api_format_picker_key(

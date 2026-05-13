@@ -194,7 +194,6 @@ pub(crate) fn handle_action(
             skills::uninstall_many(&mut ctx, directories)
         }
         Action::SkillsSync { app: scope } => skills::sync(&mut ctx, scope),
-        Action::SkillsSetSyncMethod { method } => skills::set_sync_method(&mut ctx, method),
         Action::SkillsDiscover { query } => skills::discover(&mut ctx, query),
         Action::SkillsRepoAdd { spec } => skills::repo_add(&mut ctx, spec),
         Action::SkillsRepoRemove { owner, name } => skills::repo_remove(&mut ctx, owner, name),
@@ -205,16 +204,11 @@ pub(crate) fn handle_action(
         } => skills::repo_toggle_enabled(&mut ctx, owner, name, enabled),
         Action::SkillsOpenImport => skills::open_import(&mut ctx),
         Action::SkillsOpenAgentImport => skills::open_agent_import(&mut ctx),
-        Action::SkillsScanUnmanaged => skills::scan_unmanaged(&mut ctx),
         Action::SkillsImportFromApps { directories } => {
             skills::import_from_apps(&mut ctx, directories)
         }
         Action::SkillsImportFromAgent { directories } => {
             skills::import_from_agent(&mut ctx, directories)
-        }
-        Action::EditorDiscard => {
-            ctx.app.editor = None;
-            Ok(())
         }
         Action::EditorOpenExternal => editor::open_external(&mut ctx),
         Action::EditorSubmit { submit, content } => editor::submit(&mut ctx, submit, content),
@@ -313,7 +307,6 @@ pub(crate) fn handle_action(
             );
             Ok(())
         }
-        Action::SetProxyEnabled { enabled } => settings::set_proxy_enabled(&mut ctx, enabled),
         Action::SetProxyListenAddress { address } => {
             settings::set_proxy_listen_address(&mut ctx, address)
         }
@@ -322,9 +315,6 @@ pub(crate) fn handle_action(
             settings::set_proxy_auto_failover(&mut ctx, app_type, enabled)
         }
         Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
-        Action::SetProxyTakeover { app_type, enabled } => {
-            settings::set_proxy_takeover(&mut ctx, app_type, enabled)
-        }
         Action::SetManagedProxyForCurrentApp { app_type, enabled } => queue_managed_proxy_action(
             ctx.app,
             ctx.proxy_req_tx,

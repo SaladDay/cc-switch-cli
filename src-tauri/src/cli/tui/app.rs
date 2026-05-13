@@ -7,7 +7,6 @@ use crate::app_config::AppType;
 use crate::cli::i18n::current_language;
 use crate::cli::i18n::texts;
 use crate::cli::i18n::Language;
-use crate::services::skill::SyncMethod;
 
 use super::data::UiData;
 use super::form::{

@@ -1,13 +1,13 @@
 use crate::app_config::{AppType, SkillApps};
 use crate::cli::i18n::texts;
 use crate::error::AppError;
-use crate::services::{skill::SyncMethod, SkillService};
+use crate::services::SkillService;
 
 use super::super::app::{LoadingKind, Overlay, ToastKind};
 use super::super::route::Route;
 use super::super::runtime_skills::{
     finish_skills_import_with, open_agent_skills_import_picker, open_skills_import_picker,
-    parse_repo_spec, scan_unmanaged_skills,
+    parse_repo_spec,
 };
 use super::RuntimeActionContext;
 
@@ -178,19 +178,6 @@ pub(super) fn sync(
     Ok(())
 }
 
-pub(super) fn set_sync_method(
-    ctx: &mut RuntimeActionContext<'_>,
-    method: SyncMethod,
-) -> Result<(), AppError> {
-    SkillService::set_sync_method(method)?;
-    *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
-    ctx.app.push_toast(
-        texts::tui_toast_skills_sync_method_set(texts::tui_skills_sync_method_name(method)),
-        ToastKind::Success,
-    );
-    Ok(())
-}
-
 pub(super) fn discover(ctx: &mut RuntimeActionContext<'_>, query: String) -> Result<(), AppError> {
     let Some(tx) = ctx.skills_req_tx else {
         return Err(AppError::Message(
@@ -255,10 +242,6 @@ pub(super) fn open_import(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppE
 
 pub(super) fn open_agent_import(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
     open_agent_skills_import_picker(ctx.app)
-}
-
-pub(super) fn scan_unmanaged(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
-    scan_unmanaged_skills(ctx.app)
 }
 
 pub(super) fn import_from_apps(

@@ -64,7 +64,6 @@ impl App {
                         }
                     }
                     ConfirmAction::FormSaveBeforeClose => self.handle_form_save_shortcut(data),
-                    ConfirmAction::EditorDiscard => Action::EditorDiscard,
                     ConfirmAction::EditorSaveBeforeClose => {
                         if let Some(editor) = self.editor.as_ref() {
                             Action::EditorSubmit {
@@ -223,13 +222,6 @@ impl App {
                     Some(trimmed)
                 };
                 Action::SetOpenClawConfigDir { path }
-            }
-            TextSubmit::SkillsInstallSpec => {
-                if raw.is_empty() {
-                    self.push_toast(texts::tui_toast_skill_spec_empty(), ToastKind::Warning);
-                    return Action::None;
-                }
-                Action::SkillsInstall { spec: raw }
             }
             TextSubmit::SkillsDiscoverQuery => {
                 self.skills_discover_query = raw.clone();

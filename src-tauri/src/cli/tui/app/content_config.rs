@@ -887,14 +887,8 @@ impl App {
             None => crate::t!("not supported", "不支持"),
         };
         let toggle_action = match current_app_routed {
-            Some(true) if proxy_action_available => Some(TextViewAction::ProxyToggleTakeover {
-                app_type: self.app_type.clone(),
-                enabled: false,
-            }),
-            Some(false) if proxy_action_available => Some(TextViewAction::ProxyToggleTakeover {
-                app_type: self.app_type.clone(),
-                enabled: true,
-            }),
+            Some(true) if proxy_action_available => Some(TextViewAction::ProxyToggleTakeover),
+            Some(false) if proxy_action_available => Some(TextViewAction::ProxyToggleTakeover),
             _ => None,
         };
 

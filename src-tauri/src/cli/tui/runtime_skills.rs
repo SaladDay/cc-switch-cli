@@ -8,6 +8,7 @@ use crate::services::{skill::SkillRepo, SkillService};
 use super::app::{App, Overlay, ToastKind};
 use super::data::UiData;
 
+#[cfg(test)]
 pub(crate) fn scan_unmanaged_skills_with<F>(app: &mut App, scan: F) -> Result<(), AppError>
 where
     F: FnOnce() -> Result<Vec<crate::services::skill::UnmanagedSkill>, AppError>,
@@ -20,10 +21,6 @@ where
         ToastKind::Info,
     );
     Ok(())
-}
-
-pub(crate) fn scan_unmanaged_skills(app: &mut App) -> Result<(), AppError> {
-    scan_unmanaged_skills_with(app, SkillService::scan_unmanaged)
 }
 
 pub(crate) fn open_skills_import_picker_with<F>(app: &mut App, scan: F) -> Result<(), AppError>

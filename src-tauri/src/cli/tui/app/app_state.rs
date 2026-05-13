@@ -37,9 +37,6 @@ pub enum Action {
     SkillsSync {
         app: Option<AppType>,
     },
-    SkillsSetSyncMethod {
-        method: SyncMethod,
-    },
     SkillsDiscover {
         query: String,
     },
@@ -57,7 +54,6 @@ pub enum Action {
     },
     SkillsOpenImport,
     SkillsOpenAgentImport,
-    SkillsScanUnmanaged,
     SkillsImportFromApps {
         directories: Vec<String>,
     },
@@ -184,16 +180,12 @@ pub enum Action {
         submit: EditorSubmit,
         content: String,
     },
-    EditorDiscard,
     EditorOpenExternal,
 
     SetSkipClaudeOnboarding {
         enabled: bool,
     },
     SetClaudePluginIntegration {
-        enabled: bool,
-    },
-    SetProxyEnabled {
         enabled: bool,
     },
     SetProxyListenAddress {
@@ -208,10 +200,6 @@ pub enum Action {
     },
     SetOpenClawConfigDir {
         path: Option<String>,
-    },
-    SetProxyTakeover {
-        app_type: AppType,
-        enabled: bool,
     },
     SetManagedProxyForCurrentApp {
         app_type: AppType,
@@ -238,6 +226,7 @@ pub enum ConfigItem {
     Restore,
     Validate,
     CommonSnippet,
+    #[allow(dead_code)]
     Proxy,
     OpenClawWorkspace,
     OpenClawEnv,
@@ -507,7 +496,6 @@ pub struct App {
         Vec<crate::commands::workspace::DailyMemorySearchResult>,
     pub config_webdav_idx: usize,
     pub webdav_quick_setup_username: Option<String>,
-    pub language_idx: usize,
     pub settings_idx: usize,
     pub settings_proxy_idx: usize,
 }
