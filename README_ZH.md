@@ -183,7 +183,7 @@ move cc-switch-tui.exe C:\Windows\System32\
 ### 方法 3：从源码构建
 
 **前提条件：**
-- Rust 1.85+（[通过 rustup 安装](https://rustup.rs/)）
+- Rust 1.94+（[通过 rustup 安装](https://rustup.rs/)）
 
 **构建：**
 ```bash
@@ -492,7 +492,7 @@ cc-switch --app codex provider list
 
 ### 环境要求
 
-- **Rust**：1.85+（[rustup](https://rustup.rs/)）
+- **Rust**：1.94+（[rustup](https://rustup.rs/)）
 - **Cargo**：与 Rust 捆绑
 
 ### 开发命令

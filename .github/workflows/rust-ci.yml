@@ -61,15 +61,14 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.91.1"
+          toolchain: "1.94.0"
           targets: ${{ matrix.target }}
           components: clippy
 
-      ## src-tauri/rust-toolchain.toml pins a different stable toolchain.
-      ## dtolnay/rust-toolchain installs targets for 1.91.1, but cargo
-      ## invoked under src-tauri/ switches to the pinned stable which does
-      ## NOT inherit those targets.  Add the target explicitly.
-      - name: Ensure target on rust-toolchain.toml stable
+      ## Keep target installation explicit for native cross-target jobs.
+      ## This is idempotent and ensures the target exists on the exact
+      ## toolchain selected by src-tauri/rust-toolchain.toml.
+      - name: Ensure target on pinned rust-toolchain.toml toolchain
         if: matrix.use_cross == false
         shell: bash
         working-directory: src-tauri
@@ -133,7 +132,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.91.1"
+          toolchain: "1.94.0"
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
@@ -163,7 +162,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.91.1"
+          toolchain: "1.94.0"
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2

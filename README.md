@@ -187,7 +187,7 @@ If a build only fails with `follows` enabled, try removing it to check whether t
 ### Method 3: Build from Source
 
 **Prerequisites:**
-- Rust 1.85+ ([install via rustup](https://rustup.rs/))
+- Rust 1.94+ ([install via rustup](https://rustup.rs/))
 
 **Build:**
 ```bash
@@ -496,7 +496,7 @@ Please open an issue on our [GitHub Issues](https://github.com/handy-sun/cc-swit
 
 ### Requirements
 
-- **Rust**: 1.85+ ([rustup](https://rustup.rs/))
+- **Rust**: 1.94+ ([rustup](https://rustup.rs/))
 - **Cargo**: Bundled with Rust
 
 ### Commands

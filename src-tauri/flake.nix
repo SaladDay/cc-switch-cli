@@ -47,7 +47,7 @@
               cmake
 
               ## rustup manages toolchain + cross targets
-              ## (rust-toolchain.toml in this dir pins the channel)
+              ## (rust-toolchain.toml in this dir pins the version)
               rustup
 
               ## dev helpers
@@ -55,14 +55,14 @@
             ];
 
             shellHook = ''
-              ## Install stable toolchain if missing (rustup stores in ~/.rustup/)
-              if ! rustup toolchain list 2>/dev/null | grep -q 'stable'; then
-                echo "Installing rustup stable toolchain..."
-                rustup toolchain install stable --profile minimal --no-self-update 2>&1 | tail -1
+              ## Install pinned toolchain if missing (rustup stores in ~/.rustup/)
+              if ! rustup toolchain list 2>/dev/null | grep -q '1.94.0'; then
+                echo "Installing rustup 1.94.0 toolchain..."
+                rustup toolchain install 1.94.0 --profile minimal --no-self-update 2>&1 | tail -1
               fi
 
               ## Ensure rustup reads local rust-toolchain.toml
-              export RUSTUP_TOOLCHAIN=stable
+              export RUSTUP_TOOLCHAIN=1.94.0
 
               ## Add cross-compilation targets
               for tgt in ${builtins.toString allTargets}; do

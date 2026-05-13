@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  RUST_VERSION: 1.91.1
+  RUST_VERSION: 1.94.0
 
 concurrency:
   group: release-${{ github.ref_name }}
@@ -73,13 +73,11 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
 
-      # src-tauri/rust-toolchain.toml pins channel = "stable" to stay aligned
-      # with the nix devShell. cargo invoked under src-tauri/ will auto-switch
-      # to that stable toolchain, which does NOT inherit the target installed
-      # by dtolnay/rust-toolchain above. Add the target to the stable toolchain
-      # explicitly so cross-target native builds (e.g. darwin-x64 on macos-14
-      # arm64) can find core/std.
-      - name: Ensure target on rust-toolchain.toml stable
+      # Keep target installation explicit for native cross-target jobs.
+      # This is idempotent and ensures the target exists on the exact
+      # toolchain selected by src-tauri/rust-toolchain.toml so builds such as
+      # darwin-x64 on macos-14 arm64 can find core/std.
+      - name: Ensure target on pinned rust-toolchain.toml toolchain
         if: matrix.use_cross != true
         shell: bash
         working-directory: src-tauri
