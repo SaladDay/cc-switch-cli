@@ -281,16 +281,64 @@ fn get_codex_agent_skills_dir() -> Option<PathBuf> {
     skills_dir.exists().then_some(skills_dir)
 }
 
-fn agent_skill_sources() -> Vec<(PathBuf, String, bool)> {
+#[derive(Debug, Clone)]
+struct AgentSkillSource {
+    path: PathBuf,
+    label: String,
+    uses_lock: bool,
+    app: Option<AppType>,
+}
+
+fn push_agent_skill_source(
+    sources: &mut Vec<AgentSkillSource>,
+    path: PathBuf,
+    label: String,
+    uses_lock: bool,
+    app: Option<AppType>,
+) {
+    if sources.iter().any(|source| source.path == path) {
+        return;
+    }
+
+    sources.push(AgentSkillSource {
+        path,
+        label,
+        uses_lock,
+        app,
+    });
+}
+
+fn agent_skill_sources() -> Vec<AgentSkillSource> {
     let mut sources = Vec::new();
     if let Some(agents_dir) = get_agents_skills_dir() {
-        sources.push((agents_dir, "agents".to_string(), true));
+        push_agent_skill_source(&mut sources, agents_dir, "agents".to_string(), true, None);
     }
-    if let Some(codex_dir) = get_codex_agent_skills_dir() {
-        if !sources.iter().any(|(path, _, _)| path == &codex_dir) {
-            sources.push((codex_dir, "codex-agent".to_string(), false));
+
+    for app in SkillService::supported_skill_apps() {
+        let Ok(app_dir) = SkillService::get_app_skills_dir(&app) else {
+            continue;
+        };
+        if app_dir.exists() {
+            push_agent_skill_source(
+                &mut sources,
+                app_dir,
+                app.as_str().to_string(),
+                false,
+                Some(app),
+            );
         }
     }
+
+    if let Some(codex_dir) = get_codex_agent_skills_dir() {
+        push_agent_skill_source(
+            &mut sources,
+            codex_dir,
+            "codex-agent".to_string(),
+            false,
+            Some(AppType::Codex),
+        );
+    }
+
     sources
 }
 
@@ -1222,7 +1270,6 @@ impl SkillService {
 
     pub fn scan_agent_installed() -> Result<Vec<UnmanagedSkill>, AppError> {
         let index = Self::load_index()?;
-        let managed: HashSet<String> = index.skills.keys().cloned().collect();
         let sources = agent_skill_sources();
         if sources.is_empty() {
             return Ok(Vec::new());
@@ -1230,8 +1277,8 @@ impl SkillService {
 
         let mut agent_skills: HashMap<String, UnmanagedSkill> = HashMap::new();
 
-        for (source_dir, label, _) in sources {
-            let entries = match fs::read_dir(&source_dir) {
+        for source in sources {
+            let entries = match fs::read_dir(&source.path) {
                 Ok(entries) => entries,
                 Err(_) => continue,
             };
@@ -1247,7 +1294,18 @@ impl SkillService {
                 }
 
                 let dir_name = entry.file_name().to_string_lossy().to_string();
-                if dir_name.starts_with('.') || managed.contains(&dir_name) {
+                if dir_name.starts_with('.') {
+                    continue;
+                }
+
+                let should_offer = match index.skills.get(&dir_name) {
+                    Some(skill) => source
+                        .app
+                        .as_ref()
+                        .is_some_and(|app| !skill.apps.is_enabled_for(app)),
+                    None => true,
+                };
+                if !should_offer {
                     continue;
                 }
 
@@ -1256,15 +1314,15 @@ impl SkillService {
                 agent_skills
                     .entry(dir_name.clone())
                     .and_modify(|skill| {
-                        if !skill.found_in.contains(&label) {
-                            skill.found_in.push(label.clone());
+                        if !skill.found_in.contains(&source.label) {
+                            skill.found_in.push(source.label.clone());
                         }
                     })
                     .or_insert(UnmanagedSkill {
                         directory: dir_name,
                         name,
                         description,
-                        found_in: vec![label.clone()],
+                        found_in: vec![source.label.clone()],
                     });
             }
         }
@@ -1362,15 +1420,26 @@ impl SkillService {
         );
 
         for dir_name in directories {
-            if index.skills.contains_key(&dir_name) {
-                continue;
+            let mut source_path: Option<PathBuf> = None;
+            let mut source_uses_lock = false;
+            let mut apps = SkillApps::default();
+
+            for source in &sources {
+                let path = source.path.join(&dir_name);
+                if !path.is_dir() {
+                    continue;
+                }
+
+                if source_path.is_none() {
+                    source_path = Some(path);
+                    source_uses_lock = source.uses_lock;
+                }
+                if let Some(app) = &source.app {
+                    apps.set_enabled_for(app, true);
+                }
             }
 
-            let source = sources.iter().find_map(|(base, _, uses_lock)| {
-                let path = base.join(&dir_name);
-                path.is_dir().then_some((path, *uses_lock))
-            });
-            let Some((source, uses_lock)) = source else {
+            let Some(source) = source_path else {
                 continue;
             };
 
@@ -1379,9 +1448,25 @@ impl SkillService {
                 Self::copy_dir_recursive(&source, &dest)?;
             }
 
+            if let Some(existing) = index.skills.get_mut(&dir_name) {
+                existing.apps.merge_enabled(&apps);
+                let skill_md = dest.join("SKILL.md");
+                let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
+                if existing.name.trim().is_empty()
+                    || existing.name.eq_ignore_ascii_case(&existing.directory)
+                {
+                    existing.name = name;
+                }
+                if existing.description.is_none() {
+                    existing.description = description;
+                }
+                imported.push(existing.clone());
+                continue;
+            }
+
             let skill_md = dest.join("SKILL.md");
             let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
-            let (id, repo_owner, repo_name, repo_branch, readme_url) = if uses_lock {
+            let (id, repo_owner, repo_name, repo_branch, readme_url) = if source_uses_lock {
                 build_repo_info_from_lock(&agents_lock, &dir_name)
             } else {
                 (format!("local:{dir_name}"), None, None, None, None)
@@ -1396,7 +1481,7 @@ impl SkillService {
                 repo_name,
                 repo_branch,
                 readme_url,
-                apps: SkillApps::default(),
+                apps,
                 installed_at: Utc::now().timestamp(),
             };
 

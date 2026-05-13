@@ -29,6 +29,8 @@ pub fn reset_test_fs() {
     for sub in [
         ".claude",
         ".codex",
+        ".agents",
+        ".hermes",
         ".cc-switch",
         ".cc-switch-tui",
         ".gemini",

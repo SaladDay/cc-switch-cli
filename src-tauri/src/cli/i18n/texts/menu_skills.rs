@@ -291,9 +291,9 @@ pub fn skills_no_unmanaged_found() -> &'static str {
 
 pub fn skills_no_agent_installed_found() -> &'static str {
     if is_chinese() {
-        "未发现智能体已安装且尚未由 CC Switch 管理的技能。"
+        "未发现可导入或可补齐启用状态的智能体技能。"
     } else {
-        "No agent-installed skills found that are not already managed by CC Switch."
+        "No agent skills found to import or backfill enablement for."
     }
 }
 

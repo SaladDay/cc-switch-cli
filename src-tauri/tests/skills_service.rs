@@ -170,7 +170,7 @@ fn scan_unmanaged_includes_agents_and_ssot_sources() {
 }
 
 #[test]
-fn scan_agent_installed_only_reads_agents_dir_and_excludes_managed() {
+fn scan_agent_installed_reads_all_agent_tool_dirs_and_excludes_noop_managed() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -183,7 +183,12 @@ fn scan_agent_installed_only_reads_agents_dir_and_excludes_managed() {
     write_skill_md(
         &home.join(".claude").join("skills").join("claude-skill"),
         "Claude Skill",
-        "Should not be returned",
+        "Found in Claude",
+    );
+    write_skill_md(
+        &home.join(".hermes").join("skills").join("hermes-skill"),
+        "Hermes Skill",
+        "Found in Hermes",
     );
     write_skill_md(
         &home.join(".agents").join("skills").join("managed-skill"),
@@ -206,14 +211,16 @@ fn scan_agent_installed_only_reads_agents_dir_and_excludes_managed() {
     assert!(
         agent_skills
             .iter()
-            .all(|skill| skill.found_in == vec!["agents".to_string()]),
-        "agent-only scan should only label agents as the source"
+            .any(|skill| skill.directory == "claude-skill"
+                && skill.found_in.iter().any(|source| source == "claude")),
+        "Claude skill directory should be visible in agent import flow"
     );
     assert!(
         agent_skills
             .iter()
-            .all(|skill| skill.directory != "claude-skill"),
-        "app skill directories should not be included"
+            .any(|skill| skill.directory == "hermes-skill"
+                && skill.found_in.iter().any(|source| source == "hermes")),
+        "Hermes skill directory should be visible in agent import flow"
     );
     assert!(
         agent_skills
@@ -247,8 +254,8 @@ fn import_from_agent_prefers_agents_dir_when_same_directory_exists_elsewhere() {
     assert_eq!(imported[0].name, "Agent Skill");
     assert_eq!(imported[0].description.as_deref(), Some("From agent"));
     assert!(
-        imported[0].apps.is_empty(),
-        "agent import should only add the skill to CC Switch management"
+        imported[0].apps.claude,
+        "agent import should preserve that the skill is already installed for Claude"
     );
 
     let ssot_skill_md = SkillService::get_ssot_dir()
@@ -263,7 +270,7 @@ fn import_from_agent_prefers_agents_dir_when_same_directory_exists_elsewhere() {
 }
 
 #[test]
-fn import_from_agent_reads_codex_home_skills_without_enabling_codex() {
+fn import_from_agent_reads_codex_home_skills_and_enables_codex() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -298,8 +305,8 @@ fn import_from_agent_reads_codex_home_skills_without_enabling_codex() {
     assert_eq!(imported.len(), 1);
     assert_eq!(imported[0].name, "Codex Agent Skill");
     assert!(
-        imported[0].apps.is_empty(),
-        "agent import should add the skill to CC Switch management without enabling Codex"
+        imported[0].apps.codex,
+        "agent import should preserve that the skill is already installed for Codex"
     );
     assert!(
         SkillService::get_ssot_dir()
@@ -308,6 +315,87 @@ fn import_from_agent_reads_codex_home_skills_without_enabling_codex() {
             .exists(),
         "Codex agent skill should be copied into SSOT"
     );
+}
+
+#[test]
+fn import_from_agent_imports_hermes_skill_and_enables_hermes() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    write_skill_md(
+        &home.join(".hermes").join("skills").join("hermes-skill"),
+        "Hermes Skill",
+        "From Hermes",
+    );
+
+    let imported = SkillService::import_from_agent(vec!["hermes-skill".to_string()])
+        .expect("import Hermes skill");
+
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0].directory, "hermes-skill");
+    assert!(
+        imported[0].apps.hermes,
+        "import_from_agent should enable Hermes when importing from ~/.hermes/skills"
+    );
+    assert!(
+        SkillService::get_ssot_dir()
+            .expect("get ssot dir")
+            .join("hermes-skill")
+            .exists(),
+        "Hermes skill should be copied into SSOT"
+    );
+}
+
+#[test]
+fn import_from_agent_backfills_existing_managed_skill_app_enablement() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    write_skill_md(
+        &home.join(".agents").join("skills").join("shared-skill"),
+        "Shared Skill",
+        "Initially generic",
+    );
+    let imported = SkillService::import_from_agent(vec!["shared-skill".to_string()])
+        .expect("seed generic managed skill");
+    assert_eq!(imported.len(), 1);
+    assert!(
+        imported[0].apps.is_empty(),
+        "generic .agents skill should not enable an app by itself"
+    );
+
+    write_skill_md(
+        &home.join(".hermes").join("skills").join("shared-skill"),
+        "Shared Skill",
+        "Now installed for Hermes",
+    );
+
+    let scan_result = SkillService::scan_agent_installed().expect("scan agent-installed skills");
+    assert!(
+        scan_result
+            .iter()
+            .any(|skill| skill.directory == "shared-skill"
+                && skill.found_in.iter().any(|source| source == "hermes")),
+        "managed skills should be offered when an app-local install can backfill enablement"
+    );
+
+    let backfilled = SkillService::import_from_agent(vec!["shared-skill".to_string()])
+        .expect("backfill Hermes enablement");
+
+    assert_eq!(backfilled.len(), 1);
+    assert!(
+        backfilled[0].apps.hermes,
+        "existing managed skill should gain Hermes enablement"
+    );
+
+    let installed = SkillService::list_installed().expect("list installed skills");
+    let skill = installed
+        .iter()
+        .find(|skill| skill.directory == "shared-skill")
+        .expect("shared skill should remain installed");
+    assert!(skill.apps.hermes, "Hermes enablement should persist");
 }
 
 #[test]
