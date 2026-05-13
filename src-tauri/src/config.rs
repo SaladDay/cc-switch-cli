@@ -781,6 +781,151 @@ mod tests {
     }
 
     #[test]
+    fn migration_replaces_generated_target_settings_with_legacy_preferences() {
+        let _guard = lock_test_home_and_settings();
+        let _tui = ConfigDirEnvGuard::new("CC_SWITCH_TUI_CONFIG_DIR", None);
+        let _old = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", None);
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let home = temp.path();
+        set_test_home_override(Some(home));
+
+        let old_dir = home.join(".cc-switch");
+        let new_dir = home.join(".cc-switch-tui");
+
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(
+            old_dir.join("settings.json"),
+            r#"{
+                "language": "zh",
+                "visibleApps": {
+                    "claude": true,
+                    "codex": true,
+                    "gemini": true,
+                    "opencode": true,
+                    "openclaw": true,
+                    "hermes": true
+                },
+                "currentProviderClaude": "legacy-current"
+            }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(new_dir.join("cc-switch.db"), "current-db").unwrap();
+        fs::write(
+            new_dir.join("settings.json"),
+            r#"{
+                "language": "en",
+                "visibleApps": {
+                    "claude": true,
+                    "codex": true,
+                    "gemini": false,
+                    "opencode": true,
+                    "openclaw": false,
+                    "hermes": false
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            legacy_config_migration_paths(),
+            Some((old_dir.clone(), new_dir.clone()))
+        );
+
+        migrate_legacy_config_dir_if_needed();
+
+        let migrated_settings = fs::read_to_string(new_dir.join("settings.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&migrated_settings).unwrap();
+        assert_eq!(value["language"], "zh");
+        assert_eq!(value["visibleApps"]["gemini"], true);
+        assert_eq!(value["visibleApps"]["openclaw"], true);
+        assert_eq!(value["visibleApps"]["hermes"], true);
+        assert_eq!(value["currentProviderClaude"], "legacy-current");
+        assert_eq!(
+            fs::read_to_string(new_dir.join("cc-switch.db")).unwrap(),
+            "current-db",
+            "existing target database must not be overwritten"
+        );
+        assert!(new_dir.join(".migrated-from-cc-switch").exists());
+
+        set_test_home_override(None);
+    }
+
+    #[test]
+    fn migration_does_not_replace_configured_target_settings() {
+        let _guard = lock_test_home_and_settings();
+        let _tui = ConfigDirEnvGuard::new("CC_SWITCH_TUI_CONFIG_DIR", None);
+        let _old = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", None);
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let home = temp.path();
+        set_test_home_override(Some(home));
+
+        let old_dir = home.join(".cc-switch");
+        let new_dir = home.join(".cc-switch-tui");
+
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(
+            old_dir.join("settings.json"),
+            r#"{
+                "language": "zh",
+                "visibleApps": {
+                    "claude": true,
+                    "codex": true,
+                    "gemini": true,
+                    "opencode": true,
+                    "openclaw": true,
+                    "hermes": true
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(new_dir.join("cc-switch.db"), "current-db").unwrap();
+        fs::write(
+            new_dir.join("settings.json"),
+            r#"{
+                "language": "zh",
+                "webdavSync": {
+                    "enabled": true,
+                    "baseUrl": "https://dav.example.com",
+                    "username": "user",
+                    "password": "pass"
+                },
+                "visibleApps": {
+                    "claude": true,
+                    "codex": true,
+                    "gemini": false,
+                    "opencode": true,
+                    "openclaw": false,
+                    "hermes": false
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            legacy_config_migration_paths(),
+            None,
+            "configured target settings should block implicit repair"
+        );
+
+        migrate_legacy_config_dir_if_needed();
+
+        let target_settings = fs::read_to_string(new_dir.join("settings.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&target_settings).unwrap();
+        assert_eq!(value["webdavSync"]["enabled"], true);
+        assert_eq!(value["visibleApps"]["gemini"], false);
+        assert!(
+            !new_dir.join(".migrated-from-cc-switch").exists(),
+            "blocked repair must not write the migration marker"
+        );
+
+        set_test_home_override(None);
+    }
+
+    #[test]
     fn migration_is_idempotent() {
         let _guard = lock_test_home_and_settings();
         let _tui = ConfigDirEnvGuard::new("CC_SWITCH_TUI_CONFIG_DIR", None);
@@ -954,7 +1099,7 @@ fn copy_recent_backups(src: &Path, dst: &Path, limit: usize) -> std::io::Result<
     Ok(())
 }
 
-fn target_allows_legacy_migration(new_dir: &Path) -> bool {
+fn target_allows_legacy_migration(old_dir: &Path, new_dir: &Path) -> bool {
     if !new_dir.exists() {
         return true;
     }
@@ -971,9 +1116,19 @@ fn target_allows_legacy_migration(new_dir: &Path) -> bool {
         let Ok(entry) = entry else {
             return false;
         };
-        if entry.file_name() != "cc-switch.db" {
-            return false;
+        let file_name = entry.file_name();
+        if file_name == "cc-switch.db" {
+            continue;
         }
+        if file_name == "settings.json"
+            && legacy_settings_should_replace_target(
+                &old_dir.join("settings.json"),
+                &new_dir.join("settings.json"),
+            )
+        {
+            continue;
+        }
+        return false;
     }
     true
 }
@@ -982,6 +1137,10 @@ fn needs_legacy_json_repair(old_dir: &Path, new_dir: &Path) -> bool {
     ["settings.json", "config.json"]
         .iter()
         .any(|file_name| old_dir.join(file_name).is_file() && !new_dir.join(file_name).exists())
+        || legacy_settings_should_replace_target(
+            &old_dir.join("settings.json"),
+            &new_dir.join("settings.json"),
+        )
 }
 
 fn migration_marker_allows_repair(marker: &Path) -> bool {
@@ -1016,7 +1175,7 @@ fn migration_guard(allow_repair: bool) -> Option<(PathBuf, PathBuf, PathBuf)> {
     if !has_contents {
         return None;
     }
-    if !marker.exists() && !target_allows_legacy_migration(&new_dir) {
+    if !marker.exists() && !target_allows_legacy_migration(&old_dir, &new_dir) {
         return None;
     }
 
@@ -1094,6 +1253,10 @@ fn try_migrate(old_dir: &Path, new_dir: &Path, marker: &Path) -> std::io::Result
             copy_recent_backups(&src_path, &dst_path, 3)?;
         } else if file_type.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
+        } else if file_name == "settings.json"
+            && legacy_settings_should_replace_target(&src_path, &dst_path)
+        {
+            fs::copy(&src_path, &dst_path)?;
         } else if !dst_path.exists() {
             fs::copy(&src_path, &dst_path)?;
         }
@@ -1115,4 +1278,127 @@ fn try_migrate(old_dir: &Path, new_dir: &Path, marker: &Path) -> std::io::Result
         new_dir.display()
     );
     Ok(())
+}
+
+fn legacy_settings_should_replace_target(legacy_path: &Path, target_path: &Path) -> bool {
+    if !legacy_path.is_file() {
+        return false;
+    }
+    if !target_path.exists() {
+        return true;
+    }
+
+    let Ok(legacy) = read_json_value(legacy_path) else {
+        return false;
+    };
+    let Ok(target) = read_json_value(target_path) else {
+        return false;
+    };
+
+    legacy_settings_has_migration_preference(&legacy)
+        && target_settings_looks_generated(&target)
+        && legacy_settings_are_more_specific(&legacy, &target)
+}
+
+fn read_json_value(path: &Path) -> Result<serde_json::Value, serde_json::Error> {
+    let raw = fs::read_to_string(path).map_err(serde_json::Error::io)?;
+    serde_json::from_str(&raw)
+}
+
+fn legacy_settings_has_migration_preference(value: &serde_json::Value) -> bool {
+    language_code(value).is_some_and(|lang| lang.eq_ignore_ascii_case("zh"))
+        || visible_apps_enabled_count(value) > default_visible_apps_enabled_count()
+        || value
+            .get("currentProviderClaude")
+            .or_else(|| value.get("currentProviderCodex"))
+            .or_else(|| value.get("currentProviderGemini"))
+            .or_else(|| value.get("currentProviderOpencode"))
+            .or_else(|| value.get("currentProviderOpenclaw"))
+            .or_else(|| value.get("currentProviderHermes"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty())
+        || value
+            .pointer("/webdavSync/enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+}
+
+fn target_settings_looks_generated(value: &serde_json::Value) -> bool {
+    // Generated settings from a premature new-directory startup carry defaults,
+    // but no current provider, WebDAV, or non-auto skill sync state.
+    let language_is_default = language_code(value)
+        .map(|lang| lang.eq_ignore_ascii_case("en"))
+        .unwrap_or(true);
+
+    language_is_default
+        && current_provider_fields_empty(value)
+        && !value
+            .pointer("/webdavSync/enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        && value
+            .get("skillSyncMethod")
+            .and_then(|value| value.as_str())
+            .map(|method| method == "auto")
+            .unwrap_or(true)
+}
+
+fn legacy_settings_are_more_specific(
+    legacy: &serde_json::Value,
+    target: &serde_json::Value,
+) -> bool {
+    let language_is_more_specific = match (language_code(legacy), language_code(target)) {
+        (Some(legacy), Some(target)) => !legacy.eq_ignore_ascii_case(target),
+        (Some(_), None) => true,
+        _ => false,
+    };
+
+    language_is_more_specific
+        || visible_apps_enabled_count(legacy) > visible_apps_enabled_count(target)
+        || !current_provider_fields_empty(legacy)
+        || legacy
+            .pointer("/webdavSync/enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+}
+
+fn current_provider_fields_empty(value: &serde_json::Value) -> bool {
+    [
+        "currentProviderClaude",
+        "currentProviderCodex",
+        "currentProviderGemini",
+        "currentProviderOpencode",
+        "currentProviderOpenclaw",
+        "currentProviderHermes",
+    ]
+    .iter()
+    .all(|key| {
+        value
+            .get(*key)
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+    })
+}
+
+fn language_code(value: &serde_json::Value) -> Option<&str> {
+    value.get("language").and_then(|value| value.as_str())
+}
+
+fn visible_apps_enabled_count(value: &serde_json::Value) -> usize {
+    value
+        .get("visibleApps")
+        .and_then(|value| value.as_object())
+        .map(|apps| {
+            apps.values()
+                .filter(|value| value.as_bool().unwrap_or(false))
+                .count()
+        })
+        .unwrap_or(default_visible_apps_enabled_count())
+}
+
+fn default_visible_apps_enabled_count() -> usize {
+    crate::settings::default_visible_apps()
+        .ordered_enabled()
+        .len()
 }
