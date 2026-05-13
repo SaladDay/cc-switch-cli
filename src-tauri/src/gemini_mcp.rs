@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,14 +5,6 @@ use std::path::{Path, PathBuf};
 use crate::config::atomic_write;
 use crate::error::AppError;
 use crate::gemini_config::get_gemini_settings_path;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpStatus {
-    pub user_config_path: String,
-    pub user_config_exists: bool,
-    pub server_count: usize,
-}
 
 /// 获取 Gemini MCP 配置文件路径（~/.gemini/settings.json）
 fn user_config_path() -> PathBuf {
@@ -36,16 +27,6 @@ fn write_json_value(path: &Path, value: &Value) -> Result<(), AppError> {
     let json =
         serde_json::to_string_pretty(value).map_err(|e| AppError::JsonSerialize { source: e })?;
     atomic_write(path, json.as_bytes())
-}
-
-/// 读取 Gemini MCP 配置文件的完整 JSON 文本
-pub fn read_mcp_json() -> Result<Option<String>, AppError> {
-    let path = user_config_path();
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
-    Ok(Some(content))
 }
 
 /// 读取 Gemini settings.json 中的 mcpServers 映射

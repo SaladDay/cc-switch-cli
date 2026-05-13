@@ -61,8 +61,10 @@ struct DownloadedAsset {
 struct UpdateManifest {
     version: String,
     #[serde(default)]
+    #[allow(dead_code)]
     notes: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub_date: Option<String>,
     platforms: BTreeMap<String, UpdatePlatformEntry>,
 }
@@ -672,18 +674,6 @@ async fn resolve_target_release(
         target_tag: target_tag.clone(),
         release: fetch_release_by_tag(client, repo_url, &target_tag).await?,
     })
-}
-
-async fn resolve_target_tag(
-    client: &reqwest::Client,
-    version: Option<&str>,
-) -> Result<String, AppError> {
-    let tag = match version.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(version) => normalize_tag(version),
-        None => fetch_latest_release_tag(client, REPO_URL).await?,
-    };
-    validate_target_tag(&tag)?;
-    Ok(tag)
 }
 
 fn validate_target_tag(tag: &str) -> Result<(), AppError> {

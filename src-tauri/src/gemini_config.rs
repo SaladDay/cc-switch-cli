@@ -376,18 +376,6 @@ pub fn write_generic_settings() -> Result<(), AppError> {
     update_selected_type("gemini-api-key")
 }
 
-/// 为 Packycode Gemini 供应商写入 settings.json（已废弃，使用 write_generic_settings）
-///
-/// **注意**：此函数已废弃，仅为保持向后兼容性而保留。
-/// PackyCode 现在被视为普通的 API Key 供应商，请使用 `write_generic_settings()` 代替。
-#[deprecated(
-    since = "4.1.1",
-    note = "PackyCode is now treated as a generic API key provider. Use write_generic_settings() instead."
-)]
-pub fn write_packycode_settings() -> Result<(), AppError> {
-    write_generic_settings()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

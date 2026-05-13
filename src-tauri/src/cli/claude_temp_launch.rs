@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::AppError;
+#[cfg(test)]
 use crate::provider::Provider;
 use crate::services::provider::ProviderService;
 use serde_json::Value;
@@ -21,13 +22,6 @@ impl PreparedClaudeLaunch {
     }
 }
 
-pub(crate) fn prepare_launch(
-    provider: &Provider,
-    temp_dir: &Path,
-) -> Result<PreparedClaudeLaunch, AppError> {
-    prepare_launch_with(provider, temp_dir, resolve_claude_binary)
-}
-
 pub(crate) fn prepare_launch_from_settings(
     provider_id: &str,
     settings: &Value,
@@ -36,6 +30,7 @@ pub(crate) fn prepare_launch_from_settings(
     prepare_launch_from_settings_with(provider_id, settings, temp_dir, resolve_claude_binary)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_launch_with<Resolve>(
     provider: &Provider,
     temp_dir: &Path,

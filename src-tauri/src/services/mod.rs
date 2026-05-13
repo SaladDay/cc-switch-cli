@@ -2,7 +2,6 @@ pub mod auth;
 pub mod codex_oauth;
 pub mod config;
 pub mod env_checker;
-pub mod env_manager;
 pub mod local_env_check;
 pub mod mcp;
 pub mod prompt;

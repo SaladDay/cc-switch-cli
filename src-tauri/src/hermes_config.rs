@@ -647,6 +647,7 @@ fn is_dict_only_provider(config: &serde_yaml::Value, name: &str) -> bool {
 }
 
 /// Get a single custom provider by name.
+#[cfg(test)]
 pub fn get_provider(name: &str) -> Result<Option<serde_json::Value>, AppError> {
     Ok(get_providers()?.get(name).cloned())
 }
@@ -740,6 +741,7 @@ pub fn set_provider(
 /// Filters out the matching entry from the `custom_providers:` sequence.
 /// No-op if the section is missing or no entry matches. The entire
 /// read-modify-write is done under the write lock to prevent TOCTOU races.
+#[cfg(test)]
 pub fn remove_provider(name: &str) -> Result<HermesWriteOutcome, AppError> {
     let _guard = hermes_write_lock().lock()?;
     let config = read_hermes_config()?;
@@ -894,6 +896,7 @@ pub(crate) fn json_to_yaml(json: &serde_json::Value) -> Result<serde_yaml::Value
 /// Which of Hermes' two memory files to operate on. Tauri deserializes this
 /// directly from the `"memory"` / `"user"` strings the frontend sends, so an
 /// unknown value is rejected at the IPC boundary instead of deep in the stack.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MemoryKind {
@@ -901,6 +904,7 @@ pub enum MemoryKind {
     User,
 }
 
+#[cfg(test)]
 impl MemoryKind {
     fn filename(self) -> &'static str {
         match self {
@@ -910,12 +914,14 @@ impl MemoryKind {
     }
 }
 
+#[cfg(test)]
 fn memories_dir() -> PathBuf {
     get_hermes_dir().join("memories")
 }
 
 /// Read a Hermes memory file as a markdown blob. Returns an empty string
 /// when the file doesn't exist yet (first-run case).
+#[cfg(test)]
 pub fn read_memory(kind: MemoryKind) -> Result<String, AppError> {
     let path = memories_dir().join(kind.filename());
     match fs::read_to_string(&path) {
@@ -928,6 +934,7 @@ pub fn read_memory(kind: MemoryKind) -> Result<String, AppError> {
 /// Atomically replace a Hermes memory file. `atomic_write` creates parent
 /// directories as needed, so `~/.hermes/memories/` is materialized on first
 /// write without a separate `create_dir_all` call.
+#[cfg(test)]
 pub fn write_memory(kind: MemoryKind, content: &str) -> Result<(), AppError> {
     let path = memories_dir().join(kind.filename());
     atomic_write(&path, content.as_bytes())
@@ -936,6 +943,7 @@ pub fn write_memory(kind: MemoryKind, content: &str) -> Result<(), AppError> {
 /// Character budget + enable flags for the two memory blobs, as configured
 /// in Hermes' `config.yaml`. Defaults mirror `~/.hermes`'s own defaults so
 /// callers get a usable budget bar even before the user edits config.yaml.
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HermesMemoryLimits {
@@ -945,6 +953,7 @@ pub struct HermesMemoryLimits {
     pub user_enabled: bool,
 }
 
+#[cfg(test)]
 impl Default for HermesMemoryLimits {
     fn default() -> Self {
         Self {
@@ -961,6 +970,7 @@ impl Default for HermesMemoryLimits {
 /// settings, etc.). Hermes stores the user-profile toggle under
 /// `user_profile_enabled` (not `user_enabled`), so the mapping to on-disk keys
 /// lives here rather than leaking to callers.
+#[cfg(test)]
 pub fn set_memory_enabled(kind: MemoryKind, enabled: bool) -> Result<HermesWriteOutcome, AppError> {
     let _guard = hermes_write_lock().lock()?;
     let config = read_hermes_config()?;
@@ -985,6 +995,7 @@ pub fn set_memory_enabled(kind: MemoryKind, enabled: bool) -> Result<HermesWrite
 /// Read memory budgets + toggles from `config.yaml`. Missing/unparsable
 /// fields fall back to `HermesMemoryLimits::default()` rather than erroring,
 /// so an empty or partially-populated config still yields a usable UI.
+#[cfg(test)]
 pub fn read_memory_limits() -> Result<HermesMemoryLimits, AppError> {
     let mut out = HermesMemoryLimits::default();
     let config = read_hermes_config()?;
@@ -1016,14 +1027,6 @@ pub fn read_memory_limits() -> Result<HermesMemoryLimits, AppError> {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-    }
 
     /// Run a test with an isolated temp home directory.
     ///
