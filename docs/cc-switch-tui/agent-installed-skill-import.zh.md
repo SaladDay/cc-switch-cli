@@ -81,12 +81,12 @@ fallback。
 - 目录名以 `.` 开头的隐藏目录；
 - 根目录下没有 `SKILL.md` 的目录，例如 Hermes 的分类目录；
 - Hermes `.bundled_manifest` 中声明的内置技能；
-- 目录名已经存在于 cc-switch-tui 管理记录中，并且不需要补齐任何 app 启用状态的 skill；
+- 目录名已经存在于 cc-switch-tui 管理记录中的 skill；
 - 读取目录失败的条目。
 
 这里的去重和过滤以目录名为 key。也就是说，同名目录会合并成一条导入候选，并把发现
-来源合并到 `found_in`。如果 cc-switch-tui 已经管理了同名 directory，但它又出现在某个
-具体 app 的 skill 目录里，而该 app 尚未启用，则仍会提示导入，用于补齐启用状态。
+来源合并到 `found_in`。如果 cc-switch-tui 已经管理了同名 directory，agent 导入不会再
+提示或更新它；需要调整 app 启用状态时，应在已安装技能列表中显式切换。
 
 ## 导入逻辑
 
@@ -105,7 +105,7 @@ fallback。
 4. 按 agent 来源优先级查找每个被选中的 directory。
 5. 合并所有发现来源对应的 app 启用状态。
 6. 找到来源目录后，把它复制到 cc-switch-tui 的 SSOT skill 目录。
-7. 如果 directory 已经在 index 中，复用现有记录，只补齐 app 启用状态和缺失 metadata。
+7. 如果 directory 已经在 index 中，跳过，不重复导入、不补齐 app 启用状态。
 8. 如果 directory 还没有管理记录，从目标目录的 `SKILL.md` 读取 name 和 description，并生成
    `InstalledSkill` 管理记录。
 9. 保存 skill index。

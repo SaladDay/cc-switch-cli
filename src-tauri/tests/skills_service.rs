@@ -405,6 +405,30 @@ fn import_from_agent_reads_codex_home_skills_and_enables_codex() {
 }
 
 #[test]
+fn import_from_agent_deduplicates_requested_directories() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    write_skill_md(
+        &home.join(".agents").join("skills").join("agent-skill"),
+        "Agent Skill",
+        "Found in agent",
+    );
+
+    let imported =
+        SkillService::import_from_agent(vec!["agent-skill".to_string(), "agent-skill".to_string()])
+            .expect("import should deduplicate requested directories");
+
+    assert_eq!(
+        imported.len(),
+        1,
+        "duplicate import requests should create one result"
+    );
+    assert_eq!(imported[0].directory, "agent-skill");
+}
+
+#[test]
 fn scan_agent_installed_prefers_claude_config_dir_env_over_default() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -599,7 +623,7 @@ fn import_from_agent_imports_hermes_skill_and_enables_hermes() {
 }
 
 #[test]
-fn import_from_agent_backfills_existing_managed_skill_app_enablement() {
+fn import_from_agent_skips_existing_managed_skill() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -627,18 +651,16 @@ fn import_from_agent_backfills_existing_managed_skill_app_enablement() {
     assert!(
         scan_result
             .iter()
-            .any(|skill| skill.directory == "shared-skill"
-                && skill.found_in.iter().any(|source| source == "hermes")),
-        "managed skills should be offered when an app-local install can backfill enablement"
+            .all(|skill| skill.directory != "shared-skill"),
+        "managed skills should not be offered by agent import"
     );
 
-    let backfilled = SkillService::import_from_agent(vec!["shared-skill".to_string()])
-        .expect("backfill Hermes enablement");
+    let skipped = SkillService::import_from_agent(vec!["shared-skill".to_string()])
+        .expect("skip existing managed skill");
 
-    assert_eq!(backfilled.len(), 1);
     assert!(
-        backfilled[0].apps.hermes,
-        "existing managed skill should gain Hermes enablement"
+        skipped.is_empty(),
+        "existing managed skill should not be re-imported"
     );
 
     let installed = SkillService::list_installed().expect("list installed skills");
@@ -646,7 +668,10 @@ fn import_from_agent_backfills_existing_managed_skill_app_enablement() {
         .iter()
         .find(|skill| skill.directory == "shared-skill")
         .expect("shared skill should remain installed");
-    assert!(skill.apps.hermes, "Hermes enablement should persist");
+    assert!(
+        !skill.apps.hermes,
+        "agent import should not mutate app enablement for an existing managed skill"
+    );
 }
 
 #[test]

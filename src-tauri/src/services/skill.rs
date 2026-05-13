@@ -1367,14 +1367,7 @@ impl SkillService {
                     continue;
                 }
 
-                let should_offer = match index.skills.get(&dir_name) {
-                    Some(skill) => source
-                        .app
-                        .as_ref()
-                        .is_some_and(|app| !skill.apps.is_enabled_for(app)),
-                    None => true,
-                };
-                if !should_offer {
+                if index.skills.contains_key(&dir_name) {
                     continue;
                 }
 
@@ -1487,6 +1480,16 @@ impl SkillService {
             return Ok(Vec::new());
         }
         let mut imported = Vec::new();
+        let mut seen_directories = HashSet::new();
+        let directories: Vec<String> = directories
+            .into_iter()
+            .filter(|dir_name| {
+                seen_directories.insert(dir_name.clone()) && !index.skills.contains_key(dir_name)
+            })
+            .collect();
+        if directories.is_empty() {
+            return Ok(imported);
+        }
 
         merge_repos_from_lock(
             &mut index.repos,
@@ -1521,22 +1524,6 @@ impl SkillService {
             let dest = ssot_dir.join(&dir_name);
             if !dest.exists() {
                 Self::copy_dir_recursive(&source, &dest)?;
-            }
-
-            if let Some(existing) = index.skills.get_mut(&dir_name) {
-                existing.apps.merge_enabled(&apps);
-                let skill_md = dest.join("SKILL.md");
-                let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
-                if existing.name.trim().is_empty()
-                    || existing.name.eq_ignore_ascii_case(&existing.directory)
-                {
-                    existing.name = name;
-                }
-                if existing.description.is_none() {
-                    existing.description = description;
-                }
-                imported.push(existing.clone());
-                continue;
             }
 
             let skill_md = dest.join("SKILL.md");
