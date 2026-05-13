@@ -86,7 +86,7 @@ fallback。
 
 这里的去重和过滤以目录名为 key。也就是说，同名目录会合并成一条导入候选，并把发现
 来源合并到 `found_in`。如果 cc-switch-tui 已经管理了同名 directory，agent 导入不会再
-提示或更新它；需要调整 app 启用状态时，应在已安装技能列表中显式切换。
+提示或重复导入它。
 
 ## 导入逻辑
 
@@ -155,13 +155,17 @@ Agent 导入会区分通用 agent 来源和具体工具来源。
 如果 skill 只存在于 `~/.agents/skills`，新建记录的 `apps` 使用默认值，也就是所有 app
 都未启用。
 
-如果 skill 存在于具体工具目录中，新建记录或既有记录会启用对应 app。例如：
+如果新导入的 skill 存在于具体工具目录中，新建记录会启用对应 app。例如：
 
 - `~/.hermes/skills/foo` 会设置 `foo.apps.hermes = true`
 - `~/.claude/skills/foo` 会设置 `foo.apps.claude = true`
 - `$CODEX_HOME/skills/foo` 会设置 `foo.apps.codex = true`
 - `$CLAUDE_CONFIG_DIR/skills/foo` 会设置 `foo.apps.claude = true`
 - `$HERMES_HOME/skills/foo` 会设置 `foo.apps.hermes = true`
+
+如果 skill 已经在 cc-switch-tui 管理记录中，`S` 不会重复导入；但 Skills 列表加载时会
+检查已管理 skill 是否实际存在于具体 app 的 skills 目录，若存在则回填对应 app 启用状态，
+避免目录已经存在但界面未打勾。
 
 后续仍可由用户显式调整：
 

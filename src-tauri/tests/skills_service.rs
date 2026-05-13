@@ -669,8 +669,57 @@ fn import_from_agent_skips_existing_managed_skill() {
         .find(|skill| skill.directory == "shared-skill")
         .expect("shared skill should remain installed");
     assert!(
-        !skill.apps.hermes,
-        "agent import should not mutate app enablement for an existing managed skill"
+        skill.apps.hermes,
+        "list_installed should reflect managed skills already present in an app skills dir"
+    );
+
+    let db = Database::init().expect("init db");
+    let all = db
+        .get_all_installed_skills()
+        .expect("get all installed skills");
+    let persisted = all
+        .values()
+        .find(|skill| skill.directory == "shared-skill")
+        .expect("shared skill should remain in db");
+    assert!(
+        persisted.apps.hermes,
+        "reconciled app enablement should persist"
+    );
+}
+
+#[test]
+fn list_installed_reconciles_managed_codex_skill_present_on_disk() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    write_skill_md(
+        &home.join(".agents").join("skills").join("codex-live-skill"),
+        "Codex Live Skill",
+        "Initially generic",
+    );
+    let imported = SkillService::import_from_agent(vec!["codex-live-skill".to_string()])
+        .expect("seed managed skill from generic agent dir");
+    assert_eq!(imported.len(), 1);
+    assert!(
+        !imported[0].apps.codex,
+        "generic agent source should not enable Codex"
+    );
+
+    write_skill_md(
+        &home.join(".codex").join("skills").join("codex-live-skill"),
+        "Codex Live Skill",
+        "Already installed for Codex",
+    );
+
+    let installed = SkillService::list_installed().expect("list installed skills");
+    let skill = installed
+        .iter()
+        .find(|skill| skill.directory == "codex-live-skill")
+        .expect("codex-live-skill should remain installed");
+    assert!(
+        skill.apps.codex,
+        "managed skill present in ~/.codex/skills should show Codex enabled"
     );
 }
 

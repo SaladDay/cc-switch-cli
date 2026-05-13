@@ -663,6 +663,40 @@ impl SkillService {
         Ok(())
     }
 
+    fn reconcile_managed_app_enablement_from_live_dirs(
+        index: &mut SkillsIndex,
+    ) -> Result<bool, AppError> {
+        let mut changed = false;
+
+        for app in Self::supported_skill_apps() {
+            let app_dir = match get_app_skills_dir_for_scan(&app) {
+                Ok(dir) => dir,
+                Err(_) => continue,
+            };
+            if !app_dir.is_dir() {
+                continue;
+            }
+
+            for skill in index.skills.values_mut() {
+                if skill.apps.is_enabled_for(&app) {
+                    continue;
+                }
+
+                let live_skill_dir = app_dir.join(&skill.directory);
+                if live_skill_dir.is_dir() && live_skill_dir.join("SKILL.md").is_file() {
+                    skill.apps.set_enabled_for(&app, true);
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            Self::save_index(index)?;
+        }
+
+        Ok(changed)
+    }
+
     // ---------------------------------------------------------------------
     // One-time SSOT migration (scan app dirs -> copy to SSOT -> record in index)
     // ---------------------------------------------------------------------
@@ -977,6 +1011,7 @@ impl SkillService {
     pub fn list_installed() -> Result<Vec<InstalledSkill>, AppError> {
         let mut index = Self::load_index()?;
         let _ = Self::migrate_ssot_if_pending(&mut index)?;
+        let _ = Self::reconcile_managed_app_enablement_from_live_dirs(&mut index)?;
         let mut skills: Vec<InstalledSkill> = index.skills.values().cloned().collect();
         skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         Ok(skills)

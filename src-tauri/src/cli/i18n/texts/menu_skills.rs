@@ -291,9 +291,9 @@ pub fn skills_no_unmanaged_found() -> &'static str {
 
 pub fn skills_no_agent_installed_found() -> &'static str {
     if is_chinese() {
-        "未发现可导入或可补齐启用状态的智能体技能。"
+        "未发现可导入的智能体技能。已管理技能会自动同步实际启用状态。"
     } else {
-        "No agent skills found to import or backfill enablement for."
+        "No agent skills found to import. Managed skills automatically reflect live app enablement."
     }
 }
 
