@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.2] - 2026-05-13
+
+### Added
+
+- Add OpenClaw MCP management support across the CLI/TUI app model.
+- Show the installed OpenClaw CLI version in the TUI home local environment check.
+- Add visual selection mode for skills management.
+- Add OpenClaw skill support and align agent app columns.
+
+### Fixed
+
+- Keep OpenClaw and Hermes app switches persisted in TUI state.
+- Prune stale OpenClaw agent model catalog entries when providers are removed.
+- Align the OpenClaw current provider marker and default provider keyboard handling.
+- Reconcile live app skill enablement and skip managed or bundled skills during agent import.
+- Adapt upstream sync changes for cc-switch-tui.
+
 ## [0.1.1] — 2026-05-11
 
 ### Added
@@ -40,5 +57,6 @@ Initial release of the renamed cc-switch-tui fork.
 
 - Sponsor section from README files and partner assets
 
+[0.1.2]: https://github.com/handy-sun/cc-switch-tui/releases/tag/v0.1.2
 [0.1.1]: https://github.com/handy-sun/cc-switch-tui/releases/tag/v0.1.1
 [0.1.0]: https://github.com/handy-sun/cc-switch-tui/releases/tag/v0.1.0

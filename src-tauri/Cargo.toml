@@ -1,6 +1,6 @@
 [package]
 name = "cc-switch-tui"
-version = "0.1.1"
+version = "0.1.2"
 description = "All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode, OpenClaw & Hermes"
 authors = ["Jason Young", "saladday", "handy-sun"]
 license = "MIT"

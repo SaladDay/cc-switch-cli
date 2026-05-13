@@ -404,7 +404,7 @@ jobs:
           body: |
             ## CC Switch TUI ${{ github.ref_name }}
 
-            All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode & OpenClaw
+            All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode, OpenClaw & Hermes
 
             See `CHANGELOG.md` and the README in this tag for the latest release notes and upgrade highlights.
 
