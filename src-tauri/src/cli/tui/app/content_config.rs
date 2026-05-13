@@ -715,6 +715,21 @@ impl App {
                     });
                     Action::None
                 }
+                Some(SettingsItem::SkillSyncMethod) => {
+                    let current = crate::settings::get_skill_sync_method();
+                    let next = match current {
+                        crate::services::skill::SyncMethod::Auto => {
+                            crate::services::skill::SyncMethod::Copy
+                        }
+                        crate::services::skill::SyncMethod::Copy => {
+                            crate::services::skill::SyncMethod::Symlink
+                        }
+                        crate::services::skill::SyncMethod::Symlink => {
+                            crate::services::skill::SyncMethod::Auto
+                        }
+                    };
+                    Action::SetSkillSyncMethod(next)
+                }
                 Some(SettingsItem::SkipClaudeOnboarding) => {
                     let current = crate::settings::get_skip_claude_onboarding();
                     let next = !current;

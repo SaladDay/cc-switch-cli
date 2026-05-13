@@ -767,6 +767,47 @@ fn toggle_app_openclaw_syncs_live_skill_directory() {
 }
 
 #[test]
+fn toggle_app_hermes_preserves_existing_native_skill_directory() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    write_skill_md(
+        &home.join(".claude").join("skills").join("devops"),
+        "DevOps",
+        "Managed from Claude",
+    );
+    let imported = SkillService::import_from_apps(vec!["devops".to_string()])
+        .expect("import managed devops skill");
+    assert_eq!(imported.len(), 1);
+
+    let hermes_devops = home.join(".hermes").join("skills").join("devops");
+    std::fs::create_dir_all(hermes_devops.join("kanban-worker.bak"))
+        .expect("create Hermes native category");
+    std::fs::write(hermes_devops.join("native.txt"), "owned by Hermes")
+        .expect("write Hermes native marker");
+
+    SkillService::toggle_app("devops", &AppType::Hermes, true)
+        .expect("Hermes native directory conflict should be preserved");
+
+    assert!(
+        hermes_devops.join("native.txt").exists(),
+        "Hermes native directory should not be deleted or overwritten"
+    );
+    assert!(
+        !hermes_devops.join("SKILL.md").exists(),
+        "cc-switch should not copy over an unmanaged Hermes directory"
+    );
+
+    SkillService::toggle_app("devops", &AppType::Hermes, false)
+        .expect("disabling should also preserve unmanaged Hermes directory");
+    assert!(
+        hermes_devops.join("native.txt").exists(),
+        "disabling a managed skill must not delete Hermes native directories"
+    );
+}
+
+#[test]
 fn scan_unmanaged_includes_openclaw_skill_directory() {
     let _guard = lock_test_mutex();
     reset_test_fs();

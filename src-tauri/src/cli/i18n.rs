@@ -3221,6 +3221,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_skill_sync_method_label() -> &'static str {
+        if is_chinese() {
+            "技能管理方式"
+        } else {
+            "Skill Management"
+        }
+    }
+
     pub fn tui_skills_sync_method_title() -> &'static str {
         if is_chinese() {
             "选择同步方式"
@@ -5310,9 +5318,9 @@ pub mod texts {
 
     pub fn tui_toast_skills_sync_method_set(method: &str) -> String {
         if is_chinese() {
-            format!("同步方式已设置为: {method}")
+            format!("同步方式已设置为：{method}。重新同步后会应用到已有技能。")
         } else {
-            format!("Sync method set to: {method}")
+            format!("Sync method set to: {method}. Re-sync to apply it to existing skills.")
         }
     }
 

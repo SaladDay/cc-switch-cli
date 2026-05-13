@@ -2340,6 +2340,7 @@ pub(super) fn render_settings(
     let language = crate::cli::i18n::current_language();
     let visible_apps = crate::settings::get_visible_apps();
     let openclaw_config_dir = crate::settings::get_settings().openclaw_config_dir;
+    let skill_sync_method = crate::settings::get_skill_sync_method();
     let skip_claude_onboarding = crate::settings::get_skip_claude_onboarding();
     let claude_plugin_integration = crate::settings::get_enable_claude_plugin_integration();
 
@@ -2359,6 +2360,10 @@ pub(super) fn render_settings(
                 openclaw_config_dir.clone().unwrap_or_else(|| {
                     texts::tui_settings_openclaw_config_dir_default_value().to_string()
                 }),
+            ),
+            super::app::SettingsItem::SkillSyncMethod => (
+                texts::tui_settings_skill_sync_method_label().to_string(),
+                texts::tui_skills_sync_method_name(skill_sync_method).to_string(),
             ),
             super::app::SettingsItem::SkipClaudeOnboarding => (
                 texts::skip_claude_onboarding_label().to_string(),

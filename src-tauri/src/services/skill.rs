@@ -22,6 +22,7 @@ use crate::database::Database;
 use crate::error::{format_skill_error, AppError};
 
 const SKILLS_INDEX_VERSION: u32 = 1;
+const MANAGED_SKILL_MARKER: &str = ".cc-switch-tui-managed";
 
 fn default_skills_index_version() -> u32 {
     SKILLS_INDEX_VERSION
@@ -911,6 +912,27 @@ impl SkillService {
         Ok(())
     }
 
+    fn is_managed_copy(path: &Path) -> bool {
+        path.join(MANAGED_SKILL_MARKER).is_file()
+    }
+
+    fn write_managed_copy_marker(path: &Path) -> Result<(), AppError> {
+        let marker = path.join(MANAGED_SKILL_MARKER);
+        fs::write(&marker, "managed by cc-switch-tui\n").map_err(|e| AppError::io(&marker, e))
+    }
+
+    fn sync_by_copy(source: &Path, dest: &Path) -> Result<(), AppError> {
+        Self::copy_dir_recursive(source, dest)?;
+        Self::write_managed_copy_marker(dest)
+    }
+
+    fn should_preserve_existing_app_skill_dir(app: &AppType, dest: &Path) -> bool {
+        app == &AppType::Hermes
+            && dest.exists()
+            && !Self::is_symlink(dest)
+            && !Self::is_managed_copy(dest)
+    }
+
     pub fn sync_to_app_dir(
         directory: &str,
         app: &AppType,
@@ -934,6 +956,13 @@ impl SkillService {
 
         let dest = app_dir.join(directory);
         if dest.exists() || Self::is_symlink(&dest) {
+            if Self::should_preserve_existing_app_skill_dir(app, &dest) {
+                log::warn!(
+                    "跳过同步 Skill '{directory}' 到 Hermes：目标目录已存在且不由 cc-switch-tui 管理: {}",
+                    dest.display()
+                );
+                return Ok(());
+            }
             Self::remove_path(&dest)?;
         }
 
@@ -946,11 +975,11 @@ impl SkillService {
                         source.display(),
                         dest.display()
                     );
-                    Self::copy_dir_recursive(&source, &dest)
+                    Self::sync_by_copy(&source, &dest)
                 }
             },
             SyncMethod::Symlink => Self::create_symlink(&source, &dest),
-            SyncMethod::Copy => Self::copy_dir_recursive(&source, &dest),
+            SyncMethod::Copy => Self::sync_by_copy(&source, &dest),
         }
     }
 
@@ -962,6 +991,13 @@ impl SkillService {
         let app_dir = Self::get_app_skills_dir(app)?;
         let path = app_dir.join(directory);
         if path.exists() || Self::is_symlink(&path) {
+            if Self::should_preserve_existing_app_skill_dir(app, &path) {
+                log::warn!(
+                    "跳过删除 Hermes Skill '{directory}'：目标目录不由 cc-switch-tui 管理: {}",
+                    path.display()
+                );
+                return Ok(());
+            }
             Self::remove_path(&path)?;
         }
         Ok(())

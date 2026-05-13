@@ -315,6 +315,16 @@ pub(crate) fn handle_action(
             settings::set_proxy_auto_failover(&mut ctx, app_type, enabled)
         }
         Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
+        Action::SetSkillSyncMethod(method) => {
+            crate::services::SkillService::set_sync_method(method)?;
+            ctx.data.skills.sync_method = method;
+            let method_name = texts::tui_skills_sync_method_name(method);
+            ctx.app.push_toast(
+                texts::tui_toast_skills_sync_method_set(method_name),
+                ToastKind::Success,
+            );
+            Ok(())
+        }
         Action::SetManagedProxyForCurrentApp { app_type, enabled } => queue_managed_proxy_action(
             ctx.app,
             ctx.proxy_req_tx,
@@ -697,6 +707,45 @@ mod tests {
             Some(toast)
                 if toast.kind == super::super::app::ToastKind::Success
                     && toast.message == texts::tui_toast_visible_apps_saved()
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn set_skill_sync_method_persists_and_updates_ui_data() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        crate::settings::set_skill_sync_method(crate::services::skill::SyncMethod::Auto)
+            .expect("seed skill sync method");
+
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+        data.skills.sync_method = crate::services::skill::SyncMethod::Auto;
+
+        run_action(
+            &mut app,
+            &mut data,
+            Action::SetSkillSyncMethod(crate::services::skill::SyncMethod::Copy),
+        )
+        .expect("set skill sync method");
+
+        assert_eq!(
+            crate::settings::get_skill_sync_method(),
+            crate::services::skill::SyncMethod::Copy
+        );
+        assert_eq!(
+            data.skills.sync_method,
+            crate::services::skill::SyncMethod::Copy
+        );
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == super::super::app::ToastKind::Success
+                    && toast.message == texts::tui_toast_skills_sync_method_set(
+                        texts::tui_skills_sync_method_name(
+                            crate::services::skill::SyncMethod::Copy
+                        )
+                    )
         ));
     }
 

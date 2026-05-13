@@ -478,9 +478,9 @@ pub fn tui_toast_skills_synced() -> &'static str {
 
 pub fn tui_toast_skills_sync_method_set(method: &str) -> String {
     if is_chinese() {
-        format!("同步方式已设置为: {method}")
+        format!("同步方式已设置为：{method}。重新同步后会应用到已有技能。")
     } else {
-        format!("Sync method set to: {method}")
+        format!("Sync method set to: {method}. Re-sync to apply it to existing skills.")
     }
 }
 

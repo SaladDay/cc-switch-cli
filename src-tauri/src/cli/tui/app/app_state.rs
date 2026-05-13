@@ -201,6 +201,7 @@ pub enum Action {
     SetOpenClawConfigDir {
         path: Option<String>,
     },
+    SetSkillSyncMethod(crate::services::skill::SyncMethod),
     SetManagedProxyForCurrentApp {
         app_type: AppType,
         enabled: bool,
@@ -362,6 +363,7 @@ pub enum SettingsItem {
     Language,
     VisibleApps,
     OpenClawConfigDir,
+    SkillSyncMethod,
     SkipClaudeOnboarding,
     ClaudePluginIntegration,
     Proxy,
@@ -369,10 +371,11 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 7] = [
+    pub const ALL: [SettingsItem; 8] = [
         SettingsItem::Language,
         SettingsItem::VisibleApps,
         SettingsItem::OpenClawConfigDir,
+        SettingsItem::SkillSyncMethod,
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,
         SettingsItem::Proxy,

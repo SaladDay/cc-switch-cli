@@ -292,6 +292,14 @@ pub fn tui_skills_sync_method_label() -> &'static str {
     }
 }
 
+pub fn tui_settings_skill_sync_method_label() -> &'static str {
+    if is_chinese() {
+        "技能管理方式"
+    } else {
+        "Skill Management"
+    }
+}
+
 pub fn tui_skills_sync_method_title() -> &'static str {
     if is_chinese() {
         "选择同步方式"

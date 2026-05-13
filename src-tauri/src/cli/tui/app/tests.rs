@@ -7738,6 +7738,16 @@ mod tests {
     }
 
     #[test]
+    fn settings_menu_exposes_skill_sync_method_item() {
+        assert!(
+            SettingsItem::ALL
+                .iter()
+                .any(|item| matches!(item, SettingsItem::SkillSyncMethod)),
+            "Settings should expose a skill sync method entry"
+        );
+    }
+
+    #[test]
     #[serial(home_settings)]
     fn settings_openclaw_config_dir_item_opens_text_input() {
         let temp_home = TempDir::new().expect("create temp home");
@@ -7799,6 +7809,37 @@ mod tests {
         assert!(matches!(
             action,
             Action::SetOpenClawConfigDir { path: None }
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn settings_skill_sync_method_item_cycles_to_next_method() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        crate::settings::set_skill_sync_method(crate::services::skill::SyncMethod::Auto)
+            .expect("seed sync method");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::SkillSyncMethod))
+            .expect("SkillSyncMethod missing from SettingsItem::ALL");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::SetSkillSyncMethod(crate::services::skill::SyncMethod::Copy)
+        ));
+
+        crate::settings::set_skill_sync_method(crate::services::skill::SyncMethod::Copy)
+            .expect("seed copy sync method");
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::SetSkillSyncMethod(crate::services::skill::SyncMethod::Symlink)
         ));
     }
 

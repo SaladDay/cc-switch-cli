@@ -884,6 +884,34 @@ fn settings_page_shows_openclaw_config_dir_override_value() {
 }
 
 #[test]
+#[serial(home_settings)]
+fn settings_page_shows_skill_sync_method_row_value() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_skill_sync_method(crate::services::skill::SyncMethod::Copy)
+        .expect("save skill sync method");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_settings_skill_sync_method_label()),
+        "{all}"
+    );
+    assert!(
+        all.contains(texts::tui_skills_sync_method_name(
+            crate::services::skill::SyncMethod::Copy
+        )),
+        "{all}"
+    );
+}
+
+#[test]
 fn zero_selection_warning_toast_renders_after_picker_rejection() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
