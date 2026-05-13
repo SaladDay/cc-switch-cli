@@ -66,11 +66,10 @@ pub(super) fn render_prompts(
             chunks[0],
             theme,
             &[
-                ("Space", texts::tui_key_activate()),
+                ("Space", texts::tui_key_toggle()),
                 ("a", texts::tui_key_add()),
                 ("Enter", texts::tui_key_view()),
                 ("e", texts::tui_key_edit()),
-                ("x", texts::tui_key_deactivate_active()),
                 ("d", texts::tui_key_delete()),
             ],
         );

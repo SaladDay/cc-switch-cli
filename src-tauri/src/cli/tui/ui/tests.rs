@@ -2582,7 +2582,7 @@ fn text_input_overlay_renders_inner_input_box() {
 }
 
 #[test]
-fn prompts_page_uses_space_activate_and_add_key() {
+fn prompts_page_uses_space_toggle_and_add_key() {
     let _lock = lock_env();
     let _no_color = EnvGuard::set("NO_COLOR", "1");
 
@@ -2609,9 +2609,10 @@ fn prompts_page_uses_space_activate_and_add_key() {
 
     assert!(all.contains("Prompts"));
     assert!(all.contains(AppType::Claude.as_str()));
-    assert!(all.contains("Space=activate"));
+    assert!(all.contains("Space=toggle"));
     assert!(all.contains("a=add"));
     assert!(!all.contains("c=create"));
+    assert!(!all.contains("x=deactivate"));
     assert!(all.contains(&texts::tui_prompts_summary(1, "Work Prompt")));
 }
 

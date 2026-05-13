@@ -509,9 +509,9 @@ pub mod texts {
 
     pub fn tui_footer_action_keys_prompts() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Space 激活  a 新增  Enter 查看  e 编辑  x 取消激活  d 删除  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用  Space 启用/禁用  a 新增  Enter 查看  e 编辑  d 删除  / 过滤  Esc 返回  ? 帮助"
         } else {
-            "[ ] switch app  Space activate  a add  Enter view  e edit  x deactivate  d delete  / filter  Esc back  ? help"
+            "[ ] switch app  Space toggle  a add  Enter view  e edit  d delete  / filter  Esc back  ? help"
         }
     }
 
@@ -565,9 +565,9 @@ pub mod texts {
 
     pub fn tui_help_text() -> &'static str {
         if is_chinese() {
-            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n文本输入：Ctrl+A/E 行首/行尾，Ctrl+U/K 删除行片段，Ctrl+W 删除前词，Alt+B/F 按词移动\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，Space 切换，a 新增，e 编辑，d 删除，t 测试，r 刷新，o 临时启动，f 管理故障转移，x 设为默认\n- 供应商详情：Space 切换，e 编辑，t 测试，r 刷新，o 临时启动，f 管理故障转移，x 设为默认\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：Space 激活，a 新增，Enter 查看，e 编辑，x 取消激活(当前)，d 删除\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
+            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n文本输入：Ctrl+A/E 行首/行尾，Ctrl+U/K 删除行片段，Ctrl+W 删除前词，Alt+B/F 按词移动\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，Space 切换，a 新增，e 编辑，d 删除，t 测试，r 刷新，o 临时启动，f 管理故障转移，x 设为默认\n- 供应商详情：Space 切换，e 编辑，t 测试，r 刷新，o 临时启动，f 管理故障转移，x 设为默认\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：Space 启用/禁用，a 新增，Enter 查看，e 编辑，d 删除\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
         } else {
-            "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nText input: Ctrl+A/E move line, Ctrl+U/K delete line parts, Ctrl+W delete word, Alt+B/F move word\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, Space switch, a add, e edit, d delete, t test, r refresh, o launch temp, f manage failover, x set default\n- Provider Detail: Space switch, e edit, t test, r refresh, o launch temp, f manage failover, x set default\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: Space activate, a add, Enter view, e edit, x deactivate active, d delete\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
+            "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nText input: Ctrl+A/E move line, Ctrl+U/K delete line parts, Ctrl+W delete word, Alt+B/F move word\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, Space switch, a add, e edit, d delete, t test, r refresh, o launch temp, f manage failover, x set default\n- Provider Detail: Space switch, e edit, t test, r refresh, o launch temp, f manage failover, x set default\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: Space toggle, a add, Enter view, e edit, d delete\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
         }
     }
 
@@ -8960,7 +8960,7 @@ mod tests {
         assert!(help.contains("文本输入：Ctrl+A/E 行首/行尾"));
         assert!(help.contains("供应商：Enter 详情"));
         assert!(help.contains("供应商详情：Space 切换"));
-        assert!(help.contains("提示词：Space 激活"));
+        assert!(help.contains("提示词：Space 启用/禁用"));
         assert!(help.contains("技能：Enter 详情"));
         assert!(help.contains("配置：Enter 打开/执行"));
         assert!(help.contains("设置：Enter 应用"));

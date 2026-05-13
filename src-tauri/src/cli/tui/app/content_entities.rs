@@ -360,19 +360,10 @@ impl App {
                 let Some(row) = visible.get(self.prompt_idx) else {
                     return Action::None;
                 };
-                Action::PromptActivate { id: row.id.clone() }
-            }
-            KeyCode::Char('x') => {
-                let active = data.prompts.rows.iter().find(|p| p.prompt.enabled);
-                let Some(active) = active else {
-                    self.push_toast(
-                        texts::tui_toast_prompt_no_active_to_deactivate(),
-                        ToastKind::Info,
-                    );
-                    return Action::None;
-                };
-                Action::PromptDeactivate {
-                    id: active.id.clone(),
+                if row.prompt.enabled {
+                    Action::PromptDeactivate { id: row.id.clone() }
+                } else {
+                    Action::PromptActivate { id: row.id.clone() }
                 }
             }
             KeyCode::Char('d') => {

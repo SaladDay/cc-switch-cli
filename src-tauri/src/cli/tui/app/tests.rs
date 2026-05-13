@@ -2435,7 +2435,7 @@ mod tests {
     }
 
     #[test]
-    fn prompts_space_key_triggers_activate_action() {
+    fn prompts_space_key_toggles_activate_and_deactivate_actions() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
         app.focus = Focus::Content;
@@ -2456,6 +2456,34 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(action, Action::PromptActivate { id } if id == "pr1"));
+
+        data.prompts.rows[0].prompt.enabled = true;
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(action, Action::PromptDeactivate { id } if id == "pr1"));
+    }
+
+    #[test]
+    fn prompts_x_key_no_longer_deactivates_active_prompt() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.prompts.rows.push(super::super::data::PromptRow {
+            id: "pr1".to_string(),
+            prompt: crate::prompt::Prompt {
+                id: "pr1".to_string(),
+                name: "My Prompt".to_string(),
+                content: "Hello".to_string(),
+                description: None,
+                enabled: true,
+                created_at: None,
+                updated_at: None,
+            },
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(action, Action::None));
     }
 
     #[test]
