@@ -114,14 +114,14 @@ impl App {
         key: KeyEvent,
     ) -> Option<Action> {
         match key.code {
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let Some(FormState::McpAdd(mcp)) = self.form.as_mut() else {
                     return None;
                 };
                 mcp.field_idx = mcp.field_idx.saturating_sub(1);
                 Some(Action::None)
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let Some(FormState::McpAdd(mcp)) = self.form.as_mut() else {
                     return None;
                 };
@@ -167,11 +167,11 @@ impl App {
         };
 
         match key.code {
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 mcp.json_scroll = mcp.json_scroll.saturating_sub(1);
                 Some(Action::None)
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 mcp.json_scroll = mcp.json_scroll.saturating_add(1);
                 Some(Action::None)
             }

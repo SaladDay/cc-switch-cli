@@ -128,14 +128,14 @@ impl App {
         key: KeyEvent,
     ) -> Option<Action> {
         match key.code {
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let Some(FormState::PromptMeta(prompt)) = self.form.as_mut() else {
                     return None;
                 };
                 prompt.field_idx = prompt.field_idx.saturating_sub(1);
                 Some(Action::None)
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let Some(FormState::PromptMeta(prompt)) = self.form.as_mut() else {
                     return None;
                 };

@@ -155,7 +155,7 @@ impl App {
         data: &UiData,
     ) -> Option<Action> {
         match key.code {
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return None;
                 };
@@ -170,7 +170,7 @@ impl App {
                 }
                 Some(Action::None)
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return None;
                 };
@@ -494,14 +494,14 @@ impl App {
                 }
                 Some(Action::None)
             }
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return None;
                 };
                 provider.json_scroll = provider.json_scroll.saturating_sub(1);
                 Some(Action::None)
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return None;
                 };
