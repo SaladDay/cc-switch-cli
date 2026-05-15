@@ -10775,4 +10775,367 @@ mod tests {
             } if id == "p1" && content.contains("Provider One")
         ));
     }
+
+    #[test]
+    fn provider_form_jk_navigates_fields() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.open_provider_add_form();
+
+        // Apply template to move focus from Templates to Fields.
+        app.on_key(key(KeyCode::Enter), &data());
+
+        let initial_idx = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.field_idx,
+            _ => panic!("provider form should be open"),
+        };
+        assert_eq!(initial_idx, 0);
+
+        app.on_key(key(KeyCode::Char('j')), &data());
+        let after_j = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.field_idx,
+            _ => panic!("provider form should be open"),
+        };
+        assert_eq!(after_j, 1);
+
+        app.on_key(key(KeyCode::Char('k')), &data());
+        let after_k = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.field_idx,
+            _ => panic!("provider form should be open"),
+        };
+        assert_eq!(after_k, 0);
+    }
+
+    #[test]
+    fn provider_form_jk_inserts_chars_when_editing() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.open_provider_add_form();
+
+        // Apply template to move focus from Templates to Fields.
+        app.on_key(key(KeyCode::Enter), &data());
+        // Enter editing mode on the first text field.
+        app.on_key(key(KeyCode::Enter), &data());
+        let editing = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.editing,
+            _ => panic!("provider form should be open"),
+        };
+        assert!(editing);
+
+        // In editing mode, j and k should be typed as characters.
+        app.on_key(key(KeyCode::Char('j')), &data());
+        app.on_key(key(KeyCode::Char('k')), &data());
+        let (editing, value) = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => (form.editing, form.name.value.clone()),
+            _ => panic!("provider form should be open"),
+        };
+        assert!(editing);
+        assert!(
+            value.contains('j') && value.contains('k'),
+            "j/k should be typed as characters in editing mode, got: {value}"
+        );
+    }
+
+    #[test]
+    fn provider_form_down_same_as_j() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.open_provider_add_form();
+        app.on_key(key(KeyCode::Enter), &data()); // apply template -> fields
+
+        app.on_key(key(KeyCode::Down), &data());
+        let after_down = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.field_idx,
+            _ => panic!("provider form should be open"),
+        };
+
+        app.on_key(key(KeyCode::Char('k')), &data()); // go back up
+        app.on_key(key(KeyCode::Char('j')), &data());
+        let after_j = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.field_idx,
+            _ => panic!("provider form should be open"),
+        };
+        assert_eq!(after_down, after_j);
+    }
+
+    #[test]
+    fn provider_form_up_same_as_k() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.open_provider_add_form();
+        app.on_key(key(KeyCode::Enter), &data()); // apply template -> fields
+
+        app.on_key(key(KeyCode::Char('j')), &data()); // move down first
+        app.on_key(key(KeyCode::Up), &data());
+        let after_up = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.field_idx,
+            _ => panic!("provider form should be open"),
+        };
+
+        app.on_key(key(KeyCode::Char('j')), &data()); // move down again
+        app.on_key(key(KeyCode::Char('k')), &data());
+        let after_k = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.field_idx,
+            _ => panic!("provider form should be open"),
+        };
+        assert_eq!(after_up, after_k);
+    }
+
+    #[test]
+    fn mcp_form_jk_navigates_fields() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Mcp;
+        app.focus = Focus::Content;
+        app.on_key(key(KeyCode::Char('a')), &data());
+
+        assert!(matches!(app.form, Some(FormState::McpAdd(_))));
+
+        // Apply template to move focus from Templates to Fields.
+        app.on_key(key(KeyCode::Enter), &data());
+
+        let initial_idx = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form.field_idx,
+            _ => panic!("mcp form should be open"),
+        };
+        assert_eq!(initial_idx, 0);
+
+        app.on_key(key(KeyCode::Char('j')), &data());
+        let after_j = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form.field_idx,
+            _ => panic!("mcp form should be open"),
+        };
+        assert_eq!(after_j, 1);
+
+        app.on_key(key(KeyCode::Char('k')), &data());
+        let after_k = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form.field_idx,
+            _ => panic!("mcp form should be open"),
+        };
+        assert_eq!(after_k, 0);
+    }
+
+    #[test]
+    fn mcp_form_jk_inserts_chars_when_editing() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Mcp;
+        app.focus = Focus::Content;
+        app.on_key(key(KeyCode::Char('a')), &data());
+        app.on_key(key(KeyCode::Enter), &data()); // apply template -> fields
+        app.on_key(key(KeyCode::Enter), &data()); // enter editing mode
+
+        let editing = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form.editing,
+            _ => panic!("mcp form should be open"),
+        };
+        assert!(editing);
+
+        app.on_key(key(KeyCode::Char('j')), &data());
+        app.on_key(key(KeyCode::Char('k')), &data());
+        let (editing, value) = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => (form.editing, form.id.value.clone()),
+            _ => panic!("mcp form should be open"),
+        };
+        assert!(editing);
+        assert!(
+            value.contains('j') && value.contains('k'),
+            "j/k should be typed as characters in editing mode, got: {value}"
+        );
+    }
+
+    #[test]
+    fn mcp_form_down_same_as_j() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Mcp;
+        app.focus = Focus::Content;
+        app.on_key(key(KeyCode::Char('a')), &data());
+        app.on_key(key(KeyCode::Enter), &data()); // apply template -> fields
+
+        app.on_key(key(KeyCode::Down), &data());
+        let after_down = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form.field_idx,
+            _ => panic!("mcp form should be open"),
+        };
+
+        app.on_key(key(KeyCode::Char('k')), &data()); // go back up
+        app.on_key(key(KeyCode::Char('j')), &data());
+        let after_j = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form.field_idx,
+            _ => panic!("mcp form should be open"),
+        };
+        assert_eq!(after_down, after_j);
+    }
+
+    #[test]
+    fn mcp_form_up_same_as_k() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Mcp;
+        app.focus = Focus::Content;
+        app.on_key(key(KeyCode::Char('a')), &data());
+        app.on_key(key(KeyCode::Enter), &data()); // apply template -> fields
+
+        app.on_key(key(KeyCode::Char('j')), &data()); // move down first
+        app.on_key(key(KeyCode::Up), &data());
+        let after_up = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form.field_idx,
+            _ => panic!("mcp form should be open"),
+        };
+
+        app.on_key(key(KeyCode::Char('j')), &data()); // move down again
+        app.on_key(key(KeyCode::Char('k')), &data());
+        let after_k = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form.field_idx,
+            _ => panic!("mcp form should be open"),
+        };
+        assert_eq!(after_up, after_k);
+    }
+
+    #[test]
+    fn prompt_form_jk_navigates_fields() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.on_key(key(KeyCode::Char('a')), &UiData::default());
+
+        assert!(matches!(app.form, Some(FormState::PromptMeta(_))));
+
+        let initial_idx = match app.form.as_ref() {
+            Some(FormState::PromptMeta(form)) => form.field_idx,
+            _ => panic!("prompt form should be open"),
+        };
+        assert_eq!(initial_idx, 0);
+
+        app.on_key(key(KeyCode::Char('j')), &UiData::default());
+        let after_j = match app.form.as_ref() {
+            Some(FormState::PromptMeta(form)) => form.field_idx,
+            _ => panic!("prompt form should be open"),
+        };
+        assert_eq!(after_j, 1);
+
+        app.on_key(key(KeyCode::Char('k')), &UiData::default());
+        let after_k = match app.form.as_ref() {
+            Some(FormState::PromptMeta(form)) => form.field_idx,
+            _ => panic!("prompt form should be open"),
+        };
+        assert_eq!(after_k, 0);
+    }
+
+    #[test]
+    fn prompt_form_jk_inserts_chars_when_editing() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.on_key(key(KeyCode::Char('a')), &UiData::default());
+        app.on_key(key(KeyCode::Enter), &UiData::default()); // enter editing mode
+
+        let editing = match app.form.as_ref() {
+            Some(FormState::PromptMeta(form)) => form.editing,
+            _ => panic!("prompt form should be open"),
+        };
+        assert!(editing);
+
+        app.on_key(key(KeyCode::Char('j')), &UiData::default());
+        app.on_key(key(KeyCode::Char('k')), &UiData::default());
+        let (editing, value) = match app.form.as_ref() {
+            Some(FormState::PromptMeta(form)) => (form.editing, form.id.value.clone()),
+            _ => panic!("prompt form should be open"),
+        };
+        assert!(editing);
+        assert!(
+            value.contains('j') && value.contains('k'),
+            "j/k should be typed as characters in editing mode, got: {value}"
+        );
+    }
+
+    #[test]
+    fn prompt_form_down_same_as_j() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.on_key(key(KeyCode::Char('a')), &UiData::default());
+
+        app.on_key(key(KeyCode::Down), &UiData::default());
+        let after_down = match app.form.as_ref() {
+            Some(FormState::PromptMeta(form)) => form.field_idx,
+            _ => panic!("prompt form should be open"),
+        };
+
+        app.on_key(key(KeyCode::Char('k')), &UiData::default()); // go back up
+        app.on_key(key(KeyCode::Char('j')), &UiData::default());
+        let after_j = match app.form.as_ref() {
+            Some(FormState::PromptMeta(form)) => form.field_idx,
+            _ => panic!("prompt form should be open"),
+        };
+        assert_eq!(after_down, after_j);
+    }
+
+    #[test]
+    fn prompt_form_up_same_as_k() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Prompts;
+        app.focus = Focus::Content;
+        app.on_key(key(KeyCode::Char('a')), &UiData::default());
+
+        app.on_key(key(KeyCode::Char('j')), &UiData::default()); // move down first
+        app.on_key(key(KeyCode::Up), &UiData::default());
+        let after_up = match app.form.as_ref() {
+            Some(FormState::PromptMeta(form)) => form.field_idx,
+            _ => panic!("prompt form should be open"),
+        };
+
+        app.on_key(key(KeyCode::Char('j')), &UiData::default()); // move down again
+        app.on_key(key(KeyCode::Char('k')), &UiData::default());
+        let after_k = match app.form.as_ref() {
+            Some(FormState::PromptMeta(form)) => form.field_idx,
+            _ => panic!("prompt form should be open"),
+        };
+        assert_eq!(after_up, after_k);
+    }
+
+    #[test]
+    fn provider_json_preview_jk_scrolls() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.open_provider_add_form();
+        app.on_key(key(KeyCode::Enter), &data()); // apply template -> fields
+
+        if let Some(FormState::ProviderAdd(ref mut form)) = app.form {
+            form.focus = FormFocus::JsonPreview;
+        }
+
+        app.on_key(key(KeyCode::Char('j')), &data());
+        let scroll_after_j = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.json_scroll,
+            _ => panic!("provider form should be open"),
+        };
+        assert_eq!(scroll_after_j, 1);
+
+        app.on_key(key(KeyCode::Char('k')), &data());
+        let scroll_after_k = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.json_scroll,
+            _ => panic!("provider form should be open"),
+        };
+        assert_eq!(scroll_after_k, 0);
+    }
+
+    #[test]
+    fn mcp_json_preview_jk_scrolls() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Mcp;
+        app.focus = Focus::Content;
+        app.on_key(key(KeyCode::Char('a')), &data());
+        app.on_key(key(KeyCode::Enter), &data()); // apply template -> fields
+
+        if let Some(FormState::McpAdd(ref mut form)) = app.form {
+            form.focus = FormFocus::JsonPreview;
+        }
+
+        app.on_key(key(KeyCode::Char('j')), &data());
+        let scroll_after_j = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form.json_scroll,
+            _ => panic!("mcp form should be open"),
+        };
+        assert_eq!(scroll_after_j, 1);
+
+        app.on_key(key(KeyCode::Char('k')), &data());
+        let scroll_after_k = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form.json_scroll,
+            _ => panic!("mcp form should be open"),
+        };
+        assert_eq!(scroll_after_k, 0);
+    }
 }
