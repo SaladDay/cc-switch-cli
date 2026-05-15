@@ -445,7 +445,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 **实时配置：**
 - Claude: `~/.claude/settings.json`（供应商 / 通用配置）, `~/.claude.json`（MCP）, `~/.claude/CLAUDE.md`（提示词）
 - Codex: `~/.codex/auth.json`（认证状态）, `~/.codex/config.toml`（供应商 / 通用配置 + MCP）, `~/.codex/AGENTS.md`（提示词）
-  - Codex 配置目录与 Codex 本身保持一致：当 `$CODEX_HOME` 已设置且指向已存在的目录时优先使用它；否则使用 `$HOME/.codex`。
+  - Codex 配置目录优先使用 CC-Switch 的手动覆盖设置；未配置覆盖时，如果 `$CODEX_HOME` 指向已存在的目录则跟随 Codex 使用它，否则使用 `$HOME/.codex`。
 - Gemini: `~/.gemini/.env`（供应商环境变量）, `~/.gemini/settings.json`（设置 + MCP）, `~/.gemini/GEMINI.md`（提示词）
 - OpenCode: `~/.config/opencode/opencode.json`（供应商 + MCP + 运行时配置）, `~/.config/opencode/AGENTS.md`（提示词）
 - OpenClaw: `~/.openclaw/openclaw.json`（供应商 + Env/Tools/Agents Defaults）, `~/.openclaw/AGENTS.md`（提示词）

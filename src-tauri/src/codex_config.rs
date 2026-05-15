@@ -26,15 +26,15 @@ const CODEX_RESERVED_MODEL_PROVIDER_IDS: &[&str] = &[
 
 /// 获取 Codex 配置目录路径
 pub fn get_codex_config_dir() -> PathBuf {
+    if let Some(custom) = crate::settings::get_codex_override_dir() {
+        return custom;
+    }
+
     if let Some(dir) = std::env::var_os("CODEX_HOME") {
         let dir = PathBuf::from(dir);
         if !dir.as_os_str().is_empty() && !dir.to_string_lossy().trim().is_empty() && dir.is_dir() {
             return dir;
         }
-    }
-
-    if let Some(custom) = crate::settings::get_codex_override_dir() {
-        return custom;
     }
 
     home_dir().expect("无法获取用户主目录").join(".codex")
@@ -585,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn get_codex_config_dir_blank_codex_home_falls_back_to_home_dot_codex() {
+    fn get_codex_config_dir_blank_codex_home_uses_settings_override() {
         let _guard = lock_test_home_and_settings();
         set_test_home_override(Some(Path::new("/tmp/codex-blank-env-home")));
         let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
@@ -593,14 +593,14 @@ mod tests {
 
         assert_eq!(
             get_codex_config_dir(),
-            PathBuf::from("/tmp/codex-blank-env-home").join(".codex")
+            PathBuf::from("/tmp/codex-settings-dir")
         );
 
         set_test_home_override(None);
     }
 
     #[test]
-    fn get_codex_config_dir_nonexistent_codex_home_falls_back_to_home_dot_codex() {
+    fn get_codex_config_dir_nonexistent_codex_home_uses_settings_override() {
         let _guard = lock_test_home_and_settings();
         set_test_home_override(Some(Path::new("/tmp/codex-nonexistent-env-home")));
         let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
@@ -612,7 +612,7 @@ mod tests {
 
         assert_eq!(
             get_codex_config_dir(),
-            PathBuf::from("/tmp/codex-nonexistent-env-home").join(".codex")
+            PathBuf::from("/tmp/codex-settings-dir")
         );
 
         set_test_home_override(None);
@@ -640,17 +640,23 @@ mod tests {
     }
 
     #[test]
-    fn get_codex_config_dir_ignores_settings_override() {
+    fn get_codex_config_dir_settings_override_takes_precedence_over_codex_home() {
         let _guard = lock_test_home_and_settings();
         set_test_home_override(Some(Path::new("/tmp/codex-precedence-home")));
         let _settings = SettingsGuard::with_codex_config_dir(Some("/tmp/codex-settings-dir"));
-        let _env = CodexHomeEnvGuard::new(None);
+        let codex_home = std::env::temp_dir().join(format!(
+            "cc-switch-codex-precedence-env-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&codex_home).unwrap();
+        let _env = CodexHomeEnvGuard::new(codex_home.to_str());
 
         assert_eq!(
             get_codex_config_dir(),
-            PathBuf::from("/tmp/codex-precedence-home").join(".codex")
+            PathBuf::from("/tmp/codex-settings-dir")
         );
 
+        let _ = fs::remove_dir_all(codex_home);
         set_test_home_override(None);
     }
 

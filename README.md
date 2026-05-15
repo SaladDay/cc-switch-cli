@@ -444,7 +444,7 @@ When `CC_SWITCH_CONFIG_DIR` is set, CC-Switch uses that directory as its config 
 **Live Configs:**
 - Claude: `~/.claude/settings.json` (provider/common config), `~/.claude.json` (MCP), `~/.claude/CLAUDE.md` (prompts)
 - Codex: `~/.codex/auth.json` (auth state), `~/.codex/config.toml` (provider/common config + MCP), `~/.codex/AGENTS.md` (prompts)
-  - Codex config directory follows Codex itself: `$CODEX_HOME` has top priority when it is set to an existing directory; otherwise CC-Switch uses `$HOME/.codex`.
+  - Codex config directory uses CC-Switch's manual override first. If no override is configured, CC-Switch follows Codex's `$CODEX_HOME` when it points to an existing directory, otherwise it uses `$HOME/.codex`.
 - Gemini: `~/.gemini/.env` (provider env), `~/.gemini/settings.json` (settings + MCP), `~/.gemini/GEMINI.md` (prompts)
 - OpenCode: `~/.config/opencode/opencode.json` (providers + MCP + runtime config), `~/.config/opencode/AGENTS.md` (prompts)
 - OpenClaw: `~/.openclaw/openclaw.json` (providers + env/tools/agents defaults), `~/.openclaw/AGENTS.md` (prompts)
