@@ -160,7 +160,6 @@ async fn check_connection() -> Result<(), AppError> {
     webdav::test_connection(&settings.base_url, &auth).await?;
     let dir_segments = remote_dir_segments(&settings, RemoteLayout::Current);
     webdav::ensure_remote_directories(&settings.base_url, &dir_segments, &auth).await?;
-    webdav::verify_round_trip_readability(&settings.base_url, &dir_segments, &auth).await?;
     Ok(())
 }
 
@@ -185,17 +184,8 @@ async fn upload() -> Result<WebDavSyncSummary, AppError> {
     webdav::put_bytes(
         &manifest_url,
         &auth,
-        snapshot.manifest_bytes.clone(),
+        snapshot.manifest_bytes,
         "application/json",
-    )
-    .await?;
-
-    webdav::verify_readback_matches(
-        &settings.base_url,
-        &manifest_url,
-        &auth,
-        &snapshot.manifest_bytes,
-        "manifest",
     )
     .await?;
 
@@ -209,9 +199,6 @@ async fn upload() -> Result<WebDavSyncSummary, AppError> {
     };
 
     persist_sync_success_best_effort(&mut settings, &snapshot.manifest_hash, etag);
-
-    // 上传成功后，静默清理 V1 远端数据
-    cleanup_v1_remote(&settings, &auth).await;
 
     Ok(WebDavSyncSummary {
         decision: SyncDecision::Upload,
