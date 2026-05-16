@@ -331,6 +331,14 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
             continue;
         }
 
+        {
+            let mut config = state.config.write().map_err(AppError::from)?;
+            config.ensure_app(&AppType::OpenClaw);
+            if let Some(manager) = config.get_manager_mut(&AppType::OpenClaw) {
+                manager.providers.insert(id.clone(), provider);
+            }
+        }
+
         imported += 1;
         log::info!("Imported OpenClaw provider '{id}' from live config");
     }

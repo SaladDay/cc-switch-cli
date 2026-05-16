@@ -47,22 +47,24 @@ fn provider_export_writes_merged_claude_settings_to_default_path() {
             .get_manager_mut(&AppType::Claude)
             .expect("claude manager");
         manager.current = "demo".to_string();
-        manager.providers.insert(
+        let mut provider = Provider::with_id(
             "demo".to_string(),
-            Provider::with_id(
-                "demo".to_string(),
-                "demo".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_API_KEY": "sk-demo"
-                    },
-                    "permissions": {
-                        "allow": ["Bash"]
-                    }
-                }),
-                None,
-            ),
+            "demo".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "sk-demo"
+                },
+                "permissions": {
+                    "allow": ["Bash"]
+                }
+            }),
+            None,
         );
+        provider.meta = Some(cc_switch_lib::ProviderMeta {
+            apply_common_config: Some(true),
+            ..Default::default()
+        });
+        manager.providers.insert("demo".to_string(), provider);
     }
 
     let state = state_from_config(config);
@@ -166,6 +168,61 @@ fn provider_export_respects_apply_common_config_flag_and_custom_output() {
             .and_then(|v| v.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             .is_none(),
         "common config should be skipped when applyCommonConfig=false"
+    );
+}
+
+#[test]
+#[serial]
+fn provider_export_requires_explicit_common_config_opt_in() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let project_dir = home.join("project-no-common");
+    let _cwd_guard = CurrentDirGuard::change_to(&project_dir);
+
+    let mut config = MultiAppConfig::default();
+    config.common_config_snippets.claude =
+        Some(r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}"#.to_string());
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "demo".to_string();
+        manager.providers.insert(
+            "demo".to_string(),
+            Provider::with_id(
+                "demo".to_string(),
+                "demo".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_API_KEY": "sk-demo"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test config");
+
+    cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Export {
+            id: "demo".to_string(),
+            output: None,
+        },
+        Some(AppType::Claude),
+    )
+    .expect("export command should succeed");
+
+    let export_path = project_dir.join(".claude").join("settings.local.json");
+    let exported: serde_json::Value = read_json_file(&export_path).expect("read exported file");
+    assert!(
+        exported
+            .get("env")
+            .and_then(|v| v.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .is_none(),
+        "export must not apply common config when provider did not opt in"
     );
 }
 
@@ -470,18 +527,22 @@ fn switch_provider_updates_claude_live_and_state() {
                 None,
             ),
         );
-        manager.providers.insert(
+        let mut new_provider = Provider::with_id(
             "new-provider".to_string(),
-            Provider::with_id(
-                "new-provider".to_string(),
-                "Fresh Claude".to_string(),
-                json!({
-                    "env": { "ANTHROPIC_API_KEY": "fresh-key" },
-                    "workspace": { "path": "/tmp/new-workspace" }
-                }),
-                None,
-            ),
+            "Fresh Claude".to_string(),
+            json!({
+                "env": { "ANTHROPIC_API_KEY": "fresh-key" },
+                "workspace": { "path": "/tmp/new-workspace" }
+            }),
+            None,
         );
+        new_provider.meta = Some(cc_switch_lib::ProviderMeta {
+            apply_common_config: Some(true),
+            ..Default::default()
+        });
+        manager
+            .providers
+            .insert("new-provider".to_string(), new_provider);
     }
     let app_state = state_from_config(config);
 
@@ -637,18 +698,22 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
                 None,
             ),
         );
-        manager.providers.insert(
+        let mut new_provider = Provider::with_id(
             "new-provider".to_string(),
-            Provider::with_id(
-                "new-provider".to_string(),
-                "Fresh Claude".to_string(),
-                json!({
-                    "env": { "ANTHROPIC_API_KEY": "fresh-key" },
-                    "workspace": { "path": "/tmp/new-workspace" }
-                }),
-                None,
-            ),
+            "Fresh Claude".to_string(),
+            json!({
+                "env": { "ANTHROPIC_API_KEY": "fresh-key" },
+                "workspace": { "path": "/tmp/new-workspace" }
+            }),
+            None,
         );
+        new_provider.meta = Some(cc_switch_lib::ProviderMeta {
+            apply_common_config: Some(true),
+            ..Default::default()
+        });
+        manager
+            .providers
+            .insert("new-provider".to_string(), new_provider);
     }
     config.common_config_snippets.claude = Some(
         serde_json::json!({

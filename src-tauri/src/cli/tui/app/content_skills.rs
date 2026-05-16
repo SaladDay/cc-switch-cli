@@ -39,7 +39,7 @@ impl App {
                     directory: skill.directory.clone(),
                 })
             }
-            KeyCode::Char('x') | KeyCode::Char(' ') => {
+            KeyCode::Char(' ') => {
                 let Some(skill) = visible.get(self.skills_idx) else {
                     return Action::None;
                 };
@@ -162,7 +162,7 @@ impl App {
                 });
                 Action::None
             }
-            KeyCode::Char('x') | KeyCode::Char(' ') => {
+            KeyCode::Char(' ') => {
                 let Some(repo) = visible.get(self.skills_repo_idx) else {
                     return Action::None;
                 };
@@ -192,7 +192,7 @@ impl App {
         };
 
         match key.code {
-            KeyCode::Char('x') | KeyCode::Char(' ') => Action::SkillsToggle {
+            KeyCode::Char(' ') => Action::SkillsToggle {
                 directory: skill.directory.clone(),
                 enabled: !skill.apps.is_enabled_for(&self.app_type),
             },

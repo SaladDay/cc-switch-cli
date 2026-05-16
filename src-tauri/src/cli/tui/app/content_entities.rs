@@ -83,14 +83,14 @@ impl App {
                 self.push_route_and_switch(Route::ProviderDetail { id: row.id.clone() })
             }
             KeyCode::Char('a') => {
-                self.open_provider_add_form();
+                self.open_provider_add_form(data);
                 Action::None
             }
             KeyCode::Char('e') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                self.open_provider_edit_form(row);
+                self.open_provider_edit_form(row, data);
                 Action::None
             }
             KeyCode::Char('s') | KeyCode::Char(' ') => {
@@ -204,7 +204,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('e') => {
-                self.open_provider_edit_form(row);
+                self.open_provider_edit_form(row, data);
                 Action::None
             }
             KeyCode::Enter => Action::None,
@@ -289,7 +289,7 @@ impl App {
                 self.open_mcp_edit_form(row);
                 Action::None
             }
-            KeyCode::Char('x') => {
+            KeyCode::Char(' ') => {
                 let Some(row) = visible.get(self.mcp_idx) else {
                     return Action::None;
                 };

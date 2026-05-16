@@ -2,14 +2,14 @@ use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::commands::workspace;
 use crate::error::AppError;
-use crate::services::{ConfigService, ProviderService};
+use crate::services::ConfigService;
 use crate::settings::set_webdav_sync_settings;
 
 use super::super::app::{LoadingKind, Overlay, TextViewState, ToastKind};
 use super::super::data::{load_state, UiData};
 use super::super::runtime_systems::{WebDavReq, WebDavReqKind};
 use super::helpers::{
-    export_target, open_proxy_help as open_proxy_help_overlay, refresh_common_snippet_overlay,
+    export_target, open_proxy_help as open_proxy_help_overlay,
     refresh_openclaw_daily_memory_search_results, refresh_openclaw_workspace_data,
 };
 use super::RuntimeActionContext;
@@ -147,48 +147,6 @@ pub(super) fn validate(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppErro
 
 pub(super) fn open_proxy_help(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
     open_proxy_help_overlay(ctx.app, ctx.data)
-}
-
-pub(super) fn clear_common_snippet(
-    ctx: &mut RuntimeActionContext<'_>,
-    app_type: AppType,
-) -> Result<(), AppError> {
-    let state = load_state()?;
-    ProviderService::clear_common_config_snippet(&state, app_type)?;
-
-    ctx.app
-        .push_toast(texts::common_config_snippet_cleared(), ToastKind::Success);
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    refresh_common_snippet_overlay(ctx.app, ctx.data);
-    Ok(())
-}
-
-pub(super) fn apply_common_snippet(
-    ctx: &mut RuntimeActionContext<'_>,
-    app_type: AppType,
-) -> Result<(), AppError> {
-    if app_type.is_additive_mode() {
-        ctx.app.push_toast(
-            texts::common_config_snippet_apply_not_needed(),
-            ToastKind::Info,
-        );
-        return Ok(());
-    }
-
-    let state = load_state()?;
-    let current_id = ProviderService::current(&state, app_type.clone())?;
-    if current_id.trim().is_empty() {
-        ctx.app.push_toast(
-            texts::common_config_snippet_no_current_provider(),
-            ToastKind::Info,
-        );
-        return Ok(());
-    }
-    ProviderService::switch(&state, app_type.clone(), &current_id)?;
-    ctx.app
-        .push_toast(texts::common_config_snippet_applied(), ToastKind::Success);
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    Ok(())
 }
 
 pub(super) fn webdav_check_connection(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {

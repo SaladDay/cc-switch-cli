@@ -5,7 +5,8 @@ use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::cli::ui::info;
 use crate::error::AppError;
-use crate::provider::Provider;
+use crate::provider::{Provider, ProviderMeta};
+use crate::services::ProviderService;
 use colored::Colorize;
 use inquire::{Confirm, Select, Text};
 use serde_json::{json, Value};
@@ -15,6 +16,61 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum ProviderAddMode {
     Official,
     ThirdParty,
+}
+
+pub fn supports_common_config(app_type: &AppType) -> bool {
+    matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+}
+
+pub fn common_snippet_has_effective_config(
+    app_type: &AppType,
+    common_snippet: Option<&str>,
+) -> bool {
+    if !supports_common_config(app_type) {
+        return false;
+    }
+
+    let snippet = common_snippet.map(str::trim).unwrap_or_default();
+    if snippet.is_empty() {
+        return false;
+    }
+
+    match app_type {
+        AppType::Codex => snippet
+            .parse::<toml_edit::DocumentMut>()
+            .ok()
+            .is_some_and(|doc| doc.as_table().iter().next().is_some()),
+        AppType::Claude | AppType::Gemini => serde_json::from_str::<Value>(snippet)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .is_some_and(|obj| !obj.is_empty()),
+        AppType::OpenCode | AppType::OpenClaw => false,
+    }
+}
+
+pub fn provider_uses_common_config(
+    app_type: &AppType,
+    provider: &Provider,
+    common_snippet: Option<&str>,
+) -> bool {
+    if !supports_common_config(app_type) {
+        return false;
+    }
+
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.apply_common_config)
+        .unwrap_or_else(|| {
+            ProviderService::provider_uses_common_config_for_app(app_type, provider, common_snippet)
+        })
+}
+
+pub fn set_provider_common_config_meta(provider: &mut Provider, enabled: bool) {
+    provider
+        .meta
+        .get_or_insert_with(ProviderMeta::default)
+        .apply_common_config = Some(enabled);
 }
 
 #[cfg(test)]
@@ -72,6 +128,34 @@ mod tests {
             .expect("config should be present");
         assert!(config.contains("model = \"gpt-5.4\""));
         assert!(config.contains("base_url = \"https://api.example.com/v1\""));
+    }
+
+    #[test]
+    fn common_config_helpers_detect_and_mark_supported_provider() {
+        assert!(common_snippet_has_effective_config(
+            &AppType::Claude,
+            Some(r#"{"env":{"CC_SWITCH_SHARED":"1"}}"#)
+        ));
+        assert!(common_snippet_has_effective_config(
+            &AppType::Codex,
+            Some("model_reasoning_effort = \"high\"")
+        ));
+        assert!(!common_snippet_has_effective_config(
+            &AppType::OpenCode,
+            Some(r#"{"options":{"theme":"dark"}}"#)
+        ));
+
+        let mut provider = Provider::with_id(
+            "p1".to_string(),
+            "Provider One".to_string(),
+            json!({"env": {}}),
+            None,
+        );
+        set_provider_common_config_meta(&mut provider, true);
+        assert_eq!(
+            provider.meta.and_then(|meta| meta.apply_common_config),
+            Some(true)
+        );
     }
 }
 
@@ -748,6 +832,19 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
 
     if let Some(website) = &provider.website_url {
         println!("{}: {}", texts::website_label().bright_yellow(), website);
+    }
+    if supports_common_config(app_type) {
+        if let Some(enabled) = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.apply_common_config)
+        {
+            println!(
+                "{}: {}",
+                texts::tui_form_attach_common_config().bright_yellow(),
+                enabled
+            );
+        }
     }
 
     // 显示关键配置（不显示完整 API Key）

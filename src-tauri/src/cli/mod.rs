@@ -602,6 +602,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_config_common_format_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "config", "common", "format", "--snippet", "{}"]);
+
+        match cli.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::Common(_))) => {}
+            _ => panic!("expected config common format command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_common_extract_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "config",
+            "common",
+            "extract",
+            "--provider",
+            "p1",
+            "--save",
+        ]);
+
+        match cli.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::Common(_))) => {}
+            _ => panic!("expected config common extract command"),
+        }
+    }
+
+    #[test]
     fn config_common_clear_help_marks_apply_as_compatibility_flag() {
         let mut cmd = Cli::command();
         let config = cmd

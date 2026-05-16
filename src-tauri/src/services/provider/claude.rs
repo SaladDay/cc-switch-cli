@@ -201,7 +201,7 @@ impl ProviderService {
         };
 
         for provider in manager.providers.values_mut() {
-            common_config::normalize_provider_common_config_for_storage(
+            common_config::migrate_provider_subset_usage_for_storage(
                 &AppType::Claude,
                 provider,
                 Some(old_snippet),

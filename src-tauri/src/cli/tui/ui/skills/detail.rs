@@ -49,7 +49,7 @@ pub(super) fn render_skill_detail(
             chunks[0],
             theme,
             &[
-                ("x", texts::tui_key_toggle()),
+                ("Space", texts::tui_key_toggle()),
                 ("m", texts::tui_key_apps()),
                 ("d", texts::tui_key_uninstall()),
                 ("s", texts::tui_key_sync()),

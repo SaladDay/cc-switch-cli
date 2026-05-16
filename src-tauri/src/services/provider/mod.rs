@@ -386,7 +386,7 @@ impl ProviderService {
                 .meta
                 .as_ref()
                 .and_then(|meta| meta.apply_common_config)
-                .unwrap_or(true);
+                .unwrap_or(false);
             Self::write_live_snapshot(
                 &action.app_type,
                 &action.provider,
@@ -515,38 +515,49 @@ impl ProviderService {
                     raw_settings.insert("auth".to_string(), auth);
                 }
                 raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
-                let mut settings_to_store = Self::normalize_settings_config_for_storage(
-                    app_type,
-                    &provider,
-                    Value::Object(raw_settings),
-                    effective_common_snippet.as_deref(),
-                )?;
-                Self::restore_codex_model_provider_for_storage_best_effort(
-                    &provider,
-                    &mut settings_to_store,
-                );
+                let mut snapshot_provider = provider.clone();
+                snapshot_provider.settings_config = Value::Object(raw_settings);
 
                 {
                     let mut guard = state.config.write().map_err(AppError::from)?;
-                    if !common_snippet_extracted.trim().is_empty()
+                    let did_auto_extract = !common_snippet_extracted.trim().is_empty()
                         && guard
                             .common_config_snippets
                             .codex
                             .as_deref()
                             .unwrap_or_default()
                             .trim()
-                            .is_empty()
-                    {
+                            .is_empty();
+                    if did_auto_extract {
                         guard.common_config_snippets.codex = Some(common_snippet_extracted.clone());
-                        Self::normalize_existing_provider_snapshots_for_storage_best_effort(
+                        Self::migrate_codex_common_config_snippet(
                             &mut guard,
-                            app_type,
-                            Some(common_snippet_extracted.as_str()),
-                        );
+                            None,
+                            common_snippet_extracted.as_str(),
+                        )?;
                     }
+
+                    if did_auto_extract {
+                        snapshot_provider = Self::migrate_provider_snapshot_for_storage(
+                            app_type,
+                            &snapshot_provider,
+                            effective_common_snippet.as_deref(),
+                        )?;
+                    } else {
+                        Self::normalize_provider_for_storage(
+                            app_type,
+                            &mut snapshot_provider,
+                            effective_common_snippet.as_deref(),
+                        )?;
+                    }
+                    Self::restore_codex_model_provider_for_storage_best_effort(
+                        &provider,
+                        &mut snapshot_provider.settings_config,
+                    );
+
                     if let Some(manager) = guard.get_manager_mut(app_type) {
                         if let Some(target) = manager.providers.get_mut(provider_id) {
-                            target.settings_config = settings_to_store.clone();
+                            *target = snapshot_provider;
                         }
                     }
                 }
@@ -791,6 +802,14 @@ impl ProviderService {
         common_config::provider_uses_common_config(app_type, provider, common_config_snippet)
     }
 
+    pub(crate) fn provider_uses_common_config_for_app(
+        app_type: &AppType,
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+    ) -> bool {
+        common_config::provider_uses_common_config(app_type, provider, common_config_snippet)
+    }
+
     fn normalize_provider_for_storage(
         app_type: &AppType,
         provider: &mut Provider,
@@ -801,6 +820,71 @@ impl ProviderService {
             provider,
             common_config_snippet,
         )
+    }
+
+    fn live_settings_differ_from_provider_snapshot(
+        app_type: &AppType,
+        live_settings: &Value,
+        provider_settings: &Value,
+    ) -> bool {
+        match app_type {
+            AppType::Codex => {
+                live_settings.get("config").and_then(Value::as_str)
+                    != provider_settings.get("config").and_then(Value::as_str)
+            }
+            AppType::Gemini => live_settings.get("env") != provider_settings.get("env"),
+            AppType::Claude => live_settings != provider_settings,
+            AppType::OpenCode | AppType::OpenClaw => false,
+        }
+    }
+
+    fn live_settings_indicate_common_config_usage(
+        app_type: &AppType,
+        provider: &Provider,
+        old_snippet: &str,
+    ) -> bool {
+        let Ok(live_settings) = Self::read_live_settings(app_type.clone()) else {
+            return false;
+        };
+
+        if common_config::settings_contain_common_config(app_type, &live_settings, old_snippet) {
+            return true;
+        }
+
+        Self::validate_common_config_snippet(app_type, Some(old_snippet)).is_err()
+            && Self::live_settings_differ_from_provider_snapshot(
+                app_type,
+                &live_settings,
+                &provider.settings_config,
+            )
+    }
+
+    fn mark_provider_common_config_enabled_if_unset(
+        config: &mut MultiAppConfig,
+        app_type: &AppType,
+        provider_id: Option<&str>,
+    ) {
+        let Some(provider_id) = provider_id else {
+            return;
+        };
+        let Some(provider) = config
+            .get_manager_mut(app_type)
+            .and_then(|manager| manager.providers.get_mut(provider_id))
+        else {
+            return;
+        };
+
+        if provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.apply_common_config)
+            .is_none()
+        {
+            provider
+                .meta
+                .get_or_insert_with(Default::default)
+                .apply_common_config = Some(true);
+        }
     }
 
     pub(crate) fn normalize_settings_config_for_storage(
@@ -817,6 +901,20 @@ impl ProviderService {
             common_config_snippet,
         )?;
         Ok(snapshot_provider.settings_config)
+    }
+
+    pub(crate) fn migrate_provider_snapshot_for_storage(
+        app_type: &AppType,
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+    ) -> Result<Provider, AppError> {
+        let mut snapshot_provider = provider.clone();
+        common_config::migrate_provider_subset_usage_for_storage(
+            app_type,
+            &mut snapshot_provider,
+            common_config_snippet,
+        )?;
+        Ok(snapshot_provider)
     }
 
     fn restore_codex_model_provider_for_storage_best_effort(
@@ -848,6 +946,157 @@ impl ProviderService {
         )
     }
 
+    pub(crate) fn settings_contain_common_config_for_preview(
+        app_type: &AppType,
+        settings_config: &Value,
+        common_config_snippet: &str,
+    ) -> bool {
+        common_config::settings_contain_common_config(
+            app_type,
+            settings_config,
+            common_config_snippet,
+        )
+    }
+
+    pub fn extract_common_config_snippet(
+        state: &AppState,
+        app_type: AppType,
+    ) -> Result<String, AppError> {
+        let current_id = Self::current(state, app_type.clone())?;
+        if current_id.trim().is_empty() {
+            return Err(AppError::Message("No current provider".to_string()));
+        }
+
+        let providers = state.db.get_all_providers(app_type.as_str())?;
+        let provider = providers
+            .get(&current_id)
+            .ok_or_else(|| AppError::Message(format!("Provider {current_id} not found")))?;
+
+        Self::extract_common_config_snippet_from_settings(app_type, &provider.settings_config)
+    }
+
+    pub fn extract_common_config_snippet_from_settings(
+        app_type: AppType,
+        settings_config: &Value,
+    ) -> Result<String, AppError> {
+        match app_type {
+            AppType::Claude => Self::extract_claude_common_config(settings_config),
+            AppType::Codex => Self::extract_codex_common_config(settings_config),
+            AppType::Gemini => Self::extract_gemini_common_config(settings_config),
+            AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
+            AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
+        }
+    }
+
+    fn extract_claude_common_config(settings: &Value) -> Result<String, AppError> {
+        let mut config = settings.clone();
+
+        const ENV_EXCLUDES: &[&str] = &[
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_REASONING_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_BASE_URL",
+        ];
+        const TOP_LEVEL_EXCLUDES: &[&str] = &["apiBaseUrl", "primaryModel", "smallFastModel"];
+
+        if let Some(env) = config.get_mut("env").and_then(Value::as_object_mut) {
+            for key in ENV_EXCLUDES {
+                env.remove(*key);
+            }
+            if env.is_empty() {
+                if let Some(obj) = config.as_object_mut() {
+                    obj.remove("env");
+                }
+            }
+        }
+
+        if let Some(obj) = config.as_object_mut() {
+            for key in TOP_LEVEL_EXCLUDES {
+                obj.remove(*key);
+            }
+        }
+
+        if config.as_object().is_none_or(|obj| obj.is_empty()) {
+            return Ok("{}".to_string());
+        }
+
+        serde_json::to_string_pretty(&config)
+            .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))
+    }
+
+    fn extract_codex_common_config(settings: &Value) -> Result<String, AppError> {
+        let config_toml = settings
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        Self::extract_codex_common_config_from_config_toml(config_toml)
+    }
+
+    fn extract_gemini_common_config(settings: &Value) -> Result<String, AppError> {
+        let env = settings.get("env").and_then(Value::as_object);
+
+        let mut snippet = serde_json::Map::new();
+        if let Some(env) = env {
+            for (key, value) in env {
+                if key == "GOOGLE_GEMINI_BASE_URL" || key == "GEMINI_API_KEY" {
+                    continue;
+                }
+                let Value::String(v) = value else {
+                    continue;
+                };
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    snippet.insert(key.to_string(), Value::String(trimmed.to_string()));
+                }
+            }
+        }
+
+        if snippet.is_empty() {
+            return Ok("{}".to_string());
+        }
+
+        serde_json::to_string_pretty(&Value::Object(snippet))
+            .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))
+    }
+
+    fn extract_opencode_common_config(settings: &Value) -> Result<String, AppError> {
+        let mut config = settings.clone();
+
+        if let Some(obj) = config.as_object_mut() {
+            if let Some(options) = obj.get_mut("options").and_then(Value::as_object_mut) {
+                options.remove("apiKey");
+                options.remove("baseURL");
+            }
+        }
+
+        if config.is_null() || config.as_object().is_some_and(|obj| obj.is_empty()) {
+            return Ok("{}".to_string());
+        }
+
+        serde_json::to_string_pretty(&config)
+            .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))
+    }
+
+    fn extract_openclaw_common_config(settings: &Value) -> Result<String, AppError> {
+        let mut config = settings.clone();
+
+        if let Some(obj) = config.as_object_mut() {
+            obj.remove("apiKey");
+            obj.remove("baseUrl");
+        }
+
+        if config.is_null() || config.as_object().is_some_and(|obj| obj.is_empty()) {
+            return Ok("{}".to_string());
+        }
+
+        serde_json::to_string_pretty(&config)
+            .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))
+    }
+
     fn normalize_existing_provider_snapshots_for_storage(
         config: &mut MultiAppConfig,
         app_type: &AppType,
@@ -858,7 +1107,7 @@ impl ProviderService {
         };
 
         for provider in manager.providers.values_mut() {
-            common_config::migrate_provider_subset_usage_for_storage(
+            common_config::normalize_provider_common_config_for_storage(
                 app_type,
                 provider,
                 common_config_snippet,
@@ -866,28 +1115,6 @@ impl ProviderService {
         }
 
         Ok(())
-    }
-
-    fn normalize_existing_provider_snapshots_for_storage_best_effort(
-        config: &mut MultiAppConfig,
-        app_type: &AppType,
-        common_config_snippet: Option<&str>,
-    ) {
-        let Some(manager) = config.get_manager_mut(app_type) else {
-            return;
-        };
-
-        for (provider_id, provider) in manager.providers.iter_mut() {
-            if let Err(err) = common_config::migrate_provider_subset_usage_for_storage(
-                app_type,
-                provider,
-                common_config_snippet,
-            ) {
-                log::warn!(
-                    "skip normalizing {app_type} provider snapshot '{provider_id}' while applying auto-extracted common config: {err}"
-                );
-            }
-        }
     }
 
     fn normalize_existing_provider_snapshots_for_storage_strict_current_best_effort_others(
@@ -916,7 +1143,7 @@ impl ProviderService {
         };
 
         if let Some(current_provider) = manager.providers.get_mut(&current_provider_id) {
-            common_config::migrate_provider_subset_usage_for_storage(
+            common_config::normalize_provider_common_config_for_storage(
                 app_type,
                 current_provider,
                 common_config_snippet,
@@ -928,7 +1155,7 @@ impl ProviderService {
                 continue;
             }
 
-            if let Err(err) = common_config::migrate_provider_subset_usage_for_storage(
+            if let Err(err) = common_config::normalize_provider_common_config_for_storage(
                 app_type,
                 provider,
                 common_config_snippet,
@@ -985,6 +1212,38 @@ impl ProviderService {
                 Some(state.db.get_all_providers(app_type.as_str())?),
             )
         };
+        let old_snippet_before_transaction = if app_type.is_additive_mode() {
+            None
+        } else {
+            let config = state.config.read().map_err(AppError::from)?;
+            config
+                .common_config_snippets
+                .get(&app_type)
+                .cloned()
+                .filter(|value| !value.trim().is_empty())
+        };
+        let current_live_uses_old_common_config =
+            if let (Some(current_provider_id), Some(old_snippet)) = (
+                effective_current_provider.as_deref(),
+                old_snippet_before_transaction.as_deref(),
+            ) {
+                db_providers
+                    .as_ref()
+                    .and_then(|providers| providers.get(current_provider_id))
+                    .is_some_and(|provider| {
+                        common_config::provider_uses_common_config(
+                            &app_type,
+                            provider,
+                            Some(old_snippet),
+                        ) || Self::live_settings_indicate_common_config_usage(
+                            &app_type,
+                            provider,
+                            old_snippet,
+                        )
+                    })
+            } else {
+                false
+            };
         let takeover_active = if app_type.is_additive_mode() {
             false
         } else {
@@ -1028,6 +1287,13 @@ impl ProviderService {
                     effective_current_provider.as_deref(),
                     old_snippet.as_deref(),
                 )?;
+                if current_live_uses_old_common_config {
+                    Self::mark_provider_common_config_enabled_if_unset(
+                        config,
+                        &app_type_clone,
+                        effective_current_provider.as_deref(),
+                    );
+                }
 
                 config
                     .common_config_snippets
@@ -1211,6 +1477,24 @@ impl ProviderService {
                 .providers
                 .get(&provider_id)
                 .and_then(Self::provider_live_config_managed);
+            let current_live_uses_existing_common_config = !app_type_clone.is_additive_mode()
+                && effective_current_provider.as_deref() == Some(provider_id.as_str())
+                && common_config_snippet
+                    .as_deref()
+                    .filter(|snippet| !snippet.trim().is_empty())
+                    .is_some_and(|snippet| {
+                        manager.providers.get(&provider_id).is_some_and(|existing| {
+                            common_config::provider_uses_common_config(
+                                &app_type_clone,
+                                existing,
+                                Some(snippet),
+                            ) || Self::live_settings_indicate_common_config_usage(
+                                &app_type_clone,
+                                existing,
+                                snippet,
+                            )
+                        })
+                    });
             let mut merged = if let Some(existing) = manager.providers.get(&provider_id) {
                 let mut updated = provider_clone.clone();
                 match (existing.meta.as_ref(), updated.meta.take()) {
@@ -1236,6 +1520,19 @@ impl ProviderService {
             } else {
                 provider_clone.clone()
             };
+
+            if current_live_uses_existing_common_config
+                && merged
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.apply_common_config)
+                    .is_none()
+            {
+                merged
+                    .meta
+                    .get_or_insert_with(Default::default)
+                    .apply_common_config = Some(true);
+            }
 
             Self::normalize_provider_for_storage(
                 &app_type_clone,
@@ -1368,6 +1665,17 @@ impl ProviderService {
         state
             .db
             .set_current_provider(app_type.as_str(), &provider.id)?;
+        {
+            let mut config = state.config.write().map_err(AppError::from)?;
+            config.ensure_app(&app_type);
+            let manager = config
+                .get_manager_mut(&app_type)
+                .ok_or_else(|| Self::app_not_found(&app_type))?;
+            manager
+                .providers
+                .insert(provider.id.clone(), provider.clone());
+            manager.current = provider.id.clone();
+        }
         Ok(true)
     }
 
@@ -2186,11 +2494,17 @@ impl ProviderService {
             config.common_config_snippets.get(&app_type).cloned()
         };
 
-        Self::build_effective_live_snapshot(
+        let apply_common_config = Self::resolve_live_apply_common_config(
             &app_type,
             provider,
             common_config_snippet.as_deref(),
             true,
+        );
+        Self::build_effective_live_snapshot(
+            &app_type,
+            provider,
+            common_config_snippet.as_deref(),
+            apply_common_config,
         )
     }
 

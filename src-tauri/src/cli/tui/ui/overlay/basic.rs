@@ -74,6 +74,13 @@ pub(super) fn render_confirm_overlay(
                 ("Esc", texts::tui_key_close()),
             ],
         );
+    } else if matches!(confirm.action, ConfirmAction::CommonConfigNotice) {
+        render_key_bar_center(
+            frame,
+            chunks[0],
+            theme,
+            &[("Enter", texts::tui_key_close())],
+        );
     } else {
         render_key_bar_center(
             frame,
@@ -292,7 +299,7 @@ pub(super) fn render_common_snippet_picker_overlay(
         theme,
         &[
             ("↑↓", texts::tui_key_select()),
-            ("Enter", texts::tui_key_view()),
+            ("Enter", texts::tui_key_edit()),
             ("e", texts::tui_key_edit()),
             ("Esc", texts::tui_key_close()),
         ],
@@ -311,47 +318,6 @@ pub(super) fn render_common_snippet_picker_overlay(
     let mut state = ListState::default();
     state.select(Some(selected));
     frame.render_stateful_widget(list, body_area, &mut state);
-}
-
-pub(super) fn render_common_snippet_view_overlay(
-    frame: &mut Frame<'_>,
-    content_area: Rect,
-    theme: &theme::Theme,
-    title: &str,
-    lines: &[String],
-    scroll: usize,
-) {
-    let area = centered_rect(OVERLAY_LG.0, OVERLAY_LG.1, content_area);
-    frame.render_widget(Clear, area);
-
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(overlay_border_style(theme, false))
-        .title(title.to_string());
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(inner);
-
-    render_key_bar_center(
-        frame,
-        chunks[0],
-        theme,
-        &[
-            ("a", texts::tui_key_apply()),
-            ("c", texts::tui_key_clear()),
-            ("e", texts::tui_key_edit()),
-            ("↑↓", texts::tui_key_scroll()),
-            ("Esc", texts::tui_key_close()),
-        ],
-    );
-
-    let body_area = inset_top(chunks[1], 1);
-    render_scrolling_lines(frame, body_area, lines, scroll);
 }
 
 fn render_scrolling_lines(frame: &mut Frame<'_>, area: Rect, lines: &[String], scroll: usize) {

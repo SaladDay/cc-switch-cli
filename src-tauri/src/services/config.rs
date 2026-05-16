@@ -300,11 +300,16 @@ impl ConfigService {
         provider: &Provider,
     ) -> Result<(), AppError> {
         let common_config_snippet = config.common_config_snippets.codex.clone();
+        let apply_common_config = ProviderService::provider_uses_common_config_for_app(
+            &AppType::Codex,
+            provider,
+            common_config_snippet.as_deref(),
+        );
         let effective = ProviderService::build_effective_live_snapshot(
             &AppType::Codex,
             provider,
             common_config_snippet.as_deref(),
-            true,
+            apply_common_config,
         )?;
         let settings = effective.as_object().ok_or_else(|| {
             AppError::Config(format!("供应商 {provider_id} 的 Codex 配置必须是对象"))
@@ -356,11 +361,16 @@ impl ConfigService {
         }
 
         let common_config_snippet = config.common_config_snippets.claude.clone();
+        let apply_common_config = ProviderService::provider_uses_common_config_for_app(
+            &AppType::Claude,
+            provider,
+            common_config_snippet.as_deref(),
+        );
         let effective = ProviderService::build_effective_live_snapshot(
             &AppType::Claude,
             provider,
             common_config_snippet.as_deref(),
-            true,
+            apply_common_config,
         )?;
 
         write_json_file(&settings_path, &effective)?;
@@ -388,7 +398,16 @@ impl ConfigService {
         use crate::gemini_config::{env_to_json, read_gemini_env};
 
         let common_config_snippet = config.common_config_snippets.gemini.clone();
-        ProviderService::write_gemini_live_force(provider, common_config_snippet.as_deref())?;
+        let common_config_snippet_to_apply = if ProviderService::provider_uses_common_config_for_app(
+            &AppType::Gemini,
+            provider,
+            common_config_snippet.as_deref(),
+        ) {
+            common_config_snippet.as_deref()
+        } else {
+            None
+        };
+        ProviderService::write_gemini_live_force(provider, common_config_snippet_to_apply)?;
 
         // 读回实际写入的内容并更新到配置中（包含 settings.json）
         let live_after_env = read_gemini_env()?;

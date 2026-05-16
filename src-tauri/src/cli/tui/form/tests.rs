@@ -1645,6 +1645,33 @@ fn provider_add_form_apply_provider_json_updates_fields_and_preserves_include_to
 }
 
 #[test]
+fn provider_add_form_defaults_common_config_from_effective_snippet_only() {
+    let no_snippet = ProviderAddFormState::new(AppType::Claude);
+    assert!(
+        !no_snippet.include_common_config,
+        "new provider should not attach common config when no usable snippet exists"
+    );
+
+    let comment_only_codex = ProviderAddFormState::new_with_common_snippet(
+        AppType::Codex,
+        "# comments do not create an effective snippet\n",
+    );
+    assert!(
+        !comment_only_codex.include_common_config,
+        "comment-only Codex snippets should not default-enable common config"
+    );
+
+    let with_snippet = ProviderAddFormState::new_with_common_snippet(
+        AppType::Claude,
+        r#"{"permissions":{"allow":["Bash"]}}"#,
+    );
+    assert!(
+        with_snippet.include_common_config,
+        "new provider should attach common config when a usable snippet exists"
+    );
+}
+
+#[test]
 fn provider_edit_form_preserves_missing_common_config_meta_until_toggle() {
     let provider = Provider::with_id(
         "legacy-provider".to_string(),
@@ -1681,7 +1708,40 @@ fn provider_edit_form_preserves_missing_common_config_meta_until_toggle() {
     )
     .expect("toggle should succeed");
     let toggled = form.to_provider_json_value();
-    assert_eq!(toggled["meta"]["commonConfigEnabled"], false);
+    assert_eq!(toggled["meta"]["commonConfigEnabled"], true);
+}
+
+#[test]
+fn provider_edit_form_missing_meta_inferrs_common_config_from_subset() {
+    let provider = Provider::with_id(
+        "legacy-provider".to_string(),
+        "Legacy Provider".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://provider.example",
+                "CC_SWITCH_SHARED": "1"
+            }
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider_with_common_snippet(
+        AppType::Claude,
+        &provider,
+        r#"{"env":{"CC_SWITCH_SHARED":"1"}}"#,
+    );
+
+    assert!(
+        form.include_common_config,
+        "missing-meta edit should infer common config usage when provider settings contain the snippet"
+    );
+    let raw = form.to_provider_json_value();
+    assert!(
+        raw.get("meta")
+            .and_then(|meta| meta.get("commonConfigEnabled"))
+            .is_none(),
+        "inferred missing-meta usage should not force explicit meta until the user toggles"
+    );
 }
 
 #[test]
@@ -1974,6 +2034,10 @@ fn provider_add_form_opencode_includes_dedicated_fields() {
     assert!(
         fields.len() > 6,
         "OpenCode should expose dedicated provider/model fields instead of only common metadata"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::CommonSnippet),
+        "OpenCode should not expose common config controls; upstream common config is limited to Claude/Codex/Gemini"
     );
 }
 

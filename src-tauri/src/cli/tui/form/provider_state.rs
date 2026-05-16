@@ -1,6 +1,7 @@
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::provider::Provider;
+use crate::services::ProviderService;
 use serde_json::{json, Value};
 
 use super::provider_json::{
@@ -14,7 +15,12 @@ use super::{
 
 impl ProviderAddFormState {
     pub fn new(app_type: AppType) -> Self {
-        let include_common_config = !matches!(app_type, AppType::OpenClaw);
+        Self::new_with_common_snippet(app_type, "")
+    }
+
+    pub fn new_with_common_snippet(app_type: AppType, common_snippet: &str) -> Self {
+        let include_common_config =
+            Self::snippet_has_effective_common_config(&app_type, common_snippet);
         let openclaw_api_default = match app_type {
             AppType::OpenClaw => OPENCLAW_DEFAULT_API_PROTOCOL,
             _ => "@ai-sdk/openai-compatible",
@@ -82,7 +88,15 @@ impl ProviderAddFormState {
     }
 
     pub fn from_provider(app_type: AppType, provider: &Provider) -> Self {
-        let mut form = Self::new(app_type.clone());
+        Self::from_provider_with_common_snippet(app_type, provider, "")
+    }
+
+    pub fn from_provider_with_common_snippet(
+        app_type: AppType,
+        provider: &Provider,
+        common_snippet: &str,
+    ) -> Self {
+        let mut form = Self::new_with_common_snippet(app_type.clone(), common_snippet);
         form.mode = FormMode::Edit {
             id: provider.id.clone(),
         };
@@ -98,20 +112,67 @@ impl ProviderAddFormState {
         if let Some(notes) = provider.notes.as_deref() {
             form.notes.set(notes);
         }
-        form.include_common_config = provider
+        let explicit_common_config = provider
             .meta
             .as_ref()
-            .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(!matches!(app_type, AppType::OpenClaw));
+            .and_then(|meta| meta.apply_common_config);
+        form.include_common_config = explicit_common_config.unwrap_or_else(|| {
+            Self::provider_settings_contain_common_config(&app_type, provider, common_snippet)
+        });
+        form.include_common_config_touched = explicit_common_config.is_some();
 
-        if matches!(app_type, AppType::OpenClaw) {
+        if !Self::supports_common_config(&app_type) {
             form.include_common_config = false;
+            form.include_common_config_touched = false;
         }
 
         populate_form_from_provider(&mut form, &app_type, provider);
         form.capture_initial_snapshot();
 
         form
+    }
+
+    pub fn supports_common_config(app_type: &AppType) -> bool {
+        matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+    }
+
+    pub fn snippet_has_effective_common_config(app_type: &AppType, common_snippet: &str) -> bool {
+        if !Self::supports_common_config(app_type) {
+            return false;
+        }
+
+        let snippet = common_snippet.trim();
+        if snippet.is_empty() {
+            return false;
+        }
+
+        match app_type {
+            AppType::Codex => snippet
+                .parse::<toml_edit::DocumentMut>()
+                .ok()
+                .is_some_and(|doc| doc.as_table().iter().next().is_some()),
+            AppType::Claude | AppType::Gemini => serde_json::from_str::<Value>(snippet)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .is_some_and(|obj| !obj.is_empty()),
+            AppType::OpenCode | AppType::OpenClaw => false,
+        }
+    }
+
+    pub fn provider_settings_contain_common_config(
+        app_type: &AppType,
+        provider: &Provider,
+        common_snippet: &str,
+    ) -> bool {
+        if !Self::supports_common_config(app_type) {
+            return false;
+        }
+
+        ProviderService::settings_contain_common_config_for_preview(
+            app_type,
+            &provider.settings_config,
+            common_snippet,
+        )
     }
 
     fn capture_initial_snapshot(&mut self) {
@@ -196,7 +257,7 @@ impl ProviderAddFormState {
             }
         }
 
-        if !matches!(self.app_type, AppType::OpenClaw) {
+        if Self::supports_common_config(&self.app_type) {
             fields.push(ProviderAddField::CommonConfigDivider);
             fields.push(ProviderAddField::CommonSnippet);
             fields.push(ProviderAddField::IncludeCommonConfig);

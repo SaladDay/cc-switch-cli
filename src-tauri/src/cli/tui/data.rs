@@ -260,7 +260,7 @@ impl ProxySnapshot {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct UiData {
     pub providers: ProvidersSnapshot,
     pub mcp: McpSnapshot,
@@ -269,6 +269,20 @@ pub struct UiData {
     pub skills: SkillsSnapshot,
     pub proxy: ProxySnapshot,
     pub(crate) quota: QuotaSnapshot,
+}
+
+impl Default for UiData {
+    fn default() -> Self {
+        Self {
+            providers: ProvidersSnapshot::default(),
+            mcp: McpSnapshot::default(),
+            prompts: PromptsSnapshot::default(),
+            config: ConfigSnapshot::default(),
+            skills: SkillsSnapshot::default(),
+            proxy: ProxySnapshot::default(),
+            quota: QuotaSnapshot::default(),
+        }
+    }
 }
 
 pub(crate) fn load_state() -> Result<AppState, AppError> {
@@ -784,6 +798,7 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
         let common_snippet = common_snippets.get(app_type).cloned().unwrap_or_default();
         (common_snippet, common_snippets)
     };
+    let settings = crate::settings::get_settings();
     let openclaw_snapshot = load_openclaw_config_snapshot(app_type)?;
     let openclaw_workspace = load_openclaw_workspace_snapshot(app_type)?;
 
@@ -793,7 +808,7 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
         backups,
         common_snippet,
         common_snippets,
-        webdav_sync: crate::settings::get_webdav_sync_settings(),
+        webdav_sync: settings.webdav_sync,
         openclaw_config_path: openclaw_snapshot
             .as_ref()
             .map(|snapshot| snapshot.config_path.clone()),

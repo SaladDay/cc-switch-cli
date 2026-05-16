@@ -532,7 +532,7 @@ impl App {
                 *selected = (*selected + 1).min(3);
                 Action::None
             }
-            KeyCode::Char('x') | KeyCode::Char(' ') => {
+            KeyCode::Char(' ') => {
                 let app_type = app_type_for_picker_index(*selected);
                 let enabled = apps.is_enabled_for(&app_type);
                 apps.set_enabled_for(&app_type, !enabled);
@@ -613,7 +613,7 @@ impl App {
                 *selected = (*selected + 1).min(4);
                 Action::None
             }
-            KeyCode::Char('x') | KeyCode::Char(' ') => {
+            KeyCode::Char(' ') => {
                 let app_type = app_type_for_picker_index(*selected);
                 let enabled = apps.is_enabled_for(&app_type);
                 apps.set_enabled_for(&app_type, !enabled);
@@ -665,7 +665,7 @@ impl App {
                 *selected = (*selected + 1).min(3);
                 Action::None
             }
-            KeyCode::Char('x') | KeyCode::Char(' ') => {
+            KeyCode::Char(' ') => {
                 let app_type = app_type_for_picker_index(*selected);
                 let enabled = apps.is_enabled_for(&app_type);
                 apps.set_enabled_for(&app_type, !enabled);
@@ -721,7 +721,7 @@ impl App {
                 }
                 Action::None
             }
-            KeyCode::Char('x') | KeyCode::Char(' ') => {
+            KeyCode::Char(' ') => {
                 let Some(skill) = skills.get(*selected_idx) else {
                     return Some(Action::None);
                 };

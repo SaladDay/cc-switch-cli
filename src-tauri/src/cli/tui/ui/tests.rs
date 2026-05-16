@@ -647,6 +647,47 @@ fn provider_form_fields_show_dashed_divider_before_common_snippet() {
 }
 
 #[test]
+fn provider_form_json_preview_highlights_common_config_lines() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.focus = FormFocus::JsonPreview;
+    form.include_common_config = true;
+    form.claude_api_key.set("sk-provider");
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.common_snippet = r#"{
+        "env": {
+            "COMMON_FLAG": "1"
+        }
+    }"#
+    .to_string();
+
+    let buf = render(&app, &data);
+    let theme = theme_for(&app.app_type);
+    let mut common_bg = None;
+    let mut provider_key_bg = None;
+
+    for y in 0..buf.area.height {
+        let line = line_at(&buf, y);
+        if let Some(x) = line.find("\"COMMON_FLAG\"") {
+            common_bg = Some(buf[(x as u16, y)].bg);
+        }
+        if let Some(x) = line.find("\"ANTHROPIC_AUTH_TOKEN\"") {
+            provider_key_bg = Some(buf[(x as u16, y)].bg);
+        }
+    }
+
+    assert_eq!(common_bg, Some(theme.surface));
+    assert_ne!(provider_key_bg, Some(theme.surface));
+}
+
+#[test]
 fn header_is_wrapped_in_a_rect_block() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -912,6 +953,31 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
         all.contains(texts::tui_toast_visible_apps_zero_selection_warning()),
         "{all}"
     );
+}
+
+#[test]
+fn visible_apps_picker_uses_space_toggle_key() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::VisibleAppsPicker {
+        selected: 0,
+        apps: crate::settings::VisibleApps {
+            claude: true,
+            codex: false,
+            gemini: false,
+            opencode: false,
+            openclaw: false,
+        },
+    };
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(all.contains("Space=toggle"), "{all}");
+    assert!(!all.contains("x=toggle"), "{all}");
 }
 
 #[test]
@@ -1347,6 +1413,7 @@ fn editor_cursor_matches_rendered_target_line() {
         initial,
         EditorSubmit::ConfigCommonSnippet {
             app_type: app.app_type.clone(),
+            source: crate::cli::tui::app::CommonSnippetViewSource::Global,
         },
     );
 
@@ -1404,6 +1471,7 @@ fn editor_key_bar_shows_ctrl_o_external_editor_hint() {
         "{\n  \"demo\": true\n}",
         EditorSubmit::ConfigCommonSnippet {
             app_type: app.app_type.clone(),
+            source: crate::cli::tui::app::CommonSnippetViewSource::Global,
         },
     );
 
@@ -1412,6 +1480,46 @@ fn editor_key_bar_shows_ctrl_o_external_editor_hint() {
 
     let has_ctrl_o = (0..buf.area.height).any(|y| line_at(&buf, y).contains("Ctrl+O"));
     assert!(has_ctrl_o, "editor key bar should show the Ctrl+O hint");
+}
+
+#[test]
+fn common_snippet_editor_key_bar_shows_format_and_extract_hints() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.open_editor(
+        "Common Snippet",
+        EditorKind::Json,
+        r#"{"env":{"COMMON_FLAG":"1"}}"#,
+        EditorSubmit::ConfigCommonSnippet {
+            app_type: app.app_type.clone(),
+            source: crate::cli::tui::app::CommonSnippetViewSource::ProviderForm,
+        },
+    );
+
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(
+        all.contains("F2"),
+        "editor should show format shortcut: {all}"
+    );
+    assert!(
+        all.contains("format"),
+        "editor should show format label: {all}"
+    );
+    assert!(
+        all.contains("F4"),
+        "editor should show extract shortcut: {all}"
+    );
+    assert!(
+        all.contains("extract"),
+        "editor should show extract label: {all}"
+    );
 }
 
 #[test]
@@ -2410,6 +2518,23 @@ fn mcp_page_key_bar_hides_validate_action() {
 }
 
 #[test]
+fn mcp_page_uses_space_toggle_key() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains("Space=toggle"), "{all}");
+    assert!(!all.contains("x=toggle"), "{all}");
+}
+
+#[test]
 fn mcp_page_uses_import_existing_label() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -2812,6 +2937,34 @@ fn provider_api_format_proxy_notice_overlay_uses_close_actions() {
 }
 
 #[test]
+fn common_config_notice_overlay_shows_single_close_action() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::Confirm(ConfirmOverlay {
+        title: texts::tui_common_config_notice_title().to_string(),
+        message: texts::tui_common_config_notice_message(AppType::Claude.as_str()),
+        action: ConfirmAction::CommonConfigNotice,
+    });
+
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(
+        all.contains("Enter close"),
+        "expected Enter close hint: {all}"
+    );
+    assert!(
+        !all.contains("Esc close"),
+        "should not show duplicate Esc close hint: {all}"
+    );
+}
+
+#[test]
 fn footer_shows_only_global_actions() {
     let _lock = lock_env();
 
@@ -2825,15 +2978,12 @@ fn footer_shows_only_global_actions() {
     let mut app = App::new(Some(AppType::Claude));
     app.route = Route::Config;
     app.focus = Focus::Content;
-    app.overlay = Overlay::CommonSnippetView {
-        app_type: AppType::Claude,
-        view: crate::cli::tui::app::TextViewState {
-            title: "Common Snippet".to_string(),
-            lines: vec!["{}".to_string()],
-            scroll: 0,
-            action: None,
-        },
-    };
+    app.overlay = Overlay::TextView(crate::cli::tui::app::TextViewState {
+        title: "Common Snippet".to_string(),
+        lines: vec!["{}".to_string()],
+        scroll: 0,
+        action: None,
+    });
     let data = minimal_data(&app.app_type);
 
     let buf = render(&app, &data);

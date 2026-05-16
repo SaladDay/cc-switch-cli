@@ -701,6 +701,7 @@ pub(super) fn render_mcp_apps_picker_overlay(
         texts::tui_mcp_apps_title(name),
         selected,
         apps,
+        "Space",
         &[
             crate::app_config::AppType::Claude,
             crate::app_config::AppType::Codex,
@@ -775,6 +776,7 @@ pub(super) fn render_visible_apps_picker_overlay(
         texts::tui_settings_visible_apps_title().to_string(),
         selected,
         apps,
+        "Space",
         &[
             crate::app_config::AppType::Claude,
             crate::app_config::AppType::Codex,
@@ -800,6 +802,7 @@ pub(super) fn render_skills_apps_picker_overlay(
         texts::tui_skill_apps_title(name),
         selected,
         apps,
+        "Space",
         &[
             crate::app_config::AppType::Claude,
             crate::app_config::AppType::Codex,
@@ -979,6 +982,7 @@ fn render_apps_picker_overlay<A>(
     title: String,
     selected: usize,
     apps: &A,
+    toggle_key_label: &'static str,
     app_types: &[crate::app_config::AppType],
 ) where
     A: AppToggleState,
@@ -1004,7 +1008,7 @@ fn render_apps_picker_overlay<A>(
         chunks[0],
         theme,
         &[
-            ("x", texts::tui_key_toggle()),
+            (toggle_key_label, texts::tui_key_toggle()),
             ("Enter", texts::tui_key_apply()),
             ("Esc", texts::tui_key_cancel()),
         ],

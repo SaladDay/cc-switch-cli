@@ -1294,11 +1294,12 @@ impl ProxyService {
                         app_type.as_str()
                     )
                 })?;
-        let apply_common_config = provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(true);
+        let apply_common_config =
+            crate::services::provider::ProviderService::provider_uses_common_config_for_app(
+                app_type,
+                provider,
+                common_config_snippet.as_deref(),
+            );
 
         crate::services::provider::ProviderService::build_live_backup_snapshot(
             app_type,
@@ -1871,11 +1872,12 @@ impl ProxyService {
                         app_type.as_str()
                     )
                 })?;
-        let apply_common_config = provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(true);
+        let apply_common_config =
+            crate::services::provider::ProviderService::provider_uses_common_config_for_app(
+                app_type,
+                provider,
+                common_config_snippet.as_deref(),
+            );
 
         crate::services::provider::ProviderService::build_live_backup_snapshot(
             app_type,
@@ -4063,6 +4065,56 @@ requires_openai_auth = true
             stored.get("includeCoAuthoredBy").and_then(Value::as_bool),
             Some(false),
             "common config should be applied into Claude restore backup even before takeover is active"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn update_live_backup_from_provider_requires_explicit_common_config_opt_in() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        db.set_config_snippet(
+            "claude",
+            Some(
+                serde_json::json!({
+                    "includeCoAuthoredBy": false
+                })
+                .to_string(),
+            ),
+        )
+        .expect("set common config snippet");
+
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "token",
+                    "ANTHROPIC_BASE_URL": "https://claude.example"
+                }
+            }),
+            None,
+        );
+
+        service
+            .update_live_backup_from_provider("claude", &provider)
+            .await
+            .expect("update claude live backup");
+
+        let backup = db
+            .get_live_backup("claude")
+            .await
+            .expect("get claude live backup")
+            .expect("claude backup exists");
+        let stored: Value =
+            serde_json::from_str(&backup.original_config).expect("parse claude backup json");
+
+        assert!(
+            stored.get("includeCoAuthoredBy").is_none(),
+            "proxy backup must not apply common config when provider did not opt in"
         );
     }
 

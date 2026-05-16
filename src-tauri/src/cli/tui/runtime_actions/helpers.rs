@@ -114,31 +114,6 @@ pub(crate) fn queue_managed_proxy_action(
     Ok(())
 }
 
-pub(super) fn refresh_common_snippet_overlay(app: &mut App, data: &UiData) {
-    let Overlay::CommonSnippetView { app_type, view } = &mut app.overlay else {
-        return;
-    };
-
-    let snippet = if app_type == &app.app_type {
-        data.config.common_snippet.clone()
-    } else {
-        data.config
-            .common_snippets
-            .get(app_type)
-            .cloned()
-            .unwrap_or_default()
-    };
-    let snippet = if snippet.trim().is_empty() {
-        texts::tui_default_common_snippet_for_app(app_type.as_str()).to_string()
-    } else {
-        snippet
-    };
-
-    view.title = texts::tui_common_snippet_title(app_type.as_str());
-    view.lines = snippet.lines().map(|s| s.to_string()).collect();
-    view.scroll = 0;
-}
-
 pub(crate) fn run_external_editor_for_current_editor(
     app: &mut App,
     open_external_editor: impl FnOnce(&str) -> Result<String, AppError>,

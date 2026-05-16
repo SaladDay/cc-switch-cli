@@ -59,16 +59,6 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
-        Overlay::CommonSnippetView { view, .. } => {
-            super::basic::render_common_snippet_view_overlay(
-                frame,
-                content_area,
-                theme,
-                &view.title,
-                &view.lines,
-                view.scroll,
-            )
-        }
         Overlay::ClaudeModelPicker { selected, editing } => {
             super::pickers::render_claude_model_picker_overlay(
                 frame,

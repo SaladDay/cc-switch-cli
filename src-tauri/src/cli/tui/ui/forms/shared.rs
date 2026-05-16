@@ -1,4 +1,5 @@
 use super::super::*;
+use std::collections::BTreeSet;
 
 pub(crate) fn focus_block_style(active: bool, theme: &super::theme::Theme) -> Style {
     if active {
@@ -148,6 +149,26 @@ pub(crate) fn render_form_json_preview(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
+    render_form_json_preview_with_highlights(
+        frame,
+        json_text,
+        scroll,
+        active,
+        area,
+        theme,
+        &BTreeSet::new(),
+    );
+}
+
+pub(crate) fn render_form_json_preview_with_highlights(
+    frame: &mut Frame<'_>,
+    json_text: &str,
+    scroll: usize,
+    active: bool,
+    area: Rect,
+    theme: &super::theme::Theme,
+    highlighted_lines: &BTreeSet<usize>,
+) {
     let json_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -156,9 +177,17 @@ pub(crate) fn render_form_json_preview(
     frame.render_widget(json_block.clone(), area);
     let json_inner = json_block.inner(area);
 
+    let highlight_style = Style::default().bg(theme.surface);
     let lines = json_text
         .lines()
-        .map(|s| Line::raw(s.to_string()))
+        .enumerate()
+        .map(|(idx, s)| {
+            if highlighted_lines.contains(&idx) {
+                Line::from(Span::styled(s.to_string(), highlight_style))
+            } else {
+                Line::raw(s.to_string())
+            }
+        })
         .collect::<Vec<_>>();
 
     let height = json_inner.height as usize;

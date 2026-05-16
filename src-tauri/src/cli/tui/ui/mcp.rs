@@ -81,7 +81,7 @@ pub(super) fn render_mcp(
             chunks[0],
             theme,
             &[
-                ("x", texts::tui_key_toggle()),
+                ("Space", texts::tui_key_toggle()),
                 ("m", texts::tui_key_apps()),
                 ("a", texts::tui_key_add()),
                 ("e", texts::tui_key_edit()),

@@ -114,6 +114,20 @@ mod tests {
         UiData::default()
     }
 
+    fn select_provider_common_snippet_row(app: &mut App) {
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.editing = false;
+            let fields = form.fields();
+            form.field_idx = fields
+                .iter()
+                .position(|f| *f == ProviderAddField::CommonSnippet)
+                .expect("CommonSnippet field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+    }
+
     fn open_provider_fields_form(app_type: AppType) -> App {
         let mut app = App::new(Some(app_type));
         app.open_provider_add_form();
@@ -231,6 +245,30 @@ mod tests {
             is_default_model: false,
             primary_model_id: None,
             default_model_id: None,
+        }
+    }
+
+    fn installed_skill(directory: &str, name: &str) -> crate::services::skill::InstalledSkill {
+        crate::services::skill::InstalledSkill {
+            id: format!("local:{directory}"),
+            name: name.to_string(),
+            description: None,
+            directory: directory.to_string(),
+            repo_owner: None,
+            repo_name: None,
+            repo_branch: None,
+            readme_url: None,
+            apps: crate::app_config::SkillApps::default(),
+            installed_at: 0,
+        }
+    }
+
+    fn unmanaged_skill(directory: &str) -> crate::services::skill::UnmanagedSkill {
+        crate::services::skill::UnmanagedSkill {
+            directory: directory.to_string(),
+            name: "Hello Skill".to_string(),
+            description: None,
+            found_in: vec!["claude".to_string()],
         }
     }
 
@@ -376,18 +414,7 @@ mod tests {
         let mut data = UiData::default();
         data.skills
             .installed
-            .push(crate::services::skill::InstalledSkill {
-                id: "local:hello-skill".to_string(),
-                name: "Hello Skill".to_string(),
-                description: None,
-                directory: "hello-skill".to_string(),
-                repo_owner: None,
-                repo_name: None,
-                repo_branch: None,
-                readme_url: None,
-                apps: crate::app_config::SkillApps::default(),
-                installed_at: 0,
-            });
+            .push(installed_skill("hello-skill", "Hello Skill"));
 
         let action = app.on_key(key(KeyCode::Char('m')), &data);
         assert!(matches!(action, Action::None));
@@ -403,7 +430,83 @@ mod tests {
     }
 
     #[test]
-    fn skills_apps_picker_x_toggles_selected_app_and_enter_emits_action() {
+    fn skills_space_key_toggles_current_app() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Skills;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.skills
+            .installed
+            .push(installed_skill("hello-skill", "Hello Skill"));
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(
+            action,
+            Action::SkillsToggle {
+                directory,
+                enabled: true
+            } if directory == "hello-skill"
+        ));
+    }
+
+    #[test]
+    fn skills_x_key_does_not_toggle_current_app() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Skills;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.skills
+            .installed
+            .push(installed_skill("hello-skill", "Hello Skill"));
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(action, Action::None));
+    }
+
+    #[test]
+    fn skill_detail_space_key_toggles_current_app() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SkillDetail {
+            directory: "hello-skill".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.skills
+            .installed
+            .push(installed_skill("hello-skill", "Hello Skill"));
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(
+            action,
+            Action::SkillsToggle {
+                directory,
+                enabled: true
+            } if directory == "hello-skill"
+        ));
+    }
+
+    #[test]
+    fn skill_detail_x_key_does_not_toggle_current_app() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SkillDetail {
+            directory: "hello-skill".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.skills
+            .installed
+            .push(installed_skill("hello-skill", "Hello Skill"));
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(action, Action::None));
+    }
+
+    #[test]
+    fn skills_apps_picker_space_toggles_selected_app_and_enter_emits_action() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Skills;
         app.focus = Focus::Content;
@@ -411,22 +514,11 @@ mod tests {
         let mut data = UiData::default();
         data.skills
             .installed
-            .push(crate::services::skill::InstalledSkill {
-                id: "local:hello-skill".to_string(),
-                name: "Hello Skill".to_string(),
-                description: None,
-                directory: "hello-skill".to_string(),
-                repo_owner: None,
-                repo_name: None,
-                repo_branch: None,
-                readme_url: None,
-                apps: crate::app_config::SkillApps::default(),
-                installed_at: 0,
-            });
+            .push(installed_skill("hello-skill", "Hello Skill"));
 
         app.on_key(key(KeyCode::Char('m')), &data);
 
-        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
@@ -442,6 +534,27 @@ mod tests {
     }
 
     #[test]
+    fn skills_apps_picker_x_does_not_toggle_selected_app() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Skills;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.skills
+            .installed
+            .push(installed_skill("hello-skill", "Hello Skill"));
+
+        app.on_key(key(KeyCode::Char('m')), &data);
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::SkillsAppsPicker { apps, .. } if !apps.codex
+        ));
+    }
+
+    #[test]
     fn skills_apps_picker_from_openclaw_targets_opencode_last_visible_row() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Skills;
@@ -450,18 +563,7 @@ mod tests {
         let mut data = UiData::default();
         data.skills
             .installed
-            .push(crate::services::skill::InstalledSkill {
-                id: "local:hello-skill".to_string(),
-                name: "Hello Skill".to_string(),
-                description: None,
-                directory: "hello-skill".to_string(),
-                repo_owner: None,
-                repo_name: None,
-                repo_branch: None,
-                readme_url: None,
-                apps: crate::app_config::SkillApps::default(),
-                installed_at: 0,
-            });
+            .push(installed_skill("hello-skill", "Hello Skill"));
 
         let action = app.on_key(key(KeyCode::Char('m')), &data);
         assert!(matches!(action, Action::None));
@@ -470,7 +572,7 @@ mod tests {
             Overlay::SkillsAppsPicker { selected, .. } if *selected == 3
         ));
 
-        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
@@ -492,18 +594,7 @@ mod tests {
         let mut data = UiData::default();
         data.skills
             .installed
-            .push(crate::services::skill::InstalledSkill {
-                id: "local:hello-skill".to_string(),
-                name: "Hello Skill".to_string(),
-                description: None,
-                directory: "hello-skill".to_string(),
-                repo_owner: None,
-                repo_name: None,
-                repo_branch: None,
-                readme_url: None,
-                apps: crate::app_config::SkillApps::default(),
-                installed_at: 0,
-            });
+            .push(installed_skill("hello-skill", "Hello Skill"));
 
         let action = app.on_key(key(KeyCode::Char('d')), &data);
         assert!(matches!(action, Action::None));
@@ -517,7 +608,89 @@ mod tests {
     }
 
     #[test]
-    fn config_e_key_opens_common_snippet_picker_when_selected() {
+    fn skills_repos_space_key_toggles_enabled() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SkillsRepos;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.skills.repos.push(crate::services::skill::SkillRepo {
+            owner: "anthropics".to_string(),
+            name: "skills".to_string(),
+            branch: "main".to_string(),
+            enabled: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(
+            action,
+            Action::SkillsRepoToggleEnabled {
+                owner,
+                name,
+                enabled: true
+            } if owner == "anthropics" && name == "skills"
+        ));
+    }
+
+    #[test]
+    fn skills_repos_x_key_does_not_toggle_enabled() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SkillsRepos;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.skills.repos.push(crate::services::skill::SkillRepo {
+            owner: "anthropics".to_string(),
+            name: "skills".to_string(),
+            branch: "main".to_string(),
+            enabled: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(action, Action::None));
+    }
+
+    #[test]
+    fn skills_import_picker_space_toggles_selection() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Skills;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::SkillsImportPicker {
+            skills: vec![unmanaged_skill("hello-skill")],
+            selected_idx: 0,
+            selected: std::collections::HashSet::new(),
+        };
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::SkillsImportPicker { selected, .. }
+                if selected.contains("hello-skill")
+        ));
+    }
+
+    #[test]
+    fn skills_import_picker_x_does_not_toggle_selection() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Skills;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::SkillsImportPicker {
+            skills: vec![unmanaged_skill("hello-skill")],
+            selected_idx: 0,
+            selected: std::collections::HashSet::new(),
+        };
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::SkillsImportPicker { selected, .. } if selected.is_empty()
+        ));
+    }
+
+    #[test]
+    fn config_e_key_opens_common_snippet_editor_when_selected() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Config;
         app.focus = Focus::Content;
@@ -528,7 +701,16 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Char('e')), &data());
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::CommonSnippetPicker { .. }));
+        assert!(matches!(
+            app.editor.as_ref().map(|e| (&e.kind, &e.submit)),
+            Some((
+                EditorKind::Json,
+                EditorSubmit::ConfigCommonSnippet {
+                    app_type: AppType::Claude,
+                    source: CommonSnippetViewSource::Global
+                }
+            ))
+        ));
     }
 
     #[test]
@@ -818,7 +1000,8 @@ mod tests {
     #[test]
     fn provider_add_form_notes_is_length_limited() {
         let mut app = App::new(Some(AppType::Claude));
-        app.open_provider_add_form();
+        let ui_data = UiData::default();
+        app.open_provider_add_form(&ui_data);
 
         let notes_idx = match app.form.as_ref() {
             Some(FormState::ProviderAdd(form)) => form
@@ -836,9 +1019,9 @@ mod tests {
         }
 
         // Enter edit mode for Notes.
-        app.on_key(key(KeyCode::Enter), &data());
+        app.on_key(key(KeyCode::Enter), &ui_data);
         for _ in 0..(PROVIDER_NOTES_MAX_CHARS + 10) {
-            app.on_key(key(KeyCode::Char('a')), &data());
+            app.on_key(key(KeyCode::Char('a')), &ui_data);
         }
 
         let notes_len = match app.form.as_ref() {
@@ -2065,7 +2248,38 @@ mod tests {
     }
 
     #[test]
-    fn mcp_x_key_toggles_current_app() {
+    fn mcp_space_key_toggles_current_app() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Mcp;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.mcp.rows.push(super::super::data::McpRow {
+            id: "m1".to_string(),
+            server: crate::app_config::McpServer {
+                id: "m1".to_string(),
+                name: "Server".to_string(),
+                server: json!({}),
+                apps: crate::app_config::McpApps::default(),
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: vec![],
+            },
+        });
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(
+            action,
+            Action::McpToggle {
+                id,
+                enabled: true
+            } if id == "m1"
+        ));
+    }
+
+    #[test]
+    fn mcp_x_key_does_not_toggle_current_app() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Mcp;
         app.focus = Focus::Content;
@@ -2086,13 +2300,7 @@ mod tests {
         });
 
         let action = app.on_key(key(KeyCode::Char('x')), &data);
-        assert!(matches!(
-            action,
-            Action::McpToggle {
-                id,
-                enabled: true
-            } if id == "m1"
-        ));
+        assert!(matches!(action, Action::None));
     }
 
     #[test]
@@ -2156,7 +2364,44 @@ mod tests {
     }
 
     #[test]
-    fn mcp_apps_picker_x_toggles_selected_app_and_enter_emits_action() {
+    fn mcp_apps_picker_space_toggles_selected_app_and_enter_emits_action() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Mcp;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.mcp.rows.push(super::super::data::McpRow {
+            id: "m1".to_string(),
+            server: crate::app_config::McpServer {
+                id: "m1".to_string(),
+                name: "Server".to_string(),
+                server: json!({}),
+                apps: crate::app_config::McpApps::default(),
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: vec![],
+            },
+        });
+
+        app.on_key(key(KeyCode::Char('m')), &data);
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::McpAppsPicker { apps, .. } if apps.codex
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::McpSetApps { id, apps } if id == "m1" && apps.codex && !apps.claude && !apps.gemini
+        ));
+    }
+
+    #[test]
+    fn mcp_apps_picker_x_does_not_toggle_selected_app() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Mcp;
         app.focus = Focus::Content;
@@ -2182,13 +2427,7 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
-            Overlay::McpAppsPicker { apps, .. } if apps.codex
-        ));
-
-        let action = app.on_key(key(KeyCode::Enter), &data);
-        assert!(matches!(
-            action,
-            Action::McpSetApps { id, apps } if id == "m1" && apps.codex && !apps.claude && !apps.gemini
+            Overlay::McpAppsPicker { apps, .. } if !apps.codex
         ));
     }
 
@@ -2218,7 +2457,7 @@ mod tests {
         app.on_key(key(KeyCode::Down), &data);
         app.on_key(key(KeyCode::Down), &data);
 
-        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
@@ -2261,7 +2500,7 @@ mod tests {
             Overlay::McpAppsPicker { selected, .. } if *selected == 3
         ));
 
-        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
@@ -2904,7 +3143,7 @@ mod tests {
     }
 
     #[test]
-    fn config_common_snippet_picker_and_view_support_edit_clear_apply_actions() {
+    fn config_common_snippet_opens_editor_directly() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Config;
         app.focus = Focus::Content;
@@ -2915,42 +3154,21 @@ mod tests {
 
         let data = UiData::default();
         app.on_key(key(KeyCode::Enter), &data);
-        assert!(matches!(app.overlay, Overlay::CommonSnippetPicker { .. }));
-
-        // Picker default should be the current app type (Claude). Enter opens the preview overlay.
-        app.on_key(key(KeyCode::Enter), &data);
         assert!(matches!(
-            app.overlay,
-            Overlay::CommonSnippetView {
-                app_type: AppType::Claude,
-                ..
-            }
-        ));
-
-        assert!(matches!(
-            app.on_key(key(KeyCode::Char('a')), &data),
-            Action::ConfigCommonSnippetApply {
-                app_type: AppType::Claude
-            }
-        ));
-        assert!(matches!(
-            app.on_key(key(KeyCode::Char('c')), &data),
-            Action::ConfigCommonSnippetClear {
-                app_type: AppType::Claude
-            }
-        ));
-
-        let action = app.on_key(key(KeyCode::Char('e')), &data);
-        assert!(matches!(action, Action::None));
-        assert!(matches!(
-            app.editor.as_ref().map(|e| e.kind),
-            Some(EditorKind::Json)
+            app.editor.as_ref().map(|e| (&e.kind, &e.submit)),
+            Some((
+                EditorKind::Json,
+                EditorSubmit::ConfigCommonSnippet {
+                    app_type: AppType::Claude,
+                    source: CommonSnippetViewSource::Global
+                }
+            ))
         ));
     }
 
     #[test]
-    fn config_common_snippet_picker_shows_snippet_for_non_current_app() {
-        let mut app = App::new(Some(AppType::Claude));
+    fn config_common_snippet_codex_opens_toml_editor_directly() {
+        let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Config;
         app.focus = Focus::Content;
         app.config_idx = ConfigItem::ALL
@@ -2959,23 +3177,44 @@ mod tests {
             .expect("CommonSnippet missing from ConfigItem::ALL");
 
         let mut data = UiData::default();
+        data.config.common_snippet = "disable_response_storage = true".to_string();
+
+        app.on_key(key(KeyCode::Enter), &data);
+        let editor = app.editor.as_ref().expect("expected common snippet editor");
+        assert_eq!(editor.kind, EditorKind::Toml);
+        assert_eq!(
+            editor.submit,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Codex,
+                source: CommonSnippetViewSource::Global
+            }
+        );
+        assert!(editor.text().contains("disable_response_storage"));
+    }
+
+    #[test]
+    fn common_snippet_picker_opens_editor_for_non_current_app() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::CommonSnippetPicker {
+            selected: snippet_picker_index_for_app_type(&AppType::Codex),
+        };
+
+        let mut data = UiData::default();
         data.config.common_snippets.codex = Some("disable_response_storage = true".to_string());
 
         app.on_key(key(KeyCode::Enter), &data);
-        assert!(matches!(app.overlay, Overlay::CommonSnippetPicker { .. }));
 
-        app.on_key(key(KeyCode::Down), &data); // Claude -> Codex
-        app.on_key(key(KeyCode::Enter), &data);
-
-        let snippet = match &app.overlay {
-            Overlay::CommonSnippetView {
+        let editor = app.editor.as_ref().expect("expected Codex snippet editor");
+        assert_eq!(editor.kind, EditorKind::Toml);
+        assert_eq!(
+            editor.submit,
+            EditorSubmit::ConfigCommonSnippet {
                 app_type: AppType::Codex,
-                view,
-            } => view.lines.join("\n"),
-            other => panic!("expected Codex snippet view, got {other:?}"),
-        };
+                source: CommonSnippetViewSource::Global
+            }
+        );
         assert!(
-            snippet.contains("disable_response_storage"),
+            editor.text().contains("disable_response_storage"),
             "expected Codex snippet content to be loaded from snapshot"
         );
     }
@@ -3041,105 +3280,193 @@ mod tests {
     }
 
     #[test]
-    fn provider_add_form_common_snippet_row_opens_editor_claude() {
+    fn provider_add_form_common_snippet_row_opens_json_editor_claude() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
         app.focus = Focus::Content;
 
-        let data = UiData::default();
+        let data = data();
         app.on_key(key(KeyCode::Char('a')), &data);
         app.on_key(key(KeyCode::Enter), &data); // apply template -> fields
+        select_provider_common_snippet_row(&mut app);
 
-        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
-            form.focus = super::super::form::FormFocus::Fields;
-            form.editing = false;
-            let fields = form.fields();
-            form.field_idx = fields
-                .iter()
-                .position(|f| *f == ProviderAddField::CommonSnippet)
-                .expect("CommonSnippet field should exist");
-        } else {
-            panic!("expected ProviderAdd form");
-        }
-
-        app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
         assert!(matches!(
             app.editor.as_ref().map(|e| (&e.kind, &e.submit)),
             Some((
                 EditorKind::Json,
                 EditorSubmit::ConfigCommonSnippet {
-                    app_type: AppType::Claude
+                    app_type: AppType::Claude,
+                    source: CommonSnippetViewSource::ProviderForm
                 }
             ))
         ));
     }
 
     #[test]
-    fn provider_add_form_common_snippet_row_opens_editor_codex() {
+    fn common_snippet_editor_function_keys_trigger_format_and_extract() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = data();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data); // apply template -> fields
+        select_provider_common_snippet_row(&mut app);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::F(2)), &data),
+            Action::EditorFormatCommonSnippet {
+                app_type: AppType::Claude
+            }
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::F(4)), &data),
+            Action::EditorExtractCommonSnippet {
+                app_type: AppType::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn global_common_snippet_editor_only_formats_not_extracts() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Config;
+        app.focus = Focus::Content;
+        app.open_common_snippet_editor(
+            AppType::Claude,
+            &data(),
+            Some(r#"{"env":{"COMMON_FLAG":"1"}}"#.to_string()),
+            CommonSnippetViewSource::Global,
+        );
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::F(2)), &data()),
+            Action::EditorFormatCommonSnippet {
+                app_type: AppType::Claude
+            }
+        ));
+
+        let before = app.editor.as_ref().map(|editor| editor.text());
+        assert!(matches!(
+            app.on_key(key(KeyCode::F(4)), &data()),
+            Action::None
+        ));
+        assert_eq!(app.editor.as_ref().map(|editor| editor.text()), before);
+    }
+
+    #[test]
+    fn provider_add_form_common_snippet_row_opens_toml_editor_codex() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Providers;
         app.focus = Focus::Content;
 
-        let data = UiData::default();
+        let data = data();
         app.on_key(key(KeyCode::Char('a')), &data);
         app.on_key(key(KeyCode::Enter), &data); // apply template -> fields
+        select_provider_common_snippet_row(&mut app);
 
-        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
-            form.focus = super::super::form::FormFocus::Fields;
-            form.editing = false;
-            let fields = form.fields();
-            form.field_idx = fields
-                .iter()
-                .position(|f| *f == ProviderAddField::CommonSnippet)
-                .expect("CommonSnippet field should exist");
-        } else {
-            panic!("expected ProviderAdd form");
-        }
-
-        app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
         assert!(matches!(
             app.editor.as_ref().map(|e| (&e.kind, &e.submit)),
             Some((
-                EditorKind::Plain,
+                EditorKind::Toml,
                 EditorSubmit::ConfigCommonSnippet {
-                    app_type: AppType::Codex
+                    app_type: AppType::Codex,
+                    source: CommonSnippetViewSource::ProviderForm
                 }
             ))
         ));
     }
 
     #[test]
-    fn provider_add_form_common_snippet_row_opens_editor_gemini() {
+    fn provider_add_form_common_snippet_row_opens_json_editor_gemini() {
         let mut app = App::new(Some(AppType::Gemini));
         app.route = Route::Providers;
         app.focus = Focus::Content;
 
-        let data = UiData::default();
+        let data = data();
         app.on_key(key(KeyCode::Char('a')), &data);
         app.on_key(key(KeyCode::Enter), &data); // apply template -> fields
+        select_provider_common_snippet_row(&mut app);
 
-        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
-            form.focus = super::super::form::FormFocus::Fields;
-            form.editing = false;
-            let fields = form.fields();
-            form.field_idx = fields
-                .iter()
-                .position(|f| *f == ProviderAddField::CommonSnippet)
-                .expect("CommonSnippet field should exist");
-        } else {
-            panic!("expected ProviderAdd form");
-        }
-
-        app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
         assert!(matches!(
             app.editor.as_ref().map(|e| (&e.kind, &e.submit)),
             Some((
                 EditorKind::Json,
                 EditorSubmit::ConfigCommonSnippet {
-                    app_type: AppType::Gemini
+                    app_type: AppType::Gemini,
+                    source: CommonSnippetViewSource::ProviderForm
                 }
             ))
         ));
+    }
+
+    #[test]
+    fn provider_add_form_first_open_shows_common_config_notice_for_supported_apps() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.common_config_notice_confirmed = false;
+
+        let action = app.on_key(key(KeyCode::Char('a')), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::CommonConfigNotice,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn provider_add_form_skips_common_config_notice_after_confirmed() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = data();
+
+        let action = app.on_key(key(KeyCode::Char('a')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_add_form_skips_common_config_notice_for_unsupported_apps() {
+        let mut app = App::new(Some(AppType::OpenCode));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.common_config_notice_confirmed = false;
+
+        let action = app.on_key(key(KeyCode::Char('a')), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn common_config_notice_enter_esc_and_no_all_mark_confirmed() {
+        for key_code in [KeyCode::Enter, KeyCode::Esc, KeyCode::Char('n')] {
+            let mut app = App::new(Some(AppType::Claude));
+            app.overlay = Overlay::Confirm(ConfirmOverlay {
+                title: texts::tui_common_config_notice_title().to_string(),
+                message: texts::tui_common_config_notice_message(AppType::Claude.as_str()),
+                action: ConfirmAction::CommonConfigNotice,
+            });
+
+            let action = app.on_key(key(key_code), &data());
+            assert!(matches!(action, Action::ConfirmCommonConfigNotice));
+            assert!(matches!(app.overlay, Overlay::None));
+        }
     }
 
     #[test]
@@ -7964,7 +8291,7 @@ mod tests {
         };
 
         let data = UiData::default();
-        let toggle_action = app.on_key(key(KeyCode::Char('x')), &data);
+        let toggle_action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(toggle_action, Action::None));
 
         let action = app.on_key(key(KeyCode::Enter), &data);
@@ -7985,6 +8312,41 @@ mod tests {
                 kind: ToastKind::Warning,
                 ..
             }) if message == texts::tui_toast_visible_apps_zero_selection_warning()
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn visible_apps_picker_x_key_does_not_toggle_selection() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        crate::settings::set_visible_apps(crate::settings::VisibleApps {
+            claude: true,
+            codex: false,
+            gemini: false,
+            opencode: false,
+            openclaw: false,
+        })
+        .expect("save visible apps");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::VisibleAppsPicker {
+            selected: 0,
+            apps: crate::settings::get_visible_apps(),
+        };
+
+        let action = app.on_key(key(KeyCode::Char('x')), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::VisibleAppsPicker { apps, .. }
+                if apps.claude
+                    && !apps.codex
+                    && !apps.gemini
+                    && !apps.opencode
+                    && !apps.openclaw
         ));
     }
 

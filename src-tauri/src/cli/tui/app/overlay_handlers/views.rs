@@ -13,14 +13,11 @@ impl App {
         match &self.overlay {
             Overlay::CommonSnippetPicker { selected } => {
                 let app_type = snippet_picker_app_type(*selected);
-                self.open_common_snippet_editor(app_type, data, None);
-                Some(Action::None)
-            }
-            Overlay::CommonSnippetView { app_type, view } => {
                 self.open_common_snippet_editor(
-                    app_type.clone(),
+                    app_type,
                     data,
-                    Some(view.lines.join("\n")),
+                    None,
+                    CommonSnippetViewSource::Global,
                 );
                 Some(Action::None)
             }
@@ -43,9 +40,6 @@ impl App {
             return Some(action);
         }
         if let Some(action) = self.handle_common_snippet_picker_key(key, data) {
-            return Some(action);
-        }
-        if let Some(action) = self.handle_common_snippet_view_key(key) {
             return Some(action);
         }
         if let Some(action) = self.handle_loading_overlay_key(key) {
@@ -175,37 +169,12 @@ impl App {
             }
             KeyCode::Enter => {
                 let app_type = snippet_picker_app_type(*selected);
-                self.open_common_snippet_view(app_type, data);
-                Action::None
-            }
-            _ => Action::None,
-        })
-    }
-
-    fn handle_common_snippet_view_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let Overlay::CommonSnippetView { app_type, view } = &mut self.overlay else {
-            return None;
-        };
-
-        Some(match key.code {
-            KeyCode::Char('a') => Action::ConfigCommonSnippetApply {
-                app_type: app_type.clone(),
-            },
-            KeyCode::Char('c') => Action::ConfigCommonSnippetClear {
-                app_type: app_type.clone(),
-            },
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.overlay = Overlay::None;
-                Action::None
-            }
-            KeyCode::Up => {
-                view.scroll = view.scroll.saturating_sub(1);
-                Action::None
-            }
-            KeyCode::Down => {
-                if !view.lines.is_empty() {
-                    view.scroll = (view.scroll + 1).min(view.lines.len() - 1);
-                }
+                self.open_common_snippet_editor(
+                    app_type,
+                    data,
+                    None,
+                    CommonSnippetViewSource::Global,
+                );
                 Action::None
             }
             _ => Action::None,

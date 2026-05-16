@@ -71,7 +71,8 @@ where
     F: FnOnce(&AppType) -> Result<data::UiData, AppError>,
 {
     let app_type = resolve_initial_app_type(app_override);
-    let app = App::new(Some(app_type));
+    let mut app = App::new(Some(app_type));
+    app.common_config_notice_confirmed = crate::settings::get_common_config_confirmed();
     let data = load_data(&app.app_type)?;
     Ok((app, data))
 }

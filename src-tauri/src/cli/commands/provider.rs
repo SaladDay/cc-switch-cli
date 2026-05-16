@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use super::provider_inspect;
 use crate::app_config::AppType;
 use crate::cli::commands::provider_input::{
-    current_timestamp, display_provider_summary, generate_provider_id, prompt_basic_fields,
-    prompt_optional_fields, prompt_settings_config, prompt_settings_config_for_add, OptionalFields,
-    ProviderAddMode,
+    common_snippet_has_effective_config, current_timestamp, display_provider_summary,
+    generate_provider_id, prompt_basic_fields, prompt_optional_fields, prompt_settings_config,
+    prompt_settings_config_for_add, provider_uses_common_config, set_provider_common_config_meta,
+    supports_common_config, OptionalFields, ProviderAddMode,
 };
 use crate::cli::i18n::texts;
 use crate::cli::ui::{error, highlight, info, success, warning};
@@ -29,6 +30,27 @@ fn is_codex_official_provider(provider: &Provider) -> bool {
         || provider.category.as_deref() == Some("official")
         || provider.website_url.as_deref() == Some("https://chatgpt.com/codex")
         || provider.name.trim().eq_ignore_ascii_case("OpenAI Official")
+}
+
+fn prompt_common_config_enabled(
+    app_type: &AppType,
+    common_snippet: Option<&str>,
+    current: Option<&Provider>,
+) -> Result<Option<bool>, AppError> {
+    if !supports_common_config(app_type)
+        || !common_snippet_has_effective_config(app_type, common_snippet)
+    {
+        return Ok(None);
+    }
+
+    let default_enabled = current
+        .map(|provider| provider_uses_common_config(app_type, provider, common_snippet))
+        .unwrap_or(true);
+    let enabled = Confirm::new(texts::tui_form_attach_common_config())
+        .with_default(default_enabled)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    Ok(Some(enabled))
 }
 
 #[derive(Subcommand)]
@@ -222,6 +244,7 @@ fn add_provider(app_type: AppType) -> Result<(), AppError> {
         .get_manager(&app_type)
         .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
     let existing_ids: Vec<String> = manager.providers.keys().cloned().collect();
+    let common_snippet = config.common_config_snippets.get(&app_type).cloned();
     drop(config);
 
     // 2. 收集基本字段
@@ -264,7 +287,7 @@ fn add_provider(app_type: AppType) -> Result<(), AppError> {
     };
 
     // 5. 构建 Provider 对象
-    let provider = Provider {
+    let mut provider = Provider {
         id: id.clone(),
         name,
         settings_config,
@@ -285,6 +308,10 @@ fn add_provider(app_type: AppType) -> Result<(), AppError> {
         },
         in_failover_queue: false,
     };
+    if let Some(enabled) = prompt_common_config_enabled(&app_type, common_snippet.as_deref(), None)?
+    {
+        set_provider_common_config_meta(&mut provider, enabled);
+    }
 
     // 6. 显示摘要并确认
     display_provider_summary(&provider, &app_type);
@@ -331,6 +358,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         })?
         .clone();
     let is_current = manager.current == id;
+    let common_snippet = config.common_config_snippets.get(&app_type).cloned();
     drop(config);
 
     // 2. 显示当前配置
@@ -371,7 +399,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     };
 
     // 6. 构建更新后的 Provider（保留 meta 和 created_at）
-    let updated = Provider {
+    let mut updated = Provider {
         id: id.to_string(),
         name: name.trim().to_string(),
         settings_config,
@@ -385,6 +413,11 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         meta: original.meta,                           // 保留元数据
         in_failover_queue: original.in_failover_queue, // 保留故障转移状态
     };
+    if let Some(enabled) =
+        prompt_common_config_enabled(&app_type, common_snippet.as_deref(), Some(&updated))?
+    {
+        set_provider_common_config_meta(&mut updated, enabled);
+    }
 
     // 7. 显示修改摘要并确认
     println!("\n{}", highlight(texts::updated_config_header()));
@@ -451,11 +484,11 @@ fn export_provider(app_type: AppType, id: &str, output: Option<PathBuf>) -> Resu
         )
     };
 
-    let apply_common_config = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.apply_common_config)
-        .unwrap_or(true);
+    let apply_common_config = ProviderService::provider_uses_common_config_for_app(
+        &app_type,
+        &provider,
+        common_config_snippet.as_deref(),
+    );
 
     let output_path = match output {
         None => {

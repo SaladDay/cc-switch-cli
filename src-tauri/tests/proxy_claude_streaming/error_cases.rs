@@ -263,6 +263,7 @@ async fn proxy_claude_streaming_first_byte_timeout_uses_app_config() {
         .await
         .expect("get claude proxy config");
     claude_proxy.auto_failover_enabled = true;
+    claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_first_byte_timeout = 1;
     db.update_proxy_config_for_app(claude_proxy)
@@ -368,6 +369,7 @@ async fn proxy_claude_streaming_idle_timeout_uses_app_config() {
         .await
         .expect("get claude proxy config");
     claude_proxy.auto_failover_enabled = true;
+    claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_idle_timeout = 1;
     db.update_proxy_config_for_app(claude_proxy)
@@ -511,6 +513,7 @@ async fn proxy_claude_streaming_idle_timeout_does_not_sync_failover_state() {
         .await
         .expect("get claude proxy config");
     claude_proxy.auto_failover_enabled = true;
+    claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_idle_timeout = 1;
     db.update_proxy_config_for_app(claude_proxy)
@@ -623,6 +626,7 @@ async fn proxy_claude_streaming_first_chunk_timeout_after_headers_uses_app_confi
         .await
         .expect("get claude proxy config");
     claude_proxy.auto_failover_enabled = true;
+    claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_first_byte_timeout = 1;
     db.update_proxy_config_for_app(claude_proxy)
@@ -720,6 +724,7 @@ async fn proxy_claude_streaming_first_byte_timeout_spans_headers_and_first_chunk
         .await
         .expect("get claude proxy config");
     claude_proxy.auto_failover_enabled = true;
+    claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_first_byte_timeout = 1;
     db.update_proxy_config_for_app(claude_proxy)
@@ -814,6 +819,7 @@ async fn proxy_claude_streaming_non_sse_error_body_uses_timeout_budget() {
         .await
         .expect("get claude proxy config");
     claude_proxy.auto_failover_enabled = true;
+    claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_first_byte_timeout = 1;
     db.update_proxy_config_for_app(claude_proxy)
@@ -1212,6 +1218,7 @@ async fn proxy_claude_streaming_non_sse_success_fallback_uses_timeout_budget() {
         .await
         .expect("get claude proxy config");
     claude_proxy.auto_failover_enabled = true;
+    claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_first_byte_timeout = 1;
     db.update_proxy_config_for_app(claude_proxy)
@@ -1315,6 +1322,7 @@ async fn proxy_claude_streaming_retry_respects_total_first_byte_budget() {
         .await
         .expect("get claude proxy config");
     claude_proxy.auto_failover_enabled = true;
+    claude_proxy.enabled = true;
     claude_proxy.max_retries = 1;
     claude_proxy.streaming_first_byte_timeout = 1;
     db.update_proxy_config_for_app(claude_proxy)

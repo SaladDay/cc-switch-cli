@@ -58,6 +58,17 @@ impl ProviderService {
         )
     }
 
+    fn migrate_common_gemini_config_from_provider(
+        provider: &mut Provider,
+        common_config_snippet: Option<&str>,
+    ) -> Result<(), AppError> {
+        common_config::migrate_provider_subset_usage_for_storage(
+            &AppType::Gemini,
+            provider,
+            common_config_snippet,
+        )
+    }
+
     pub(super) fn migrate_gemini_common_config_snippet(
         config: &mut MultiAppConfig,
         strict_current_provider_id: Option<&str>,
@@ -81,7 +92,7 @@ impl ProviderService {
             };
 
             for provider in manager.providers.values_mut() {
-                Self::strip_common_gemini_config_from_provider(provider, Some(old_snippet))?;
+                Self::migrate_common_gemini_config_from_provider(provider, Some(old_snippet))?;
             }
 
             return Ok(());
@@ -92,7 +103,7 @@ impl ProviderService {
         };
 
         if let Some(current_provider) = manager.providers.get_mut(&current_provider_id) {
-            Self::strip_common_gemini_config_from_provider(current_provider, Some(old_snippet))?;
+            Self::migrate_common_gemini_config_from_provider(current_provider, Some(old_snippet))?;
         }
 
         for (provider_id, provider) in manager.providers.iter_mut() {
@@ -101,7 +112,7 @@ impl ProviderService {
             }
 
             if let Err(err) =
-                Self::strip_common_gemini_config_from_provider(provider, Some(old_snippet))
+                Self::migrate_common_gemini_config_from_provider(provider, Some(old_snippet))
             {
                 log::warn!(
                     "skip migrating Gemini non-current provider snapshot '{provider_id}' from stored common config snippet: {err}"
@@ -209,7 +220,7 @@ impl ProviderService {
             &AppType::Gemini,
             provider,
             common_config_snippet,
-            true,
+            common_config_snippet.is_some(),
         )?;
 
         let mut env_map = json_to_env(&content_to_write)?;

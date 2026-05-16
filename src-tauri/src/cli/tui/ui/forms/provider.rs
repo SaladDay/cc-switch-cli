@@ -1,4 +1,6 @@
 use super::*;
+use serde_json::json;
+use std::collections::BTreeSet;
 
 fn claude_api_format_label(api_format: crate::cli::tui::form::ClaudeApiFormat) -> String {
     texts::tui_claude_api_format_value(api_format.as_str()).to_string()
@@ -10,6 +12,138 @@ fn should_redact_provider_field(
 ) -> bool {
     matches!(provider.app_type, AppType::OpenClaw)
         && matches!(field, ProviderAddField::OpenCodeApiKey)
+}
+
+fn common_json_preview_value(app_type: &AppType, common_snippet: &str) -> Option<Value> {
+    if common_snippet.trim().is_empty() {
+        return None;
+    }
+
+    match app_type {
+        AppType::Claude => serde_json::from_str::<Value>(common_snippet).ok(),
+        AppType::Gemini => serde_json::from_str::<Value>(common_snippet)
+            .ok()
+            .map(|env| json!({ "env": env })),
+        AppType::Codex | AppType::OpenCode | AppType::OpenClaw => None,
+    }
+    .filter(Value::is_object)
+}
+
+fn sorted_json_object_keys(value: &Value) -> Vec<String> {
+    value
+        .as_object()
+        .map(|obj| obj.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn mark_common_json_lines(
+    full: &Value,
+    common: &Value,
+    path: &mut Vec<String>,
+    lines: &[&str],
+    highlighted: &mut BTreeSet<usize>,
+) {
+    let Some(common_obj) = common.as_object() else {
+        return;
+    };
+
+    for key in sorted_json_object_keys(common) {
+        let Some(common_child) = common_obj.get(&key) else {
+            continue;
+        };
+        let Some(full_child) = full.get(&key) else {
+            continue;
+        };
+        path.push(key.clone());
+
+        let key_line = find_json_path_line(lines, path);
+        if !common_child.is_object() {
+            if let Some(line_idx) = key_line {
+                highlighted.insert(line_idx);
+            }
+        } else if let Some(common_child_obj) = common_child.as_object() {
+            if common_child_obj.is_empty() {
+                if let Some(line_idx) = key_line {
+                    highlighted.insert(line_idx);
+                }
+            } else {
+                mark_common_json_lines(full_child, common_child, path, lines, highlighted);
+            }
+        }
+
+        path.pop();
+    }
+}
+
+fn find_json_path_line(lines: &[&str], path: &[String]) -> Option<usize> {
+    let mut stack: Vec<String> = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let closing = trimmed
+            .chars()
+            .take_while(|ch| *ch == '}' || *ch == ']')
+            .count();
+        for _ in 0..closing.min(stack.len()) {
+            stack.pop();
+        }
+
+        if let Some(key) = json_line_key(trimmed) {
+            let mut candidate = stack.clone();
+            candidate.push(key.to_string());
+            if candidate == path {
+                return Some(idx);
+            }
+            if json_line_opens_container(trimmed) {
+                stack.push(key.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn json_line_key(trimmed_line: &str) -> Option<&str> {
+    let rest = trimmed_line.strip_prefix('"')?;
+    let (key, rest) = rest.split_once("\":")?;
+    if rest.trim_start().is_empty() {
+        return None;
+    }
+    Some(key)
+}
+
+fn json_line_opens_container(trimmed_line: &str) -> bool {
+    let Some((_, rest)) = trimmed_line.split_once("\":") else {
+        return false;
+    };
+    let value = rest.trim_start();
+    value.starts_with('{') || value.starts_with('[')
+}
+
+fn common_json_preview_highlight_lines(
+    app_type: &AppType,
+    json_value: &Value,
+    json_text: &str,
+    common_snippet: &str,
+    include_common_config: bool,
+) -> BTreeSet<usize> {
+    if !include_common_config {
+        return BTreeSet::new();
+    }
+
+    let Some(common) = common_json_preview_value(app_type, common_snippet) else {
+        return BTreeSet::new();
+    };
+
+    let lines = json_text.lines().collect::<Vec<_>>();
+    let mut highlighted = BTreeSet::new();
+    mark_common_json_lines(
+        json_value,
+        &common,
+        &mut Vec::new(),
+        &lines,
+        &mut highlighted,
+    );
+    highlighted
 }
 
 pub(crate) fn render_provider_add_form(
@@ -278,13 +412,21 @@ pub(crate) fn render_provider_add_form(
         };
         let json_text =
             serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| "{}".to_string());
-        render_form_json_preview(
+        let highlighted_lines = common_json_preview_highlight_lines(
+            &provider.app_type,
+            &json_value,
+            &json_text,
+            &data.config.common_snippet,
+            provider.include_common_config,
+        );
+        render_form_json_preview_with_highlights(
             frame,
             &json_text,
             provider.json_scroll,
             matches!(provider.focus, FormFocus::JsonPreview),
             body[1],
             theme,
+            &highlighted_lines,
         );
     }
 }

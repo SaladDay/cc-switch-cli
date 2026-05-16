@@ -493,6 +493,10 @@ pub fn tui_editor_json_field_title() -> &'static str {
     "JSON"
 }
 
+pub fn tui_editor_toml_field_title() -> &'static str {
+    "TOML"
+}
+
 pub fn tui_editor_hint_view() -> &'static str {
     if is_chinese() {
         "Enter 编辑  ↑↓ 滚动  Ctrl+S 保存  Esc 返回"

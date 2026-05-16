@@ -206,6 +206,12 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::EditorOpenExternal => editor::open_external(&mut ctx),
+        Action::EditorFormatCommonSnippet { app_type } => {
+            editor::format_common_snippet(&mut ctx, app_type)
+        }
+        Action::EditorExtractCommonSnippet { app_type } => {
+            editor::extract_common_snippet_into_editor(&mut ctx, app_type)
+        }
         Action::EditorSubmit { submit, content } => editor::submit(&mut ctx, submit, content),
         Action::ProviderSwitch { id } => providers::switch(&mut ctx, id),
         Action::ProviderRemoveFromConfig { id } => providers::remove_from_config(&mut ctx, id),
@@ -266,11 +272,10 @@ pub(crate) fn handle_action(
         Action::ConfigRestoreBackup { id } => config::restore_backup(&mut ctx, id),
         Action::ConfigValidate => config::validate(&mut ctx),
         Action::ConfigOpenProxyHelp => config::open_proxy_help(&mut ctx),
-        Action::ConfigCommonSnippetClear { app_type } => {
-            config::clear_common_snippet(&mut ctx, app_type)
-        }
-        Action::ConfigCommonSnippetApply { app_type } => {
-            config::apply_common_snippet(&mut ctx, app_type)
+        Action::ConfirmCommonConfigNotice => {
+            ctx.app.common_config_notice_confirmed = true;
+            crate::settings::set_common_config_confirmed(true)?;
+            Ok(())
         }
         Action::ConfigWebDavCheckConnection => config::webdav_check_connection(&mut ctx),
         Action::ConfigWebDavUpload => config::webdav_upload(&mut ctx),
@@ -451,6 +456,28 @@ mod tests {
         fs::create_dir_all(&config_dir).expect("create config dir");
         fs::write(config_dir.join("config.json"), "{ not valid json }")
             .expect("write invalid legacy config");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn confirm_common_config_notice_persists_setting() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        assert!(!crate::settings::get_common_config_confirmed());
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.common_config_notice_confirmed = false;
+        let mut data = UiData::default();
+
+        run_action(&mut app, &mut data, Action::ConfirmCommonConfigNotice)
+            .expect("confirm common config notice");
+
+        assert!(app.common_config_notice_confirmed);
+        assert!(crate::settings::get_common_config_confirmed());
+        assert_eq!(
+            crate::settings::get_settings().common_config_confirmed,
+            Some(true)
+        );
     }
 
     #[test]

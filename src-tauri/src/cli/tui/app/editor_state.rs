@@ -4,6 +4,7 @@ use super::*;
 pub enum EditorKind {
     Plain,
     Json,
+    Toml,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +31,7 @@ pub enum EditorSubmit {
     },
     ConfigCommonSnippet {
         app_type: AppType,
+        source: CommonSnippetViewSource,
     },
     OpenClawWorkspaceFile {
         filename: String,

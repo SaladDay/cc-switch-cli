@@ -53,6 +53,7 @@ impl App {
                         Action::SetClaudePluginIntegration { enabled: *enabled }
                     }
                     ConfirmAction::ProviderApiFormatProxyNotice => Action::None,
+                    ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
                     ConfirmAction::ProxyEnableAndAutoFailover { app_type } => {
                         Action::EnableProxyAndAutoFailover {
                             app_type: app_type.clone(),
@@ -87,6 +88,10 @@ impl App {
                 action
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
+                if matches!(confirm.action, ConfirmAction::CommonConfigNotice) {
+                    self.close_overlay();
+                    return Some(Action::ConfirmCommonConfigNotice);
+                }
                 if matches!(confirm.action, ConfirmAction::EditorSaveBeforeClose) {
                     self.editor = None;
                 }
@@ -98,7 +103,11 @@ impl App {
             }
             KeyCode::Esc => {
                 self.close_overlay();
-                Action::None
+                if matches!(confirm.action, ConfirmAction::CommonConfigNotice) {
+                    Action::ConfirmCommonConfigNotice
+                } else {
+                    Action::None
+                }
             }
             _ => Action::None,
         };

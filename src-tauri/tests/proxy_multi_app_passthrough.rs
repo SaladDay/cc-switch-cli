@@ -582,6 +582,7 @@ async fn proxy_codex_retries_with_app_non_streaming_timeout_policy() {
         .await
         .expect("get codex proxy config");
     codex_proxy.auto_failover_enabled = true;
+    codex_proxy.enabled = true;
     codex_proxy.max_retries = 1;
     codex_proxy.non_streaming_timeout = 1;
     db.update_proxy_config_for_app(codex_proxy)
@@ -867,6 +868,7 @@ async fn proxy_gemini_query_streaming_uses_stream_timeouts() {
         .await
         .expect("get gemini proxy config");
     gemini_proxy.auto_failover_enabled = true;
+    gemini_proxy.enabled = true;
     gemini_proxy.max_retries = 0;
     gemini_proxy.streaming_first_byte_timeout = 1;
     db.update_proxy_config_for_app(gemini_proxy)

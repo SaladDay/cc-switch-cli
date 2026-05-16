@@ -413,7 +413,7 @@ impl ProviderAddFormState {
         if snippet.is_empty() {
             return Ok(provider_value);
         }
-        if matches!(self.app_type, AppType::OpenCode | AppType::OpenClaw) {
+        if !ProviderAddFormState::supports_common_config(&self.app_type) {
             return Ok(provider_value);
         }
 
@@ -467,11 +467,7 @@ impl ProviderAddFormState {
         if should_write_common_config_meta {
             meta_obj.insert(
                 "commonConfigEnabled".to_string(),
-                json!(if matches!(self.app_type, AppType::OpenClaw) {
-                    false
-                } else {
-                    self.include_common_config
-                }),
+                json!(self.include_common_config),
             );
         } else {
             meta_obj.remove("commonConfigEnabled");
@@ -504,10 +500,10 @@ impl ProviderAddFormState {
     }
 
     fn should_write_common_config_meta(&self) -> bool {
-        matches!(self.app_type, AppType::OpenClaw)
-            || !self.mode.is_edit()
-            || self.include_common_config_touched
-            || self.has_common_config_meta()
+        ProviderAddFormState::supports_common_config(&self.app_type)
+            && (!self.mode.is_edit()
+                || self.include_common_config_touched
+                || self.has_common_config_meta())
     }
 
     fn has_common_config_meta(&self) -> bool {

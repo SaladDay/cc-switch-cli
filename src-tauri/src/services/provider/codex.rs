@@ -92,11 +92,6 @@ impl ProviderService {
         root.remove("base_url");
         // Remove entire model_providers table (provider-specific configuration)
         root.remove("model_providers");
-        // Codex writes trust decisions for local workspaces at runtime. These
-        // must stay with the provider snapshot being backfilled, not become
-        // common config that is merged into every provider.
-        root.remove("projects");
-        root.remove("trusted_workspaces");
 
         // Clean up multiple empty lines (keep at most one blank line).
         let mut cleaned = String::new();
@@ -137,11 +132,7 @@ impl ProviderService {
         }
 
         config.common_config_snippets.codex = Some(extracted.clone());
-        Self::normalize_existing_provider_snapshots_for_storage_best_effort(
-            config,
-            &AppType::Codex,
-            Some(extracted.as_str()),
-        );
+        Self::migrate_codex_common_config_snippet(config, None, extracted.as_str())?;
         Ok(())
     }
 
@@ -239,6 +230,17 @@ impl ProviderService {
         )
     }
 
+    fn migrate_common_codex_config_from_provider(
+        provider: &mut Provider,
+        common_config_snippet: Option<&str>,
+    ) -> Result<(), AppError> {
+        common_config::migrate_provider_subset_usage_for_storage(
+            &AppType::Codex,
+            provider,
+            common_config_snippet,
+        )
+    }
+
     pub(super) fn migrate_codex_common_config_snippet(
         config: &mut MultiAppConfig,
         strict_current_provider_id: Option<&str>,
@@ -262,7 +264,7 @@ impl ProviderService {
             };
 
             for provider in manager.providers.values_mut() {
-                Self::strip_common_codex_config_from_provider(provider, Some(old_snippet))?;
+                Self::migrate_common_codex_config_from_provider(provider, Some(old_snippet))?;
             }
 
             return Ok(());
@@ -273,7 +275,7 @@ impl ProviderService {
         };
 
         if let Some(current_provider) = manager.providers.get_mut(&current_provider_id) {
-            Self::strip_common_codex_config_from_provider(current_provider, Some(old_snippet))?;
+            Self::migrate_common_codex_config_from_provider(current_provider, Some(old_snippet))?;
         }
 
         for (provider_id, provider) in manager.providers.iter_mut() {
@@ -282,7 +284,7 @@ impl ProviderService {
             }
 
             if let Err(err) =
-                Self::strip_common_codex_config_from_provider(provider, Some(old_snippet))
+                Self::migrate_common_codex_config_from_provider(provider, Some(old_snippet))
             {
                 log::warn!(
                     "skip migrating Codex non-current provider snapshot '{provider_id}' from stored common config snippet: {err}"
@@ -354,7 +356,8 @@ impl ProviderService {
             current_provider.settings_config.get("auth").cloned()
         };
 
-        let mut settings_config = if config_path.exists() {
+        let mut snapshot_provider = current_provider.clone();
+        if config_path.exists() {
             let text =
                 std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
             Self::maybe_update_codex_common_config_snippet(config, &text)?;
@@ -364,27 +367,27 @@ impl ProviderService {
                 raw_settings.insert("auth".to_string(), auth);
             }
             raw_settings.insert("config".to_string(), Value::String(text));
-            Self::normalize_settings_config_for_storage(
+            snapshot_provider.settings_config = Value::Object(raw_settings);
+            snapshot_provider = Self::migrate_provider_snapshot_for_storage(
                 &AppType::Codex,
-                &current_provider,
-                Value::Object(raw_settings),
+                &snapshot_provider,
                 config.common_config_snippets.codex.as_deref(),
-            )?
+            )?;
         } else {
             let mut raw_settings = serde_json::Map::new();
             if let Some(auth) = auth.clone() {
                 raw_settings.insert("auth".to_string(), auth);
             }
-            Value::Object(raw_settings)
+            snapshot_provider.settings_config = Value::Object(raw_settings);
         };
         Self::restore_codex_model_provider_for_storage_best_effort(
             &current_provider,
-            &mut settings_config,
+            &mut snapshot_provider.settings_config,
         );
 
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             if let Some(current) = manager.providers.get_mut(current_id) {
-                current.settings_config = settings_config;
+                *current = snapshot_provider;
             }
         }
 

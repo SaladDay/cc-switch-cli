@@ -13,6 +13,34 @@ use crate::store::AppState;
 pub enum CommonConfigCommand {
     /// Show current common config snippet
     Show,
+    /// Format a common config snippet and print the normalized result
+    Format {
+        /// Inline snippet text (Claude/Gemini/OpenCode/OpenClaw: JSON object; Codex: TOML)
+        #[arg(long = "snippet", value_name = "SNIPPET", conflicts_with = "file")]
+        snippet: Option<String>,
+
+        /// Read snippet text from file using the selected app's format rules
+        #[arg(long, conflicts_with = "snippet")]
+        file: Option<std::path::PathBuf>,
+    },
+    /// Extract a common config snippet from a provider or settings payload
+    Extract {
+        /// Provider ID to extract from; defaults to the current provider
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Inline settingsConfig JSON payload to extract from
+        #[arg(long = "settings-config", value_name = "JSON", conflicts_with_all = ["provider", "file"])]
+        settings_config: Option<String>,
+
+        /// Read settingsConfig JSON payload from file
+        #[arg(long, conflicts_with_all = ["provider", "settings_config"])]
+        file: Option<std::path::PathBuf>,
+
+        /// Save the extracted snippet as the app's common config
+        #[arg(long)]
+        save: bool,
+    },
     /// Set common config snippet for the selected app
     #[command(
         after_long_help = "Compatibility:\n  --json <SNIPPET>  Legacy alias for --snippet <SNIPPET>."
@@ -46,6 +74,21 @@ pub enum CommonConfigCommand {
 pub fn execute(cmd: CommonConfigCommand, app_type: AppType) -> Result<(), AppError> {
     match cmd {
         CommonConfigCommand::Show => show(app_type),
+        CommonConfigCommand::Format { snippet, file } => {
+            format(app_type, snippet.as_deref(), file.as_deref())
+        }
+        CommonConfigCommand::Extract {
+            provider,
+            settings_config,
+            file,
+            save,
+        } => extract(
+            app_type,
+            provider.as_deref(),
+            settings_config.as_deref(),
+            file.as_deref(),
+            save,
+        ),
         CommonConfigCommand::Set {
             snippet,
             file,
@@ -116,25 +159,29 @@ fn show(app_type: AppType) -> Result<(), AppError> {
     Ok(())
 }
 
-fn set(
-    app_type: AppType,
-    snippet_text: Option<&str>,
+fn read_required_text(
+    inline_text: Option<&str>,
     file: Option<&Path>,
-    _apply: bool,
-) -> Result<(), AppError> {
-    let raw = if let Some(text) = snippet_text {
-        text.to_string()
+    missing_message: &'static str,
+) -> Result<String, AppError> {
+    if let Some(text) = inline_text {
+        Ok(text.to_string())
     } else if let Some(path) = file {
-        fs::read_to_string(path).map_err(|e| AppError::io(path, e))?
+        fs::read_to_string(path).map_err(|e| AppError::io(path, e))
     } else {
-        return Err(AppError::InvalidInput(
-            texts::config_common_snippet_require_json_or_file().to_string(),
-        ));
-    };
+        Err(AppError::InvalidInput(missing_message.to_string()))
+    }
+}
 
-    let snippet = match app_type {
+fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<String>, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    match app_type {
         AppType::Claude | AppType::Gemini | AppType::OpenCode | AppType::OpenClaw => {
-            let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+            let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
                 AppError::InvalidInput(texts::tui_toast_invalid_json(&e.to_string()))
             })?;
             if !value.is_object() {
@@ -144,15 +191,46 @@ fn set(
             }
 
             serde_json::to_string_pretty(&value)
-                .map_err(|e| AppError::Message(texts::failed_to_serialize_json(&e.to_string())))?
+                .map(Some)
+                .map_err(|e| AppError::Message(texts::failed_to_serialize_json(&e.to_string())))
         }
         AppType::Codex => {
-            raw.parse::<toml_edit::DocumentMut>().map_err(|e| {
+            let doc = trimmed.parse::<toml_edit::DocumentMut>().map_err(|e| {
                 AppError::InvalidInput(texts::common_config_snippet_invalid_toml(&e.to_string()))
             })?;
-            raw
+            Ok(Some(doc.to_string().trim().to_string()))
         }
-    };
+    }
+}
+
+fn format(
+    app_type: AppType,
+    snippet_text: Option<&str>,
+    file: Option<&Path>,
+) -> Result<(), AppError> {
+    let raw = read_required_text(
+        snippet_text,
+        file,
+        texts::config_common_snippet_require_json_or_file(),
+    )?;
+    if let Some(snippet) = canonical_common_snippet(app_type, &raw)? {
+        println!("{}", snippet);
+    }
+    Ok(())
+}
+
+fn set(
+    app_type: AppType,
+    snippet_text: Option<&str>,
+    file: Option<&Path>,
+    _apply: bool,
+) -> Result<(), AppError> {
+    let raw = read_required_text(
+        snippet_text,
+        file,
+        texts::config_common_snippet_require_json_or_file(),
+    )?;
+    let snippet = canonical_common_snippet(app_type.clone(), &raw)?.unwrap_or_default();
 
     let state = get_state()?;
     ProviderService::set_common_config_snippet(&state, app_type.clone(), Some(snippet))?;
@@ -175,6 +253,61 @@ fn set(
         }
     }
 
+    Ok(())
+}
+
+fn extract(
+    app_type: AppType,
+    provider_id: Option<&str>,
+    settings_config_text: Option<&str>,
+    file: Option<&Path>,
+    save: bool,
+) -> Result<(), AppError> {
+    let state = get_state()?;
+    let extracted = if settings_config_text.is_some() || file.is_some() {
+        let raw = read_required_text(
+            settings_config_text,
+            file,
+            texts::config_common_snippet_require_json_or_file(),
+        )?;
+        let settings_config: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| AppError::InvalidInput(texts::tui_toast_invalid_json(&e.to_string())))?;
+        ProviderService::extract_common_config_snippet_from_settings(
+            app_type.clone(),
+            &settings_config,
+        )?
+    } else if let Some(provider_id) = provider_id {
+        let providers = ProviderService::list(&state, app_type.clone())?;
+        let provider = providers.get(provider_id).ok_or_else(|| {
+            let msg = texts::provider_not_found(provider_id);
+            AppError::localized("provider.not_found", msg.clone(), msg)
+        })?;
+        ProviderService::extract_common_config_snippet_from_settings(
+            app_type.clone(),
+            &provider.settings_config,
+        )?
+    } else {
+        ProviderService::extract_common_config_snippet(&state, app_type.clone())?
+    };
+
+    if save {
+        let snippet = canonical_common_snippet(app_type.clone(), &extracted)?.unwrap_or_default();
+        ProviderService::set_common_config_snippet(
+            &state,
+            app_type.clone(),
+            Some(snippet.clone()),
+        )?;
+        println!("{}", success(texts::common_config_snippet_extracted()));
+        if !snippet.trim().is_empty() {
+            println!();
+            println!("{}", snippet);
+        }
+        return Ok(());
+    }
+
+    if let Some(snippet) = canonical_common_snippet(app_type, &extracted)? {
+        println!("{}", snippet);
+    }
     Ok(())
 }
 
@@ -460,6 +593,95 @@ mod tests {
             live.contains("disable_response_storage = true"),
             "service path should merge the codex common snippet into the live config"
         );
+    }
+
+    #[test]
+    fn format_pretty_prints_json_common_snippet() {
+        let formatted =
+            canonical_common_snippet(AppType::Claude, r#"{"env":{"CC_SWITCH_TEST":"1"}}"#)
+                .expect("format snippet")
+                .expect("non-empty snippet");
+
+        assert_eq!(
+            formatted,
+            "{\n  \"env\": {\n    \"CC_SWITCH_TEST\": \"1\"\n  }\n}"
+        );
+    }
+
+    #[test]
+    fn format_normalizes_codex_toml_common_snippet() {
+        let formatted = canonical_common_snippet(AppType::Codex, "model_reasoning_effort=\"high\"")
+            .expect("format snippet")
+            .expect("non-empty snippet");
+
+        let parsed = formatted
+            .parse::<toml_edit::DocumentMut>()
+            .expect("formatted snippet should remain valid TOML");
+        assert_eq!(
+            parsed
+                .get("model_reasoning_effort")
+                .and_then(|item| item.as_str()),
+            Some("high")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn extract_from_settings_config_saves_common_snippet() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        extract(
+            AppType::Claude,
+            None,
+            Some(
+                r#"{
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://provider.example",
+                        "ANTHROPIC_AUTH_TOKEN": "sk-test",
+                        "CC_SWITCH_SHARED": "1"
+                    }
+                }"#,
+            ),
+            None,
+            true,
+        )
+        .expect("extract should succeed");
+
+        let state = AppState::try_new().expect("reload state");
+        let stored = state
+            .config
+            .read()
+            .expect("read config")
+            .common_config_snippets
+            .claude
+            .clone()
+            .expect("stored claude snippet");
+        let stored_json: serde_json::Value =
+            serde_json::from_str(&stored).expect("stored snippet should be valid JSON");
+        assert_eq!(stored_json["env"]["CC_SWITCH_SHARED"], "1");
+        assert!(stored_json["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn extract_from_named_provider_saves_common_snippet() {
+        let (_temp_home, _env) = seed_current_claude_provider();
+
+        extract(AppType::Claude, Some("p1"), None, None, true).expect("extract should succeed");
+
+        let state = AppState::try_new().expect("reload state");
+        let stored = state
+            .config
+            .read()
+            .expect("read config")
+            .common_config_snippets
+            .claude
+            .clone()
+            .expect("stored claude snippet");
+        let stored_json: serde_json::Value =
+            serde_json::from_str(&stored).expect("stored snippet should be valid JSON");
+        assert_eq!(stored_json, json!({}));
     }
 
     #[test]

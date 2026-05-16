@@ -223,13 +223,16 @@ impl ProviderAddFormState {
             if template_id == ProviderTemplateId::Custom {
                 if matches!(self.mode, FormMode::Add) {
                     let defaults = Self::new(self.app_type.clone());
+                    let previous_include_common_config = self.include_common_config;
+                    let previous_include_common_config_touched = self.include_common_config_touched;
                     self.extra = defaults.extra;
                     self.id = defaults.id;
                     self.id_is_manual = defaults.id_is_manual;
                     self.name = defaults.name;
                     self.website_url = defaults.website_url;
                     self.notes = defaults.notes;
-                    self.include_common_config = defaults.include_common_config;
+                    self.include_common_config = previous_include_common_config;
+                    self.include_common_config_touched = previous_include_common_config_touched;
                     self.json_scroll = defaults.json_scroll;
                     self.codex_preview_section = defaults.codex_preview_section;
                     self.codex_auth_scroll = defaults.codex_auth_scroll;

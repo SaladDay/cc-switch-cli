@@ -8,6 +8,22 @@ impl App {
             return Action::None;
         };
 
+        if let EditorSubmit::ConfigCommonSnippet { app_type, source } = &editor.submit {
+            match key.code {
+                KeyCode::F(2) => {
+                    return Action::EditorFormatCommonSnippet {
+                        app_type: app_type.clone(),
+                    };
+                }
+                KeyCode::F(4) if matches!(source, CommonSnippetViewSource::ProviderForm) => {
+                    return Action::EditorExtractCommonSnippet {
+                        app_type: app_type.clone(),
+                    };
+                }
+                _ => {}
+            }
+        }
+
         if is_save_shortcut(key) {
             return Action::EditorSubmit {
                 submit: editor.submit.clone(),

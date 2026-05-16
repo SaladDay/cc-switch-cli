@@ -32,7 +32,7 @@ pub(super) fn render_skills_repos(
             &[
                 ("a", texts::tui_key_add()),
                 ("d", texts::tui_key_delete()),
-                ("x", texts::tui_key_toggle()),
+                ("Space", texts::tui_key_toggle()),
             ],
         );
     }

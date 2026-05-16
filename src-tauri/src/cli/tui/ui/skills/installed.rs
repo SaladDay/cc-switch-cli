@@ -31,7 +31,7 @@ pub(super) fn render_skills_installed(
             theme,
             &[
                 ("Enter", texts::tui_key_details()),
-                ("x", texts::tui_key_toggle()),
+                ("Space", texts::tui_key_toggle()),
                 ("m", texts::tui_key_apps()),
                 ("f", texts::tui_key_discover()),
                 ("i", texts::tui_skills_action_import_existing()),

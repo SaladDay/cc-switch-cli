@@ -47,9 +47,12 @@ impl App {
                     return Action::None;
                 };
                 if matches!(item, ConfigItem::CommonSnippet) {
-                    self.overlay = Overlay::CommonSnippetPicker {
-                        selected: snippet_picker_index_for_app_type(&self.app_type),
-                    };
+                    self.open_common_snippet_editor(
+                        self.app_type.clone(),
+                        data,
+                        None,
+                        CommonSnippetViewSource::Global,
+                    );
                 }
                 Action::None
             }
@@ -115,9 +118,12 @@ impl App {
                     }
                     ConfigItem::Validate => Action::ConfigValidate,
                     ConfigItem::CommonSnippet => {
-                        self.overlay = Overlay::CommonSnippetPicker {
-                            selected: snippet_picker_index_for_app_type(&self.app_type),
-                        };
+                        self.open_common_snippet_editor(
+                            self.app_type.clone(),
+                            data,
+                            None,
+                            CommonSnippetViewSource::Global,
+                        );
                         Action::None
                     }
                     ConfigItem::Proxy => Action::ConfigOpenProxyHelp,
@@ -886,25 +892,6 @@ impl App {
         }
     }
 
-    pub(crate) fn open_common_snippet_view(&mut self, app_type: AppType, data: &UiData) {
-        let snippet = self.common_snippet_text_for(&app_type, data);
-        let snippet = if snippet.trim().is_empty() {
-            texts::tui_default_common_snippet_for_app(app_type.as_str()).to_string()
-        } else {
-            snippet
-        };
-
-        self.overlay = Overlay::CommonSnippetView {
-            app_type: app_type.clone(),
-            view: TextViewState {
-                title: texts::tui_common_snippet_title(app_type.as_str()),
-                lines: snippet.lines().map(|s| s.to_string()).collect(),
-                scroll: 0,
-                action: None,
-            },
-        };
-    }
-
     pub(crate) fn open_proxy_help_view(
         &mut self,
         data: &UiData,
@@ -1076,6 +1063,7 @@ impl App {
         app_type: AppType,
         data: &UiData,
         initial_override: Option<String>,
+        source: CommonSnippetViewSource,
     ) {
         let snippet = initial_override.unwrap_or_else(|| {
             let snippet = self.common_snippet_text_for(&app_type, data);
@@ -1087,7 +1075,7 @@ impl App {
         });
 
         let kind = if matches!(app_type, AppType::Codex) {
-            EditorKind::Plain
+            EditorKind::Toml
         } else {
             EditorKind::Json
         };
@@ -1096,29 +1084,55 @@ impl App {
             texts::tui_common_snippet_title(app_type.as_str()),
             kind,
             snippet,
-            EditorSubmit::ConfigCommonSnippet { app_type },
+            EditorSubmit::ConfigCommonSnippet { app_type, source },
         );
     }
 
-    pub(crate) fn open_provider_add_form(&mut self) {
-        self.filter.active = false;
-        self.overlay = Overlay::None;
-        self.focus = Focus::Content;
-        self.editor = None;
-        self.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
-            self.app_type.clone(),
-        )));
+    fn maybe_show_common_config_notice(&mut self) {
+        if self.common_config_notice_confirmed
+            || !ProviderAddFormState::supports_common_config(&self.app_type)
+        {
+            return;
+        }
+
+        self.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_common_config_notice_title().to_string(),
+            message: texts::tui_common_config_notice_message(self.app_type.as_str()),
+            action: ConfirmAction::CommonConfigNotice,
+        });
     }
 
-    pub(crate) fn open_provider_edit_form(&mut self, row: &super::data::ProviderRow) {
+    pub(crate) fn open_provider_add_form(&mut self, data: &UiData) {
         self.filter.active = false;
         self.overlay = Overlay::None;
         self.focus = Focus::Content;
         self.editor = None;
-        self.form = Some(FormState::ProviderAdd(ProviderAddFormState::from_provider(
-            self.app_type.clone(),
-            &row.provider,
-        )));
+        self.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::new_with_common_snippet(
+                self.app_type.clone(),
+                &data.config.common_snippet,
+            ),
+        ));
+        self.maybe_show_common_config_notice();
+    }
+
+    pub(crate) fn open_provider_edit_form(
+        &mut self,
+        row: &super::data::ProviderRow,
+        data: &UiData,
+    ) {
+        self.filter.active = false;
+        self.overlay = Overlay::None;
+        self.focus = Focus::Content;
+        self.editor = None;
+        self.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::from_provider_with_common_snippet(
+                self.app_type.clone(),
+                &row.provider,
+                &data.config.common_snippet,
+            ),
+        ));
+        self.maybe_show_common_config_notice();
     }
 
     pub(crate) fn open_mcp_add_form(&mut self) {

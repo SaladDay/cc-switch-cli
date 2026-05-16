@@ -68,6 +68,7 @@ pub enum ConfirmAction {
     SettingsSetSkipClaudeOnboarding { enabled: bool },
     SettingsSetClaudePluginIntegration { enabled: bool },
     ProviderApiFormatProxyNotice,
+    CommonConfigNotice,
     ProxyEnableAndAutoFailover { app_type: AppType },
     PromptOpenImportCandidate { filename: String, content: String },
     OpenClawDailyMemoryDelete { filename: String },
@@ -127,6 +128,12 @@ pub struct TextViewState {
 #[derive(Debug, Clone)]
 pub enum TextViewAction {
     ProxyToggleTakeover { app_type: AppType, enabled: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommonSnippetViewSource {
+    Global,
+    ProviderForm,
 }
 
 impl TextViewAction {
@@ -190,10 +197,6 @@ pub enum Overlay {
     },
     FailoverQueueManager {
         selected: usize,
-    },
-    CommonSnippetView {
-        app_type: AppType,
-        view: TextViewState,
     },
     ClaudeModelPicker {
         selected: usize,

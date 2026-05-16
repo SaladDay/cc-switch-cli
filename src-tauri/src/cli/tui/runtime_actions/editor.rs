@@ -13,7 +13,7 @@ use crate::provider::Provider;
 use crate::services::{McpService, PromptService, ProviderService};
 use crate::settings::{set_webdav_sync_settings, WebDavSyncSettings};
 
-use super::super::app::{EditorSubmit, Overlay, TextViewState, ToastKind};
+use super::super::app::{CommonSnippetViewSource, EditorSubmit, ToastKind};
 use super::super::data::{load_state, UiData};
 use super::super::form::FormState;
 use super::helpers::{
@@ -71,6 +71,166 @@ pub(super) fn open_external(ctx: &mut RuntimeActionContext<'_>) -> Result<(), Ap
     })
 }
 
+enum CommonSnippetFormat {
+    Empty,
+    Formatted(String),
+    InvalidJson(String),
+    InvalidToml(String),
+    NotObject,
+    SerializeFailed(String),
+}
+
+fn canonical_common_snippet(app_type: &AppType, content: &str) -> CommonSnippetFormat {
+    let edited = content.trim();
+    if edited.is_empty() {
+        return CommonSnippetFormat::Empty;
+    }
+
+    if matches!(app_type, AppType::Codex) {
+        return match edited.parse::<toml_edit::DocumentMut>() {
+            Ok(doc) => CommonSnippetFormat::Formatted(doc.to_string().trim().to_string()),
+            Err(e) => CommonSnippetFormat::InvalidToml(e.to_string()),
+        };
+    }
+
+    let value: Value = match serde_json::from_str(edited) {
+        Ok(value) => value,
+        Err(e) => return CommonSnippetFormat::InvalidJson(e.to_string()),
+    };
+
+    if !value.is_object() {
+        return CommonSnippetFormat::NotObject;
+    }
+
+    match serde_json::to_string_pretty(&value) {
+        Ok(pretty) => CommonSnippetFormat::Formatted(pretty),
+        Err(e) => CommonSnippetFormat::SerializeFailed(e.to_string()),
+    }
+}
+
+pub(super) fn format_common_snippet(
+    ctx: &mut RuntimeActionContext<'_>,
+    app_type: AppType,
+) -> Result<(), AppError> {
+    let Some(editor) = ctx.app.editor.as_mut() else {
+        return Ok(());
+    };
+    let EditorSubmit::ConfigCommonSnippet {
+        app_type: editor_app_type,
+        ..
+    } = &editor.submit
+    else {
+        return Ok(());
+    };
+    if editor_app_type != &app_type {
+        return Ok(());
+    }
+
+    let formatted = match canonical_common_snippet(&app_type, &editor.text()) {
+        CommonSnippetFormat::Empty => String::new(),
+        CommonSnippetFormat::Formatted(value) => value,
+        CommonSnippetFormat::InvalidToml(err) => {
+            ctx.app.push_toast(
+                texts::common_config_snippet_invalid_toml(&err),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+        CommonSnippetFormat::InvalidJson(err) => {
+            ctx.app.push_toast(
+                texts::common_config_snippet_invalid_json(&err),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+        CommonSnippetFormat::NotObject => {
+            ctx.app
+                .push_toast(texts::common_config_snippet_not_object(), ToastKind::Error);
+            return Ok(());
+        }
+        CommonSnippetFormat::SerializeFailed(err) => {
+            ctx.app
+                .push_toast(texts::failed_to_serialize_json(&err), ToastKind::Error);
+            return Ok(());
+        }
+    };
+
+    if let Some(editor) = ctx.app.editor.as_mut() {
+        editor.replace_text(formatted);
+    }
+    ctx.app
+        .push_toast(texts::common_config_snippet_formatted(), ToastKind::Success);
+    Ok(())
+}
+
+pub(super) fn extract_common_snippet_into_editor(
+    ctx: &mut RuntimeActionContext<'_>,
+    app_type: AppType,
+) -> Result<(), AppError> {
+    let source = ctx
+        .app
+        .editor
+        .as_ref()
+        .and_then(|editor| match &editor.submit {
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: editor_app_type,
+                source,
+            } if editor_app_type == &app_type => Some(*source),
+            _ => None,
+        });
+    if !matches!(
+        source,
+        Some(crate::cli::tui::app::CommonSnippetViewSource::ProviderForm)
+    ) {
+        return Ok(());
+    }
+
+    let settings_config = {
+        let Some(FormState::ProviderAdd(provider)) = ctx.app.form.as_ref() else {
+            return Ok(());
+        };
+
+        if provider.app_type != app_type {
+            return Ok(());
+        }
+
+        let provider_value = match provider
+            .to_provider_json_value_with_common_config(&ctx.data.config.common_snippet)
+        {
+            Ok(value) => value,
+            Err(err) => {
+                ctx.app.push_toast(err, ToastKind::Error);
+                return Ok(());
+            }
+        };
+        provider_value
+            .get("settingsConfig")
+            .cloned()
+            .unwrap_or_else(|| json!({}))
+    };
+
+    let extracted = ProviderService::extract_common_config_snippet_from_settings(
+        app_type.clone(),
+        &settings_config,
+    )?;
+    if !crate::cli::tui::form::ProviderAddFormState::snippet_has_effective_common_config(
+        &app_type, &extracted,
+    ) {
+        ctx.app.push_toast(
+            texts::common_config_snippet_extract_empty(),
+            ToastKind::Info,
+        );
+        return Ok(());
+    }
+
+    if let Some(editor) = ctx.app.editor.as_mut() {
+        editor.replace_text(extracted);
+    }
+    ctx.app
+        .push_toast(texts::common_config_snippet_extracted(), ToastKind::Success);
+    Ok(())
+}
+
 pub(super) fn submit(
     ctx: &mut RuntimeActionContext<'_>,
     submit: EditorSubmit,
@@ -97,8 +257,8 @@ pub(super) fn submit(
         EditorSubmit::ProviderEdit { id } => submit_provider_edit(ctx, id, content),
         EditorSubmit::McpAdd => submit_mcp_add(ctx, content),
         EditorSubmit::McpEdit { id } => submit_mcp_edit(ctx, id, content),
-        EditorSubmit::ConfigCommonSnippet { app_type } => {
-            submit_config_common_snippet(ctx, app_type, content)
+        EditorSubmit::ConfigCommonSnippet { app_type, source } => {
+            submit_config_common_snippet(ctx, app_type, source, content)
         }
         EditorSubmit::OpenClawWorkspaceFile { filename } => {
             submit_openclaw_workspace_file(ctx, filename, content)
@@ -718,54 +878,38 @@ fn submit_mcp_edit(
 fn submit_config_common_snippet(
     ctx: &mut RuntimeActionContext<'_>,
     app_type: AppType,
+    source: CommonSnippetViewSource,
     content: String,
 ) -> Result<(), AppError> {
-    let edited = content.trim().to_string();
-    let (next_snippet, toast) = if edited.is_empty() {
-        (None, texts::common_config_snippet_cleared())
-    } else if matches!(app_type, AppType::Codex) {
-        let doc: toml_edit::DocumentMut = match edited.parse() {
-            Ok(v) => v,
-            Err(e) => {
-                ctx.app.push_toast(
-                    texts::common_config_snippet_invalid_toml(&e.to_string()),
-                    ToastKind::Error,
-                );
-                return Ok(());
-            }
-        };
-        let canonical = doc.to_string().trim().to_string();
-        (Some(canonical), texts::common_config_snippet_saved())
-    } else {
-        let value: Value = match serde_json::from_str(&edited) {
-            Ok(v) => v,
-            Err(e) => {
-                ctx.app.push_toast(
-                    texts::common_config_snippet_invalid_json(&e.to_string()),
-                    ToastKind::Error,
-                );
-                return Ok(());
-            }
-        };
-
-        if !value.is_object() {
+    let (next_snippet, toast) = match canonical_common_snippet(&app_type, &content) {
+        CommonSnippetFormat::Empty => (None, texts::common_config_snippet_cleared()),
+        CommonSnippetFormat::Formatted(value) => {
+            (Some(value), texts::common_config_snippet_saved())
+        }
+        CommonSnippetFormat::InvalidToml(err) => {
+            ctx.app.push_toast(
+                texts::common_config_snippet_invalid_toml(&err),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+        CommonSnippetFormat::InvalidJson(err) => {
+            ctx.app.push_toast(
+                texts::common_config_snippet_invalid_json(&err),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+        CommonSnippetFormat::NotObject => {
             ctx.app
                 .push_toast(texts::common_config_snippet_not_object(), ToastKind::Error);
             return Ok(());
         }
-
-        let pretty = match serde_json::to_string_pretty(&value) {
-            Ok(v) => v,
-            Err(e) => {
-                ctx.app.push_toast(
-                    texts::failed_to_serialize_json(&e.to_string()),
-                    ToastKind::Error,
-                );
-                return Ok(());
-            }
-        };
-
-        (Some(pretty), texts::common_config_snippet_saved())
+        CommonSnippetFormat::SerializeFailed(err) => {
+            ctx.app
+                .push_toast(texts::failed_to_serialize_json(&err), ToastKind::Error);
+            return Ok(());
+        }
     };
 
     let state = load_state()?;
@@ -782,19 +926,9 @@ fn submit_config_common_snippet(
     ctx.app.editor = None;
     ctx.app.push_toast(toast, ToastKind::Success);
     *ctx.data = UiData::load(&ctx.app.app_type)?;
-
-    let snippet = next_snippet.unwrap_or_else(|| {
-        texts::tui_default_common_snippet_for_app(app_type.as_str()).to_string()
-    });
-    ctx.app.overlay = Overlay::CommonSnippetView {
-        app_type: app_type.clone(),
-        view: TextViewState {
-            title: texts::tui_common_snippet_title(app_type.as_str()),
-            lines: snippet.lines().map(|s| s.to_string()).collect(),
-            scroll: 0,
-            action: None,
-        },
-    };
+    if matches!(source, CommonSnippetViewSource::Global) {
+        ctx.app.overlay = crate::cli::tui::app::Overlay::None;
+    }
     Ok(())
 }
 
@@ -948,6 +1082,152 @@ mod tests {
             webdav_loading: RequestTracker::default(),
             update_check: RequestTracker::default(),
         }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_config_common_snippet_returns_to_form_without_view_overlay() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+        };
+
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Claude,
+                source: crate::cli::tui::app::CommonSnippetViewSource::ProviderForm,
+            },
+            r#"{"env":{"COMMON_FLAG":"1"}}"#.to_string(),
+        )
+        .expect("common snippet submit should succeed");
+
+        assert!(ctx.app.editor.is_none());
+        assert!(matches!(
+            ctx.app.overlay,
+            crate::cli::tui::app::Overlay::None
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn format_common_snippet_updates_editor_buffer_without_saving() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+        fixture.app.open_editor(
+            "Common Snippet",
+            crate::cli::tui::app::EditorKind::Json,
+            r#"{"env":{"COMMON_FLAG":"1"}}"#,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Claude,
+                source: crate::cli::tui::app::CommonSnippetViewSource::Global,
+            },
+        );
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+        };
+
+        super::format_common_snippet(&mut ctx, AppType::Claude).expect("format common snippet");
+
+        let content = ctx.app.editor.as_ref().expect("editor remains open").text();
+        assert!(content.contains("\n  \"env\": {"));
+        assert!(matches!(
+            ctx.app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Success,
+                ..
+            })
+        ));
+        assert!(
+            ctx.data.config.common_snippet.trim().is_empty(),
+            "formatting should not persist the snippet before Ctrl+S"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn extract_common_snippet_updates_editor_buffer_without_saving() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+        form.name.set("Provider One");
+        form.claude_base_url.set("https://provider.example");
+        form.claude_api_key.set("sk-provider");
+        form.extra = json!({
+            "settingsConfig": {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://provider.example",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-provider",
+                    "COMMON_FLAG": "1"
+                }
+            }
+        });
+        fixture.app.form = Some(FormState::ProviderAdd(form));
+        fixture.app.open_editor(
+            "Common Snippet",
+            crate::cli::tui::app::EditorKind::Json,
+            "{}",
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Claude,
+                source: crate::cli::tui::app::CommonSnippetViewSource::ProviderForm,
+            },
+        );
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+        };
+
+        super::extract_common_snippet_into_editor(&mut ctx, AppType::Claude)
+            .expect("extract common snippet into editor");
+
+        let content = ctx.app.editor.as_ref().expect("editor remains open").text();
+        assert!(content.contains("COMMON_FLAG"));
+        assert!(!content.contains("ANTHROPIC_BASE_URL"));
+        assert!(!content.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(
+            ctx.data.config.common_snippet.trim().is_empty(),
+            "extracting into the editor should not persist before Ctrl+S"
+        );
     }
 
     #[test]

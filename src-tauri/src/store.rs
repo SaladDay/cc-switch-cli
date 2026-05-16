@@ -95,41 +95,23 @@ impl AppState {
 
         state.import_live_provider_configs_on_startup()?;
 
-        if !state
+        let proxy_running = state
             .proxy_service
             .is_running_blocking()
-            .map_err(AppError::Message)?
-        {
+            .map_err(AppError::Message)?;
+        if !proxy_running {
             state
                 .proxy_service
                 .recover_takeovers_on_startup_blocking()
                 .map_err(AppError::Config)?;
         }
 
+        state.import_live_current_provider_configs_on_startup()?;
+
         Ok(state)
     }
 
     fn import_live_provider_configs_on_startup(&self) -> Result<(), AppError> {
-        for app_type in crate::app_config::AppType::all().filter(|app| !app.is_additive_mode()) {
-            match crate::services::provider::ProviderService::import_default_config(
-                self,
-                app_type.clone(),
-            ) {
-                Ok(true) => log::info!(
-                    "✓ Imported live config for {} as default provider",
-                    app_type.as_str()
-                ),
-                Ok(false) => log::debug!(
-                    "○ {} already has providers; live import skipped",
-                    app_type.as_str()
-                ),
-                Err(error) => log::debug!(
-                    "○ No live config to import for {}: {error}",
-                    app_type.as_str()
-                ),
-            }
-        }
-
         match self.db.init_default_official_providers() {
             Ok(count) if count > 0 => log::info!("✓ Seeded {count} official provider(s)"),
             Ok(_) => {}
@@ -152,6 +134,41 @@ impl AppState {
             }
             Ok(_) => log::debug!("○ No new OpenClaw providers to import"),
             Err(error) => log::warn!("✗ Failed to import OpenClaw providers: {error}"),
+        }
+
+        self.refresh_config_from_db()
+    }
+
+    fn import_live_current_provider_configs_on_startup(&self) -> Result<(), AppError> {
+        for app_type in crate::app_config::AppType::all().filter(|app| !app.is_additive_mode()) {
+            if self
+                .proxy_service
+                .detect_takeover_in_live_config_for_app(&app_type)
+            {
+                log::debug!(
+                    "○ {} live config is in proxy takeover mode; live import skipped",
+                    app_type.as_str()
+                );
+                continue;
+            }
+
+            match crate::services::provider::ProviderService::import_default_config(
+                self,
+                app_type.clone(),
+            ) {
+                Ok(true) => log::info!(
+                    "✓ Imported live config for {} as default provider",
+                    app_type.as_str()
+                ),
+                Ok(false) => log::debug!(
+                    "○ {} already has providers; live import skipped",
+                    app_type.as_str()
+                ),
+                Err(error) => log::debug!(
+                    "○ No live config to import for {}: {error}",
+                    app_type.as_str()
+                ),
+            }
         }
 
         self.refresh_config_from_db()

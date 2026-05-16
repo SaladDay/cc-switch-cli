@@ -659,6 +659,20 @@ fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_
 }
 
 #[test]
+#[serial(home_settings)]
+fn startup_reads_persisted_common_config_notice_confirmation() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    crate::settings::set_common_config_confirmed(true).expect("save confirmation");
+
+    let (app, _data) =
+        initialize_app_state_for_test(Some(AppType::Claude), |_| Ok(UiData::default()))
+            .expect("bootstrap app state");
+
+    assert!(app.common_config_notice_confirmed);
+}
+
+#[test]
 fn parse_model_ids_supports_multiple_shapes_and_dedups_stably() {
     let data_payload = json!({
         "data": [
