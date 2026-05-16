@@ -379,11 +379,11 @@ impl App {
     fn handle_codex_provider_preview_key(&mut self, key: KeyEvent) -> Option<Action> {
         match key.code {
             KeyCode::Enter => Some(self.open_codex_provider_preview_editor()),
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 self.adjust_codex_preview_scroll(|scroll| scroll.saturating_sub(1));
                 Some(Action::None)
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 self.adjust_codex_preview_scroll(|scroll| scroll.saturating_add(1));
                 Some(Action::None)
             }
