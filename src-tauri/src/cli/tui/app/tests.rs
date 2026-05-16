@@ -130,7 +130,7 @@ mod tests {
 
     fn open_provider_fields_form(app_type: AppType) -> App {
         let mut app = App::new(Some(app_type));
-        app.open_provider_add_form();
+        app.open_provider_add_form(&UiData::default());
         app.on_key(key(KeyCode::Enter), &data());
         app
     }
