@@ -66,11 +66,33 @@ struct PostCommitAction {
     app_type: AppType,
     provider: Provider,
     backup: LiveSnapshot,
+    write_live_snapshot: bool,
     sync_mcp: bool,
+    sync_codex_catalog: bool,
+    stale_codex_catalog_keys: Vec<String>,
     refresh_snapshot: bool,
     apply_hermes_switch_defaults: bool,
     common_config_snippet: Option<String>,
     takeover_active: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexImportReport {
+    pub created: usize,
+    pub merged_by_key: usize,
+    pub merged_by_name: usize,
+    pub needs_auth: usize,
+    pub conflicts: usize,
+    pub used_default_fallback: bool,
+}
+
+impl CodexImportReport {
+    pub fn imported_any(&self) -> bool {
+        self.created > 0
+            || self.merged_by_key > 0
+            || self.merged_by_name > 0
+            || self.used_default_fallback
+    }
 }
 
 impl ProviderService {
@@ -355,7 +377,7 @@ impl ProviderService {
                     .update_live_backup_from_provider(action.app_type.as_str(), &action.provider),
             )
             .map_err(AppError::Message)?;
-        } else {
+        } else if action.write_live_snapshot {
             let apply_common_config = action
                 .provider
                 .meta
@@ -386,6 +408,12 @@ impl ProviderService {
             && crate::sync_policy::should_sync_live(&action.app_type)
         {
             Self::refresh_provider_snapshot(state, &action.app_type, &action.provider.id)?;
+        }
+        if !action.takeover_active
+            && action.sync_codex_catalog
+            && crate::sync_policy::should_sync_live(&AppType::Codex)
+        {
+            Self::sync_codex_provider_catalog_to_live(state, &action.stale_codex_catalog_keys)?;
         }
 
         // D6: Align upstream live flows - also sync skills (best effort, should not block provider ops).
@@ -773,7 +801,10 @@ impl ProviderService {
             app_type: app_type.clone(),
             provider,
             backup: Self::capture_live_snapshot(app_type)?,
+            write_live_snapshot: true,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
+            sync_codex_catalog: matches!(app_type, AppType::Codex),
+            stale_codex_catalog_keys: Vec::new(),
             refresh_snapshot: false,
             apply_hermes_switch_defaults: false,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
@@ -1162,9 +1193,26 @@ impl ProviderService {
                     app_type: app_type_clone.clone(),
                     provider: provider_to_store.clone(),
                     backup,
+                    write_live_snapshot: true,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
+                    sync_codex_catalog: matches!(&app_type_clone, AppType::Codex),
+                    stale_codex_catalog_keys: Vec::new(),
+                    refresh_snapshot: false,
+                    apply_hermes_switch_defaults: false,
+                    common_config_snippet,
+                    takeover_active: false,
+                })
+            } else if matches!(&app_type_clone, AppType::Codex) {
+                Some(PostCommitAction {
+                    app_type: app_type_clone.clone(),
+                    provider: provider_to_store.clone(),
+                    backup: Self::capture_live_snapshot(&app_type_clone)?,
+                    write_live_snapshot: false,
+                    sync_mcp: false,
+                    sync_codex_catalog: true,
+                    stale_codex_catalog_keys: Vec::new(),
                     refresh_snapshot: false,
                     apply_hermes_switch_defaults: false,
                     common_config_snippet,
@@ -1222,6 +1270,10 @@ impl ProviderService {
                 .providers
                 .get(&provider_id)
                 .and_then(Self::provider_live_config_managed);
+            let previous_codex_catalog_key = manager
+                .providers
+                .get(&provider_id)
+                .and_then(Self::provider_codex_model_provider_key);
             let mut merged = if let Some(existing) = manager.providers.get(&provider_id) {
                 let mut updated = provider_clone.clone();
                 match (existing.meta.as_ref(), updated.meta.take()) {
@@ -1276,9 +1328,34 @@ impl ProviderService {
                     app_type: app_type_clone.clone(),
                     provider: merged,
                     backup,
+                    write_live_snapshot: true,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
                     sync_mcp: matches!(&app_type_clone, AppType::Codex),
+                    sync_codex_catalog: matches!(&app_type_clone, AppType::Codex),
+                    stale_codex_catalog_keys: Vec::new(),
+                    refresh_snapshot: false,
+                    apply_hermes_switch_defaults: false,
+                    common_config_snippet,
+                    takeover_active: false,
+                })
+            } else if matches!(&app_type_clone, AppType::Codex) {
+                let backup = Self::capture_live_snapshot(&app_type_clone)?;
+                let current_codex_catalog_key = Self::provider_codex_model_provider_key(&merged);
+                let stale_codex_catalog_keys = previous_codex_catalog_key
+                    .filter(|old_key| {
+                        current_codex_catalog_key.as_deref() != Some(old_key.as_str())
+                    })
+                    .into_iter()
+                    .collect();
+                Some(PostCommitAction {
+                    app_type: app_type_clone.clone(),
+                    provider: merged,
+                    backup,
+                    write_live_snapshot: false,
+                    sync_mcp: false,
+                    sync_codex_catalog: true,
+                    stale_codex_catalog_keys,
                     refresh_snapshot: false,
                     apply_hermes_switch_defaults: false,
                     common_config_snippet,
@@ -1670,6 +1747,15 @@ impl ProviderService {
             }
         }
 
+        if snapshots
+            .iter()
+            .any(|(app_type, _, _)| matches!(app_type, AppType::Codex))
+        {
+            if let Err(e) = Self::sync_codex_provider_catalog_to_live(state, &[]) {
+                log::warn!("sync_current_to_live: Codex provider catalog 同步失败: {e}");
+            }
+        }
+
         if let Err(e) =
             crate::services::prompt::PromptService::sync_all_active_to_live_best_effort(state)
         {
@@ -1760,7 +1846,10 @@ impl ProviderService {
                     app_type: app_type_clone.clone(),
                     provider,
                     backup: Self::capture_live_snapshot(&app_type_clone)?,
+                    write_live_snapshot: true,
                     sync_mcp: matches!(app_type_clone, AppType::OpenCode),
+                    sync_codex_catalog: false,
+                    stale_codex_catalog_keys: Vec::new(),
                     refresh_snapshot: false,
                     apply_hermes_switch_defaults: matches!(app_type_clone, AppType::Hermes),
                     common_config_snippet: config
@@ -1799,7 +1888,10 @@ impl ProviderService {
                 app_type: app_type_clone.clone(),
                 provider,
                 backup,
+                write_live_snapshot: true,
                 sync_mcp: true, // v3.7.0: 所有应用切换时都同步 MCP，防止配置丢失
+                sync_codex_catalog: matches!(app_type_clone, AppType::Codex),
+                stale_codex_catalog_keys: Vec::new(),
                 refresh_snapshot: true,
                 apply_hermes_switch_defaults: false,
                 common_config_snippet: config.common_config_snippets.get(&app_type_clone).cloned(),
@@ -2301,6 +2393,13 @@ impl ProviderService {
                 )
             })?
         };
+        let stale_codex_catalog_keys = if matches!(app_type, AppType::Codex) {
+            Self::provider_codex_model_provider_key(&provider_snapshot)
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         if app_type.is_additive_mode() {
             match app_type {
@@ -2381,7 +2480,11 @@ impl ProviderService {
             manager.providers.shift_remove(provider_id);
         }
 
-        state.save()
+        state.save()?;
+        if matches!(app_type, AppType::Codex) {
+            Self::sync_codex_provider_catalog_to_live(state, &stale_codex_catalog_keys)?;
+        }
+        Ok(())
     }
 
     pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {

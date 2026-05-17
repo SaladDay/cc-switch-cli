@@ -446,6 +446,14 @@ pub fn tui_provider_empty_subtitle() -> &'static str {
     }
 }
 
+pub fn tui_provider_empty_subtitle_codex() -> &'static str {
+    if is_chinese() {
+        "如果你已有 Codex 配置，请点击\"导入当前配置\"，程序会读取当前 config.toml 里的所有可识别供应商并合并到 TUI 中"
+    } else {
+        "If you already have a Codex config, use \"Import Current Config\". CC-Switch will read every recognizable provider from the current config.toml and merge them into the TUI."
+    }
+}
+
 pub fn tui_key_import_current_config() -> &'static str {
     if is_chinese() {
         "导入当前配置"

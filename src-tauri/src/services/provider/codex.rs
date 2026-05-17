@@ -1,6 +1,22 @@
 use super::*;
+use indexmap::IndexMap;
 use std::fs;
 use std::path::Path;
+use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+struct LiveCodexCatalogProvider {
+    key: String,
+    name: String,
+    settings_config: Value,
+    is_active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexImportMatchKind {
+    Key,
+    Name,
+}
 
 impl ProviderService {
     pub(crate) fn capture_codex_temp_launch_snapshot(
@@ -169,6 +185,446 @@ impl ProviderService {
         }
 
         Ok(doc.to_string())
+    }
+
+    fn codex_provider_key_from_config_text(config_toml: &str) -> Option<String> {
+        let doc = config_toml.parse::<toml_edit::DocumentMut>().ok()?;
+        let provider_key = doc
+            .get("model_provider")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+
+        doc.get("model_providers")
+            .and_then(|value| value.as_table_like())
+            .and_then(|providers| providers.get(provider_key))
+            .map(|_| provider_key.to_string())
+    }
+
+    pub(super) fn provider_codex_model_provider_key(provider: &Provider) -> Option<String> {
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_model_provider_key.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                provider
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .and_then(Self::codex_provider_key_from_config_text)
+            })
+    }
+
+    fn codex_catalog_entry_from_provider(
+        provider: &Provider,
+    ) -> Result<Option<(String, toml_edit::Item)>, AppError> {
+        let Some(config_toml) = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+        else {
+            return Ok(None);
+        };
+        if config_toml.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let doc = config_toml.parse::<toml_edit::DocumentMut>().map_err(|e| {
+            AppError::Config(format!(
+                "Codex provider '{}' TOML 无法解析: {e}",
+                provider.id
+            ))
+        })?;
+
+        let configured_key = Self::provider_codex_model_provider_key(provider);
+        let model_providers = doc
+            .get("model_providers")
+            .and_then(|item| item.as_table_like());
+        let source_key = configured_key
+            .as_deref()
+            .filter(|key| {
+                model_providers
+                    .and_then(|providers| providers.get(*key))
+                    .is_some()
+            })
+            .map(str::to_string)
+            .or_else(|| Self::codex_provider_key_from_config_text(config_toml))
+            .or_else(|| {
+                model_providers.and_then(|providers| {
+                    let mut keys = providers.iter().map(|(key, _)| key.to_string());
+                    let first = keys.next()?;
+                    keys.next().is_none().then_some(first)
+                })
+            });
+
+        let Some(source_key) = source_key else {
+            return Ok(None);
+        };
+        let resolved_key = configured_key.unwrap_or_else(|| source_key.clone());
+        let Some(provider_item) = model_providers.and_then(|providers| providers.get(&source_key))
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some((resolved_key, provider_item.clone())))
+    }
+
+    fn codex_catalog_item_signature(item: &toml_edit::Item) -> String {
+        item.to_string()
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    }
+
+    fn merge_codex_catalog_into_config_text(
+        base_config_toml: &str,
+        catalog_entries: &IndexMap<String, toml_edit::Item>,
+        stale_keys: &[String],
+    ) -> Result<String, AppError> {
+        let mut doc = if base_config_toml.trim().is_empty() {
+            toml_edit::DocumentMut::new()
+        } else {
+            base_config_toml
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| AppError::Config(format!("Codex live config TOML 无法解析: {e}")))?
+        };
+
+        if doc.get("model_providers").is_none() {
+            doc["model_providers"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let providers = doc["model_providers"].as_table_like_mut().ok_or_else(|| {
+            AppError::Config("Codex live `model_providers` 必须是 TOML table".into())
+        })?;
+
+        for stale_key in stale_keys {
+            providers.remove(stale_key);
+        }
+        for (key, item) in catalog_entries {
+            providers.insert(key, item.clone());
+        }
+
+        if providers.iter().next().is_none() {
+            doc.as_table_mut().remove("model_providers");
+        }
+
+        Ok(doc.to_string())
+    }
+
+    fn sync_codex_provider_catalog_entries_to_live(
+        providers: &[Provider],
+        stale_keys: &[String],
+    ) -> Result<(), AppError> {
+        let mut catalog_entries = IndexMap::new();
+        let mut owners = std::collections::HashMap::<String, String>::new();
+        for provider in providers {
+            if Self::is_codex_official_provider(provider) {
+                continue;
+            }
+            let catalog_entry = match Self::codex_catalog_entry_from_provider(provider) {
+                Ok(entry) => entry,
+                Err(err) => {
+                    log::warn!(
+                        "skip syncing broken Codex provider snapshot '{}' into live catalog: {err}",
+                        provider.id
+                    );
+                    continue;
+                }
+            };
+            let Some((key, item)) = catalog_entry else {
+                continue;
+            };
+            if let Some(previous_owner) = owners.insert(key.clone(), provider.id.clone()) {
+                return Err(AppError::Config(format!(
+                    "Codex provider key 冲突: `{key}` 同时属于 `{previous_owner}` 和 `{}`",
+                    provider.id
+                )));
+            }
+            catalog_entries.insert(key, item);
+        }
+
+        let auth = if get_codex_auth_path().exists() {
+            Some(read_json_file::<Value>(&get_codex_auth_path())?)
+        } else {
+            None
+        };
+        let current_text = crate::codex_config::read_and_validate_codex_config_text()?;
+        let merged_text = Self::merge_codex_catalog_into_config_text(
+            &current_text,
+            &catalog_entries,
+            stale_keys,
+        )?;
+        if merged_text == current_text {
+            return Ok(());
+        }
+
+        crate::codex_config::write_codex_live_atomic_optional_auth(
+            auth.as_ref(),
+            Some(&merged_text),
+        )
+    }
+
+    pub(super) fn sync_codex_provider_catalog_to_live(
+        state: &AppState,
+        stale_keys: &[String],
+    ) -> Result<(), AppError> {
+        let providers = {
+            let guard = state.config.read().map_err(AppError::from)?;
+            guard
+                .get_manager(&AppType::Codex)
+                .map(|manager| manager.providers.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        Self::sync_codex_provider_catalog_entries_to_live(&providers, stale_keys)
+    }
+
+    pub(crate) fn sync_codex_provider_catalog_to_live_from_config(
+        config: &MultiAppConfig,
+        stale_keys: &[String],
+    ) -> Result<(), AppError> {
+        let providers = config
+            .get_manager(&AppType::Codex)
+            .map(|manager| manager.providers.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        Self::sync_codex_provider_catalog_entries_to_live(&providers, stale_keys)
+    }
+
+    fn build_codex_catalog_snapshot_config(
+        provider_key: &str,
+        provider_item: &toml_edit::Item,
+        model: Option<&str>,
+    ) -> String {
+        let mut doc = toml_edit::DocumentMut::new();
+        doc["model_provider"] = toml_edit::value(provider_key);
+        if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+            doc["model"] = toml_edit::value(model);
+        }
+        doc["model_providers"] = toml_edit::Item::Table(toml_edit::Table::new());
+        if let Some(providers) = doc["model_providers"].as_table_like_mut() {
+            providers.insert(provider_key, provider_item.clone());
+        }
+        doc.to_string().trim().to_string()
+    }
+
+    fn parse_codex_catalog_from_live(
+        config_toml: &str,
+        auth: &Value,
+    ) -> Result<Vec<LiveCodexCatalogProvider>, AppError> {
+        if config_toml.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let doc = config_toml
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| AppError::Config(format!("Codex live config TOML 无法解析: {e}")))?;
+        let active_key = doc
+            .get("model_provider")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let model = doc
+            .get("model")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let Some(model_providers) = doc
+            .get("model_providers")
+            .and_then(|item| item.as_table_like())
+        else {
+            return Ok(Vec::new());
+        };
+        let canonical_active_key = active_key.as_ref().and_then(|active_key| {
+            let active_item = model_providers.get(active_key.as_str())?;
+            let active_signature = Self::codex_catalog_item_signature(active_item);
+            model_providers.iter().find_map(|(key, item)| {
+                (key != active_key && Self::codex_catalog_item_signature(item) == active_signature)
+                    .then(|| key.to_string())
+            })
+        });
+        let effective_active_key = canonical_active_key.as_deref().or(active_key.as_deref());
+
+        let mut providers = Vec::new();
+        for (key, item) in model_providers.iter() {
+            if active_key.as_deref() == Some(key) && canonical_active_key.is_some() {
+                continue;
+            }
+            let name = item
+                .as_table_like()
+                .and_then(|table| table.get("name"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(key)
+                .to_string();
+            let is_active = effective_active_key == Some(key);
+            let auth_value = if is_active {
+                auth.clone()
+            } else {
+                Value::Object(serde_json::Map::new())
+            };
+            providers.push(LiveCodexCatalogProvider {
+                key: key.to_string(),
+                name,
+                settings_config: json!({
+                    "auth": auth_value,
+                    "config": Self::build_codex_catalog_snapshot_config(key, item, model.as_deref()),
+                }),
+                is_active,
+            });
+        }
+
+        Ok(providers)
+    }
+
+    fn find_codex_import_target(
+        manager: &crate::provider::ProviderManager,
+        entry: &LiveCodexCatalogProvider,
+    ) -> Result<Option<(String, CodexImportMatchKind)>, ()> {
+        let key_matches = manager
+            .providers
+            .values()
+            .filter(|provider| {
+                Self::provider_codex_model_provider_key(provider).as_deref()
+                    == Some(entry.key.as_str())
+            })
+            .map(|provider| provider.id.clone())
+            .collect::<Vec<_>>();
+        match key_matches.len() {
+            0 => {}
+            1 => return Ok(Some((key_matches[0].clone(), CodexImportMatchKind::Key))),
+            _ => return Err(()),
+        }
+
+        let normalized_name = entry.name.trim();
+        if normalized_name.is_empty() {
+            return Ok(None);
+        }
+        let name_matches = manager
+            .providers
+            .values()
+            .filter(|provider| provider.name.trim() == normalized_name)
+            .map(|provider| provider.id.clone())
+            .collect::<Vec<_>>();
+        match name_matches.len() {
+            0 => Ok(None),
+            1 => Ok(Some((name_matches[0].clone(), CodexImportMatchKind::Name))),
+            _ => Err(()),
+        }
+    }
+
+    pub fn import_codex_providers_from_live(
+        state: &AppState,
+    ) -> Result<CodexImportReport, AppError> {
+        let auth = if get_codex_auth_path().exists() {
+            read_json_file::<Value>(&get_codex_auth_path())?
+        } else {
+            Value::Object(serde_json::Map::new())
+        };
+        let config_toml = crate::codex_config::read_and_validate_codex_config_text()?;
+        let live_providers = Self::parse_codex_catalog_from_live(&config_toml, &auth)?;
+        if live_providers.is_empty() {
+            let imported = Self::import_default_config(state, AppType::Codex)?;
+            return Ok(CodexImportReport {
+                created: usize::from(imported),
+                used_default_fallback: imported,
+                ..CodexImportReport::default()
+            });
+        }
+
+        let preserved_current = [AppType::Codex];
+        Self::run_transaction_preserving_current_providers(
+            state,
+            &preserved_current,
+            move |config| {
+                config.ensure_app(&AppType::Codex);
+                let manager = config
+                    .get_manager_mut(&AppType::Codex)
+                    .ok_or_else(|| Self::app_not_found(&AppType::Codex))?;
+                let mut report = CodexImportReport::default();
+
+                for entry in &live_providers {
+                    let target = match Self::find_codex_import_target(manager, entry) {
+                        Ok(target) => target,
+                        Err(()) => {
+                            report.conflicts += 1;
+                            continue;
+                        }
+                    };
+
+                    let mut settings_config = entry.settings_config.clone();
+                    let auth_is_empty = settings_config
+                        .get("auth")
+                        .and_then(Value::as_object)
+                        .is_some_and(|value| value.is_empty());
+
+                    match target {
+                        Some((provider_id, match_kind)) => {
+                            let existing = manager
+                                .providers
+                                .get(&provider_id)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    AppError::localized(
+                                        "provider.not_found",
+                                        format!("供应商不存在: {provider_id}"),
+                                        format!("Provider not found: {provider_id}"),
+                                    )
+                                })?;
+
+                            if auth_is_empty {
+                                if let Some(existing_auth) =
+                                    existing.settings_config.get("auth").cloned()
+                                {
+                                    if let Some(obj) = settings_config.as_object_mut() {
+                                        obj.insert("auth".to_string(), existing_auth);
+                                    }
+                                }
+                            }
+
+                            let mut merged = existing.clone();
+                            merged.settings_config = settings_config;
+                            merged
+                                .meta
+                                .get_or_insert_with(Default::default)
+                                .codex_model_provider_key = Some(entry.key.clone());
+                            manager.providers.insert(provider_id.clone(), merged);
+
+                            match match_kind {
+                                CodexImportMatchKind::Key => report.merged_by_key += 1,
+                                CodexImportMatchKind::Name => report.merged_by_name += 1,
+                            }
+                        }
+                        None => {
+                            let mut provider = Provider::with_id(
+                                Uuid::new_v4().to_string(),
+                                entry.name.clone(),
+                                settings_config,
+                                None,
+                            );
+                            provider.category = Some("custom".to_string());
+                            provider.created_at = Some(current_timestamp());
+                            provider
+                                .meta
+                                .get_or_insert_with(Default::default)
+                                .codex_model_provider_key = Some(entry.key.clone());
+                            manager.providers.insert(provider.id.clone(), provider);
+                            report.created += 1;
+                        }
+                    }
+
+                    if !entry.is_active && auth_is_empty {
+                        report.needs_auth += 1;
+                    }
+                }
+
+                Ok((report, None))
+            },
+        )
     }
 
     #[cfg(test)]

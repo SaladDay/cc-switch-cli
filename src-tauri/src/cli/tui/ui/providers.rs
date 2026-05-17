@@ -67,7 +67,12 @@ fn provider_name_with_quota_line(
     Line::from(spans)
 }
 
-fn render_provider_empty_state(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
+fn render_provider_empty_state(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app_type: &crate::app_config::AppType,
+    theme: &super::theme::Theme,
+) {
     let title_style = Style::default().add_modifier(Modifier::BOLD);
     let subtitle_style = Style::default().fg(theme.comment);
     let primary_style = if theme.no_color {
@@ -87,20 +92,32 @@ fn render_provider_empty_state(frame: &mut Frame<'_>, area: Rect, theme: &super:
             .add_modifier(Modifier::BOLD)
     };
 
-    let content_lines = vec![
+    let subtitle = if matches!(app_type, crate::app_config::AppType::Codex) {
+        texts::tui_provider_empty_subtitle_codex()
+    } else {
+        texts::tui_provider_empty_subtitle()
+    };
+
+    let mut content_lines = vec![
         Line::styled(texts::tui_provider_empty_title(), title_style),
         Line::raw(""),
-        Line::styled(texts::tui_provider_empty_subtitle(), subtitle_style),
+        Line::styled(subtitle, subtitle_style),
         Line::raw(""),
         Line::from(vec![Span::styled(
             format!("  Enter  {}  ", texts::tui_key_import_current_config()),
             primary_style,
         )]),
-        Line::from(vec![Span::styled(
-            format!("  a  {}  ", texts::tui_key_add_provider()),
-            secondary_style,
-        )]),
     ];
+    if matches!(app_type, crate::app_config::AppType::Codex) {
+        content_lines.push(Line::from(vec![Span::styled(
+            format!("  i  {}  ", texts::tui_key_import_current_config()),
+            secondary_style,
+        )]));
+    }
+    content_lines.push(Line::from(vec![Span::styled(
+        format!("  a  {}  ", texts::tui_key_add_provider()),
+        secondary_style,
+    )]));
 
     let top_padding = area.height.saturating_sub(content_lines.len() as u16) / 2;
     let mut lines = Vec::with_capacity(top_padding as usize + content_lines.len());
@@ -173,12 +190,18 @@ pub(super) fn render_providers(
         let mut keys = Vec::new();
         if data.providers.rows.is_empty() {
             keys.push(("Enter", texts::tui_key_import_current_config()));
+            if matches!(app.app_type, crate::app_config::AppType::Codex) {
+                keys.push(("i", texts::tui_key_import_current_config()));
+            }
             keys.push(("a", texts::tui_key_add_provider()));
         } else if visible.is_empty() {
             keys.push(("a", texts::tui_key_add()));
         } else {
             keys.push(("Enter", texts::tui_key_details()));
             keys.push(("Space", texts::tui_key_switch()));
+            if matches!(app.app_type, crate::app_config::AppType::Codex) {
+                keys.push(("i", texts::tui_key_import_current_config()));
+            }
             keys.extend([
                 ("a", texts::tui_key_add()),
                 ("e", texts::tui_key_edit()),
@@ -205,7 +228,7 @@ pub(super) fn render_providers(
     }
 
     if data.providers.rows.is_empty() {
-        render_provider_empty_state(frame, chunks[1], theme);
+        render_provider_empty_state(frame, chunks[1], &app.app_type, theme);
         return;
     }
 

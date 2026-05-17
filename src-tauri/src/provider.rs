@@ -284,6 +284,12 @@ pub struct ProviderMeta {
     /// `None` 表示旧数据/未知状态，`Some(false)` 表示明确仅存在于数据库中。
     #[serde(rename = "liveConfigManaged", skip_serializing_if = "Option::is_none")]
     pub live_config_managed: Option<bool>,
+    /// Codex live config 中 `[model_providers.<key>]` 的稳定外部键。
+    #[serde(
+        rename = "codexModelProviderKey",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_model_provider_key: Option<String>,
     /// 供应商类型标识（用于特殊供应商检测）
     /// - "github_copilot": GitHub Copilot 供应商
     #[serde(rename = "providerType", skip_serializing_if = "Option::is_none")]

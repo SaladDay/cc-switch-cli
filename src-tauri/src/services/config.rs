@@ -341,6 +341,8 @@ impl ConfigService {
             }
         }
 
+        ProviderService::sync_codex_provider_catalog_to_live_from_config(config, &[])?;
+
         Ok(())
     }
 

@@ -4007,6 +4007,247 @@ fn import_default_config_preserves_codex_common_snippet_in_db_snapshot() {
 }
 
 #[test]
+#[serial]
+fn codex_switch_syncs_all_managed_provider_catalog_entries_into_live_config() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                codex_settings(
+                    "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nname = \"First\"\nbase_url = \"https://api.one.example/v1\"\n",
+                ),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                codex_settings(
+                    "model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nname = \"Second\"\nbase_url = \"https://api.two.example/v1\"\n",
+                ),
+                None,
+            ),
+        );
+    }
+
+    std::fs::write(
+        get_codex_config_path(),
+        "model_provider = \"session_anchor\"\nmodel = \"gpt-4\"\n\n[model_providers.session_anchor]\nname = \"First\"\nbase_url = \"https://api.one.example/v1\"\n",
+    )
+    .expect("seed live config.toml");
+    write_json_file(
+        &get_codex_auth_path(),
+        &json!({ "OPENAI_API_KEY": "sk-test" }),
+    )
+    .expect("write auth.json");
+
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
+
+    let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
+    assert!(
+        live_text.contains("[model_providers.first]"),
+        "live config should keep the non-current provider catalog entry: {live_text}"
+    );
+    assert!(
+        live_text.contains("[model_providers.second]"),
+        "live config should expose the current provider catalog entry too: {live_text}"
+    );
+}
+
+#[test]
+#[serial]
+fn import_codex_providers_from_live_merges_catalog_and_skips_active_alias_duplicate() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+
+    std::fs::write(
+        get_codex_config_path(),
+        r#"model_provider = "session_anchor"
+model = "gpt-5"
+
+[model_providers.session_anchor]
+name = "Current Live"
+base_url = "https://current.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[model_providers.current_live]
+name = "Current Live"
+base_url = "https://current.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[model_providers.existing_key]
+name = "Renamed Existing"
+base_url = "https://key.example/v2"
+wire_api = "responses"
+
+[model_providers.new_by_name]
+name = "Name Merge"
+base_url = "https://name.example/v2"
+wire_api = "responses"
+
+[model_providers.brand_new]
+name = "Brand New"
+base_url = "https://brand.example/v1"
+wire_api = "responses"
+"#,
+    )
+    .expect("write live config.toml");
+    write_json_file(
+        &get_codex_auth_path(),
+        &json!({ "OPENAI_API_KEY": "sk-live" }),
+    )
+    .expect("write auth.json");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "keep-current".to_string();
+        manager.providers.insert(
+            "keep-current".to_string(),
+            Provider::with_id(
+                "keep-current".to_string(),
+                "Keep Current".to_string(),
+                codex_settings(
+                    "model_provider = \"keep_current\"\nmodel = \"gpt-4\"\n\n[model_providers.keep_current]\nname = \"Keep Current\"\nbase_url = \"https://keep.example/v1\"\n",
+                ),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "merge-key".to_string(),
+            Provider::with_id(
+                "merge-key".to_string(),
+                "Existing Key".to_string(),
+                codex_settings(
+                    "model_provider = \"existing_key\"\nmodel = \"gpt-4\"\n\n[model_providers.existing_key]\nname = \"Existing Key\"\nbase_url = \"https://key.example/v1\"\n",
+                ),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "merge-name".to_string(),
+            Provider::with_id(
+                "merge-name".to_string(),
+                "Name Merge".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "persist-me" },
+                    "config": "model_provider = \"legacy_name_key\"\nmodel = \"gpt-4\"\n\n[model_providers.legacy_name_key]\nname = \"Name Merge\"\nbase_url = \"https://name.example/v1\"\n",
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    let report = ProviderService::import_codex_providers_from_live(&state)
+        .expect("import codex providers from live config");
+    assert_eq!(report.merged_by_key, 1);
+    assert_eq!(report.merged_by_name, 1);
+    assert_eq!(report.created, 2);
+    assert_eq!(report.conflicts, 0);
+    assert!(!report.used_default_fallback);
+
+    let cfg = state.config.read().expect("read config after import");
+    let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
+    assert_eq!(
+        manager.current, "keep-current",
+        "import should not silently switch the current provider"
+    );
+    assert_eq!(
+        manager
+            .providers
+            .values()
+            .filter(|provider| provider.name == "Current Live")
+            .count(),
+        1,
+        "active stable alias should not be imported as a duplicate provider"
+    );
+    assert!(
+        manager.providers.values().all(|provider| {
+            ProviderService::provider_codex_model_provider_key(provider).as_deref()
+                != Some("session_anchor")
+        }),
+        "stable live alias should not overwrite the stored catalog key"
+    );
+
+    let key_merged = manager
+        .providers
+        .get("merge-key")
+        .expect("key-merged provider");
+    assert!(
+        key_merged
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .is_some_and(|config| config.contains("https://key.example/v2")),
+        "key-based merge should refresh the stored config"
+    );
+
+    let name_merged = manager
+        .providers
+        .get("merge-name")
+        .expect("name-merged provider");
+    assert_eq!(
+        name_merged
+            .settings_config
+            .get("auth")
+            .and_then(|value| value.get("OPENAI_API_KEY"))
+            .and_then(Value::as_str),
+        Some("persist-me"),
+        "name-based merge should preserve existing auth when live catalog has no auth for it"
+    );
+
+    let current_live = manager
+        .providers
+        .values()
+        .find(|provider| provider.name == "Current Live")
+        .expect("current live provider should be imported once");
+    assert_eq!(
+        current_live
+            .settings_config
+            .get("auth")
+            .and_then(|value| value.get("OPENAI_API_KEY"))
+            .and_then(Value::as_str),
+        Some("sk-live"),
+        "the canonical imported current provider should inherit the live auth payload"
+    );
+    assert_eq!(
+        ProviderService::provider_codex_model_provider_key(current_live).as_deref(),
+        Some("current_live")
+    );
+    assert!(
+        manager
+            .providers
+            .values()
+            .any(|provider| provider.name == "Brand New"),
+        "non-matching live entries should be added as new saved providers"
+    );
+}
+
+#[test]
 fn extract_credentials_returns_expected_values() {
     let provider = Provider::with_id(
         "claude".into(),

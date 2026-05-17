@@ -77,6 +77,9 @@ pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
 pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
     let state = load_state()?;
     let imported = match ctx.app.app_type {
+        crate::app_config::AppType::Codex => {
+            ProviderService::import_codex_providers_from_live(&state)?.imported_any()
+        }
         crate::app_config::AppType::OpenCode => {
             ProviderService::import_opencode_providers_from_live(&state)? > 0
         }

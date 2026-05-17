@@ -1263,6 +1263,48 @@ fn providers_empty_state_matches_gui_copy_in_chinese() {
 }
 
 #[test]
+fn codex_providers_empty_state_shows_catalog_import_copy_and_i_hint() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &UiData::default()));
+    let compact: String = all.chars().filter(|c| !c.is_whitespace()).collect();
+
+    assert!(
+        compact.contains("如果你已有Codex配置，请点击\"导入当前配置\"，程序会读取当前config.toml"),
+        "{all}"
+    );
+    assert!(
+        compact.contains("里的所有可识别供应商并合并到TUI中"),
+        "{all}"
+    );
+    assert!(compact.contains("Enter导入当前配置"), "{all}");
+    assert!(compact.contains("i导入当前配置"), "{all}");
+    assert!(compact.contains("a添加供应商"), "{all}");
+}
+
+#[test]
+fn codex_provider_list_key_bar_shows_import_current_config_hint() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("i import current config"), "{all}");
+    assert!(all.contains("Space switch"), "{all}");
+}
+
+#[test]
 fn focused_pane_border_keeps_v500_bold_style_in_ansi256_mode() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
