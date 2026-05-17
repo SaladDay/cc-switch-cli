@@ -14,7 +14,7 @@ pub(crate) fn should_sync_live(app_type: &AppType) -> bool {
             crate::config::get_claude_config_dir().exists()
                 || crate::config::get_claude_mcp_path().exists()
         }
-        // Codex is considered initialized if ~/.codex (or override dir) exists.
+        // Codex is considered initialized if CODEX_HOME / override dir / default dir exists.
         AppType::Codex => crate::codex_config::get_codex_config_dir().exists(),
         // Gemini is considered initialized if ~/.gemini (or override dir) exists.
         AppType::Gemini => crate::gemini_config::get_gemini_dir().exists(),
