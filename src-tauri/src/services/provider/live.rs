@@ -29,6 +29,9 @@ pub(super) enum LiveSnapshot {
     OpenClaw {
         config_source: Option<String>,
     },
+    Hermes {
+        config_source: Option<String>,
+    },
 }
 
 impl LiveSnapshot {
@@ -96,6 +99,14 @@ impl LiveSnapshot {
                     delete_file(&path)?;
                 }
             }
+            LiveSnapshot::Hermes { config_source } => {
+                let path = crate::hermes_config::get_hermes_config_path();
+                if let Some(source) = config_source {
+                    crate::config::write_text_file(&path, source)?;
+                } else if path.exists() {
+                    delete_file(&path)?;
+                }
+            }
         }
         Ok(())
     }
@@ -159,7 +170,116 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
             let config_source = crate::openclaw_config::read_openclaw_config_source()?;
             Ok(LiveSnapshot::OpenClaw { config_source })
         }
+        AppType::Hermes => {
+            let path = crate::hermes_config::get_hermes_config_path();
+            let config_source = if path.exists() {
+                Some(std::fs::read_to_string(&path).map_err(|err| AppError::io(&path, err))?)
+            } else {
+                None
+            };
+            Ok(LiveSnapshot::Hermes { config_source })
+        }
     }
+}
+
+pub fn sync_hermes_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+    if !crate::hermes_config::get_hermes_config_path().exists() {
+        return Ok(0);
+    }
+
+    let providers = crate::hermes_config::get_providers()?;
+    let mut live_providers = IndexMap::new();
+    for (id, live_provider) in providers {
+        if id.trim().is_empty() {
+            log::warn!("Skipping Hermes live provider with blank id during local mirror");
+            continue;
+        }
+
+        if let Err(err) = super::ProviderService::validate_hermes_provider_settings(&live_provider)
+        {
+            log::warn!("Skipping malformed Hermes live provider '{id}' during local mirror: {err}");
+            continue;
+        }
+
+        live_providers.insert(id, live_provider);
+    }
+
+    let mut changed = 0;
+    {
+        let mut config = state.config.write().map_err(AppError::from)?;
+        config.ensure_app(&AppType::Hermes);
+        let manager = config
+            .get_manager_mut(&AppType::Hermes)
+            .ok_or_else(|| AppError::Config("Hermes manager missing".to_string()))?;
+
+        for (id, live_provider) in live_providers {
+            if let Some(existing) = manager.providers.get_mut(&id) {
+                let mut provider_changed = false;
+                if existing.id != id {
+                    existing.id = id.clone();
+                    provider_changed = true;
+                }
+                if is_auto_mirrored_hermes_snapshot(existing) && existing.name != id {
+                    existing.name = id.clone();
+                    provider_changed = true;
+                }
+                if existing.settings_config != live_provider {
+                    existing.settings_config = live_provider;
+                    provider_changed = true;
+                }
+                if provider_changed {
+                    changed += 1;
+                }
+                continue;
+            }
+
+            manager.providers.insert(
+                id.clone(),
+                Provider::with_id(id.clone(), id.clone(), live_provider, None),
+            );
+            changed += 1;
+        }
+    }
+
+    if changed > 0 {
+        state.save()?;
+    }
+
+    Ok(changed)
+}
+
+pub(super) fn is_auto_mirrored_hermes_snapshot(provider: &Provider) -> bool {
+    provider.website_url.is_none()
+        && provider.category.is_none()
+        && provider.created_at.is_none()
+        && provider.sort_index.is_none()
+        && provider.notes.is_none()
+        && provider
+            .meta
+            .as_ref()
+            .map_or(true, is_default_hermes_common_config_marker)
+        && provider.icon.is_none()
+        && provider.icon_color.is_none()
+        && !provider.in_failover_queue
+}
+
+fn is_default_hermes_common_config_marker(meta: &ProviderMeta) -> bool {
+    meta.apply_common_config == Some(false)
+        && meta.codex_official.is_none()
+        && meta.custom_endpoints.is_empty()
+        && meta.usage_script.is_none()
+        && meta.endpoint_auto_select.is_none()
+        && meta.is_partner.is_none()
+        && meta.partner_promotion_key.is_none()
+        && meta.cost_multiplier.is_none()
+        && meta.pricing_model_source.is_none()
+        && meta.limit_daily_usd.is_none()
+        && meta.limit_monthly_usd.is_none()
+        && meta.test_config.is_none()
+        && meta.proxy_config.is_none()
+        && meta.api_format.is_none()
+        && meta.prompt_cache_key.is_none()
+        && meta.live_config_managed.is_none()
 }
 
 pub fn sync_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
@@ -341,6 +461,57 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
 
         imported += 1;
         log::info!("Imported OpenClaw provider '{id}' from live config");
+    }
+
+    Ok(imported)
+}
+
+pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+    let providers = crate::hermes_config::get_providers()?;
+    if providers.is_empty() {
+        return Ok(0);
+    }
+
+    let mut imported = 0usize;
+    let existing_ids = state.db.get_provider_ids("hermes")?;
+
+    for (id, settings_config) in providers {
+        if id.trim().is_empty() {
+            log::warn!("Skipping Hermes provider with empty id");
+            continue;
+        }
+        if existing_ids.contains(&id) {
+            log::debug!("Hermes provider '{id}' already exists in database, skipping");
+            continue;
+        }
+        if let Err(err) =
+            super::ProviderService::validate_hermes_provider_settings(&settings_config)
+        {
+            log::warn!("Skipping malformed Hermes provider '{id}': {err}");
+            continue;
+        }
+
+        let mut provider = Provider::with_id(id.clone(), id.clone(), settings_config.clone(), None);
+        provider.meta = Some(ProviderMeta {
+            live_config_managed: Some(true),
+            ..Default::default()
+        });
+
+        if let Err(err) = state.db.save_provider("hermes", &provider) {
+            log::warn!("Failed to import Hermes provider '{id}': {err}");
+            continue;
+        }
+
+        {
+            let mut config = state.config.write().map_err(AppError::from)?;
+            config.ensure_app(&AppType::Hermes);
+            if let Some(manager) = config.get_manager_mut(&AppType::Hermes) {
+                manager.providers.insert(id.clone(), provider);
+            }
+        }
+
+        imported += 1;
+        log::info!("Imported Hermes provider '{id}' from live config");
     }
 
     Ok(imported)

@@ -180,7 +180,11 @@ fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<Strin
     }
 
     match app_type {
-        AppType::Claude | AppType::Gemini | AppType::OpenCode | AppType::OpenClaw => {
+        AppType::Claude
+        | AppType::Gemini
+        | AppType::OpenCode
+        | AppType::OpenClaw
+        | AppType::Hermes => {
             let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
                 AppError::InvalidInput(texts::tui_toast_invalid_json(&e.to_string()))
             })?;

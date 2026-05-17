@@ -22,6 +22,8 @@ pub(crate) fn should_sync_live(app_type: &AppType) -> bool {
         AppType::OpenCode => crate::opencode_config::get_opencode_dir().exists(),
         // OpenClaw is considered initialized if ~/.openclaw (or override dir) exists.
         AppType::OpenClaw => get_openclaw_dir().exists(),
+        // Hermes is considered initialized if ~/.hermes (or override dir) exists.
+        AppType::Hermes => crate::hermes_config::get_hermes_dir().exists(),
     }
 }
 

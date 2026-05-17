@@ -644,6 +644,7 @@ fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_
         gemini: false,
         opencode: true,
         openclaw: true,
+        hermes: false,
     })
     .expect("save visible apps");
 

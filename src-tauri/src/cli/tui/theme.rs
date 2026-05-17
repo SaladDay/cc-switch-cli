@@ -7,6 +7,7 @@ const COLOR_MODE_ENV: &str = "CC_SWITCH_COLOR_MODE";
 const DRACULA_GREEN: (u8, u8, u8) = (80, 250, 123);
 const DRACULA_CYAN: (u8, u8, u8) = (139, 233, 253);
 const DRACULA_PINK: (u8, u8, u8) = (255, 121, 198);
+const DRACULA_PURPLE: (u8, u8, u8) = (189, 147, 249);
 const DRACULA_ORANGE: (u8, u8, u8) = (255, 184, 108);
 const DRACULA_YELLOW: (u8, u8, u8) = (241, 250, 140);
 const DRACULA_RED: (u8, u8, u8) = (255, 85, 85);
@@ -184,6 +185,7 @@ fn accent_rgb(app: &AppType) -> (u8, u8, u8) {
         AppType::Gemini => DRACULA_PINK,
         AppType::OpenCode => DRACULA_ORANGE,
         AppType::OpenClaw => OPENCLAW_CORAL,
+        AppType::Hermes => DRACULA_PURPLE,
     }
 }
 

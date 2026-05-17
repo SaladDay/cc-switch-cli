@@ -572,6 +572,7 @@ mod tests {
             gemini: true,
             opencode: true,
             openclaw: true,
+            hermes: false,
         })
         .expect("save initial visible apps");
 
@@ -581,6 +582,7 @@ mod tests {
             gemini: false,
             opencode: false,
             openclaw: false,
+            hermes: false,
         };
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ConfigOpenClawTools;
@@ -640,6 +642,7 @@ mod tests {
             gemini: false,
             opencode: true,
             openclaw: true,
+            hermes: false,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
             .expect("save initial visible apps");
@@ -661,6 +664,7 @@ mod tests {
                     gemini: false,
                     opencode: false,
                     openclaw: false,
+                    hermes: false,
                 },
             },
         )
@@ -688,6 +692,7 @@ mod tests {
             gemini: false,
             opencode: true,
             openclaw: true,
+            hermes: false,
         })
         .expect("save initial visible apps");
         write_invalid_legacy_config(temp_home.path());
@@ -698,6 +703,7 @@ mod tests {
             gemini: false,
             opencode: true,
             openclaw: false,
+            hermes: false,
         };
         let mut app = App::new(Some(AppType::Claude));
         let mut data = UiData::default();
@@ -734,6 +740,7 @@ mod tests {
             gemini: false,
             opencode: true,
             openclaw: true,
+            hermes: false,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
             .expect("save initial visible apps");
@@ -752,6 +759,7 @@ mod tests {
                     gemini: false,
                     opencode: false,
                     openclaw: false,
+                    hermes: false,
                 },
             },
         )

@@ -284,7 +284,7 @@ fn parse_json_object_snippet(
             format!("Gemini 通用配置片段不是有效的 JSON：{e}"),
             format!("Gemini common config snippet is not valid JSON: {e}"),
         ),
-        AppType::OpenCode | AppType::OpenClaw => AppError::localized(
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => AppError::localized(
             "common_config.opencode.invalid_json",
             format!("OpenCode 通用配置片段不是有效的 JSON：{e}"),
             format!("OpenCode common config snippet is not valid JSON: {e}"),
@@ -304,7 +304,7 @@ fn parse_json_object_snippet(
                 "Gemini 通用配置片段必须是 JSON 对象",
                 "Gemini common config snippet must be a JSON object",
             ),
-            AppType::OpenCode | AppType::OpenClaw => AppError::localized(
+            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => AppError::localized(
                 "common_config.opencode.not_object",
                 "OpenCode 通用配置片段必须是 JSON 对象",
                 "OpenCode common config snippet must be a JSON object",
@@ -339,7 +339,11 @@ pub(super) fn validate_common_config_snippet(
     }
 
     match app_type {
-        AppType::Claude | AppType::Gemini | AppType::OpenCode | AppType::OpenClaw => {
+        AppType::Claude
+        | AppType::Gemini
+        | AppType::OpenCode
+        | AppType::OpenClaw
+        | AppType::Hermes => {
             parse_json_object_snippet(app_type, snippet, false)?;
         }
         AppType::Codex => {
@@ -395,7 +399,7 @@ pub(super) fn settings_contain_common_config(
             }
             _ => false,
         },
-        AppType::OpenCode | AppType::OpenClaw => false,
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => false,
     }
 }
 
@@ -460,7 +464,7 @@ pub(super) fn apply_common_config_to_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode | AppType::OpenClaw => Ok(settings.clone()),
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => Ok(settings.clone()),
     }
 }
 
@@ -509,7 +513,7 @@ pub(super) fn remove_common_config_from_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode | AppType::OpenClaw => Ok(settings.clone()),
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => Ok(settings.clone()),
     }
 }
 

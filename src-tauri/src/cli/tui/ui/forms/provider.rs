@@ -10,7 +10,7 @@ fn should_redact_provider_field(
     provider: &super::form::ProviderAddFormState,
     field: ProviderAddField,
 ) -> bool {
-    matches!(provider.app_type, AppType::OpenClaw)
+    matches!(provider.app_type, AppType::OpenClaw | AppType::Hermes)
         && matches!(field, ProviderAddField::OpenCodeApiKey)
 }
 
@@ -24,7 +24,7 @@ fn common_json_preview_value(app_type: &AppType, common_snippet: &str) -> Option
         AppType::Gemini => serde_json::from_str::<Value>(common_snippet)
             .ok()
             .map(|env| json!({ "env": env })),
-        AppType::Codex | AppType::OpenCode | AppType::OpenClaw => None,
+        AppType::Codex | AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => None,
     }
     .filter(Value::is_object)
 }
@@ -405,7 +405,7 @@ pub(crate) fn render_provider_add_form(
             .get("settingsConfig")
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        let json_value = if matches!(provider.app_type, AppType::OpenClaw) {
+        let json_value = if matches!(provider.app_type, AppType::OpenClaw | AppType::Hermes) {
             redact_sensitive_json(&json_value)
         } else {
             json_value

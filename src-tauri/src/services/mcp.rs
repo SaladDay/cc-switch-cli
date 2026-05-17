@@ -164,6 +164,7 @@ impl McpService {
                 mcp::sync_single_server_to_opencode(cfg, &server.id, &server.server)?;
             }
             AppType::OpenClaw => {}
+            AppType::Hermes => {}
         }
         Ok(())
     }
@@ -188,6 +189,7 @@ impl McpService {
             AppType::Gemini => mcp::remove_server_from_gemini(id)?,
             AppType::OpenCode => mcp::remove_server_from_opencode(id)?,
             AppType::OpenClaw => {}
+            AppType::Hermes => {}
         }
         Ok(())
     }
@@ -197,7 +199,7 @@ impl McpService {
         let servers = Self::get_all_servers(state)?;
 
         for app in AppType::all() {
-            if matches!(app, AppType::OpenClaw) {
+            if matches!(app, AppType::OpenClaw | AppType::Hermes) {
                 continue;
             }
 

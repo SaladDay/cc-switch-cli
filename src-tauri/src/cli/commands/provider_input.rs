@@ -44,7 +44,7 @@ pub fn common_snippet_has_effective_config(
             .ok()
             .and_then(|value| value.as_object().cloned())
             .is_some_and(|obj| !obj.is_empty()),
-        AppType::OpenCode | AppType::OpenClaw => false,
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => false,
     }
 }
 
@@ -170,6 +170,7 @@ pub fn prompt_settings_config_for_add(
         (AppType::Gemini, _) => prompt_gemini_config(None),
         (AppType::OpenCode, _) => Ok(json!({})),
         (AppType::OpenClaw, _) => Ok(json!({})),
+        (AppType::Hermes, _) => prompt_hermes_config(None),
     }
 }
 
@@ -406,6 +407,7 @@ pub fn prompt_settings_config(
         AppType::Gemini => prompt_gemini_config(current),
         AppType::OpenCode => Ok(current.cloned().unwrap_or_else(|| json!({}))),
         AppType::OpenClaw => Ok(current.cloned().unwrap_or_else(|| json!({}))),
+        AppType::Hermes => prompt_hermes_config(current),
     }
 }
 
@@ -759,6 +761,65 @@ fn prompt_gemini_config(current: Option<&Value>) -> Result<Value, AppError> {
     }
 }
 
+fn prompt_hermes_config(current: Option<&Value>) -> Result<Value, AppError> {
+    println!("\n{}", "Hermes Configuration".bright_cyan().bold());
+
+    let current_api_key = current
+        .and_then(|v| v.get("api_key").or_else(|| v.get("apiKey")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let current_base_url = current
+        .and_then(|v| v.get("base_url").or_else(|| v.get("baseUrl")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let current_model = current
+        .and_then(|v| v.get("models"))
+        .and_then(|v| v.as_array())
+        .and_then(|models| models.first())
+        .and_then(|model| model.get("id").and_then(|id| id.as_str()))
+        .or_else(|| {
+            current
+                .and_then(|v| v.get("model"))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("");
+
+    let api_key = Text::new("Hermes API Key")
+        .with_initial_value(current_api_key)
+        .with_placeholder("sk-...")
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    let base_url = Text::new("Hermes Base URL")
+        .with_initial_value(current_base_url)
+        .with_placeholder("https://api.example.com/v1")
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    let model = Text::new("Hermes Model")
+        .with_initial_value(current_model)
+        .with_placeholder("claude-sonnet-4-6")
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let mut settings = serde_json::Map::new();
+    if !api_key.trim().is_empty() {
+        settings.insert("api_key".to_string(), json!(api_key.trim()));
+    }
+    if !base_url.trim().is_empty() {
+        settings.insert(
+            "base_url".to_string(),
+            json!(base_url.trim().trim_end_matches('/')),
+        );
+    }
+    if !model.trim().is_empty() {
+        settings.insert(
+            "models".to_string(),
+            json!([{ "id": model.trim(), "name": model.trim() }]),
+        );
+    }
+
+    Ok(Value::Object(settings))
+}
+
 /// 收集可选字段
 pub fn prompt_optional_fields(current: Option<&Provider>) -> Result<OptionalFields, AppError> {
     println!("\n{}", texts::optional_fields_config().bright_cyan().bold());
@@ -939,6 +1000,35 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
             if let Some(base_url) = provider
                 .settings_config
                 .get("baseUrl")
+                .and_then(|v| v.as_str())
+            {
+                println!("  {}: {}", texts::base_url_display_label(), base_url);
+            }
+            if let Some(models) = provider
+                .settings_config
+                .get("models")
+                .and_then(|v| v.as_array())
+            {
+                println!("  {}: {}", texts::model_label(), models.len());
+            }
+        }
+        AppType::Hermes => {
+            if let Some(api_key) = provider
+                .settings_config
+                .get("api_key")
+                .or_else(|| provider.settings_config.get("apiKey"))
+                .and_then(|v| v.as_str())
+            {
+                println!(
+                    "  {}: {}",
+                    texts::api_key_display_label(),
+                    mask_api_key(api_key)
+                );
+            }
+            if let Some(base_url) = provider
+                .settings_config
+                .get("base_url")
+                .or_else(|| provider.settings_config.get("baseUrl"))
                 .and_then(|v| v.as_str())
             {
                 println!("  {}: {}", texts::base_url_display_label(), base_url);

@@ -77,6 +77,9 @@ pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(
         crate::app_config::AppType::OpenClaw => {
             ProviderService::import_openclaw_providers_from_live(&state)? > 0
         }
+        crate::app_config::AppType::Hermes => {
+            ProviderService::import_hermes_providers_from_live(&state)? > 0
+        }
         _ => ProviderService::import_default_config(&state, ctx.app.app_type.clone())?,
     };
 
@@ -326,6 +329,16 @@ pub(super) fn remove_from_config(
             Ok(())
         }
         crate::app_config::AppType::OpenCode => {
+            let state = load_state()?;
+            ProviderService::remove_from_live_config(&state, ctx.app.app_type.clone(), &id)?;
+            ctx.app.push_toast(
+                texts::tui_toast_provider_removed_from_app_config(ctx.app.app_type.as_str()),
+                ToastKind::Success,
+            );
+            *ctx.data = UiData::load(&ctx.app.app_type)?;
+            Ok(())
+        }
+        crate::app_config::AppType::Hermes => {
             let state = load_state()?;
             ProviderService::remove_from_live_config(&state, ctx.app.app_type.clone(), &id)?;
             ctx.app.push_toast(

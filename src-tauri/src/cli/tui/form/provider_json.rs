@@ -399,6 +399,73 @@ impl ProviderAddFormState {
                     settings_obj.insert("models".to_string(), Value::Array(models));
                 }
             }
+            AppType::Hermes => {
+                settings_obj.remove("npm");
+                settings_obj.remove("options");
+                settings_obj.remove("apiKey");
+                settings_obj.remove("baseUrl");
+                settings_obj.remove("api");
+                settings_obj.remove("headers");
+
+                set_or_remove_trimmed(settings_obj, "api_key", &self.opencode_api_key.value);
+                set_or_remove_trimmed(settings_obj, "base_url", &self.opencode_base_url.value);
+
+                let mut models = match settings_obj.remove("models") {
+                    Some(Value::Array(items)) => items,
+                    _ => Vec::new(),
+                };
+
+                let model_id = self.opencode_primary_model_id();
+                match model_id {
+                    Some(model_id) => {
+                        let original_index = self
+                            .opencode_model_original_id
+                            .as_deref()
+                            .and_then(|original_id| openclaw_model_index(&models, original_id));
+                        let target_index =
+                            original_index.or_else(|| openclaw_model_index(&models, &model_id));
+
+                        let mut model_obj = target_index
+                            .and_then(|index| models.get(index).cloned())
+                            .and_then(|value| value.as_object().cloned())
+                            .unwrap_or_default();
+
+                        model_obj.insert("id".to_string(), json!(model_id.clone()));
+                        let model_name = self.opencode_model_name.value.trim();
+                        if model_name.is_empty() {
+                            model_obj.remove("name");
+                        } else {
+                            model_obj.insert("name".to_string(), json!(model_name));
+                        }
+                        let context_value = self.opencode_model_context_limit.value.trim();
+                        if context_value.is_empty() {
+                            model_obj.remove("context_length");
+                        } else if let Ok(context_length) = context_value.parse::<u64>() {
+                            model_obj.insert("context_length".to_string(), json!(context_length));
+                        }
+
+                        let updated_model = Value::Object(model_obj);
+                        if let Some(index) = target_index {
+                            models[index] = updated_model;
+                        } else {
+                            models.push(updated_model);
+                        }
+                    }
+                    None => {
+                        if let Some(original_id) = self.opencode_model_original_id.as_deref() {
+                            if let Some(index) = openclaw_model_index(&models, original_id) {
+                                models.remove(index);
+                            }
+                        }
+                    }
+                }
+
+                if models.is_empty() {
+                    settings_obj.remove("models");
+                } else {
+                    settings_obj.insert("models".to_string(), Value::Array(models));
+                }
+            }
         }
 
         Value::Object(provider_obj)
@@ -563,7 +630,7 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::OpenCode | AppType::OpenClaw => {}
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,

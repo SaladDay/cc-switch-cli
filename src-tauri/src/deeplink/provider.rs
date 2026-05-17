@@ -140,6 +140,7 @@ fn build_provider_from_request(
         AppType::Gemini => build_gemini_settings(request),
         AppType::OpenCode => build_opencode_settings(request),
         AppType::OpenClaw => build_openclaw_settings(request),
+        AppType::Hermes => build_hermes_settings(request),
     };
 
     let meta = build_provider_meta(request)?;
@@ -370,6 +371,30 @@ fn build_openclaw_settings(request: &DeepLinkImportRequest) -> serde_json::Value
     }
     settings.insert("api".to_string(), json!("openai-completions"));
 
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.insert(
+            "models".to_string(),
+            json!([{ "id": model, "name": model }]),
+        );
+    }
+
+    serde_json::Value::Object(settings)
+}
+
+fn build_hermes_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
+    let endpoint = get_primary_endpoint(request);
+    let mut settings = serde_json::Map::new();
+
+    if !endpoint.is_empty() {
+        settings.insert("base_url".to_string(), json!(endpoint));
+    }
+    if let Some(api_key) = &request.api_key {
+        settings.insert("api_key".to_string(), json!(api_key));
+    }
     if let Some(model) = request
         .model
         .as_deref()

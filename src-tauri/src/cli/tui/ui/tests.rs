@@ -575,6 +575,7 @@ fn installed_skill(directory: &str, name: &str) -> InstalledSkill {
             codex: false,
             gemini: false,
             opencode: false,
+            hermes: false,
         },
         installed_at: 1,
     }
@@ -799,6 +800,7 @@ fn header_only_renders_selected_visible_apps() {
         gemini: false,
         opencode: false,
         openclaw: true,
+        hermes: false,
     })
     .expect("save visible apps");
 
@@ -827,6 +829,7 @@ fn header_keeps_all_app_tabs_visible_with_proxy_chip() {
         gemini: true,
         opencode: true,
         openclaw: true,
+        hermes: false,
     })
     .expect("save visible apps");
 
@@ -855,6 +858,7 @@ fn settings_page_shows_visible_apps_row_value() {
         gemini: true,
         opencode: false,
         openclaw: true,
+        hermes: false,
     })
     .expect("save visible apps");
 
@@ -935,6 +939,7 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
             gemini: false,
             opencode: false,
             openclaw: false,
+            hermes: false,
         },
     };
     app.push_toast(
@@ -971,6 +976,7 @@ fn visible_apps_picker_uses_space_toggle_key() {
             gemini: false,
             opencode: false,
             openclaw: false,
+            hermes: false,
         },
     };
 
@@ -1587,6 +1593,7 @@ fn home_connection_card_labels_mcp_and_skills_with_active_counts() {
                 codex: false,
                 gemini: false,
                 opencode: false,
+                hermes: false,
             },
             installed_at: 0,
         },
@@ -2397,6 +2404,7 @@ fn skills_page_shows_opencode_summary() {
         codex: false,
         gemini: false,
         opencode: true,
+        hermes: false,
     };
     data.skills.installed = vec![skill];
 
@@ -2424,6 +2432,7 @@ fn skill_detail_page_shows_opencode_enabled_state() {
         codex: false,
         gemini: false,
         opencode: true,
+        hermes: false,
     };
     data.skills.installed = vec![skill];
 

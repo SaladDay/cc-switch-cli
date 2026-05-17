@@ -8,6 +8,8 @@ pub enum LocalTool {
     Codex,
     Gemini,
     OpenCode,
+    OpenClaw,
+    Hermes,
 }
 
 #[derive(Debug, Clone)]
@@ -24,25 +26,37 @@ pub struct ToolCheckResult {
     pub status: ToolCheckStatus,
 }
 
-pub fn check_local_environment() -> Vec<ToolCheckResult> {
-    const SPECS: &[(LocalTool, &str, &str, &[&str])] = &[
-        (
-            LocalTool::Claude,
-            "claude",
-            "Claude",
-            &["--version", "version"],
-        ),
-        (LocalTool::Codex, "codex", "Codex", &["--version"]),
-        (LocalTool::Gemini, "gemini", "Gemini", &["--version", "-v"]),
-        (
-            LocalTool::OpenCode,
-            "opencode",
-            "OpenCode",
-            &["--version", "version"],
-        ),
-    ];
+const TOOL_SPECS: &[(LocalTool, &str, &str, &[&str])] = &[
+    (
+        LocalTool::Claude,
+        "claude",
+        "Claude",
+        &["--version", "version"],
+    ),
+    (LocalTool::Codex, "codex", "Codex", &["--version"]),
+    (LocalTool::Gemini, "gemini", "Gemini", &["--version", "-v"]),
+    (
+        LocalTool::OpenCode,
+        "opencode",
+        "OpenCode",
+        &["--version", "version"],
+    ),
+    (
+        LocalTool::OpenClaw,
+        "openclaw",
+        "OpenClaw",
+        &["--version", "version"],
+    ),
+    (
+        LocalTool::Hermes,
+        "hermes",
+        "Hermes",
+        &["--version", "version"],
+    ),
+];
 
-    SPECS
+pub fn check_local_environment() -> Vec<ToolCheckResult> {
+    TOOL_SPECS
         .iter()
         .map(|(tool, bin, display_name, args)| ToolCheckResult {
             tool: *tool,
@@ -140,7 +154,7 @@ pub(crate) fn parse_version(output: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_version;
+    use super::{parse_version, LocalTool, TOOL_SPECS};
 
     #[test]
     fn parse_version_extracts_semver() {
@@ -159,5 +173,16 @@ mod tests {
     #[test]
     fn parse_version_returns_none_for_garbage() {
         assert_eq!(parse_version("nonsense").as_deref(), None);
+    }
+
+    #[test]
+    fn tool_specs_include_openclaw_and_hermes() {
+        let tools = TOOL_SPECS
+            .iter()
+            .map(|(tool, _, _, _)| *tool)
+            .collect::<Vec<_>>();
+
+        assert!(tools.contains(&LocalTool::OpenClaw));
+        assert!(tools.contains(&LocalTool::Hermes));
     }
 }

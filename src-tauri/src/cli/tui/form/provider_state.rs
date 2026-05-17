@@ -155,7 +155,7 @@ impl ProviderAddFormState {
                 .ok()
                 .and_then(|value| value.as_object().cloned())
                 .is_some_and(|obj| !obj.is_empty()),
-            AppType::OpenCode | AppType::OpenClaw => false,
+            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => false,
         }
     }
 
@@ -210,7 +210,7 @@ impl ProviderAddFormState {
             ProviderAddField::Notes,
         ];
 
-        if matches!(self.app_type, AppType::OpenClaw) {
+        if matches!(self.app_type, AppType::OpenClaw | AppType::Hermes) {
             fields.insert(0, ProviderAddField::Id);
         }
 
@@ -254,6 +254,13 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::OpenCodeBaseUrl);
                 fields.push(ProviderAddField::OpenClawUserAgent);
                 fields.push(ProviderAddField::OpenClawModels);
+            }
+            AppType::Hermes => {
+                fields.push(ProviderAddField::OpenCodeApiKey);
+                fields.push(ProviderAddField::OpenCodeBaseUrl);
+                fields.push(ProviderAddField::OpenCodeModelId);
+                fields.push(ProviderAddField::OpenCodeModelName);
+                fields.push(ProviderAddField::OpenCodeModelContextLimit);
             }
         }
 

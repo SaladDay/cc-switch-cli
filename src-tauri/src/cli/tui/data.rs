@@ -251,6 +251,7 @@ impl ProxySnapshot {
             AppType::Gemini => Some(self.gemini_takeover),
             AppType::OpenCode => None,
             AppType::OpenClaw => None,
+            AppType::Hermes => None,
         }
     }
 
@@ -323,7 +324,7 @@ pub(crate) fn provider_display_name(app_type: &AppType, row: &ProviderRow) -> St
         return row.provider.name.clone();
     }
 
-    if matches!(app_type, AppType::OpenClaw) {
+    if matches!(app_type, AppType::OpenClaw | AppType::Hermes) {
         return row.id.clone();
     }
 
@@ -524,6 +525,9 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
     if matches!(app_type, AppType::OpenClaw) {
         ProviderService::sync_openclaw_providers_from_live(state)?;
     }
+    if matches!(app_type, AppType::Hermes) {
+        ProviderService::sync_hermes_providers_from_live(state)?;
+    }
 
     let current_id = ProviderService::current(state, app_type.clone())?;
     let providers = ProviderService::list(state, app_type.clone())?;
@@ -541,6 +545,14 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
     };
     let opencode_live_ids = if matches!(app_type, AppType::OpenCode) {
         crate::opencode_config::get_providers()?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
+    let hermes_live_ids = if matches!(app_type, AppType::Hermes) {
+        crate::hermes_config::get_providers()?
             .into_iter()
             .map(|(id, _)| id)
             .collect::<HashSet<_>>()
@@ -573,6 +585,7 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
                 is_in_config: match app_type {
                     AppType::OpenCode => opencode_live_ids.contains(&id),
                     AppType::OpenClaw => openclaw_live_ids.contains(&id),
+                    AppType::Hermes => hermes_live_ids.contains(&id),
                     _ => true,
                 },
                 is_saved: true,
@@ -659,6 +672,11 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .or_else(|| settings_config.get("base_url"))?
             .as_str()
             .map(|s| s.to_string()),
+        AppType::Hermes => settings_config
+            .get("base_url")
+            .or_else(|| settings_config.get("baseUrl"))?
+            .as_str()
+            .map(|s| s.to_string()),
     }
 }
 
@@ -672,6 +690,13 @@ fn extract_primary_model_id(
             Some(live_provider) => openclaw_primary_model_id(live_provider),
             None => openclaw_primary_model_id(settings_config),
         },
+        AppType::Hermes => settings_config
+            .get("models")
+            .and_then(|value| value.as_array())
+            .and_then(|models| models.first())
+            .and_then(|model| model.get("id").and_then(Value::as_str))
+            .or_else(|| settings_config.get("model").and_then(Value::as_str))
+            .map(str::to_string),
         _ => None,
     }
 }

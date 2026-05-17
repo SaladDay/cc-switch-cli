@@ -162,6 +162,17 @@ impl StreamCheckService {
                 .await
             }
             AppType::OpenClaw => unreachable!("OpenClaw should return unsupported earlier"),
+            AppType::Hermes => {
+                Self::check_codex_stream(
+                    &client,
+                    &base_url,
+                    &auth,
+                    &model_to_test,
+                    test_prompt,
+                    request_timeout,
+                )
+                .await
+            }
         };
 
         let response_time = start.elapsed().as_millis() as u64;

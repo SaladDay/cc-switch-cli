@@ -20,6 +20,8 @@ pub struct VisibleApps {
     pub opencode: bool,
     #[serde(default = "default_visible_app_openclaw")]
     pub openclaw: bool,
+    #[serde(default = "default_visible_app_hermes")]
+    pub hermes: bool,
 }
 
 fn default_visible_app_claude() -> bool {
@@ -42,6 +44,10 @@ fn default_visible_app_openclaw() -> bool {
     true
 }
 
+fn default_visible_app_hermes() -> bool {
+    true
+}
+
 pub fn default_visible_apps() -> VisibleApps {
     VisibleApps {
         claude: true,
@@ -49,6 +55,7 @@ pub fn default_visible_apps() -> VisibleApps {
         gemini: false,
         opencode: true,
         openclaw: true,
+        hermes: true,
     }
 }
 
@@ -73,6 +80,7 @@ impl VisibleApps {
             AppType::Gemini => self.gemini,
             AppType::OpenCode => self.opencode,
             AppType::OpenClaw => self.openclaw,
+            AppType::Hermes => self.hermes,
         }
     }
 
@@ -83,6 +91,7 @@ impl VisibleApps {
             AppType::Gemini => self.gemini = enabled,
             AppType::OpenCode => self.opencode = enabled,
             AppType::OpenClaw => self.openclaw = enabled,
+            AppType::Hermes => self.hermes = enabled,
         }
     }
 
@@ -103,13 +112,14 @@ impl VisibleApps {
     }
 }
 
-fn app_order() -> [AppType; 5] {
+fn app_order() -> [AppType; 6] {
     [
         AppType::Claude,
         AppType::Codex,
         AppType::Gemini,
         AppType::OpenCode,
         AppType::OpenClaw,
+        AppType::Hermes,
     ]
 }
 
@@ -312,6 +322,8 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hermes_config_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_claude: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_codex: Option<String>,
@@ -321,6 +333,8 @@ pub struct AppSettings {
     pub current_provider_opencode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_openclaw: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_hermes: Option<String>,
     #[serde(default = "default_visible_apps")]
     pub visible_apps: VisibleApps,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -366,11 +380,13 @@ impl Default for AppSettings {
             gemini_config_dir: None,
             opencode_config_dir: None,
             openclaw_config_dir: None,
+            hermes_config_dir: None,
             current_provider_claude: None,
             current_provider_codex: None,
             current_provider_gemini: None,
             current_provider_opencode: None,
             current_provider_openclaw: None,
+            current_provider_hermes: None,
             visible_apps: default_visible_apps(),
             language: None,
             launch_on_startup: false,
@@ -422,6 +438,13 @@ impl AppSettings {
 
         self.openclaw_config_dir = self
             .openclaw_config_dir
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        self.hermes_config_dir = self
+            .hermes_config_dir
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
@@ -598,6 +621,14 @@ pub fn get_openclaw_override_dir() -> Option<PathBuf> {
         .map(|p| resolve_override_path(p))
 }
 
+pub fn get_hermes_override_dir() -> Option<PathBuf> {
+    let settings = settings_store().read().ok()?;
+    settings
+        .hermes_config_dir
+        .as_ref()
+        .map(|p| resolve_override_path(p))
+}
+
 pub fn get_current_provider(app_type: &AppType) -> Option<String> {
     let settings = settings_store().read().ok()?;
     match app_type {
@@ -606,6 +637,7 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
         AppType::Gemini => settings.current_provider_gemini.clone(),
         AppType::OpenCode => settings.current_provider_opencode.clone(),
         AppType::OpenClaw => settings.current_provider_openclaw.clone(),
+        AppType::Hermes => settings.current_provider_hermes.clone(),
     }
 }
 
@@ -618,6 +650,7 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
         AppType::Gemini => settings.current_provider_gemini = id.map(|value| value.to_string()),
         AppType::OpenCode => settings.current_provider_opencode = id.map(|value| value.to_string()),
         AppType::OpenClaw => settings.current_provider_openclaw = id.map(|value| value.to_string()),
+        AppType::Hermes => settings.current_provider_hermes = id.map(|value| value.to_string()),
     }
 
     update_settings(settings)

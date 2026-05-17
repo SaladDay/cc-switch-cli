@@ -13,6 +13,7 @@ mod app_config {
         Gemini,
         OpenCode,
         OpenClaw,
+        Hermes,
     }
 
     impl AppType {
@@ -23,6 +24,7 @@ mod app_config {
                 AppType::Gemini => "gemini",
                 AppType::OpenCode => "opencode",
                 AppType::OpenClaw => "openclaw",
+                AppType::Hermes => "hermes",
             }
         }
     }
@@ -292,6 +294,7 @@ fn default_visible_apps_hide_gemini() {
             AppType::Codex,
             AppType::OpenCode,
             AppType::OpenClaw,
+            AppType::Hermes,
         ]
     );
     assert!(!visible.is_enabled_for(&AppType::Gemini));
@@ -308,6 +311,7 @@ fn set_visible_apps_persists_visible_apps_as_camel_case_json() {
         gemini: true,
         opencode: false,
         openclaw: true,
+        hermes: false,
     })
     .expect("persist visible apps");
 
@@ -324,6 +328,7 @@ fn set_visible_apps_persists_visible_apps_as_camel_case_json() {
             "gemini": true,
             "opencode": false,
             "openclaw": true,
+            "hermes": false,
         })
     );
 }
@@ -341,6 +346,7 @@ fn load_reads_valid_non_default_visible_apps_from_settings_json() {
                 "gemini": true,
                 "opencode": true,
                 "openclaw": false,
+                "hermes": false,
             }
         }),
     );
@@ -356,6 +362,7 @@ fn load_reads_valid_non_default_visible_apps_from_settings_json() {
             gemini: true,
             opencode: true,
             openclaw: false,
+            hermes: false,
         }
     );
     assert_eq!(
@@ -387,6 +394,7 @@ fn load_partial_visible_apps_object_uses_defaults_for_missing_keys() {
             gemini: false,
             opencode: true,
             openclaw: true,
+            hermes: true,
         }
     );
 }
@@ -423,6 +431,7 @@ fn set_visible_apps_rejects_zero_selection() {
         gemini: false,
         opencode: false,
         openclaw: false,
+        hermes: false,
     })
     .expect_err("zero visible apps should be rejected");
 
@@ -444,6 +453,7 @@ fn update_settings_rejects_all_false_visible_apps() {
         gemini: false,
         opencode: false,
         openclaw: false,
+        hermes: false,
     };
 
     let err =
@@ -491,7 +501,8 @@ fn load_normalizes_all_false_visible_apps_to_defaults() {
                 "codex": false,
                 "gemini": false,
                 "opencode": false,
-                "openclaw": false
+                "openclaw": false,
+                "hermes": false
             }
         }),
     );
@@ -535,6 +546,7 @@ fn next_visible_app_wraps_and_skips_hidden_entries() {
         gemini: false,
         opencode: true,
         openclaw: true,
+        hermes: false,
     };
 
     assert_eq!(

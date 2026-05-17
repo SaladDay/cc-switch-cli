@@ -19,6 +19,7 @@ pub(super) fn populate_form_from_provider(
         AppType::Gemini => populate_gemini_form(form, provider),
         AppType::OpenCode => populate_opencode_form(form, provider),
         AppType::OpenClaw => populate_openclaw_form(form, provider),
+        AppType::Hermes => populate_hermes_form(form, provider),
     }
 }
 
@@ -249,6 +250,55 @@ fn populate_openclaw_form(form: &mut ProviderAddFormState, provider: &Provider) 
             form.opencode_model_context_limit
                 .set(context_window.to_string());
         }
+    }
+}
+
+fn populate_hermes_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    if let Some(api_key) = provider
+        .settings_config
+        .get("api_key")
+        .or_else(|| provider.settings_config.get("apiKey"))
+        .and_then(|value| value.as_str())
+    {
+        form.opencode_api_key.set(api_key);
+    }
+    if let Some(base_url) = provider
+        .settings_config
+        .get("base_url")
+        .or_else(|| provider.settings_config.get("baseUrl"))
+        .and_then(|value| value.as_str())
+    {
+        form.opencode_base_url.set(base_url);
+    }
+    if let Some(models) = provider
+        .settings_config
+        .get("models")
+        .and_then(|value| value.as_array())
+    {
+        if let Some(model) = models.first() {
+            if let Some(id) = model.get("id").and_then(|value| value.as_str()) {
+                form.opencode_model_original_id = Some(id.to_string());
+                form.opencode_model_id.set(id);
+            }
+            if let Some(name) = model.get("name").and_then(|value| value.as_str()) {
+                form.opencode_model_name.set(name);
+            }
+            if let Some(context_length) = model
+                .get("context_length")
+                .or_else(|| model.get("contextWindow"))
+                .and_then(|value| value.as_u64())
+            {
+                form.opencode_model_context_limit
+                    .set(context_length.to_string());
+            }
+        }
+    } else if let Some(model) = provider
+        .settings_config
+        .get("model")
+        .and_then(|value| value.as_str())
+    {
+        form.opencode_model_original_id = Some(model.to_string());
+        form.opencode_model_id.set(model);
     }
 }
 

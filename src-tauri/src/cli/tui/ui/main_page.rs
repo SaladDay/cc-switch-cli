@@ -585,18 +585,28 @@ fn render_local_env_check_card(
 
     let cols0 = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
         .split(rows[0]);
     let cols1 = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
         .split(rows[1]);
 
     let cells = [
         (LocalTool::Claude, "Claude", cols0[0]),
         (LocalTool::Codex, "Codex", cols0[1]),
-        (LocalTool::Gemini, "Gemini", cols1[0]),
-        (LocalTool::OpenCode, "OpenCode", cols1[1]),
+        (LocalTool::Gemini, "Gemini", cols0[2]),
+        (LocalTool::OpenCode, "OpenCode", cols1[0]),
+        (LocalTool::OpenClaw, "OpenClaw", cols1[1]),
+        (LocalTool::Hermes, "Hermes", cols1[2]),
     ];
 
     for (tool, display_name, cell_area) in cells {
