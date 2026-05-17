@@ -69,7 +69,7 @@ pub(crate) enum QuotaReq {
 pub(crate) enum QuotaMsg {
     Finished {
         target: QuotaTarget,
-        result: Result<crate::services::SubscriptionQuota, String>,
+        result: Result<crate::cli::tui::data::ProviderUsageQuota, String>,
     },
 }
 

@@ -1075,6 +1075,106 @@ fn add_first_provider_sets_current() {
 
 #[test]
 #[serial]
+fn provider_add_injects_coding_plan_usage_script_for_claude_provider() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    let state = state_from_config(config);
+
+    let provider = Provider::with_id(
+        "kimi".to_string(),
+        "Kimi Coding".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token",
+                "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding/v1"
+            }
+        }),
+        None,
+    );
+
+    ProviderService::add(&state, AppType::Claude, provider).expect("add should succeed");
+
+    let cfg = state.config.read().expect("read config");
+    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
+    let stored = manager.providers.get("kimi").expect("stored provider");
+    let script = stored
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.usage_script.as_ref())
+        .expect("coding plan usage script should be injected");
+
+    assert!(script.enabled);
+    assert_eq!(script.template_type.as_deref(), Some("token_plan"));
+    assert_eq!(script.coding_plan_provider.as_deref(), Some("kimi"));
+    assert_eq!(script.language, "javascript");
+    assert_eq!(script.code, "");
+    assert_eq!(script.timeout, Some(10));
+    assert_eq!(script.auto_query_interval, Some(5));
+}
+
+#[test]
+#[serial]
+fn provider_add_keeps_existing_usage_script_for_coding_plan_claude_provider() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    let state = state_from_config(config);
+
+    let mut provider = Provider::with_id(
+        "custom-script".to_string(),
+        "Custom Script".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "token",
+                "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding/v1"
+            }
+        }),
+        None,
+    );
+    provider.meta = Some(crate::provider::ProviderMeta {
+        usage_script: Some(crate::provider::UsageScript {
+            enabled: false,
+            language: "javascript".to_string(),
+            code: "return {}".to_string(),
+            timeout: Some(8),
+            api_key: None,
+            base_url: None,
+            access_token: None,
+            user_id: None,
+            template_type: Some("custom".to_string()),
+            auto_query_interval: Some(0),
+            coding_plan_provider: None,
+        }),
+        ..Default::default()
+    });
+
+    ProviderService::add(&state, AppType::Claude, provider).expect("add should succeed");
+
+    let cfg = state.config.read().expect("read config");
+    let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
+    let stored = manager
+        .providers
+        .get("custom-script")
+        .expect("stored provider");
+    let script = stored
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.usage_script.as_ref())
+        .expect("existing usage script should remain");
+
+    assert!(!script.enabled);
+    assert_eq!(script.template_type.as_deref(), Some("custom"));
+    assert_eq!(script.code, "return {}");
+    assert_eq!(script.coding_plan_provider, None);
+}
+
+#[test]
+#[serial]
 fn current_prefers_effective_current_from_local_settings_without_mutating_config() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());
@@ -4448,6 +4548,7 @@ fn resolve_usage_script_credentials_falls_back_to_provider_values() {
         user_id: None,
         template_type: None,
         auto_query_interval: None,
+        coding_plan_provider: None,
     };
 
     let (api_key, base_url) = ProviderService::resolve_usage_script_credentials(
@@ -4483,6 +4584,7 @@ fn resolve_usage_script_credentials_does_not_require_provider_api_key_when_scrip
         user_id: None,
         template_type: None,
         auto_query_interval: None,
+        coding_plan_provider: None,
     };
 
     let (api_key, base_url) = ProviderService::resolve_usage_script_credentials(

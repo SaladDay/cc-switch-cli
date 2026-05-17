@@ -563,7 +563,7 @@ pub(crate) fn handle_update_msg(app: &mut App, update_check: &mut RequestTracker
 mod tests {
     use super::*;
     use crate::app_config::AppType;
-    use crate::cli::tui::data::{QuotaTarget, QuotaTargetKind};
+    use crate::cli::tui::data::{ProviderUsageQuota, QuotaTarget, QuotaTargetKind};
     use crate::services::{CredentialStatus, SubscriptionQuota};
 
     fn quota_target() -> QuotaTarget {
@@ -602,7 +602,7 @@ mod tests {
             &mut data,
             QuotaMsg::Finished {
                 target: target.clone(),
-                result: Ok(quota_result()),
+                result: Ok(ProviderUsageQuota::Subscription(quota_result())),
             },
         );
 
@@ -630,7 +630,7 @@ mod tests {
             &mut data,
             QuotaMsg::Finished {
                 target,
-                result: Ok(quota_result()),
+                result: Ok(ProviderUsageQuota::Subscription(quota_result())),
             },
         );
 

@@ -1291,6 +1291,16 @@ pub mod texts {
         }
     }
 
+    pub fn tui_quota_seconds_ago(count: i64) -> String {
+        if is_chinese() {
+            format!("{count} 秒前")
+        } else if count == 1 {
+            "1 second ago".to_string()
+        } else {
+            format!("{count} seconds ago")
+        }
+    }
+
     pub fn tui_quota_minutes_ago(count: i64) -> String {
         if is_chinese() {
             format!("{count} 分钟前")
@@ -1947,6 +1957,346 @@ pub mod texts {
             "字段"
         } else {
             "Fields"
+        }
+    }
+
+    pub fn tui_usage_query_title(provider: &str) -> String {
+        if provider.trim().is_empty() {
+            tui_usage_query_configure_title().to_string()
+        } else {
+            format!("{} - {provider}", tui_usage_query_configure_title())
+        }
+    }
+
+    pub fn tui_usage_query_configure_title() -> &'static str {
+        if is_chinese() {
+            "配置用量查询"
+        } else {
+            "Configure Usage Query"
+        }
+    }
+
+    pub fn tui_usage_query_notice_title() -> &'static str {
+        tui_usage_query_configure_title()
+    }
+
+    pub fn tui_usage_query_notice_message() -> &'static str {
+        if is_chinese() {
+            "用量查询需要配置专用的查询脚本或 API 参数，请确保您已从供应商处获取相关信息。\n\n如不确定如何配置，请先查阅供应商文档。"
+        } else {
+            "Usage query requires a custom script or API parameters. Please make sure you have obtained the necessary information from your provider.\n\nIf unsure how to configure, please consult your provider's documentation first."
+        }
+    }
+
+    pub fn tui_usage_query_enable() -> &'static str {
+        if is_chinese() {
+            "启用用量查询"
+        } else {
+            "Enable usage query"
+        }
+    }
+
+    pub fn tui_usage_query_template() -> &'static str {
+        if is_chinese() {
+            "预设模板"
+        } else {
+            "Preset template"
+        }
+    }
+
+    pub fn tui_usage_query_access_token() -> &'static str {
+        if is_chinese() {
+            "访问令牌（在个人安全设置里获取）"
+        } else {
+            "Access Token"
+        }
+    }
+
+    pub fn tui_usage_query_user_id() -> &'static str {
+        if is_chinese() {
+            "用户 ID"
+        } else {
+            "User ID"
+        }
+    }
+
+    pub fn tui_usage_query_timeout_seconds() -> &'static str {
+        if is_chinese() {
+            "超时时间（秒）"
+        } else {
+            "Timeout (seconds)"
+        }
+    }
+
+    pub fn tui_usage_query_auto_interval() -> &'static str {
+        if is_chinese() {
+            "自动查询间隔（分钟，0 表示不自动查询）"
+        } else {
+            "Auto query interval (minutes, 0 to disable)"
+        }
+    }
+
+    pub fn tui_usage_query_script() -> &'static str {
+        if is_chinese() {
+            "提取器代码"
+        } else {
+            "Extractor Code"
+        }
+    }
+
+    pub fn tui_usage_query_script_preview_title() -> &'static str {
+        if is_chinese() {
+            "提取器代码 | 返回对象需包含剩余额度等字段"
+        } else {
+            "Extractor code | Return object should include remaining quota fields"
+        }
+    }
+
+    pub fn tui_usage_query_script_help_title() -> &'static str {
+        if is_chinese() {
+            "脚本编写说明："
+        } else {
+            "Script writing instructions:"
+        }
+    }
+
+    pub fn tui_usage_query_copilot_auto_auth() -> &'static str {
+        if is_chinese() {
+            "自动使用 OAuth 认证，无需手动配置凭证"
+        } else {
+            "Auto OAuth authentication, no manual credentials needed"
+        }
+    }
+
+    pub fn tui_usage_query_token_plan_hint() -> &'static str {
+        if is_chinese() {
+            "自动使用供应商的 API Key 和 Base URL 查询 Token Plan 额度"
+        } else {
+            "Automatically uses the provider's API Key and Base URL to query Token Plan quota"
+        }
+    }
+
+    pub fn tui_usage_query_balance_hint() -> &'static str {
+        if is_chinese() {
+            "自动使用供应商的 API Key 查询账户余额"
+        } else {
+            "Automatically uses the provider's API Key to query account balance"
+        }
+    }
+
+    pub fn tui_usage_query_script_empty() -> &'static str {
+        if is_chinese() {
+            "脚本配置不能为空"
+        } else {
+            "Script configuration cannot be empty"
+        }
+    }
+
+    pub fn tui_usage_query_must_have_return() -> &'static str {
+        if is_chinese() {
+            "脚本必须包含 return 语句"
+        } else {
+            "Script must contain return statement"
+        }
+    }
+
+    pub fn tui_usage_query_coding_plan_provider() -> &'static str {
+        if is_chinese() {
+            "Coding Plan 供应商"
+        } else {
+            "Coding Plan Provider"
+        }
+    }
+
+    pub fn tui_usage_query_info() -> &'static str {
+        if is_chinese() {
+            "说明"
+        } else {
+            "Info"
+        }
+    }
+
+    pub fn tui_usage_query_custom_hint() -> &'static str {
+        if is_chinese() {
+            "支持变量: {{apiKey}}, {{baseUrl}} | extractor 函数接收 API 响应的 JSON 对象"
+        } else {
+            "Supported variables: {{apiKey}}, {{baseUrl}} | extractor function receives API response JSON object"
+        }
+    }
+
+    pub fn tui_usage_query_credentials_config() -> &'static str {
+        if is_chinese() {
+            "凭证配置"
+        } else {
+            "Credentials"
+        }
+    }
+
+    pub fn tui_usage_query_credentials_hint() -> &'static str {
+        if is_chinese() {
+            "留空则自动使用供应商配置"
+        } else {
+            "Leave empty to use provider config"
+        }
+    }
+
+    pub fn tui_usage_query_optional() -> &'static str {
+        if is_chinese() {
+            "可选"
+        } else {
+            "optional"
+        }
+    }
+
+    pub fn tui_usage_query_base_url() -> &'static str {
+        if is_chinese() {
+            "请求地址"
+        } else {
+            "Base URL"
+        }
+    }
+
+    pub fn tui_usage_query_api_key_placeholder() -> &'static str {
+        if is_chinese() {
+            "留空则使用供应商的 API Key"
+        } else {
+            "Leave empty to use provider's API Key"
+        }
+    }
+
+    pub fn tui_usage_query_base_url_placeholder() -> &'static str {
+        if is_chinese() {
+            "留空则使用供应商的请求地址"
+        } else {
+            "Leave empty to use provider's base URL"
+        }
+    }
+
+    pub fn tui_usage_query_access_token_placeholder() -> &'static str {
+        if is_chinese() {
+            "在'安全设置'里生成"
+        } else {
+            "Generate in 'Security Settings'"
+        }
+    }
+
+    pub fn tui_usage_query_user_id_placeholder() -> &'static str {
+        if is_chinese() {
+            "例如：114514"
+        } else {
+            "e.g., 114514"
+        }
+    }
+
+    pub fn tui_usage_query_config_format() -> &'static str {
+        if is_chinese() {
+            "配置格式："
+        } else {
+            "Configuration format:"
+        }
+    }
+
+    pub fn tui_usage_query_extractor_format() -> &'static str {
+        if is_chinese() {
+            "extractor 返回格式（所有字段均为可选）："
+        } else {
+            "Extractor return format (all fields optional):"
+        }
+    }
+
+    pub fn tui_usage_query_tips() -> &'static str {
+        if is_chinese() {
+            "💡 提示："
+        } else {
+            "💡 Tips:"
+        }
+    }
+
+    pub fn tui_usage_query_field_is_valid() -> &'static str {
+        if is_chinese() {
+            "• isValid: 布尔值，套餐是否有效"
+        } else {
+            "• isValid: Boolean, whether plan is valid"
+        }
+    }
+
+    pub fn tui_usage_query_field_invalid_message() -> &'static str {
+        if is_chinese() {
+            "• invalidMessage: 字符串，失效原因说明（当 isValid 为 false 时显示）"
+        } else {
+            "• invalidMessage: String, reason for expiration (shown when isValid is false)"
+        }
+    }
+
+    pub fn tui_usage_query_field_remaining() -> &'static str {
+        if is_chinese() {
+            "• remaining: 数字，剩余额度"
+        } else {
+            "• remaining: Number, remaining quota"
+        }
+    }
+
+    pub fn tui_usage_query_field_unit() -> &'static str {
+        if is_chinese() {
+            "• unit: 字符串，单位（如 \"USD\"）"
+        } else {
+            "• unit: String, unit (e.g., \"USD\")"
+        }
+    }
+
+    pub fn tui_usage_query_field_plan_name() -> &'static str {
+        if is_chinese() {
+            "• planName: 字符串，套餐名称"
+        } else {
+            "• planName: String, plan name"
+        }
+    }
+
+    pub fn tui_usage_query_field_total() -> &'static str {
+        if is_chinese() {
+            "• total: 数字，总额度"
+        } else {
+            "• total: Number, total quota"
+        }
+    }
+
+    pub fn tui_usage_query_field_used() -> &'static str {
+        if is_chinese() {
+            "• used: 数字，已用额度"
+        } else {
+            "• used: Number, used quota"
+        }
+    }
+
+    pub fn tui_usage_query_field_extra() -> &'static str {
+        if is_chinese() {
+            "• extra: 字符串，扩展字段，可自由补充需要展示的文本"
+        } else {
+            "• extra: String, custom display text"
+        }
+    }
+
+    pub fn tui_usage_query_tip1() -> &'static str {
+        if is_chinese() {
+            "• 变量 {{apiKey}} 和 {{baseUrl}} 会自动替换"
+        } else {
+            "• Variables {{apiKey}} and {{baseUrl}} are automatically replaced"
+        }
+    }
+
+    pub fn tui_usage_query_tip2() -> &'static str {
+        if is_chinese() {
+            "• extractor 函数在沙箱环境中执行，支持 ES2020+ 语法"
+        } else {
+            "• Extractor function runs in sandbox environment, supports ES2020+ syntax"
+        }
+    }
+
+    pub fn tui_usage_query_tip3() -> &'static str {
+        if is_chinese() {
+            "• 整个配置必须用 () 包裹，形成对象字面量表达式"
+        } else {
+            "• Entire config must be wrapped in () to form object literal expression"
         }
     }
 
@@ -3366,6 +3716,14 @@ pub mod texts {
             "通用配置片段"
         } else {
             "Common Config Snippet"
+        }
+    }
+
+    pub fn tui_config_item_usage_query() -> &'static str {
+        if is_chinese() {
+            "用量查询"
+        } else {
+            "Usage Query"
         }
     }
 

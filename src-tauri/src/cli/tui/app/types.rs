@@ -69,6 +69,7 @@ pub enum ConfirmAction {
     SettingsSetClaudePluginIntegration { enabled: bool },
     ProviderApiFormatProxyNotice,
     CommonConfigNotice,
+    UsageQueryNotice,
     ProxyEnableAndAutoFailover { app_type: AppType },
     PromptOpenImportCandidate { filename: String, content: String },
     OpenClawDailyMemoryDelete { filename: String },
@@ -203,6 +204,9 @@ pub enum Overlay {
         editing: bool,
     },
     ClaudeApiFormatPicker {
+        selected: usize,
+    },
+    UsageQueryTemplatePicker {
         selected: usize,
     },
     ModelFetchPicker {

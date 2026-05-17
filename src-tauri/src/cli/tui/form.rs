@@ -21,7 +21,11 @@ pub(crate) use super::text_edit::TextInput;
 pub(crate) use codex_config::parse_codex_config_snippet;
 pub(crate) use provider_json::claude_hide_attribution_enabled;
 pub(crate) use provider_json::strip_common_config_from_settings;
+pub(crate) use provider_json::{normalize_usage_interval, normalize_usage_timeout};
 pub(crate) use provider_state::resolve_provider_id_for_submit;
+pub(crate) use provider_state::{
+    detect_balance_provider_for_usage_query, detect_coding_plan_provider_for_usage_query,
+};
 
 pub const OPENCLAW_DEFAULT_API_PROTOCOL: &str = "openai-completions";
 pub const OPENCLAW_DEFAULT_USER_AGENT: &str =
@@ -183,6 +187,38 @@ pub enum ProviderAddField {
     CommonConfigDivider,
     CommonSnippet,
     IncludeCommonConfig,
+    UsageQueryDivider,
+    UsageQuery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFormPage {
+    Main,
+    UsageQuery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageQueryTemplate {
+    Custom,
+    General,
+    NewApi,
+    GitHubCopilot,
+    TokenPlan,
+    Balance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageQueryField {
+    Enabled,
+    Template,
+    ApiKey,
+    BaseUrl,
+    AccessToken,
+    UserId,
+    Timeout,
+    AutoInterval,
+    CodingPlanProvider,
+    Script,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,9 +261,13 @@ pub struct ProviderAddFormState {
     pub app_type: AppType,
     pub mode: FormMode,
     pub focus: FormFocus,
+    pub page: ProviderFormPage,
     pub template_idx: usize,
     pub field_idx: usize,
     pub editing: bool,
+    pub usage_query_touched: bool,
+    pub usage_query_field_idx: usize,
+    pub usage_query_editing: bool,
     pub extra: Value,
     pub id: TextInput,
     pub id_is_manual: bool,
@@ -267,6 +307,16 @@ pub struct ProviderAddFormState {
 
     pub openclaw_user_agent: bool,
     pub openclaw_models: Vec<Value>,
+    pub usage_query_enabled: bool,
+    pub usage_query_template: UsageQueryTemplate,
+    pub usage_query_api_key: TextInput,
+    pub usage_query_base_url: TextInput,
+    pub usage_query_access_token: TextInput,
+    pub usage_query_user_id: TextInput,
+    pub usage_query_timeout: TextInput,
+    pub usage_query_auto_interval: TextInput,
+    pub usage_query_code: String,
+    pub usage_query_coding_plan_provider: TextInput,
     pub opencode_npm_package: TextInput,
     pub opencode_api_key: TextInput,
     pub opencode_base_url: TextInput,

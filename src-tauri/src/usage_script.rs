@@ -323,13 +323,21 @@ fn validate_base_url(base_url: &str) -> Result<(), AppError> {
         ));
     }
 
-    parsed_url.host_str().ok_or_else(|| {
+    let hostname = parsed_url.host_str().ok_or_else(|| {
         AppError::localized(
             "usage_script.base_url_hostname_missing",
             "base_url 必须包含有效的主机名",
             "base_url must include a valid hostname",
         )
     })?;
+
+    if hostname.is_empty() {
+        return Err(AppError::localized(
+            "usage_script.base_url_hostname_empty",
+            "base_url 主机名不能为空",
+            "base_url hostname cannot be empty",
+        ));
+    }
 
     Ok(())
 }
@@ -398,87 +406,9 @@ fn validate_request_url(
                 "Unable to determine port number",
             )),
         }?;
-
-        if let Some(host) = parsed_request.host_str() {
-            let base_host = parsed_base.host_str().unwrap_or("");
-            if !is_private_ip(base_host) && is_private_ip(host) {
-                return Err(AppError::localized(
-                    "usage_script.private_ip_blocked",
-                    "禁止访问私有 IP 地址",
-                    "Access to private IP addresses is blocked",
-                ));
-            }
-        }
-    } else if let Some(host) = parsed_request.host_str() {
-        if is_private_ip(host) && !is_request_loopback {
-            return Err(AppError::localized(
-                "usage_script.private_ip_blocked",
-                "禁止访问私有 IP 地址（localhost 除外）",
-                "Access to private IP addresses is blocked (localhost allowed)",
-            ));
-        }
     }
 
     Ok(())
-}
-
-fn is_private_ip(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-
-    if let Ok(ip_addr) = host.parse::<std::net::IpAddr>() {
-        return is_private_ip_addr(ip_addr);
-    }
-
-    false
-}
-
-fn is_private_ip_addr(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(ipv4) => {
-            let octets = ipv4.octets();
-
-            if octets[0] == 0 {
-                return true;
-            }
-            if octets[0] == 10 {
-                return true;
-            }
-            if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31 {
-                return true;
-            }
-            if octets[0] == 192 && octets[1] == 168 {
-                return true;
-            }
-            if octets[0] == 169 && octets[1] == 254 {
-                return true;
-            }
-            if octets[0] == 127 {
-                return true;
-            }
-
-            false
-        }
-        std::net::IpAddr::V6(ipv6) => {
-            if ipv6.is_loopback() {
-                return true;
-            }
-
-            let first_segment = ipv6.segments()[0];
-            if (first_segment & 0xfe00) == 0xfc00 {
-                return true;
-            }
-            if (first_segment & 0xffc0) == 0xfe80 {
-                return true;
-            }
-            if ipv6.is_unspecified() {
-                return true;
-            }
-
-            false
-        }
-    }
 }
 
 fn is_loopback_host(url: &Url) -> bool {
@@ -743,16 +673,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_url_blocks_private_ip_but_allows_loopback() {
-        let err = validate_request_url("https://10.0.0.1/api", "", true)
-            .expect_err("private IP target should be blocked");
-        let message = err.to_string();
-        assert!(
-            message.contains("私有 IP") || message.contains("private IP"),
-            "unexpected error message: {message}"
-        );
-
+    fn validate_request_url_matches_upstream_custom_and_same_origin_rules() {
+        validate_request_url("https://10.0.0.1/api", "", true)
+            .expect("upstream allows custom HTTPS targets without private-IP filtering");
         validate_request_url("http://127.0.0.1/api", "", true)
             .expect("loopback target should remain allowed");
+
+        let err = validate_request_url(
+            "https://other.example/api",
+            "https://api.example.com",
+            false,
+        )
+        .expect_err("non-custom templates should enforce same-origin");
+        let message = err.to_string();
+        assert!(
+            message.contains("同源请求") || message.contains("same-origin"),
+            "unexpected error message: {message}"
+        );
     }
 }

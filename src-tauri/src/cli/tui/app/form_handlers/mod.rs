@@ -42,6 +42,13 @@ impl App {
     }
 
     fn handle_form_exit_key(&mut self) -> Action {
+        if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+            if matches!(provider.page, form::ProviderFormPage::UsageQuery) {
+                provider.close_usage_query_page();
+                return Action::None;
+            }
+        }
+
         let has_unsaved_changes = self
             .form
             .as_ref()

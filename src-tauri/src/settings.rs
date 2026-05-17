@@ -301,6 +301,9 @@ pub struct AppSettings {
     /// 是否已确认通用配置首次提示
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub common_config_confirmed: Option<bool>,
+    /// 是否已确认用量查询首次提示
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_confirmed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +364,7 @@ impl Default for AppSettings {
             enable_claude_plugin_integration: false,
             skip_claude_onboarding: false,
             common_config_confirmed: None,
+            usage_confirmed: None,
             claude_config_dir: None,
             codex_config_dir: None,
             gemini_config_dir: None,
@@ -740,6 +744,19 @@ pub fn get_common_config_confirmed() -> bool {
 pub fn set_common_config_confirmed(confirmed: bool) -> Result<(), AppError> {
     let mut settings = get_settings();
     settings.common_config_confirmed = Some(confirmed);
+    update_settings(settings)
+}
+
+pub fn get_usage_confirmed() -> bool {
+    settings_store()
+        .read()
+        .map(|s| s.usage_confirmed.unwrap_or(false))
+        .unwrap_or(false)
+}
+
+pub fn set_usage_confirmed(confirmed: bool) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.usage_confirmed = Some(confirmed);
     update_settings(settings)
 }
 

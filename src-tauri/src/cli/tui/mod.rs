@@ -73,6 +73,7 @@ where
     let app_type = resolve_initial_app_type(app_override);
     let mut app = App::new(Some(app_type));
     app.common_config_notice_confirmed = crate::settings::get_common_config_confirmed();
+    app.usage_query_notice_confirmed = crate::settings::get_usage_confirmed();
     let data = load_data(&app.app_type)?;
     Ok((app, data))
 }

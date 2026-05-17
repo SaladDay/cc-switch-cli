@@ -213,7 +213,7 @@ fn quota_countdown(resets_at: Option<&str>) -> Option<String> {
 fn quota_relative_time(timestamp_ms: i64) -> String {
     let diff_secs = ((chrono::Utc::now().timestamp_millis() - timestamp_ms).max(0)) / 1000;
     if diff_secs < 60 {
-        texts::tui_quota_just_now().to_string()
+        texts::tui_quota_seconds_ago(diff_secs.max(1))
     } else if diff_secs < 3600 {
         texts::tui_quota_minutes_ago(diff_secs / 60)
     } else if diff_secs < 86_400 {
@@ -266,6 +266,19 @@ pub(super) fn quota_compact_line(
     }
 
     let quota = state.quota.as_ref()?;
+    if let data::ProviderUsageQuota::Script(result) = quota {
+        return script_usage_compact_line(
+            result,
+            state.loading,
+            state.updated_at,
+            theme,
+            quiet_missing,
+        );
+    }
+
+    let data::ProviderUsageQuota::Subscription(quota) = quota else {
+        return None;
+    };
     match quota.credential_status {
         crate::services::CredentialStatus::NotFound => {
             if quiet_missing {
@@ -425,6 +438,21 @@ pub(super) fn quota_detail_lines(
         return lines;
     };
 
+    if let data::ProviderUsageQuota::Script(result) = quota {
+        push_script_usage_detail_lines(
+            result,
+            state.loading,
+            state.updated_at,
+            &mut push_kv,
+            theme,
+        );
+        return lines;
+    }
+
+    let data::ProviderUsageQuota::Subscription(quota) = quota else {
+        return lines;
+    };
+
     match quota.credential_status {
         crate::services::CredentialStatus::NotFound => {
             push_kv(
@@ -553,6 +581,226 @@ pub(super) fn quota_detail_lines(
     }
 
     lines
+}
+
+fn script_usage_compact_line(
+    result: &crate::provider::UsageResult,
+    loading: bool,
+    updated_at: Option<i64>,
+    theme: &super::theme::Theme,
+    quiet_missing: bool,
+) -> Option<Line<'static>> {
+    if !result.success {
+        return Some(Line::from(Span::styled(
+            texts::tui_quota_query_failed().to_string(),
+            Style::default().fg(theme.err),
+        )));
+    }
+
+    let data = result.data.as_ref()?;
+    let mut spans = Vec::new();
+    for (idx, item) in data.iter().take(2).enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw("  "));
+        }
+        if let Some(name) = display_usage_plan_name(item) {
+            spans.push(Span::styled(
+                format!("{} ", name.trim()),
+                Style::default().fg(theme.comment),
+            ));
+        }
+        spans.push(Span::styled(
+            usage_value_summary(item).unwrap_or_else(|| texts::tui_quota_ok().to_string()),
+            Style::default().fg(theme.cyan),
+        ));
+    }
+
+    if spans.is_empty() {
+        if quiet_missing {
+            return None;
+        }
+        return Some(Line::from(Span::styled(
+            texts::tui_quota_not_available().to_string(),
+            Style::default().fg(theme.surface),
+        )));
+    }
+
+    if loading {
+        spans.push(Span::styled(" | ", Style::default().fg(theme.comment)));
+        spans.push(Span::styled(
+            texts::tui_quota_loading().to_string(),
+            Style::default().fg(theme.surface),
+        ));
+    } else if let Some(checked) = updated_at.map(quota_relative_time) {
+        spans.push(Span::styled(" | ", Style::default().fg(theme.comment)));
+        spans.push(Span::styled(checked, Style::default().fg(theme.surface)));
+    }
+
+    Some(Line::from(spans))
+}
+
+fn push_script_usage_detail_lines(
+    result: &crate::provider::UsageResult,
+    loading: bool,
+    updated_at: Option<i64>,
+    push_kv: &mut impl FnMut(String, Vec<Span<'static>>),
+    theme: &super::theme::Theme,
+) {
+    if !result.success {
+        push_kv(
+            texts::tui_label_quota().to_string(),
+            vec![
+                Span::styled(
+                    texts::tui_quota_query_failed().to_string(),
+                    Style::default().fg(theme.err),
+                ),
+                Span::raw("  "),
+                Span::raw(result.error.clone().unwrap_or_default()),
+            ],
+        );
+        return;
+    }
+
+    if let Some(items) = result.data.as_ref().filter(|items| !items.is_empty()) {
+        if items.len() == 1 && display_usage_plan_name(&items[0]).is_none() {
+            let mut parts = script_usage_item_spans(&items[0], theme);
+            if loading {
+                parts.push(Span::styled(" | ", Style::default().fg(theme.comment)));
+                parts.push(Span::styled(
+                    texts::tui_quota_loading().to_string(),
+                    Style::default().fg(theme.surface),
+                ));
+            } else if let Some(checked) = updated_at.map(quota_relative_time) {
+                parts.push(Span::styled(" | ", Style::default().fg(theme.comment)));
+                parts.push(Span::styled(checked, Style::default().fg(theme.cyan)));
+            }
+            push_kv(texts::tui_label_quota().to_string(), parts);
+            return;
+        }
+    }
+
+    let Some(items) = result.data.as_ref().filter(|items| !items.is_empty()) else {
+        push_kv(
+            texts::tui_label_quota().to_string(),
+            vec![Span::styled(
+                texts::tui_quota_not_available().to_string(),
+                Style::default().fg(theme.surface),
+            )],
+        );
+        return;
+    };
+
+    push_kv(texts::tui_label_quota().to_string(), {
+        let mut spans = vec![Span::styled(
+            if loading {
+                texts::tui_quota_loading().to_string()
+            } else {
+                texts::tui_quota_ok().to_string()
+            },
+            Style::default().fg(if loading { theme.surface } else { theme.ok }),
+        )];
+        if !loading {
+            if let Some(checked) = updated_at.map(quota_relative_time) {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    texts::tui_quota_last_checked(),
+                    Style::default().fg(theme.comment),
+                ));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(checked, Style::default().fg(theme.cyan)));
+            }
+        }
+        spans
+    });
+
+    for (idx, item) in items.iter().enumerate() {
+        let label = display_usage_plan_name(item)
+            .map_or_else(|| format!("Usage {}", idx + 1), str::to_string);
+        let parts = script_usage_item_spans(item, theme);
+        push_kv(label, parts);
+    }
+}
+
+fn script_usage_item_spans(
+    item: &crate::provider::UsageData,
+    theme: &super::theme::Theme,
+) -> Vec<Span<'static>> {
+    let mut parts = Vec::new();
+    if let Some(summary) = usage_value_summary(item) {
+        parts.push(Span::styled(summary, Style::default().fg(theme.cyan)));
+    }
+    if item.is_valid == Some(false) {
+        parts.push(Span::raw("  "));
+        parts.push(Span::styled(
+            item.invalid_message
+                .clone()
+                .unwrap_or_else(|| texts::tui_quota_query_failed().to_string()),
+            Style::default().fg(theme.warn),
+        ));
+    }
+    if let Some(extra) = item
+        .extra
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(Span::raw("  "));
+        parts.push(Span::styled(
+            extra.to_string(),
+            Style::default().fg(theme.comment),
+        ));
+    }
+    if parts.is_empty() {
+        parts.push(Span::styled(
+            texts::tui_quota_ok().to_string(),
+            Style::default().fg(theme.ok),
+        ));
+    }
+    parts
+}
+
+fn display_usage_plan_name(item: &crate::provider::UsageData) -> Option<&str> {
+    item.plan_name.as_deref().filter(|value| {
+        let trimmed = value.trim();
+        !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("default")
+    })
+}
+
+fn usage_value_summary(item: &crate::provider::UsageData) -> Option<String> {
+    let unit = item.unit.as_deref().unwrap_or("");
+    match (item.remaining, item.total, item.used) {
+        (Some(remaining), Some(total), Some(used)) => Some(format!(
+            "{} / {} {} left, {} used",
+            usage_number(remaining),
+            usage_number(total),
+            unit,
+            usage_number(used)
+        )),
+        (Some(remaining), Some(total), None) => Some(format!(
+            "{} / {} {} left",
+            usage_number(remaining),
+            usage_number(total),
+            unit
+        )),
+        (Some(remaining), None, _) => Some(format!("{} {}", usage_number(remaining), unit)),
+        (None, Some(total), Some(used)) => Some(format!(
+            "{} / {} {} used",
+            usage_number(used),
+            usage_number(total),
+            unit
+        )),
+        (None, Some(total), None) => Some(format!("total {} {}", usage_number(total), unit)),
+        (None, None, Some(used)) => Some(format!("used {} {}", usage_number(used), unit)),
+        _ => None,
+    }
+    .map(|value| value.trim().to_string())
+}
+
+fn usage_number(value: f64) -> String {
+    if (value.fract()).abs() < f64::EPSILON {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    }
 }
 
 pub(super) fn kv_line<'a>(

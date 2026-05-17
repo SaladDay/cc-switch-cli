@@ -41,6 +41,7 @@ pub(crate) fn add_form_key_items(
                     Some(
                         ProviderAddField::ClaudeModelConfig
                         | ProviderAddField::CommonSnippet
+                        | ProviderAddField::UsageQuery
                         | ProviderAddField::OpenClawModels,
                     ) => texts::tui_key_open(),
                     Some(
@@ -65,6 +66,58 @@ pub(crate) fn add_form_key_items(
             ]);
         }
         FormFocus::Content => {}
+    }
+
+    keys
+}
+
+pub(crate) fn usage_query_form_key_items(
+    focus: FormFocus,
+    editing: bool,
+    selected_field: Option<super::form::UsageQueryField>,
+    extractor_available: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![
+        ("Ctrl+S", texts::tui_key_save()),
+        ("Esc", texts::tui_key_no()),
+    ];
+    if extractor_available {
+        keys.insert(0, ("Tab", texts::tui_key_focus()));
+    }
+
+    match focus {
+        FormFocus::Fields => {
+            keys.push(("↑↓", texts::tui_key_select()));
+            if editing {
+                keys.extend([
+                    ("←→", texts::tui_key_move()),
+                    ("Enter", texts::tui_key_exit_edit()),
+                ]);
+            } else {
+                let enter_action = match selected_field {
+                    Some(
+                        super::form::UsageQueryField::Enabled
+                        | super::form::UsageQueryField::Template
+                        | super::form::UsageQueryField::CodingPlanProvider,
+                    ) => texts::tui_key_toggle(),
+                    Some(super::form::UsageQueryField::Script) => texts::tui_key_open(),
+                    Some(_) => texts::tui_key_edit_mode(),
+                    None => texts::tui_key_edit_mode(),
+                };
+                keys.push(("Enter", enter_action));
+            }
+        }
+        FormFocus::JsonPreview => {
+            if extractor_available {
+                keys.push(("Enter", texts::tui_key_open()));
+            }
+        }
+        FormFocus::Content => {
+            if extractor_available {
+                keys.push(("Enter", texts::tui_key_view()));
+            }
+        }
+        FormFocus::Templates => {}
     }
 
     keys

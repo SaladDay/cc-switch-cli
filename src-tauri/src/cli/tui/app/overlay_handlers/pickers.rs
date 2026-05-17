@@ -12,6 +12,9 @@ impl App {
         if let Some(action) = self.handle_claude_api_format_picker_key(key, data) {
             return Some(action);
         }
+        if let Some(action) = self.handle_usage_query_template_picker_key(key) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_provider_test_menu_key(key, data) {
             return Some(action);
         }
@@ -132,6 +135,48 @@ impl App {
                     });
                 }
 
+                Action::None
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_usage_query_template_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::UsageQueryTemplatePicker { selected } = &mut self.overlay else {
+            return None;
+        };
+
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+            self.overlay = Overlay::None;
+            return Some(Action::None);
+        };
+
+        let options = provider.available_usage_query_templates();
+        if options.is_empty() {
+            self.overlay = Overlay::None;
+            return Some(Action::None);
+        }
+
+        *selected = (*selected).min(options.len() - 1);
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(options.len() - 1);
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let template = options[*selected];
+                provider.set_usage_query_template(template);
+                provider.touch_usage_query();
+                self.overlay = Overlay::None;
                 Action::None
             }
             _ => Action::None,

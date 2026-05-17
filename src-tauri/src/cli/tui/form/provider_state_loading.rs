@@ -1,12 +1,12 @@
+use super::codex_config::parse_codex_config_snippet;
+use super::{
+    claude_hide_attribution_enabled, detect_balance_provider_for_usage_query,
+    detect_coding_plan_provider_for_usage_query, ClaudeApiFormat, ProviderAddFormState,
+    UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
+};
 use crate::app_config::AppType;
 use crate::provider::Provider;
 use serde_json::Value;
-
-use super::codex_config::parse_codex_config_snippet;
-use super::{
-    claude_hide_attribution_enabled, ClaudeApiFormat, ProviderAddFormState,
-    OPENCLAW_DEFAULT_API_PROTOCOL,
-};
 
 pub(super) fn populate_form_from_provider(
     form: &mut ProviderAddFormState,
@@ -20,6 +20,63 @@ pub(super) fn populate_form_from_provider(
         AppType::OpenCode => populate_opencode_form(form, provider),
         AppType::OpenClaw => populate_openclaw_form(form, provider),
     }
+    populate_usage_query_form(form, provider);
+}
+
+fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    let Some(script) = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.usage_script.as_ref())
+    else {
+        form.refresh_default_usage_query_template();
+        return;
+    };
+
+    form.usage_query_enabled = script.enabled;
+    form.usage_query_timeout
+        .set(script.timeout.unwrap_or(10).to_string());
+    form.usage_query_auto_interval
+        .set(script.auto_query_interval.unwrap_or(5).to_string());
+    if let Some(value) = script.api_key.as_deref() {
+        form.usage_query_api_key.set(value);
+    }
+    if let Some(value) = script.base_url.as_deref() {
+        form.usage_query_base_url.set(value);
+    }
+    if let Some(value) = script.access_token.as_deref() {
+        form.usage_query_access_token.set(value);
+    }
+    if let Some(value) = script.user_id.as_deref() {
+        form.usage_query_user_id.set(value);
+    }
+    if let Some(value) = script.coding_plan_provider.as_deref() {
+        form.usage_query_coding_plan_provider.set(value);
+    } else if let Some(provider) =
+        detect_coding_plan_provider_for_usage_query(&form.current_provider_base_url())
+    {
+        form.usage_query_coding_plan_provider.set(provider);
+    }
+
+    let template = script
+        .template_type
+        .as_deref()
+        .and_then(UsageQueryTemplate::from_str)
+        .or_else(|| {
+            if script.access_token.is_some() || script.user_id.is_some() {
+                Some(UsageQueryTemplate::NewApi)
+            } else if script.api_key.is_some() || script.base_url.is_some() {
+                Some(UsageQueryTemplate::General)
+            } else if detect_balance_provider_for_usage_query(&form.current_provider_base_url()) {
+                Some(UsageQueryTemplate::Balance)
+            } else {
+                Some(UsageQueryTemplate::General)
+            }
+        })
+        .unwrap_or(UsageQueryTemplate::General);
+
+    form.usage_query_template = template;
+    form.usage_query_code = script.code.clone();
 }
 
 fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {

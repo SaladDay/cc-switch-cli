@@ -247,6 +247,9 @@ pub(super) fn submit(
         EditorSubmit::ProviderFormApplyOpenClawModels => {
             submit_provider_form_apply_openclaw_models(ctx, content)
         }
+        EditorSubmit::ProviderFormApplyUsageScriptCode => {
+            submit_provider_form_apply_usage_script_code(ctx, content)
+        }
         EditorSubmit::ProviderFormApplyCodexAuth => {
             submit_provider_form_apply_codex_auth(ctx, content)
         }
@@ -585,6 +588,18 @@ fn submit_provider_form_apply_openclaw_models(
         return Ok(());
     }
 
+    ctx.app.editor = None;
+    Ok(())
+}
+
+fn submit_provider_form_apply_usage_script_code(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    if let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_mut() {
+        form.usage_query_code = content;
+        form.touch_usage_query();
+    }
     ctx.app.editor = None;
     Ok(())
 }

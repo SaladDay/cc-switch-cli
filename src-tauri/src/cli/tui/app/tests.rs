@@ -229,6 +229,20 @@ mod tests {
         }
     }
 
+    fn select_provider_usage_query_row(app: &mut App) {
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.editing = false;
+            let fields = form.fields();
+            form.field_idx = fields
+                .iter()
+                .position(|f| *f == ProviderAddField::UsageQuery)
+                .expect("UsageQuery field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+    }
+
     fn claude_provider_row(id: &str) -> ProviderRow {
         ProviderRow {
             id: id.to_string(),
@@ -11432,5 +11446,296 @@ mod tests {
         assert_eq!(mcp_json_scroll(&app), 1);
         app.on_key(key(KeyCode::Char('k')), &data());
         assert_eq!(mcp_json_scroll(&app), 0);
+    }
+
+    #[test]
+    fn provider_form_usage_query_row_opens_secondary_page_and_esc_returns() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.usage_query_notice_confirmed = true;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+        select_provider_usage_query_row(&mut app);
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if matches!(form.page, super::super::form::ProviderFormPage::UsageQuery)
+        ));
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if matches!(form.page, super::super::form::ProviderFormPage::Main)
+        ));
+    }
+
+    #[test]
+    fn provider_form_usage_query_row_shows_first_entry_notice() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.usage_query_notice_confirmed = false;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+        select_provider_usage_query_row(&mut app);
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::UsageQueryNotice,
+                ..
+            })
+        ));
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if matches!(form.page, super::super::form::ProviderFormPage::UsageQuery)
+        ));
+
+        let action = app.on_key(key(KeyCode::Esc), &data);
+        assert!(matches!(action, Action::ConfirmUsageQueryNotice));
+    }
+
+    #[test]
+    fn provider_form_navigation_skips_usage_query_divider() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.editing = false;
+            let fields = form.fields();
+            form.field_idx = fields
+                .iter()
+                .position(|field| *field == ProviderAddField::IncludeCommonConfig)
+                .expect("IncludeCommonConfig field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        app.on_key(key(KeyCode::Down), &UiData::default());
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if form.fields().get(form.field_idx) == Some(&ProviderAddField::UsageQuery)
+        ));
+
+        app.on_key(key(KeyCode::Up), &UiData::default());
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if form.fields().get(form.field_idx) == Some(&ProviderAddField::IncludeCommonConfig)
+        ));
+    }
+
+    #[test]
+    fn provider_form_usage_query_tab_switches_between_fields_preview_and_help() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_usage_query_page();
+            form.toggle_usage_query_enabled();
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        app.on_key(key(KeyCode::Tab), &data);
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if matches!(form.page, super::super::form::ProviderFormPage::UsageQuery)
+                    && form.focus == FormFocus::JsonPreview
+        ));
+
+        let before = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.usage_query_field_idx,
+            other => panic!("expected ProviderAdd form, got: {other:?}"),
+        };
+        app.on_key(key(KeyCode::Down), &data);
+        let after = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.usage_query_field_idx,
+            other => panic!("expected ProviderAdd form, got: {other:?}"),
+        };
+        assert_eq!(after, before);
+
+        app.on_key(key(KeyCode::Tab), &data);
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form)) if form.focus == FormFocus::Content
+        ));
+
+        app.on_key(key(KeyCode::Tab), &data);
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form)) if form.focus == FormFocus::Fields
+        ));
+    }
+
+    #[test]
+    fn provider_form_usage_query_jk_navigates_fields() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_mut() else {
+            panic!("expected ProviderAdd form");
+        };
+        form.open_usage_query_page();
+        form.toggle_usage_query_enabled();
+        form.focus = FormFocus::Fields;
+
+        app.on_key(key(KeyCode::Char('j')), &UiData::default());
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form)) if form.usage_query_field_idx == 1
+        ));
+
+        app.on_key(key(KeyCode::Char('k')), &UiData::default());
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form)) if form.usage_query_field_idx == 0
+        ));
+    }
+
+    #[test]
+    fn provider_form_usage_query_side_panel_enter_opens_script_editor() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_usage_query_page();
+            form.toggle_usage_query_enabled();
+            form.focus = FormFocus::JsonPreview;
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor.as_ref(),
+            Some(editor)
+                if matches!(editor.kind, EditorKind::Plain)
+                    && matches!(editor.submit, EditorSubmit::ProviderFormApplyUsageScriptCode)
+        ));
+    }
+
+    #[test]
+    fn provider_form_usage_query_help_panel_enter_opens_read_only_detail_view() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_usage_query_page();
+            form.toggle_usage_query_enabled();
+            form.focus = FormFocus::Content;
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(app.editor.is_none());
+
+        let Overlay::TextView(view) = &app.overlay else {
+            panic!("expected TextView overlay, got {:?}", app.overlay);
+        };
+        assert_eq!(view.title, texts::tui_usage_query_script_help_title());
+        assert!(view
+            .lines
+            .iter()
+            .any(|line| line.contains("{{baseUrl}}/api/usage")));
+        assert!(view.action.is_none());
+    }
+
+    #[test]
+    fn provider_form_usage_query_enable_then_save_writes_usage_script() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.name.set("Provider One");
+            form.open_usage_query_page();
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        assert!(matches!(
+            submit,
+            Action::EditorSubmit {
+                submit: EditorSubmit::ProviderAdd,
+                content
+            } if content.contains("\"usage_script\"")
+                && content.contains("\"enabled\": true")
+                && content.contains("\"templateType\": \"general\"")
+        ));
+    }
+
+    #[test]
+    fn provider_form_usage_query_script_opens_plain_editor() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_usage_query_page();
+            form.toggle_usage_query_enabled();
+            form.focus = FormFocus::JsonPreview;
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor.as_ref(),
+            Some(editor)
+                if matches!(editor.kind, EditorKind::Plain)
+                    && matches!(editor.submit, EditorSubmit::ProviderFormApplyUsageScriptCode)
+        ));
     }
 }

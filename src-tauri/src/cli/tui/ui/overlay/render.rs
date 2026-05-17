@@ -78,6 +78,15 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
+        Overlay::UsageQueryTemplatePicker { selected } => {
+            super::pickers::render_usage_query_template_picker_overlay(
+                frame,
+                app,
+                content_area,
+                theme,
+                *selected,
+            )
+        }
         Overlay::ModelFetchPicker {
             input,
             query,

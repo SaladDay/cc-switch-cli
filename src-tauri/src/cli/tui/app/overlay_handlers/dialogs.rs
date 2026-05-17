@@ -54,6 +54,7 @@ impl App {
                     }
                     ConfirmAction::ProviderApiFormatProxyNotice => Action::None,
                     ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
+                    ConfirmAction::UsageQueryNotice => Action::ConfirmUsageQueryNotice,
                     ConfirmAction::ProxyEnableAndAutoFailover { app_type } => {
                         Action::EnableProxyAndAutoFailover {
                             app_type: app_type.clone(),
@@ -88,9 +89,16 @@ impl App {
                 action
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
-                if matches!(confirm.action, ConfirmAction::CommonConfigNotice) {
+                if matches!(
+                    confirm.action,
+                    ConfirmAction::CommonConfigNotice | ConfirmAction::UsageQueryNotice
+                ) {
                     self.close_overlay();
-                    return Some(Action::ConfirmCommonConfigNotice);
+                    return Some(match confirm.action {
+                        ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
+                        ConfirmAction::UsageQueryNotice => Action::ConfirmUsageQueryNotice,
+                        _ => Action::None,
+                    });
                 }
                 if matches!(confirm.action, ConfirmAction::EditorSaveBeforeClose) {
                     self.editor = None;
@@ -103,10 +111,10 @@ impl App {
             }
             KeyCode::Esc => {
                 self.close_overlay();
-                if matches!(confirm.action, ConfirmAction::CommonConfigNotice) {
-                    Action::ConfirmCommonConfigNotice
-                } else {
-                    Action::None
+                match confirm.action {
+                    ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
+                    ConfirmAction::UsageQueryNotice => Action::ConfirmUsageQueryNotice,
+                    _ => Action::None,
                 }
             }
             _ => Action::None,

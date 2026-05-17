@@ -161,6 +161,53 @@ fn provider_field_label_and_value_renders_claude_hide_attribution_toggle() {
 }
 
 #[test]
+fn provider_form_renders_usage_query_entry_as_open_row() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.focus = FormFocus::Fields;
+    form.name.set("Demo Provider");
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(all.contains("Usage Query"), "{all}");
+    assert!(all.contains("open") || all.contains("打开"), "{all}");
+}
+
+#[test]
+fn provider_form_usage_query_page_omits_duplicate_side_panel_status_and_inline_key_hint() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.focus = FormFocus::Fields;
+    form.open_usage_query_page();
+    form.toggle_usage_query_enabled();
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(all.contains("Preset template"), "{all}");
+    assert!(all.contains("Enable usage query"), "{all}");
+    assert!(all.contains("Extractor code | Return object"), "{all}");
+    assert!(!all.contains("Extractor code          open"), "{all}");
+    assert!(!all.contains("Preset template:"), "{all}");
+    assert!(!all.contains("Enable usage query:"), "{all}");
+    assert!(!all.contains("Enter edits text"), "{all}");
+}
+
+#[test]
 fn provider_detail_uses_legacy_claude_api_format_for_display() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");

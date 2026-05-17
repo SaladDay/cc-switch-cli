@@ -148,6 +148,7 @@ pub enum Action {
     ConfigValidate,
     ConfigOpenProxyHelp,
     ConfirmCommonConfigNotice,
+    ConfirmUsageQueryNotice,
     ConfigWebDavCheckConnection,
     ConfigWebDavUpload,
     ConfigWebDavDownload,
@@ -485,6 +486,7 @@ pub struct App {
     pub quota_last_auto_tick: Option<u64>,
     pub prompt_import_prompted_apps: HashSet<String>,
     pub common_config_notice_confirmed: bool,
+    pub usage_query_notice_confirmed: bool,
 
     pub local_env_results: Vec<crate::services::local_env_check::ToolCheckResult>,
     pub local_env_loading: bool,

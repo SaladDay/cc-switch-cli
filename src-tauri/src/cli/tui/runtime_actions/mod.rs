@@ -277,6 +277,11 @@ pub(crate) fn handle_action(
             crate::settings::set_common_config_confirmed(true)?;
             Ok(())
         }
+        Action::ConfirmUsageQueryNotice => {
+            ctx.app.usage_query_notice_confirmed = true;
+            crate::settings::set_usage_confirmed(true)?;
+            Ok(())
+        }
         Action::ConfigWebDavCheckConnection => config::webdav_check_connection(&mut ctx),
         Action::ConfigWebDavUpload => config::webdav_upload(&mut ctx),
         Action::ConfigWebDavDownload => config::webdav_download(&mut ctx),
@@ -478,6 +483,25 @@ mod tests {
             crate::settings::get_settings().common_config_confirmed,
             Some(true)
         );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn confirm_usage_query_notice_persists_setting() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        assert!(!crate::settings::get_usage_confirmed());
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.usage_query_notice_confirmed = false;
+        let mut data = UiData::default();
+
+        run_action(&mut app, &mut data, Action::ConfirmUsageQueryNotice)
+            .expect("confirm usage query notice");
+
+        assert!(app.usage_query_notice_confirmed);
+        assert!(crate::settings::get_usage_confirmed());
+        assert_eq!(crate::settings::get_settings().usage_confirmed, Some(true));
     }
 
     #[test]

@@ -469,7 +469,8 @@ pub(super) fn render_provider_detail(
 mod tests {
     use super::*;
     use crate::app_config::AppType;
-    use crate::provider::Provider;
+    use crate::cli::tui::data::ProviderUsageQuota;
+    use crate::provider::{Provider, ProviderMeta, UsageData, UsageResult, UsageScript};
     use crate::services::{CredentialStatus, QuotaTier, SubscriptionQuota};
     use ratatui::buffer::Buffer;
     use serde_json::json;
@@ -511,7 +512,7 @@ mod tests {
             data::quota_target_for_provider(&AppType::Claude, &data.providers.rows[0]).unwrap();
         data.quota.finish(
             target,
-            SubscriptionQuota {
+            ProviderUsageQuota::Subscription(SubscriptionQuota {
                 tool: "claude".to_string(),
                 credential_status: CredentialStatus::Valid,
                 credential_message: None,
@@ -531,7 +532,66 @@ mod tests {
                 extra_usage: None,
                 error: None,
                 queried_at: Some(chrono::Utc::now().timestamp_millis()),
-            },
+            }),
+        );
+        data
+    }
+
+    fn usage_script_data() -> UiData {
+        let mut data = super::super::tests::minimal_data(&AppType::Claude);
+        let mut provider = Provider::with_id(
+            "usage-provider".to_string(),
+            "Usage Provider".to_string(),
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            usage_script: Some(UsageScript {
+                enabled: true,
+                language: "javascript".to_string(),
+                code: "return { planName: 'default', remaining: 12, unit: 'USD' }".to_string(),
+                timeout: Some(10),
+                api_key: None,
+                base_url: None,
+                access_token: None,
+                user_id: None,
+                template_type: Some("general".to_string()),
+                auto_query_interval: Some(5),
+                coding_plan_provider: None,
+            }),
+            ..Default::default()
+        });
+        data.providers.current_id = "usage-provider".to_string();
+        data.providers.rows = vec![ProviderRow {
+            id: "usage-provider".to_string(),
+            provider,
+            api_url: Some("https://api.example.com".to_string()),
+            is_current: true,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        }];
+
+        let target =
+            data::quota_target_for_provider(&AppType::Claude, &data.providers.rows[0]).unwrap();
+        data.quota.finish(
+            target,
+            ProviderUsageQuota::Script(UsageResult {
+                success: true,
+                data: Some(vec![UsageData {
+                    plan_name: Some("default".to_string()),
+                    extra: None,
+                    is_valid: Some(true),
+                    invalid_message: None,
+                    total: None,
+                    used: None,
+                    remaining: Some(12.0),
+                    unit: Some("USD".to_string()),
+                }]),
+                error: None,
+            }),
         );
         data
     }
@@ -695,6 +755,73 @@ mod tests {
         );
         assert!(all.contains("5h: 42%"), "{all}");
         assert!(all.contains("7d: 70%"), "{all}");
+    }
+
+    #[test]
+    fn usage_script_quota_hides_default_plan_name_and_shows_checked_time() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = usage_script_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
+
+        assert!(all.contains("Usage Provider"), "{all}");
+        assert!(all.contains("12 USD"), "{all}");
+        assert!(all.contains("second ago"), "{all}");
+        assert!(!all.contains("default"), "{all}");
+    }
+
+    #[test]
+    fn usage_script_quota_uses_chinese_checked_time() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::Chinese);
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ProviderDetail {
+            id: "usage-provider".to_string(),
+        };
+        app.focus = Focus::Content;
+        let data = usage_script_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
+
+        assert!(all.contains("12 USD"), "{all}");
+        assert!(all.contains("秒 前"), "{all}");
+        assert!(!all.contains("default"), "{all}");
+    }
+
+    #[test]
+    fn usage_script_detail_empty_data_shows_not_available_once() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ProviderDetail {
+            id: "usage-provider".to_string(),
+        };
+        app.focus = Focus::Content;
+        let mut data = usage_script_data();
+        let target =
+            data::quota_target_for_provider(&AppType::Claude, &data.providers.rows[0]).unwrap();
+        data.quota.finish(
+            target,
+            ProviderUsageQuota::Script(UsageResult {
+                success: true,
+                data: Some(Vec::new()),
+                error: None,
+            }),
+        );
+
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
+
+        assert!(all.contains(texts::tui_quota_not_available()), "{all}");
+        assert!(!all.contains(texts::tui_quota_ok()), "{all}");
+        assert_eq!(all.matches(texts::tui_label_quota()).count(), 1, "{all}");
     }
 
     #[cfg(not(unix))]

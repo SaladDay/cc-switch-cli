@@ -1,5 +1,7 @@
 pub mod auth;
+pub mod balance;
 pub mod codex_oauth;
+pub mod coding_plan;
 pub mod config;
 pub mod env_checker;
 pub mod env_manager;

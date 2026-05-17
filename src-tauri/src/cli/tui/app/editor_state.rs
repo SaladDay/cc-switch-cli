@@ -19,6 +19,7 @@ pub enum EditorSubmit {
     },
     ProviderFormApplyJson,
     ProviderFormApplyOpenClawModels,
+    ProviderFormApplyUsageScriptCode,
     ProviderFormApplyCodexAuth,
     ProviderFormApplyCodexConfigToml,
     ProviderAdd,

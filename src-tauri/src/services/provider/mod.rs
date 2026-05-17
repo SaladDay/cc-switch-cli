@@ -26,7 +26,7 @@ use crate::config::{
     write_json_file,
 };
 use crate::error::AppError;
-use crate::provider::Provider;
+use crate::provider::{Provider, ProviderMeta, UsageScript};
 use crate::store::AppState;
 
 use gemini_auth::GeminiAuthType;
@@ -52,6 +52,22 @@ fn current_timestamp() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn detect_coding_plan_provider_id(base_url: &str) -> Option<&'static str> {
+    let url = base_url.to_lowercase();
+    if url.contains("api.kimi.com/coding") {
+        Some("kimi")
+    } else if url.contains("bigmodel.cn") || url.contains("api.z.ai") {
+        Some("zhipu")
+    } else if url.contains("api.minimaxi.com")
+        || url.contains("api.minimax.com")
+        || url.contains("api.minimax.io")
+    {
+        Some("minimax")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -81,6 +97,47 @@ struct PostCommitAction {
 }
 
 impl ProviderService {
+    fn inject_coding_plan_usage_script(app_type: &AppType, provider: &mut Provider) {
+        if !matches!(app_type, AppType::Claude) {
+            return;
+        }
+        if provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.usage_script.as_ref())
+            .is_some()
+        {
+            return;
+        }
+
+        let base_url = provider
+            .settings_config
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let Some(coding_plan_provider) = detect_coding_plan_provider_id(base_url) else {
+            return;
+        };
+
+        provider
+            .meta
+            .get_or_insert_with(ProviderMeta::default)
+            .usage_script = Some(UsageScript {
+            enabled: true,
+            language: "javascript".to_string(),
+            code: String::new(),
+            timeout: Some(10),
+            api_key: None,
+            base_url: None,
+            access_token: None,
+            user_id: None,
+            template_type: Some("token_plan".to_string()),
+            auto_query_interval: Some(5),
+            coding_plan_provider: Some(coding_plan_provider.to_string()),
+        });
+    }
+
     fn is_codex_official_provider(provider: &Provider) -> bool {
         provider
             .meta
@@ -1360,6 +1417,7 @@ impl ProviderService {
         let mut provider = provider;
         // 归一化 Claude 模型键
         Self::normalize_provider_if_claude(&app_type, &mut provider);
+        Self::inject_coding_plan_usage_script(&app_type, &mut provider);
         Self::validate_provider_settings(&app_type, &provider)?;
 
         let app_type_clone = app_type.clone();

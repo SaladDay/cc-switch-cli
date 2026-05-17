@@ -1133,6 +1133,16 @@ pub fn tui_quota_just_now() -> &'static str {
     }
 }
 
+pub fn tui_quota_seconds_ago(count: i64) -> String {
+    if is_chinese() {
+        format!("{count} 秒前")
+    } else if count == 1 {
+        "1 second ago".to_string()
+    } else {
+        format!("{count} seconds ago")
+    }
+}
+
 pub fn tui_quota_minutes_ago(count: i64) -> String {
     if is_chinese() {
         format!("{count} 分钟前")

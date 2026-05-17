@@ -3,6 +3,7 @@ mod auth;
 mod claude;
 mod codex;
 pub mod codex_oauth_auth;
+pub mod copilot_auth;
 mod gemini;
 pub mod streaming;
 pub mod streaming_responses;

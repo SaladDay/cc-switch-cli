@@ -74,7 +74,10 @@ pub(super) fn render_confirm_overlay(
                 ("Esc", texts::tui_key_close()),
             ],
         );
-    } else if matches!(confirm.action, ConfirmAction::CommonConfigNotice) {
+    } else if matches!(
+        confirm.action,
+        ConfirmAction::CommonConfigNotice | ConfirmAction::UsageQueryNotice
+    ) {
         render_key_bar_center(
             frame,
             chunks[0],

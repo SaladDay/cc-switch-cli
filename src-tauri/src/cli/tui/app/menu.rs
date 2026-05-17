@@ -39,6 +39,7 @@ impl App {
             quota_last_auto_tick: None,
             prompt_import_prompted_apps: HashSet::new(),
             common_config_notice_confirmed: true,
+            usage_query_notice_confirmed: true,
             local_env_results: Vec::new(),
             local_env_loading: true,
             provider_idx: 0,

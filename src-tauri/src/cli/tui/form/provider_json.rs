@@ -6,8 +6,8 @@ use super::codex_config::{
     build_codex_provider_config_toml, clean_codex_provider_key, update_codex_config_snippet,
 };
 use super::{
-    ClaudeApiFormat, GeminiAuthType, ProviderAddFormState, OPENCLAW_DEFAULT_API_PROTOCOL,
-    OPENCLAW_DEFAULT_USER_AGENT,
+    ClaudeApiFormat, GeminiAuthType, ProviderAddFormState, UsageQueryTemplate,
+    OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
 };
 
 impl ProviderAddFormState {
@@ -447,6 +447,7 @@ impl ProviderAddFormState {
 
         if !should_write_common_config_meta
             && !should_write_claude_api_format
+            && !self.has_usage_script_meta()
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
             return;
@@ -490,9 +491,65 @@ impl ProviderAddFormState {
             }
         }
 
+        self.update_usage_script_meta(meta_obj);
+
         if meta_obj.is_empty() {
             provider_obj.remove("meta");
         }
+    }
+
+    fn update_usage_script_meta(&self, meta_obj: &mut serde_json::Map<String, Value>) {
+        if !self.has_usage_script_meta() && !self.usage_query_enabled && !self.usage_query_touched {
+            meta_obj.remove("usage_script");
+            return;
+        }
+
+        let mut script = serde_json::Map::new();
+        script.insert("enabled".to_string(), json!(self.usage_query_enabled));
+        script.insert("language".to_string(), json!("javascript"));
+        script.insert("code".to_string(), json!(self.usage_query_code.as_str()));
+        script.insert(
+            "timeout".to_string(),
+            json!(normalize_usage_timeout(&self.usage_query_timeout.value)),
+        );
+        script.insert(
+            "templateType".to_string(),
+            json!(self.usage_query_template.as_str()),
+        );
+        script.insert(
+            "autoQueryInterval".to_string(),
+            json!(normalize_usage_interval(
+                &self.usage_query_auto_interval.value
+            )),
+        );
+
+        match self.usage_query_template {
+            UsageQueryTemplate::General => {
+                set_or_remove_trimmed(&mut script, "apiKey", &self.usage_query_api_key.value);
+                set_or_remove_trimmed(&mut script, "baseUrl", &self.usage_query_base_url.value);
+            }
+            UsageQueryTemplate::NewApi => {
+                set_or_remove_trimmed(&mut script, "baseUrl", &self.usage_query_base_url.value);
+                set_or_remove_trimmed(
+                    &mut script,
+                    "accessToken",
+                    &self.usage_query_access_token.value,
+                );
+                set_or_remove_trimmed(&mut script, "userId", &self.usage_query_user_id.value);
+            }
+            UsageQueryTemplate::TokenPlan => {
+                set_or_remove_trimmed(
+                    &mut script,
+                    "codingPlanProvider",
+                    &self.usage_query_coding_plan_provider.value,
+                );
+            }
+            UsageQueryTemplate::Custom
+            | UsageQueryTemplate::GitHubCopilot
+            | UsageQueryTemplate::Balance => {}
+        }
+
+        meta_obj.insert("usage_script".to_string(), Value::Object(script));
     }
 
     pub(crate) fn should_strip_common_config_from_applied_settings_json(&self) -> bool {
@@ -514,6 +571,42 @@ impl ProviderAddFormState {
                 meta.contains_key("commonConfigEnabled") || meta.contains_key("applyCommonConfig")
             })
     }
+
+    pub(super) fn has_usage_script_meta(&self) -> bool {
+        self.extra
+            .get("meta")
+            .and_then(Value::as_object)
+            .is_some_and(|meta| meta.contains_key("usage_script"))
+    }
+}
+
+pub(crate) fn normalize_usage_timeout(raw: &str) -> u64 {
+    normalize_usage_number(raw, 10, None)
+}
+
+pub(crate) fn normalize_usage_interval(raw: &str) -> u64 {
+    normalize_usage_number(raw, 0, Some(1440))
+}
+
+fn normalize_usage_number(raw: &str, fallback: u64, max: Option<u64>) -> u64 {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return fallback;
+    }
+
+    let Ok(value) = trimmed.parse::<f64>() else {
+        return fallback;
+    };
+    if !value.is_finite() || value < 0.0 {
+        return fallback;
+    }
+
+    let floored = value.floor();
+    let capped = max
+        .map(|max| floored.min(max as f64))
+        .unwrap_or(floored)
+        .max(0.0);
+    capped as u64
 }
 
 fn openclaw_model_index(models: &[Value], model_id: &str) -> Option<usize> {

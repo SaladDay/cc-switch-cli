@@ -15,6 +15,23 @@ impl App {
 
         match form {
             FormState::ProviderAdd(provider) => {
+                if matches!(provider.page, form::ProviderFormPage::UsageQuery) {
+                    if is_backtab {
+                        return false;
+                    }
+                    finish_usage_query_tab_editing(provider);
+                    if !provider.usage_query_extractor_available() {
+                        provider.focus = FormFocus::Fields;
+                        return true;
+                    }
+                    provider.focus = match provider.focus {
+                        FormFocus::Fields => FormFocus::JsonPreview,
+                        FormFocus::JsonPreview => FormFocus::Content,
+                        FormFocus::Content => FormFocus::Fields,
+                        FormFocus::Templates => FormFocus::Fields,
+                    };
+                    return true;
+                }
                 if is_backtab {
                     return false;
                 }
@@ -120,4 +137,23 @@ impl App {
 
         true
     }
+}
+
+fn finish_usage_query_tab_editing(provider: &mut form::ProviderAddFormState) {
+    if !provider.usage_query_editing {
+        return;
+    }
+
+    if matches!(
+        provider.selected_usage_query_field(),
+        Some(form::UsageQueryField::Timeout | form::UsageQueryField::AutoInterval)
+    ) {
+        let timeout = form::normalize_usage_timeout(&provider.usage_query_timeout.value);
+        provider.usage_query_timeout.set(timeout.to_string());
+
+        let interval = form::normalize_usage_interval(&provider.usage_query_auto_interval.value);
+        provider.usage_query_auto_interval.set(interval.to_string());
+    }
+
+    provider.usage_query_editing = false;
 }

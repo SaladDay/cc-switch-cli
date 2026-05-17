@@ -10,6 +10,10 @@ impl App {
             return None;
         };
 
+        if !matches!(provider.page, form::ProviderFormPage::Main) {
+            return None;
+        }
+
         if provider.focus != FormFocus::Templates || !matches!(provider.mode, FormMode::Add) {
             return None;
         }
@@ -43,6 +47,10 @@ impl App {
             return None;
         };
 
+        if matches!(provider.page, form::ProviderFormPage::UsageQuery) {
+            return self.handle_usage_query_page_key(key);
+        }
+
         match provider.focus {
             FormFocus::Fields => self.handle_provider_fields_key(key, data),
             FormFocus::JsonPreview => self.handle_provider_json_preview_key(key, data),
@@ -67,6 +75,8 @@ impl App {
                 && provider.codex_base_url.is_blank()
             {
                 Some(texts::base_url_empty_error())
+            } else if let Some(message) = validate_usage_query_form(provider) {
+                Some(message)
             } else if !provider.ensure_generated_id(&collect_existing_provider_ids(data)) {
                 Some(if provider.mode.is_edit() {
                     texts::tui_toast_provider_missing_name()
@@ -161,10 +171,7 @@ impl App {
                 };
                 provider.field_idx = provider.field_idx.saturating_sub(1);
                 while provider.field_idx > 0
-                    && matches!(
-                        fields.get(provider.field_idx),
-                        Some(ProviderAddField::CommonConfigDivider)
-                    )
+                    && is_provider_divider_field(fields.get(provider.field_idx))
                 {
                     provider.field_idx = provider.field_idx.saturating_sub(1);
                 }
@@ -176,10 +183,7 @@ impl App {
                 };
                 provider.field_idx = (provider.field_idx + 1).min(fields.len() - 1);
                 while provider.field_idx < fields.len().saturating_sub(1)
-                    && matches!(
-                        fields.get(provider.field_idx),
-                        Some(ProviderAddField::CommonConfigDivider)
-                    )
+                    && is_provider_divider_field(fields.get(provider.field_idx))
                 {
                     provider.field_idx = (provider.field_idx + 1).min(fields.len() - 1);
                 }
@@ -310,6 +314,12 @@ impl App {
                 }
                 Action::None
             }
+            ProviderAddField::UsageQuery => {
+                if matches!(key.code, KeyCode::Enter) {
+                    self.open_usage_query_page_with_notice();
+                }
+                Action::None
+            }
             ProviderAddField::CodexModel
             | ProviderAddField::GeminiModel
             | ProviderAddField::OpenCodeModelId => {
@@ -328,6 +338,204 @@ impl App {
                 Action::None
             }
         }
+    }
+
+    fn handle_usage_query_page_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+            return None;
+        };
+        if matches!(provider.focus, FormFocus::JsonPreview) {
+            if !provider.usage_query_extractor_available() {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.focus = FormFocus::Fields;
+                }
+                return Some(Action::None);
+            }
+            return match key.code {
+                KeyCode::Enter => Some(self.open_usage_query_script_editor()),
+                _ => None,
+            };
+        }
+        if matches!(provider.focus, FormFocus::Content) {
+            if !provider.usage_query_extractor_available() {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.focus = FormFocus::Fields;
+                }
+                return Some(Action::None);
+            }
+            return match key.code {
+                KeyCode::Enter => Some(self.open_usage_query_script_help_view()),
+                _ => None,
+            };
+        }
+
+        let (fields, selected, editing) = match self.prepare_usage_query_field_selection() {
+            Some(state) => state,
+            None => return None,
+        };
+
+        if editing {
+            self.handle_usage_query_field_editing(selected, key)
+        } else {
+            self.handle_usage_query_field_navigation(fields, selected, key)
+        }
+    }
+
+    fn open_usage_query_page_with_notice(&mut self) {
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+            return;
+        };
+        provider.open_usage_query_page();
+
+        if self.usage_query_notice_confirmed {
+            return;
+        }
+
+        self.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_usage_query_notice_title().to_string(),
+            message: texts::tui_usage_query_notice_message().to_string(),
+            action: ConfirmAction::UsageQueryNotice,
+        });
+    }
+
+    fn handle_usage_query_field_editing(
+        &mut self,
+        selected: form::UsageQueryField,
+        key: KeyEvent,
+    ) -> Option<Action> {
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+            return None;
+        };
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                provider.usage_query_editing = false;
+                if matches!(
+                    selected,
+                    form::UsageQueryField::Timeout | form::UsageQueryField::AutoInterval
+                ) {
+                    normalize_usage_query_numeric_fields(provider);
+                }
+                Some(Action::None)
+            }
+            _ => {
+                if TextEditCommand::from_key(key).is_none() {
+                    return None;
+                }
+                let changed = provider
+                    .usage_query_input_mut(selected)
+                    .and_then(|input| input.apply_key(key))
+                    .map(|edit| edit.changed)
+                    .unwrap_or(false);
+                if changed {
+                    provider.touch_usage_query();
+                }
+                Some(Action::None)
+            }
+        }
+    }
+
+    fn handle_usage_query_field_navigation(
+        &mut self,
+        fields: Vec<form::UsageQueryField>,
+        selected: form::UsageQueryField,
+        key: KeyEvent,
+    ) -> Option<Action> {
+        match key.code {
+            KeyCode::Esc => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.close_usage_query_page();
+                Some(Action::None)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.usage_query_field_idx = provider.usage_query_field_idx.saturating_sub(1);
+                Some(Action::None)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.usage_query_field_idx =
+                    (provider.usage_query_field_idx + 1).min(fields.len() - 1);
+                Some(Action::None)
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                Some(self.handle_usage_query_field_activate(selected))
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_usage_query_field_activate(&mut self, selected: form::UsageQueryField) -> Action {
+        match selected {
+            form::UsageQueryField::Enabled => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.toggle_usage_query_enabled();
+                Action::None
+            }
+            form::UsageQueryField::Template => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+                    return Action::None;
+                };
+                let options = provider.available_usage_query_templates();
+                let selected = options
+                    .iter()
+                    .position(|template| *template == provider.usage_query_template)
+                    .unwrap_or(0);
+                self.overlay = Overlay::UsageQueryTemplatePicker { selected };
+                Action::None
+            }
+            form::UsageQueryField::CodingPlanProvider => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.cycle_usage_query_coding_plan_provider();
+                Action::None
+            }
+            form::UsageQueryField::Script => self.open_usage_query_script_editor(),
+            _ => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                if provider.usage_query_input(selected).is_some() {
+                    provider.usage_query_editing = true;
+                }
+                Action::None
+            }
+        }
+    }
+
+    fn open_usage_query_script_editor(&mut self) -> Action {
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+            return Action::None;
+        };
+        if !provider.usage_query_extractor_available() {
+            return Action::None;
+        }
+        self.open_editor(
+            texts::tui_usage_query_script(),
+            EditorKind::Plain,
+            provider.usage_query_code.clone(),
+            EditorSubmit::ProviderFormApplyUsageScriptCode,
+        );
+        Action::None
+    }
+
+    fn open_usage_query_script_help_view(&mut self) -> Action {
+        self.overlay = Overlay::TextView(TextViewState {
+            title: texts::tui_usage_query_script_help_title().to_string(),
+            lines: form::ProviderAddFormState::usage_query_script_help_lines(),
+            scroll: 0,
+            action: None,
+        });
+        Action::None
     }
 
     fn handle_provider_model_field_activate(
@@ -548,10 +756,7 @@ impl App {
             provider.field_idx = 0;
         }
 
-        if matches!(
-            fields.get(provider.field_idx),
-            Some(ProviderAddField::CommonConfigDivider)
-        ) {
+        if is_provider_divider_field(fields.get(provider.field_idx)) {
             if provider.field_idx < fields.len().saturating_sub(1) {
                 provider.field_idx = (provider.field_idx + 1).min(fields.len() - 1);
             } else {
@@ -561,6 +766,30 @@ impl App {
 
         let selected = fields.get(provider.field_idx).copied()?;
         Some((fields, selected, provider.editing))
+    }
+
+    fn prepare_usage_query_field_selection(
+        &mut self,
+    ) -> Option<(Vec<form::UsageQueryField>, form::UsageQueryField, bool)> {
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+            return None;
+        };
+        if !matches!(provider.page, form::ProviderFormPage::UsageQuery) {
+            return None;
+        }
+        if !matches!(provider.focus, FormFocus::Fields) {
+            return None;
+        }
+
+        let fields = provider.usage_query_table_fields();
+        if !fields.is_empty() {
+            provider.usage_query_field_idx = provider.usage_query_field_idx.min(fields.len() - 1);
+        } else {
+            provider.usage_query_field_idx = 0;
+        }
+
+        let selected = fields.get(provider.usage_query_field_idx).copied()?;
+        Some((fields, selected, provider.usage_query_editing))
     }
 
     fn finish_provider_input_change(
@@ -585,7 +814,31 @@ impl App {
                     &existing_ids,
                 ));
         }
+        if changed && usage_query_provider_credential_field(selected) {
+            provider.refresh_usage_query_custom_variable_comment();
+        }
     }
+}
+
+fn usage_query_provider_credential_field(field: ProviderAddField) -> bool {
+    matches!(
+        field,
+        ProviderAddField::ClaudeApiKey
+            | ProviderAddField::ClaudeBaseUrl
+            | ProviderAddField::CodexApiKey
+            | ProviderAddField::CodexBaseUrl
+            | ProviderAddField::GeminiApiKey
+            | ProviderAddField::GeminiBaseUrl
+            | ProviderAddField::OpenCodeApiKey
+            | ProviderAddField::OpenCodeBaseUrl
+    )
+}
+
+fn is_provider_divider_field(field: Option<&ProviderAddField>) -> bool {
+    matches!(
+        field,
+        Some(ProviderAddField::CommonConfigDivider | ProviderAddField::UsageQueryDivider)
+    )
 }
 
 fn collect_existing_provider_ids(data: &UiData) -> Vec<String> {
@@ -605,4 +858,37 @@ fn next_openclaw_api_protocol(current: &str) -> &'static str {
         .map(|idx| (idx + 1) % protocols.len())
         .unwrap_or(0);
     protocols[next_idx]
+}
+
+fn normalize_usage_query_numeric_fields(provider: &mut form::ProviderAddFormState) {
+    let timeout = form::normalize_usage_timeout(&provider.usage_query_timeout.value);
+    provider.usage_query_timeout.set(timeout.to_string());
+
+    let interval = form::normalize_usage_interval(&provider.usage_query_auto_interval.value);
+    provider.usage_query_auto_interval.set(interval.to_string());
+}
+
+fn validate_usage_query_form(provider: &form::ProviderAddFormState) -> Option<&'static str> {
+    if !provider.usage_query_enabled {
+        return None;
+    }
+
+    if matches!(
+        provider.usage_query_template,
+        form::UsageQueryTemplate::GitHubCopilot
+            | form::UsageQueryTemplate::TokenPlan
+            | form::UsageQueryTemplate::Balance
+    ) {
+        return None;
+    }
+
+    let code = provider.usage_query_code.trim();
+    if code.is_empty() {
+        return Some(texts::tui_usage_query_script_empty());
+    }
+    if !code.contains("return") {
+        return Some(texts::tui_usage_query_must_have_return());
+    }
+
+    None
 }

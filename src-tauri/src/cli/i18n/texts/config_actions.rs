@@ -448,6 +448,14 @@ pub fn tui_config_item_common_snippet() -> &'static str {
     }
 }
 
+pub fn tui_config_item_usage_query() -> &'static str {
+    if is_chinese() {
+        "用量查询"
+    } else {
+        "Usage Query"
+    }
+}
+
 pub fn tui_config_item_proxy() -> &'static str {
     if is_chinese() {
         "本地代理"

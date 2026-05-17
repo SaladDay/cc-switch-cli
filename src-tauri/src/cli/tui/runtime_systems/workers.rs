@@ -521,12 +521,32 @@ fn quota_worker_loop(rx: mpsc::Receiver<QuotaReq>, tx: mpsc::Sender<QuotaMsg>) {
     while let Ok(req) = rx.recv() {
         let QuotaReq::Refresh { target } = req;
         let result = match &target.kind {
-            crate::cli::tui::data::QuotaTargetKind::SubscriptionTool { tool } => {
-                rt.block_on(crate::services::subscription::get_subscription_quota(tool))
+            crate::cli::tui::data::QuotaTargetKind::SubscriptionTool { tool } => rt
+                .block_on(crate::services::subscription::get_subscription_quota(tool))
+                .map(crate::cli::tui::data::ProviderUsageQuota::Subscription),
+            crate::cli::tui::data::QuotaTargetKind::CodexOAuth { account_id } => Ok(
+                crate::cli::tui::data::ProviderUsageQuota::Subscription(rt.block_on(
+                    crate::services::CodexOAuthService::get_quota(account_id.as_deref()),
+                )),
+            ),
+            crate::cli::tui::data::QuotaTargetKind::UsageScript => {
+                let state = match crate::cli::tui::data::load_state() {
+                    Ok(state) => state,
+                    Err(error) => {
+                        let _ = tx.send(QuotaMsg::Finished {
+                            target,
+                            result: Err(error.to_string()),
+                        });
+                        continue;
+                    }
+                };
+                rt.block_on(crate::services::ProviderService::query_provider_usage(
+                    &state,
+                    target.app_type.clone(),
+                    &target.provider_id,
+                ))
+                .map(crate::cli::tui::data::ProviderUsageQuota::Script)
             }
-            crate::cli::tui::data::QuotaTargetKind::CodexOAuth { account_id } => Ok(rt.block_on(
-                crate::services::CodexOAuthService::get_quota(account_id.as_deref()),
-            )),
         };
 
         let _ = tx.send(QuotaMsg::Finished { target, result });
