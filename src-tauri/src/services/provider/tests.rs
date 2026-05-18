@@ -4072,6 +4072,93 @@ fn codex_switch_syncs_all_managed_provider_catalog_entries_into_live_config() {
 
 #[test]
 #[serial]
+fn codex_switch_auto_repairs_conflicting_custom_provider_keys() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+
+    let second_id = "a48a49e6-0f52-4df8-8acc-c326cb5caf57";
+    let second_key = "a48a49e6_0f52_4df8_8acc_c326cb5caf57";
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "codex-provider".to_string();
+        manager.providers.insert(
+            "codex-provider".to_string(),
+            Provider::with_id(
+                "codex-provider".to_string(),
+                "Codex Provider".to_string(),
+                codex_settings(
+                    "model_provider = \"custom\"\nmodel = \"gpt-5.4\"\n\n[model_providers.custom]\nname = \"custom\"\nbase_url = \"https://api.one.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+                ),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            second_id.to_string(),
+            Provider::with_id(
+                second_id.to_string(),
+                "Imported From File".to_string(),
+                codex_settings(
+                    "model_provider = \"custom\"\nmodel = \"gpt-5.4\"\n\n[model_providers.custom]\nname = \"custom\"\nbase_url = \"https://api.two.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+                ),
+                None,
+            ),
+        );
+    }
+
+    std::fs::write(
+        get_codex_config_path(),
+        "model_provider = \"custom\"\nmodel = \"gpt-5.4\"\n\n[model_providers.custom]\nname = \"custom\"\nbase_url = \"https://api.one.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+    )
+    .expect("seed live config.toml");
+    write_json_file(
+        &get_codex_auth_path(),
+        &json!({ "OPENAI_API_KEY": "sk-test" }),
+    )
+    .expect("write auth.json");
+
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Codex, second_id).expect("switch should succeed");
+
+    let first = state
+        .db
+        .get_provider_by_id("codex-provider", AppType::Codex.as_str())
+        .expect("read first provider")
+        .expect("first provider exists");
+    assert_eq!(
+        ProviderService::provider_codex_model_provider_key(&first).as_deref(),
+        Some("codex_provider")
+    );
+
+    let second = state
+        .db
+        .get_provider_by_id(second_id, AppType::Codex.as_str())
+        .expect("read second provider")
+        .expect("second provider exists");
+    assert_eq!(
+        ProviderService::provider_codex_model_provider_key(&second).as_deref(),
+        Some(second_key)
+    );
+
+    let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
+    assert!(
+        live_text.contains("[model_providers.codex_provider]"),
+        "live config should expose the repaired first provider key: {live_text}"
+    );
+    assert!(
+        live_text.contains(&format!("[model_providers.{second_key}]")),
+        "live config should expose the repaired imported provider key: {live_text}"
+    );
+}
+
+#[test]
+#[serial]
 fn import_codex_providers_from_live_merges_catalog_and_skips_active_alias_duplicate() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = EnvGuard::set_home(temp_home.path());
