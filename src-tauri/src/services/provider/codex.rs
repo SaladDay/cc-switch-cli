@@ -218,6 +218,172 @@ impl ProviderService {
             })
     }
 
+    fn compact_codex_key_suffix(raw: &str) -> String {
+        raw.chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .map(|ch| ch.to_ascii_lowercase())
+            .take(8)
+            .collect()
+    }
+
+    fn unique_codex_provider_key_for_conflict(
+        provider: &Provider,
+        occupied: &std::collections::HashSet<String>,
+        conflicting_key: &str,
+    ) -> String {
+        let mut candidates = Vec::new();
+        for raw in [provider.id.trim(), provider.name.trim()] {
+            if raw.is_empty() {
+                continue;
+            }
+            let candidate = crate::codex_config::clean_codex_provider_key(raw);
+            if candidate != conflicting_key && !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+
+        if candidates.is_empty() {
+            let suffix = Self::compact_codex_key_suffix(&provider.id);
+            if !suffix.is_empty() {
+                candidates.push(format!("{conflicting_key}_{suffix}"));
+            }
+        }
+
+        let base = candidates
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("{conflicting_key}_provider"));
+        let suffix = Self::compact_codex_key_suffix(&provider.id);
+        if !suffix.is_empty() {
+            let suffixed = format!("{base}_{suffix}");
+            if !candidates.contains(&suffixed) {
+                candidates.push(suffixed);
+            }
+        }
+
+        for candidate in candidates {
+            if !occupied.contains(&candidate) && candidate != conflicting_key {
+                return candidate;
+            }
+        }
+
+        let mut index = 2usize;
+        loop {
+            let candidate = format!("{base}_{index}");
+            if !occupied.contains(&candidate) && candidate != conflicting_key {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
+    fn rewrite_provider_codex_model_provider_key(
+        provider: &mut Provider,
+        target_key: &str,
+    ) -> Result<bool, AppError> {
+        let target_key = crate::codex_config::clean_codex_provider_key(target_key);
+        let current_key = Self::provider_codex_model_provider_key(provider);
+        let mut changed = current_key.as_deref() != Some(target_key.as_str());
+
+        if let Some(config_text) = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            let rewritten = crate::codex_config::rewrite_codex_config_model_provider_key(
+                &config_text,
+                &target_key,
+            )?;
+            if rewritten != config_text {
+                changed = true;
+                if let Some(settings_obj) = provider.settings_config.as_object_mut() {
+                    settings_obj.insert("config".to_string(), Value::String(rewritten));
+                }
+            }
+        }
+
+        provider
+            .meta
+            .get_or_insert_with(Default::default)
+            .codex_model_provider_key = Some(target_key);
+
+        Ok(changed)
+    }
+
+    fn repair_conflicting_custom_codex_provider_keys(
+        manager: &mut crate::provider::ProviderManager,
+    ) -> bool {
+        let provider_ids = manager.providers.keys().cloned().collect::<Vec<_>>();
+        let mut key_groups = std::collections::HashMap::<String, Vec<String>>::new();
+        for provider_id in &provider_ids {
+            let Some(provider) = manager.providers.get(provider_id) else {
+                continue;
+            };
+            if Self::is_codex_official_provider(provider) {
+                continue;
+            }
+            let Some(key) = Self::provider_codex_model_provider_key(provider) else {
+                continue;
+            };
+            key_groups.entry(key).or_default().push(provider_id.clone());
+        }
+
+        let mut occupied = key_groups
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let mut changed = false;
+        for (key, provider_ids) in key_groups {
+            if key != "custom" || provider_ids.len() < 2 {
+                continue;
+            }
+
+            for provider_id in provider_ids {
+                let Some(provider) = manager.providers.get_mut(&provider_id) else {
+                    continue;
+                };
+                let new_key =
+                    Self::unique_codex_provider_key_for_conflict(provider, &occupied, &key);
+                match Self::rewrite_provider_codex_model_provider_key(provider, &new_key) {
+                    Ok(true) => {
+                        log::warn!(
+                            "auto-repaired conflicting Codex provider key for '{}' from '{}' to '{}'",
+                            provider_id,
+                            key,
+                            new_key
+                        );
+                        occupied.insert(new_key);
+                        changed = true;
+                    }
+                    Ok(false) => {
+                        occupied.insert(new_key);
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "skip auto-repair for conflicting Codex provider '{}' (key '{}'): {}",
+                            provider_id,
+                            key,
+                            err
+                        );
+                    }
+                }
+            }
+        }
+
+        changed
+    }
+
+    fn collect_codex_providers_for_live_sync(config: &mut MultiAppConfig) -> (Vec<Provider>, bool) {
+        let Some(manager) = config.get_manager_mut(&AppType::Codex) else {
+            return (Vec::new(), false);
+        };
+
+        let repaired = Self::repair_conflicting_custom_codex_provider_keys(manager);
+        let providers = manager.providers.values().cloned().collect::<Vec<_>>();
+        (providers, repaired)
+    }
+
     fn codex_catalog_entry_from_provider(
         provider: &Provider,
     ) -> Result<Option<(String, toml_edit::Item)>, AppError> {
@@ -373,24 +539,21 @@ impl ProviderService {
         state: &AppState,
         stale_keys: &[String],
     ) -> Result<(), AppError> {
-        let providers = {
-            let guard = state.config.read().map_err(AppError::from)?;
-            guard
-                .get_manager(&AppType::Codex)
-                .map(|manager| manager.providers.values().cloned().collect::<Vec<_>>())
-                .unwrap_or_default()
+        let (providers, repaired) = {
+            let mut guard = state.config.write().map_err(AppError::from)?;
+            Self::collect_codex_providers_for_live_sync(&mut guard)
         };
+        if repaired {
+            state.save()?;
+        }
         Self::sync_codex_provider_catalog_entries_to_live(&providers, stale_keys)
     }
 
     pub(crate) fn sync_codex_provider_catalog_to_live_from_config(
-        config: &MultiAppConfig,
+        config: &mut MultiAppConfig,
         stale_keys: &[String],
     ) -> Result<(), AppError> {
-        let providers = config
-            .get_manager(&AppType::Codex)
-            .map(|manager| manager.providers.values().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+        let (providers, _repaired) = Self::collect_codex_providers_for_live_sync(config);
         Self::sync_codex_provider_catalog_entries_to_live(&providers, stale_keys)
     }
 
