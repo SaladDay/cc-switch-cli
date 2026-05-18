@@ -294,31 +294,16 @@ impl App {
         self.overlay = self.pending_overlay.take().unwrap_or(Overlay::None);
     }
 
-    fn text_input_overlay_is_active(&self) -> bool {
-        matches!(
-            self.overlay,
-            Overlay::TextInput(_)
-                | Overlay::ModelFetchPicker { .. }
-                | Overlay::McpEnvEntryEditor(_)
-                | Overlay::ClaudeModelPicker { editing: true, .. }
-        )
+    fn overlay_text_input_is_active(&self) -> bool {
+        self.overlay.is_editing()
     }
 
     fn form_text_input_is_active(&self) -> bool {
-        match self.form.as_ref() {
-            Some(FormState::ProviderAdd(provider)) => {
-                provider.editing || provider.usage_query_editing
-            }
-            Some(FormState::McpAdd(mcp)) => mcp.editing,
-            Some(FormState::PromptMeta(prompt)) => {
-                prompt.editing || matches!(prompt.focus, FormFocus::Content)
-            }
-            None => false,
-        }
+        self.form.as_ref().is_some_and(|f| f.is_editing())
     }
 
     fn text_input_is_active(&self) -> bool {
-        self.text_input_overlay_is_active()
+        self.overlay_text_input_is_active()
             || self.editor.is_some()
             || self.filter.active
             || self.form_text_input_is_active()

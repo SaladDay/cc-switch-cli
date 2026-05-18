@@ -118,6 +118,12 @@ pub struct TextInputState {
     pub secret: bool,
 }
 
+impl TextInputState {
+    pub fn is_editing(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TextViewState {
     pub title: String,
@@ -176,6 +182,10 @@ impl McpEnvEntryEditorState {
 
     pub fn value_active(&self) -> bool {
         matches!(self.field, McpEnvEditorField::Value)
+    }
+
+    pub fn is_editing(&self) -> bool {
+        true
     }
 }
 
@@ -299,5 +309,43 @@ pub enum Overlay {
 impl Overlay {
     pub fn is_active(&self) -> bool {
         !matches!(self, Overlay::None)
+    }
+
+    /// Whether this overlay is actively accepting text input.
+    /// This controlls whether the main UI should consider itself in "editing mode" and e.g. respond to vim-style navigation.
+    pub fn is_editing(&self) -> bool {
+        match self {
+            Overlay::TextInput(input) => input.is_editing(),
+            Overlay::ClaudeModelPicker { editing, .. } => *editing,
+            Overlay::ModelFetchPicker { .. } => true,
+            Overlay::McpEnvEntryEditor(editor) => editor.is_editing(),
+            Overlay::None
+            | Overlay::Help
+            | Overlay::Confirm(_)
+            | Overlay::BackupPicker { .. }
+            | Overlay::TextView(_)
+            | Overlay::CommonSnippetPicker { .. }
+            | Overlay::ProviderTestMenu { .. }
+            | Overlay::FailoverQueueManager { .. }
+            | Overlay::ClaudeApiFormatPicker { .. }
+            | Overlay::UsageQueryTemplatePicker { .. }
+            | Overlay::OpenClawToolsProfilePicker { .. }
+            | Overlay::OpenClawAgentsFallbackPicker { .. }
+            | Overlay::McpAppsPicker { .. }
+            | Overlay::VisibleAppsPicker { .. }
+            | Overlay::SkillsAppsPicker { .. }
+            | Overlay::SkillsImportPicker { .. }
+            | Overlay::SkillsSyncMethodPicker { .. }
+            | Overlay::McpEnvPicker { .. }
+            | Overlay::McpTypePicker { .. }
+            | Overlay::Loading { .. }
+            | Overlay::SpeedtestRunning { .. }
+            | Overlay::SpeedtestResult { .. }
+            | Overlay::StreamCheckRunning { .. }
+            | Overlay::StreamCheckResult { .. }
+            | Overlay::UpdateAvailable { .. }
+            | Overlay::UpdateDownloading { .. }
+            | Overlay::UpdateResult { .. } => false,
+        }
     }
 }

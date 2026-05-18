@@ -114,6 +114,61 @@ mod tests {
         UiData::default()
     }
 
+    #[test]
+    fn overlay_is_editing_reflects_text_input_state_only() {
+        assert!(!Overlay::None.is_editing());
+        assert!(!Overlay::Confirm(ConfirmOverlay {
+            title: "Confirm".to_string(),
+            message: "Continue?".to_string(),
+            action: ConfirmAction::Quit,
+        })
+        .is_editing());
+        assert!(!Overlay::ProviderTestMenu {
+            provider_id: "provider".to_string(),
+            selected: 0,
+        }
+        .is_editing());
+        assert!(!Overlay::ClaudeModelPicker {
+            selected: 0,
+            editing: false,
+        }
+        .is_editing());
+
+        assert!(Overlay::TextInput(TextInputState {
+            title: "Title".to_string(),
+            prompt: "Prompt".to_string(),
+            input: TextInput::new(""),
+            submit: TextSubmit::ConfigExport,
+            secret: false,
+        })
+        .is_editing());
+        assert!(Overlay::ClaudeModelPicker {
+            selected: 0,
+            editing: true,
+        }
+        .is_editing());
+        assert!(Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::Name,
+            claude_idx: None,
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: false,
+            models: Vec::new(),
+            error: None,
+            selected_idx: 0,
+        }
+        .is_editing());
+        assert!(Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
+            row: None,
+            return_selected: 0,
+            field: McpEnvEditorField::Key,
+            key: TextInput::new(""),
+            value: TextInput::new(""),
+        })
+        .is_editing());
+    }
+
     fn select_provider_common_snippet_row(app: &mut App) {
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
             form.focus = FormFocus::Fields;
