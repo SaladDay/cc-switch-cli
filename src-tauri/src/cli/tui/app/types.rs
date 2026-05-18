@@ -119,7 +119,7 @@ pub struct TextInputState {
 }
 
 impl TextInputState {
-    pub fn is_editing(&self) -> bool {
+    pub const fn is_editing(&self) -> bool {
         true
     }
 }
@@ -312,7 +312,7 @@ impl Overlay {
     }
 
     /// Whether this overlay is actively accepting text input.
-    /// This controlls whether the main UI should consider itself in "editing mode" and e.g. respond to vim-style navigation.
+    /// This controls whether the main UI should consider itself in "editing mode" and e.g. respond to vim-style navigation.
     pub fn is_editing(&self) -> bool {
         match self {
             Overlay::TextInput(input) => input.is_editing(),

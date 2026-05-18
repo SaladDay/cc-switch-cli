@@ -361,7 +361,7 @@ pub struct PromptMetaFormState {
     initial_snapshot: (String, String, String, String),
 }
 
-// This controlls whether the main UI should consider itself in "editing mode" and e.g. respond to vim-style navigation.
+// This controls whether the main UI should consider itself in "editing mode" and e.g. respond to vim-style navigation.
 impl ProviderAddFormState {
     pub fn is_editing(&self) -> bool {
         self.editing || self.usage_query_editing
