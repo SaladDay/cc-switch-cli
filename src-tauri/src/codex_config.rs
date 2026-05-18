@@ -274,6 +274,26 @@ fn codex_model_provider_id_with_table_from_config(
     Ok(has_provider_table.then_some(provider_id))
 }
 
+fn primary_codex_model_provider_id_with_table(doc: &DocumentMut) -> Option<String> {
+    if let Some(provider_id) = active_codex_model_provider_id(doc) {
+        let has_provider_table = doc
+            .get("model_providers")
+            .and_then(|item| item.as_table_like())
+            .and_then(|table| table.get(provider_id.as_str()))
+            .is_some();
+        if has_provider_table {
+            return Some(provider_id);
+        }
+    }
+
+    let providers = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table_like())?;
+    let mut keys = providers.iter().map(|(key, _)| key.to_string());
+    let first = keys.next()?;
+    keys.next().is_none().then_some(first)
+}
+
 fn normalize_codex_live_config_model_provider_with_anchors<'a>(
     config_text: &str,
     anchor_config_texts: impl IntoIterator<Item = &'a str>,
@@ -460,6 +480,51 @@ pub fn restore_codex_settings_config_model_provider_for_backfill(
     }
 
     Ok(())
+}
+
+/// Rewrite a stored Codex provider snapshot to use a specific provider key.
+///
+/// This updates both the root `model_provider` and the matching
+/// `[model_providers.<key>]` table, while preserving the provider table body and
+/// profile references.
+pub fn rewrite_codex_config_model_provider_key(
+    config_text: &str,
+    target_provider_id: &str,
+) -> Result<String, AppError> {
+    if config_text.trim().is_empty() {
+        return Ok(String::new());
+    }
+
+    let target_provider_id = clean_codex_provider_key(target_provider_id);
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let Some(source_provider_id) = primary_codex_model_provider_id_with_table(&doc) else {
+        return Ok(config_text.to_string());
+    };
+
+    if let Some(model_providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    {
+        if source_provider_id != target_provider_id {
+            let Some(provider_table) = model_providers.remove(source_provider_id.as_str()) else {
+                return Ok(config_text.to_string());
+            };
+            model_providers[target_provider_id.as_str()] = provider_table;
+            rewrite_codex_profile_model_provider_refs(
+                &mut doc,
+                &source_provider_id,
+                &target_provider_id,
+            );
+        }
+    } else {
+        return Ok(config_text.to_string());
+    }
+
+    doc["model_provider"] = toml_edit::value(target_provider_id.as_str());
+
+    Ok(doc.to_string())
 }
 
 /// Atomically write Codex live config after normalizing provider-specific ids.
