@@ -165,7 +165,7 @@ impl App {
         data: &UiData,
     ) -> Option<Action> {
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return None;
                 };
@@ -177,7 +177,7 @@ impl App {
                 }
                 Some(Action::None)
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return None;
                 };
@@ -449,14 +449,14 @@ impl App {
                 provider.close_usage_query_page();
                 Some(Action::None)
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return None;
                 };
                 provider.usage_query_field_idx = provider.usage_query_field_idx.saturating_sub(1);
                 Some(Action::None)
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return None;
                 };
@@ -592,11 +592,11 @@ impl App {
     fn handle_codex_provider_preview_key(&mut self, key: KeyEvent) -> Option<Action> {
         match key.code {
             KeyCode::Enter => Some(self.open_codex_provider_preview_editor()),
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.adjust_codex_preview_scroll(|scroll| scroll.saturating_sub(1));
                 Some(Action::None)
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 self.adjust_codex_preview_scroll(|scroll| scroll.saturating_add(1));
                 Some(Action::None)
             }
@@ -707,14 +707,14 @@ impl App {
                 }
                 Some(Action::None)
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return None;
                 };
                 provider.json_scroll = provider.json_scroll.saturating_sub(1);
                 Some(Action::None)
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return None;
                 };
