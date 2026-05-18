@@ -1053,9 +1053,11 @@ mod tests {
         assert_eq!(app.filter.active, true);
         app.on_key(key(KeyCode::Char('a')), &data());
         app.on_key(key(KeyCode::Char('b')), &data());
-        assert_eq!(app.filter.input.value, "ab");
+        app.on_key(key(KeyCode::Char('j')), &data());
+        app.on_key(key(KeyCode::Char('k')), &data());
+        assert_eq!(app.filter.input.value, "abjk");
         app.on_key(key(KeyCode::Backspace), &data());
-        assert_eq!(app.filter.input.value, "a");
+        assert_eq!(app.filter.input.value, "abj");
         app.on_key(key(KeyCode::Enter), &data());
         assert_eq!(app.filter.active, false);
     }
@@ -10663,6 +10665,90 @@ mod tests {
             other => panic!("expected ProviderAdd form, got: {other:?}"),
         };
         assert_eq!(format, super::super::form::ClaudeApiFormat::Anthropic);
+    }
+
+    #[test]
+    fn provider_claude_api_format_overlay_jk_navigates_options() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::ClaudeApiFormatPicker { selected: 0 };
+
+        let action = app.on_key(key(KeyCode::Char('j')), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeApiFormatPicker { selected: 1 }
+        ));
+
+        let action = app.on_key(key(KeyCode::Char('k')), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeApiFormatPicker { selected: 0 }
+        ));
+    }
+
+    #[test]
+    fn provider_claude_model_overlay_jk_navigates_when_not_editing() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 0,
+            editing: false,
+        };
+
+        let action = app.on_key(key(KeyCode::Char('j')), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 1,
+                editing: false
+            }
+        ));
+
+        let action = app.on_key(key(KeyCode::Char('k')), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+    }
+
+    #[test]
+    fn provider_claude_model_overlay_jk_inserts_chars_when_editing() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 0,
+            editing: true,
+        };
+
+        app.on_key(key(KeyCode::Char('j')), &data());
+        app.on_key(key(KeyCode::Char('k')), &data());
+
+        let model = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.claude_model.value.clone(),
+            other => panic!("expected ProviderAdd form, got: {other:?}"),
+        };
+        assert_eq!(model, "jk");
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: true
+            }
+        ));
     }
 
     #[test]

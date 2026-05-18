@@ -294,17 +294,53 @@ impl App {
         self.overlay = self.pending_overlay.take().unwrap_or(Overlay::None);
     }
 
-    fn structured_form_is_editing_text_field(&self) -> bool {
-        match self.route {
-            Route::ConfigOpenClawTools => false,
-            Route::ConfigOpenClawAgents => false,
-            _ => false,
+    fn text_input_overlay_is_active(&self) -> bool {
+        matches!(
+            self.overlay,
+            Overlay::TextInput(_)
+                | Overlay::ModelFetchPicker { .. }
+                | Overlay::McpEnvEntryEditor(_)
+                | Overlay::ClaudeModelPicker { editing: true, .. }
+        )
+    }
+
+    fn form_text_input_is_active(&self) -> bool {
+        match self.form.as_ref() {
+            Some(FormState::ProviderAdd(provider)) => {
+                provider.editing || provider.usage_query_editing
+            }
+            Some(FormState::McpAdd(mcp)) => mcp.editing,
+            Some(FormState::PromptMeta(prompt)) => {
+                prompt.editing || matches!(prompt.focus, FormFocus::Content)
+            }
+            None => false,
+        }
+    }
+
+    fn text_input_is_active(&self) -> bool {
+        self.text_input_overlay_is_active()
+            || self.editor.is_some()
+            || self.filter.active
+            || self.form_text_input_is_active()
+    }
+
+    fn normalize_vim_navigation_key(&self, key: KeyEvent) -> KeyEvent {
+        if self.text_input_is_active() {
+            return key;
+        }
+
+        match key.code {
+            KeyCode::Char('h') => KeyEvent::new(KeyCode::Left, key.modifiers),
+            KeyCode::Char('j') => KeyEvent::new(KeyCode::Down, key.modifiers),
+            KeyCode::Char('k') => KeyEvent::new(KeyCode::Up, key.modifiers),
+            KeyCode::Char('l') => KeyEvent::new(KeyCode::Right, key.modifiers),
+            _ => key,
         }
     }
 
     fn should_route_printable_content_input_before_globals(&self, key: &KeyEvent) -> bool {
         matches!(self.focus, Focus::Content)
-            && self.structured_form_is_editing_text_field()
+            && self.text_input_is_active()
             && matches!(key.code, KeyCode::Char(c) if !c.is_control())
             && !key.modifiers.contains(KeyModifiers::CONTROL)
     }
@@ -319,6 +355,8 @@ impl App {
             self.should_quit = true;
             return Action::Quit;
         }
+
+        let key = self.normalize_vim_navigation_key(key);
 
         if self.overlay.is_active() {
             return self.on_overlay_key(key, data);
@@ -335,21 +373,6 @@ impl App {
         if self.filter.active {
             return self.on_filter_key(key);
         }
-
-        // Vim-style hjkl navigation
-        let key = if matches!(self.focus, Focus::Content)
-            && self.structured_form_is_editing_text_field()
-        {
-            key
-        } else {
-            match key.code {
-                KeyCode::Char('h') => KeyEvent::new(KeyCode::Left, key.modifiers),
-                KeyCode::Char('j') => KeyEvent::new(KeyCode::Down, key.modifiers),
-                KeyCode::Char('k') => KeyEvent::new(KeyCode::Up, key.modifiers),
-                KeyCode::Char('l') => KeyEvent::new(KeyCode::Right, key.modifiers),
-                _ => key,
-            }
-        };
 
         if self.should_route_printable_content_input_before_globals(&key) {
             return self.on_content_key(key, data);
