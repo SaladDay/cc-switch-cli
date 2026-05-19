@@ -502,33 +502,42 @@ pub fn restore_codex_settings_config_model_provider_for_backfill(
 /// - `[mcp_servers]` is **never** overwritten from the snapshot. The user's live
 ///   `[mcp_servers]` content (active subtables, commented-out subtables, and any
 ///   loose comments around them) is preserved verbatim.
-/// - Root-level user preference keys (`approval_mode`, `disable_response_storage`,
-///   `model_reasoning_effort`, `check_for_update_on_startup`):
-///     - `preserve_user_preferences = true` (provider switch): if live already has
-///       the key, live wins and the snapshot's value is ignored; if live doesn't
-///       have it, fall back to the snapshot's value. This way an initial write
-///       still seeds preferences from the snapshot (which is what carries the
+/// - The narrow set in [`PROVIDER_SCOPED_KEYS`] is treated as **provider-scoped**:
+///   the snapshot is authoritative, live entries the snapshot doesn't cover are
+///   removed (so e.g. runtime trust under `[projects]` from the previous provider
+///   doesn't leak into the new one).
+/// - Every other root-level entry is treated as **user-owned**:
+///     - `preserve_user_preferences = true` (provider switch with applyCommonConfig
+///       honored): live wins when present; falls back to snapshot otherwise so an
+///       initial write still seeds keys from the snapshot (which is what carries
 ///       merged common-snippet defaults).
-///     - `preserve_user_preferences = false` (common-snippet apply/clear):
-///       snapshot drives preferences. Any preference key present in live but
-///       absent from the snapshot is removed, so old snippet leftovers don't
+///     - `preserve_user_preferences = false` (common-snippet apply/clear, or
+///       provider with `applyCommonConfig=false`): snapshot drives. Live keys
+///       absent from the snapshot are removed so old snippet residue doesn't
 ///       bleed through.
-/// - Every other top-level entry the snapshot supplies (root keys like
-///   `model_provider` / `model`, tables like `[model_providers]`, `[projects]`,
-///   `[features]`, …) overwrites the same entry in live. Replacing `[model_providers]`
-///   wholesale is intentional — it ensures provider isolation, since the previous
-///   provider's `[model_providers.X]` entries are not relevant under the new key.
+///
+/// Defaulting *all* non-blacklisted root keys to user-owned is intentional: it
+/// keeps the helper forward-compatible. When Codex adds a new root-level
+/// preference (e.g. `sandbox_mode`, `verbose_logging`, …), users' live values
+/// survive switches without anyone having to update this list. Only the small
+/// set of keys that must hard-sync between providers needs to be maintained.
+///
+/// Currently provider-scoped:
+/// - `model_provider` — pointer to the active `[model_providers.X]` entry.
+/// - `model` — currently-selected model name, conventionally per-provider.
+/// - `model_providers` — provider definitions; replaced wholesale per snapshot.
+/// - `projects` — per-provider runtime trust list.
 pub fn merge_provider_into_codex_live_config(
     live_text: &str,
     provider_snapshot: &str,
     preserve_user_preferences: bool,
 ) -> Result<String, AppError> {
-    const PREFERENCE_KEYS: &[&str] = &[
-        "approval_mode",
-        "disable_response_storage",
-        "model_reasoning_effort",
-        "check_for_update_on_startup",
-    ];
+    /// Root-level keys whose value must strictly follow the active provider's
+    /// snapshot. Anything not listed here is treated as user-owned and follows
+    /// the `preserve_user_preferences` rules above, so adding a new preference
+    /// key in Codex does NOT require code changes here.
+    const PROVIDER_SCOPED_KEYS: &[&str] =
+        &["model_provider", "model", "model_providers", "projects"];
 
     let mut live = if live_text.trim().is_empty() {
         toml_edit::DocumentMut::new()
@@ -546,40 +555,45 @@ pub fn merge_provider_into_codex_live_config(
             .map_err(|e| AppError::Message(format!("Invalid Codex provider snapshot: {e}")))?
     };
 
-    // Step 1: drop any live entry the snapshot does not cover, so switching
-    // providers doesn't leak the previous provider's tables (e.g. [projects],
-    // [model_providers.OLD]) into the new live config. Exempt:
-    //   - `[mcp_servers]` — always lives in the live config and is user-owned
-    //     (including any comment-only lines around it).
-    //   - preference keys, but only when `preserve_user_preferences` is true.
+    // Step 1: figure out which live entries to drop.
+    //
+    // - `[mcp_servers]` is never touched.
+    // - Provider-scoped keys are dropped when the snapshot does not provide
+    //   them, so the previous provider's [projects] / [model_providers.OLD]
+    //   don't leak.
+    // - User-owned keys (everything else) are dropped only when
+    //   `preserve_user_preferences = false` AND the snapshot does not provide
+    //   them, so common-snippet residue gets cleared but ordinary user
+    //   preferences are kept on a normal switch.
     let live_keys: Vec<String> = live.as_table().iter().map(|(k, _)| k.to_string()).collect();
     for key in live_keys {
         if key == "mcp_servers" {
             continue;
         }
-        if preserve_user_preferences && PREFERENCE_KEYS.contains(&key.as_str()) {
-            continue;
-        }
         if snap.get(&key).is_some() {
             continue;
         }
-        live.as_table_mut().remove(&key);
+        let is_provider_scoped = PROVIDER_SCOPED_KEYS.contains(&key.as_str());
+        if is_provider_scoped || !preserve_user_preferences {
+            live.as_table_mut().remove(&key);
+        }
     }
 
-    // Step 2: overlay every snapshot entry except [mcp_servers]. For preference
-    // keys: when `preserve_user_preferences` is true and live already has the
-    // key, live wins; otherwise the snapshot's value is used (this is what
-    // seeds an initial write from snapshot, including merged common-snippet
-    // defaults).
+    // Step 2: overlay every snapshot entry except [mcp_servers].
+    //
+    // - Provider-scoped keys always overwrite live (the snapshot is the source
+    //   of truth for these).
+    // - User-owned keys overwrite live unless we are preserving live
+    //   preferences AND the key already exists in live (in which case live
+    //   wins). When the key is missing from live we still take the snapshot's
+    //   value so initial writes get seeded.
     let snap_keys: Vec<String> = snap.as_table().iter().map(|(k, _)| k.to_string()).collect();
     for key in snap_keys {
         if key == "mcp_servers" {
             continue;
         }
-        if preserve_user_preferences
-            && PREFERENCE_KEYS.contains(&key.as_str())
-            && live.get(&key).is_some()
-        {
+        let is_provider_scoped = PROVIDER_SCOPED_KEYS.contains(&key.as_str());
+        if !is_provider_scoped && preserve_user_preferences && live.get(&key).is_some() {
             continue;
         }
         if let Some(val) = snap.get(&key) {
@@ -876,6 +890,51 @@ name = \"New\"
         assert!(doc.get("disable_response_storage").is_none());
         assert!(doc.get("model_reasoning_effort").is_none());
         assert_eq!(doc["model_provider"].as_str(), Some("p1"));
+    }
+
+    #[test]
+    fn merge_keeps_unknown_root_keys_from_live_on_switch() {
+        // Regression guard for forward compatibility: if Codex introduces a
+        // new root-level preference key tomorrow (e.g. `sandbox_mode`,
+        // `verbose_logging`, or anything else not yet listed in
+        // PROVIDER_SCOPED_KEYS), the user's live value must survive a
+        // provider switch without us having to update this file.
+        let live = indoc::indoc! {r#"
+            model_provider = "old"
+            sandbox_mode = "danger-full-access"
+            verbose_logging = true
+
+            [model_providers.old]
+            name = "Old"
+        "#};
+
+        // Snapshot is from a stored provider that doesn't know about the new
+        // keys at all (older snapshot, or a provider configured before the
+        // user added them).
+        let snapshot = indoc::indoc! {r#"
+            model_provider = "new"
+
+            [model_providers.new]
+            name = "New"
+        "#};
+
+        let merged = merge_provider_into_codex_live_config(live, snapshot, true).unwrap();
+        let doc: toml_edit::DocumentMut = merged.parse().unwrap();
+
+        // Provider-scoped keys followed the snapshot.
+        assert_eq!(doc["model_provider"].as_str(), Some("new"));
+        assert!(doc
+            .get("model_providers")
+            .and_then(|t| t.get("new"))
+            .is_some());
+        assert!(doc
+            .get("model_providers")
+            .and_then(|t| t.get("old"))
+            .is_none());
+
+        // Unknown root keys stayed put.
+        assert_eq!(doc["sandbox_mode"].as_str(), Some("danger-full-access"));
+        assert_eq!(doc["verbose_logging"].as_bool(), Some(true));
     }
 
     #[test]
