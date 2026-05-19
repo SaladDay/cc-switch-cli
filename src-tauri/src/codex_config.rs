@@ -485,11 +485,17 @@ pub fn restore_codex_settings_config_model_provider_for_backfill(
 /// Merge a stored provider snapshot into the current live config.
 ///
 /// Strategy: edit the **live** document in place, overlaying only the entries the
-/// snapshot explicitly provides. Everything else — including comment-only lines
-/// the user has placed anywhere in the file (e.g. a `# [mcp_servers.x]` block that
-/// they have temporarily disabled) — stays untouched. This avoids any chance of
-/// commented-out sections being "reopened" or silently dropped when switching
-/// providers.
+/// snapshot explicitly provides. Everything else stays untouched — in particular
+/// every comment the user has placed in `~/.codex/config.toml` survives a
+/// provider switch, including:
+///
+/// - whole commented-out subtables (e.g. `# [mcp_servers.x] / # command = ...`,
+///   typically used to temporarily disable an MCP server),
+/// - commented-out root-level keys (e.g. `# disable_response_storage = true`),
+/// - free-floating header notes attached to a key (toml_edit treats these as
+///   the next key's prefix decor; overwriting that key in place preserves the
+///   decor because the key already existed in live),
+/// - trailing notes at end of file (document-level trailing decor).
 ///
 /// Rules:
 ///
@@ -870,6 +876,50 @@ name = \"New\"
         assert!(doc.get("disable_response_storage").is_none());
         assert!(doc.get("model_reasoning_effort").is_none());
         assert_eq!(doc["model_provider"].as_str(), Some("p1"));
+    }
+
+    #[test]
+    fn merge_keeps_root_level_comments_around_overwritten_keys() {
+        // In toml_edit's model, comment-only lines between two root-level
+        // keys are attached to the **next** key's prefix decor. When the
+        // snapshot overwrites that next key, the comments must still be
+        // there afterwards — otherwise users lose any inline notes they
+        // sprinkled into ~/.codex/config.toml.
+        let live = "\
+# pinned by me — do not change without checking the runbook
+model_provider = \"old\"
+
+# disabled while debugging issue-1234
+# disable_response_storage = true
+approval_mode = \"auto-edit\"
+
+# trailing footnote at EOF
+";
+
+        let snapshot = "\
+model_provider = \"new\"
+
+[model_providers.new]
+name = \"New\"
+";
+
+        let merged = merge_provider_into_codex_live_config(live, snapshot, true).unwrap();
+
+        for needle in [
+            "# pinned by me — do not change without checking the runbook",
+            "# disabled while debugging issue-1234",
+            "# disable_response_storage = true",
+            "# trailing footnote at EOF",
+        ] {
+            assert!(
+                merged.contains(needle),
+                "merged output is missing comment line: {needle:?}\n--- merged ---\n{merged}"
+            );
+        }
+
+        let doc: toml_edit::DocumentMut = merged.parse().unwrap();
+        assert_eq!(doc["model_provider"].as_str(), Some("new"));
+        assert_eq!(doc["approval_mode"].as_str(), Some("auto-edit"));
     }
 
     #[test]
