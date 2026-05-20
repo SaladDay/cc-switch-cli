@@ -32,7 +32,7 @@
 | `5c6d373f` | `Fix broken internal documentation links (#167)` | `9b205d20` | 语义吸收 | 手工吸收内部文档链接修复：将不存在的 `CLAUDE.md` 链接改为 README 链接，并修正 v3.6.0 / v3.6.1 中文 release note 指向同目录英文版本。 |
 | `d36070bf` | `(tui)refine footer shortcuts` | `9b205d20` | 语义吸收 | 合入 TUI footer 快捷键压缩展示，移除 `NAV` / `ACT` 标签并优先展示 proxy 开关入口，改善窄中文终端可见性。 |
 | `371f4222` | `(prompt)stabilize prompt list order` | `9b205d20` | 语义吸收 | 合入 prompt 列表稳定排序：按 `created_at` 正序并用 id 兜底，避免仅因 `updated_at` 变化导致列表跳动。 |
-| `73b7c3c1` | `fix(webdav): avoid upload readback checks` | 当前工作区 | 语义吸收 | 合入 WebDAV 上传策略修复：去掉 check connection 的 probe 写读删、去掉 upload 后 manifest GET readback 校验，保留 manifest HEAD 作为 best-effort metadata，并避免普通上传触发旧 V1 远端清理。 |
+| `73b7c3c1` | `fix(webdav): avoid upload readback checks` | `20c949fa` | 语义吸收 | 合入 WebDAV 上传策略修复：去掉 check connection 的 probe 写读删、去掉 upload 后 manifest GET readback 校验，保留 manifest HEAD 作为 best-effort metadata，并避免普通上传触发旧 V1 远端清理。 |
 
 ### 部分覆盖但未合入原上游提交
 
@@ -57,6 +57,17 @@
 | `6ff4f888`, `8afd9075`, `d3810be2`, `3fa27235` | prompt 服务和 prompt 编辑系列 | 暂不合入 | 这组涉及 SQLite prompt service、prompt identity、add/edit form 统一和导入确认；当前本仓库缺少上游新增的 prompt form 文件结构，且 `services/prompt.rs` 与 TUI content/form handler 存在冲突，需要作为独立专题迁移。 |
 | `65c4dc75` 到 `d160b168` | provider common config 系列重构 | 暂不合入 | 这组改动 provider live/common config 写入、CLI 命令、TUI editor 和 settings 持久化，且与本仓库现有 Hermes/OpenClaw/provider common config 扩展冲突；需要先定义 fork 行为边界再拆分吸收。 |
 | `a1dd240a` | `(tui)add usage query configuration` | 暂不合入 | 该提交新增 Copilot auth、balance/coding plan 服务、usage query 配置 UI 和大量 provider form 状态，变更面超过 6000 行并与当前 TUI settings/form 状态冲突，不适合和 WebDAV 修复同批合入。 |
+
+### 本轮很高风险复核
+
+复核方法：逐个查看上游 diff/stat，用 `git apply --check --3way` 在当前分支上试套 patch，并对照当前 fork 的核心实现。结论是本轮不合入代码，只记录后续迁移边界。
+
+| 上游提交 | 风险焦点 | 复核结论 |
+| --- | --- | --- |
+| `83307151` | failover / proxy UX、proxy 持久化开关、provider 路由、数据库 DAO 和 TUI 设置页。 | 不直接合入。该提交改动 37 个文件，新增 `cli/failover_policy.rs`，并把“开启自动故障转移”升级为可能自动开启 proxy、切换到队列头 provider、关闭 proxy 时清理 auto failover。试套时 `cli/commands/failover.rs`、`cli/i18n.rs`、`content_entities.rs`、`runtime_actions/settings.rs`、`ui/providers.rs` 等关键 TUI/命令入口冲突；更重要的是它会改变当前 fork 已有的 proxy inactive guard、managed external proxy session、live config/current provider 同步语义。后续应作为独立 failover 迁移：先定行为规格，再迁 service/DAO 测试，最后迁 TUI。 |
+| `6ff4f888`, `8afd9075`, `d3810be2`, `3fa27235` | prompt 存储从 config 快照转向 SQLite、prompt identity 编辑、add/edit form 统一、导入前确认。 | 不直接合入。`6ff4f888` 会删除 `store.rs` 对 prompts 的持久化同步，并让 `PromptService` 直接读写 DB；当前 fork 虽已有 `prompts` 表和 store 同步，但 service 仍以 `MultiAppConfig` 快照为主。后续 UI 提交还新增 `cli/tui/app/form_handlers/prompt.rs`、`cli/tui/form/prompt.rs`、`cli/tui/ui/forms/prompt.rs`，这些文件当前树不存在，试套后在 prompt service、content_entities、form/tab/runtime_actions 多处冲突。后续应先把 PromptService DB-first 作为单独迁移并补齐 stale-config/DB 优先级测试，再处理 prompt 表单结构。 |
+| `65c4dc75` 到 `d160b168` | provider common config 语义、provider snapshot 归一化、live config 写入、CLI common-config 命令、TUI editor/settings。 | 不直接合入。该系列从 `65c4dc75` 起就会重写 `common_config.rs` 的 `provider_uses_common_config` 判定、Codex common snippet 处理、startup live import 和 provider snapshot 迁移。当前 fork 已有 `common_config_upstream_semantics_migrated_v1` 迁移标记、Hermes/OpenClaw 扩展、Codex runtime-local key 处理和大量 provider tests；试套冲突集中在 `app_state.rs`、`provider_state.rs`、`services/provider/codex.rs`、`services/provider/common_config.rs`、`services/provider/mod.rs`、`store.rs`。其中 `a5914cdd` 虽小，但依赖前序 common config 语义，不适合单独摘。后续需要独立设计“上游 common config 语义”和本 fork additive app/provider 扩展的边界。 |
+| `a1dd240a` | usage query 配置、GitHub Copilot 托管认证、balance/coding plan 网络服务、provider form 状态、settings 持久化。 | 不直接合入。该提交改动 46 个文件，新增约 6800 行，包括 `proxy/providers/copilot_auth.rs`、`services/balance.rs`、`services/coding_plan.rs`，并改造 TUI provider 表单、usage script credential 解析和 settings。当前 fork 只有 `services/subscription.rs`、`services/provider/usage.rs` 和既有 usage_script 边界校验；试套冲突落在 TUI 状态机、overlay、settings、provider tests 等位置。该功能还引入外部网络认证、token/account 持久化和多个第三方 API 查询路径，安全与产品行为都需要单独审查，不应作为上游吸收子项混入。 |
 
 ### 尚未吸收的上游新增提交
 
