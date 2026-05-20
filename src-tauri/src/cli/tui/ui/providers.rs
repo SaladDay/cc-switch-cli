@@ -233,6 +233,12 @@ pub(super) fn render_providers(
     }
 
     let failover_supported = crate::cli::tui::app::supports_failover_controls(&app.app_type);
+    let proxy_failover_active = failover_supported
+        && data.proxy.auto_failover_enabled
+        && data
+            .proxy
+            .routes_current_app_through_proxy(&app.app_type)
+            .unwrap_or(false);
     let mut header_cells = vec![
         Cell::from(""),
         Cell::from(texts::header_name()),
@@ -258,7 +264,7 @@ pub(super) fn render_providers(
             } else {
                 ""
             }
-        } else if failover_supported && data.proxy.auto_failover_enabled {
+        } else if proxy_failover_active {
             if row.provider.in_failover_queue {
                 texts::tui_marker_active()
             } else {

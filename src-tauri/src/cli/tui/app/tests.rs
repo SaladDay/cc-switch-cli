@@ -10197,6 +10197,8 @@ mod tests {
 
         let mut data = UiData::default();
         data.proxy.auto_failover_enabled = true;
+        data.proxy.running = true;
+        data.proxy.claude_takeover = true;
         data.providers.rows.push(failover_provider_row(
             "p1",
             "Provider One",
@@ -10211,6 +10213,28 @@ mod tests {
     }
 
     #[test]
+    fn providers_space_switches_provider_when_failover_enabled_but_proxy_inactive() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.proxy.auto_failover_enabled = true;
+        data.proxy.running = false;
+        data.proxy.claude_takeover = true;
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+            true,
+            Some(0),
+        ));
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(action, Action::ProviderSwitch { id } if id == "p1"));
+    }
+
+    #[test]
     fn providers_s_key_is_blocked_when_failover_enabled() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Providers;
@@ -10218,6 +10242,8 @@ mod tests {
 
         let mut data = UiData::default();
         data.proxy.auto_failover_enabled = true;
+        data.proxy.running = true;
+        data.proxy.codex_takeover = true;
         data.providers.rows.push(failover_provider_row(
             "p1",
             "Provider One",

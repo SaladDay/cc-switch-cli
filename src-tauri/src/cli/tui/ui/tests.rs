@@ -7200,6 +7200,8 @@ fn failover_provider_list_marks_queue_entries_when_enabled() {
     app.focus = Focus::Content;
     let mut data = minimal_data(&app.app_type);
     data.proxy.auto_failover_enabled = true;
+    data.proxy.running = true;
+    data.proxy.claude_takeover = true;
     data.providers.current_id = "current".to_string();
     data.providers.rows = vec![
         failover_provider_row("current", "Current Provider", true, false, None),
@@ -7222,6 +7224,45 @@ fn failover_provider_list_marks_queue_entries_when_enabled() {
     );
     assert!(
         queued_line.contains(texts::tui_marker_active()),
+        "{queued_line}"
+    );
+    assert!(queued_line.contains("#1"), "{queued_line}");
+}
+
+#[test]
+fn failover_provider_list_uses_current_marker_when_enabled_but_proxy_inactive() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.auto_failover_enabled = true;
+    data.proxy.running = false;
+    data.proxy.claude_takeover = true;
+    data.providers.current_id = "current".to_string();
+    data.providers.rows = vec![
+        failover_provider_row("current", "Current Provider", true, false, None),
+        failover_provider_row("queued", "Queued Provider", false, true, Some(1)),
+    ];
+
+    let buf = render(&app, &data);
+    let current_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("Current Provider") && line.contains("https://example.com"))
+        .expect("current provider row rendered");
+    let queued_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("Queued Provider") && line.contains("https://example.com"))
+        .expect("queued provider row rendered");
+
+    assert!(
+        current_line.contains(texts::tui_marker_active()),
+        "{current_line}"
+    );
+    assert!(
+        !queued_line.contains(texts::tui_marker_active()),
         "{queued_line}"
     );
     assert!(queued_line.contains("#1"), "{queued_line}");

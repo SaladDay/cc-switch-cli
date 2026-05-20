@@ -25,7 +25,13 @@ impl App {
     }
 
     fn provider_switch_action(&mut self, row: &super::data::ProviderRow, data: &UiData) -> Action {
-        if supports_failover_controls(&self.app_type) && data.proxy.auto_failover_enabled {
+        let proxy_failover_active = supports_failover_controls(&self.app_type)
+            && data.proxy.auto_failover_enabled
+            && data
+                .proxy
+                .routes_current_app_through_proxy(&self.app_type)
+                .unwrap_or(false);
+        if proxy_failover_active {
             self.push_toast(
                 crate::t!(
                     "Manage provider priority in the failover queue while automatic failover is enabled.",
