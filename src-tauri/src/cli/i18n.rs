@@ -3064,6 +3064,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_fill_all() -> &'static str {
+        if is_chinese() {
+            "填充全部"
+        } else {
+            "fill all"
+        }
+    }
+
     pub fn tui_key_deactivate_active() -> &'static str {
         if is_chinese() {
             "取消激活(当前)"

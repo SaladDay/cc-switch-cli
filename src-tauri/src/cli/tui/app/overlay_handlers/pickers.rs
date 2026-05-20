@@ -343,6 +343,24 @@ impl App {
                 }
                 Action::None
             }
+            KeyCode::Char('a') => {
+                let selected = *selected;
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    let value = provider
+                        .claude_model_input(selected)
+                        .map(|input| input.value.clone())
+                        .unwrap_or_default();
+                    for idx in 0..5 {
+                        if idx != selected {
+                            if let Some(input) = provider.claude_model_input_mut(idx) {
+                                input.set(value.clone());
+                            }
+                        }
+                    }
+                    provider.mark_claude_model_config_touched();
+                }
+                Action::None
+            }
             _ => Action::None,
         }
     }
@@ -371,9 +389,19 @@ impl App {
                 .collect()
         };
 
+        let is_claude_model = *field == ProviderAddField::ClaudeModelConfig;
+        let restore_idx = claude_idx.unwrap_or(0);
+
         Some(match key.code {
             KeyCode::Esc => {
-                self.overlay = Overlay::None;
+                if is_claude_model {
+                    self.overlay = Overlay::ClaudeModelPicker {
+                        selected: restore_idx,
+                        editing: false,
+                    };
+                } else {
+                    self.overlay = Overlay::None;
+                }
                 Action::None
             }
             KeyCode::Up => {
@@ -409,7 +437,15 @@ impl App {
 
                 let field = *field;
                 let claude_idx = *claude_idx;
-                self.overlay = Overlay::None;
+
+                if field == ProviderAddField::ClaudeModelConfig {
+                    self.overlay = Overlay::ClaudeModelPicker {
+                        selected: claude_idx.unwrap_or(0),
+                        editing: false,
+                    };
+                } else {
+                    self.overlay = Overlay::None;
+                }
 
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
                     if field == ProviderAddField::ClaudeModelConfig {
