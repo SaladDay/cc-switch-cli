@@ -7,7 +7,7 @@ use serde_json::json;
 use serial_test::serial;
 use tempfile::TempDir;
 
-use super::app::{App, LoadingKind, Overlay, ToastKind};
+use super::app::{Action, App, LoadingKind, Overlay, ToastKind};
 use super::data::UiData;
 use super::form::ProviderAddField;
 use super::*;
@@ -78,6 +78,75 @@ fn mcp_import_uses_info_toast_kind() {
 #[test]
 fn tui_tick_rate_returns_to_200ms() {
     assert_eq!(TUI_TICK_RATE, std::time::Duration::from_millis(200));
+}
+
+#[test]
+fn initialize_codex_opens_current_provider_mismatch_picker() {
+    let (app, _data) = initialize_app_state_for_test(Some(AppType::Codex), |_| {
+        let mut data = UiData::default();
+        data.providers.codex_current_mismatch =
+            Some(crate::services::provider::CodexCurrentProviderMismatch {
+                stored_provider_id: "stored-current".to_string(),
+                stored_provider_name: "zhima-cx".to_string(),
+                live_provider_id: "live-current".to_string(),
+                live_provider_name: "zhima-fuli".to_string(),
+                live_model_provider_key: "zhima-fuli".to_string(),
+            });
+        Ok(data)
+    })
+    .expect("initialize app state");
+
+    assert!(matches!(
+        app.overlay,
+        Overlay::CodexCurrentProviderMismatch { selected: 0, .. }
+    ));
+}
+
+#[test]
+fn switching_to_codex_opens_current_provider_mismatch_picker() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut next_data = UiData::default();
+    next_data.providers.codex_current_mismatch =
+        Some(crate::services::provider::CodexCurrentProviderMismatch {
+            stored_provider_id: "stored-current".to_string(),
+            stored_provider_name: "zhima-cx".to_string(),
+            live_provider_id: "live-current".to_string(),
+            live_provider_name: "zhima-fuli".to_string(),
+            live_model_provider_key: "zhima-fuli".to_string(),
+        });
+
+    apply_preloaded_app_switch(&mut app, &mut data, AppType::Codex, next_data);
+
+    assert!(matches!(
+        app.overlay,
+        Overlay::CodexCurrentProviderMismatch { selected: 0, .. }
+    ));
+}
+
+#[test]
+fn codex_current_mismatch_picker_enter_accepts_live_by_default() {
+    let mut app = App::new(Some(AppType::Codex));
+    app.overlay = Overlay::CodexCurrentProviderMismatch {
+        selected: 0,
+        mismatch: crate::services::provider::CodexCurrentProviderMismatch {
+            stored_provider_id: "stored-current".to_string(),
+            stored_provider_name: "zhima-cx".to_string(),
+            live_provider_id: "live-current".to_string(),
+            live_provider_name: "zhima-fuli".to_string(),
+            live_model_provider_key: "zhima-fuli".to_string(),
+        },
+    };
+
+    let action = app.on_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &UiData::default(),
+    );
+
+    assert!(matches!(
+        action,
+        Action::CodexAcceptLiveCurrent { id } if id == "live-current"
+    ));
 }
 
 #[test]

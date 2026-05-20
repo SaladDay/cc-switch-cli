@@ -653,6 +653,226 @@ wire_api = "responses"
 
     #[test]
     #[serial(home_settings)]
+    fn startup_reports_codex_current_mismatch_without_rewriting_live_config() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        write_json(
+            crate::codex_config::get_codex_auth_path(),
+            json!({ "OPENAI_API_KEY": "live-codex-key" }),
+        );
+        let live_config = r#"model_provider = "zhima-fuli"
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+disable_response_storage = true
+approval_mode = "auto-edit"
+check_for_update_on_startup = false
+
+[model_providers.zhima-cx]
+name = "zhima-cx"
+base_url = "https://api.cx.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[model_providers.zhima-fuli]
+name = "zhima-fuli"
+base_url = "https://api.fuli.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        write_text(crate::codex_config::get_codex_config_path(), live_config);
+
+        let mut config = crate::app_config::MultiAppConfig::default();
+        config.common_config_snippets.codex = Some(
+            "model_reasoning_effort = \"xhigh\"\ndisable_response_storage = true\napproval_mode = \"auto-edit\"\ncheck_for_update_on_startup = false"
+                .to_string(),
+        );
+        {
+            let manager = config
+                .get_manager_mut(&crate::app_config::AppType::Codex)
+                .expect("codex manager");
+            manager.current = "db-current".to_string();
+            manager.providers.insert(
+                "db-current".to_string(),
+                crate::provider::Provider::with_id(
+                    "db-current".to_string(),
+                    "zhima-cx".to_string(),
+                    json!({
+                        "auth": { "OPENAI_API_KEY": "db-key" },
+                        "config": "model_provider = \"zhima-cx\"\nmodel = \"gpt-5.5\"\n\n[model_providers.zhima-cx]\nname = \"zhima-cx\"\nbase_url = \"https://api.cx.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                    }),
+                    None,
+                ),
+            );
+            manager.providers.insert(
+                "live-current".to_string(),
+                crate::provider::Provider::with_id(
+                    "live-current".to_string(),
+                    "zhima-fuli".to_string(),
+                    json!({
+                        "auth": { "OPENAI_API_KEY": "db-key" },
+                        "config": "model_provider = \"zhima-fuli\"\nmodel = \"gpt-5.5\"\n\n[model_providers.zhima-fuli]\nname = \"zhima-fuli\"\nbase_url = \"https://api.fuli.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                    }),
+                    None,
+                ),
+            );
+        }
+
+        let db = crate::database::Database::init().expect("create db");
+        db.migrate_from_json(&config).expect("seed db");
+        db.set_current_provider("codex", "db-current")
+            .expect("seed db current");
+        crate::settings::set_current_provider(
+            &crate::app_config::AppType::Codex,
+            Some("db-current"),
+        )
+        .expect("seed local current");
+        drop(db);
+
+        let state = AppState::try_new_with_startup_recovery().expect("create startup state");
+
+        assert_eq!(
+            state
+                .db
+                .get_current_provider("codex")
+                .expect("read db current")
+                .as_deref(),
+            Some("db-current")
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&crate::app_config::AppType::Codex).as_deref(),
+            Some("db-current")
+        );
+        let config = state.config.read().expect("read refreshed config");
+        let manager = config
+            .get_manager(&crate::app_config::AppType::Codex)
+            .expect("codex manager");
+        assert_eq!(manager.current, "db-current");
+        drop(config);
+        let mismatch =
+            crate::services::provider::ProviderService::codex_current_provider_mismatch(&state)
+                .expect("read Codex current mismatch")
+                .expect("mismatch should be reported for the TUI");
+        assert_eq!(mismatch.live_provider_id, "live-current");
+        assert_eq!(mismatch.stored_provider_id, "db-current");
+        assert_eq!(
+            std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+                .expect("read live config"),
+            live_config,
+            "startup current reconciliation must not rewrite live config.toml"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn startup_reports_codex_current_mismatch_from_exact_live_key_when_duplicate_snapshot_exists() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        write_json(
+            crate::codex_config::get_codex_auth_path(),
+            json!({ "OPENAI_API_KEY": "live-codex-key" }),
+        );
+        let duplicate_key = "810012f0_9dd1_4b80_b4d0_7251315cfb77";
+        let live_config = format!(
+            r#"model_provider = "zhima-cx"
+model = "gpt-5.5"
+disable_response_storage = true
+
+[model_providers.{duplicate_key}]
+name = "zhima-cx"
+base_url = "https://api.cx.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[model_providers.zhima-cx]
+name = "zhima-cx"
+base_url = "https://api.cx.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        );
+        write_text(crate::codex_config::get_codex_config_path(), &live_config);
+
+        let mut config = crate::app_config::MultiAppConfig::default();
+        {
+            let manager = config
+                .get_manager_mut(&crate::app_config::AppType::Codex)
+                .expect("codex manager");
+            manager.current = "duplicate-current".to_string();
+            manager.providers.insert(
+                "duplicate-current".to_string(),
+                crate::provider::Provider::with_id(
+                    "duplicate-current".to_string(),
+                    "zhima-cx-free".to_string(),
+                    json!({
+                        "auth": { "OPENAI_API_KEY": "db-key" },
+                        "config": format!(
+                            "model_provider = \"{duplicate_key}\"\nmodel = \"gpt-5.5\"\n\n[model_providers.{duplicate_key}]\nname = \"zhima-cx\"\nbase_url = \"https://api.cx.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                        )
+                    }),
+                    None,
+                ),
+            );
+            manager.providers.insert(
+                "live-current".to_string(),
+                crate::provider::Provider::with_id(
+                    "live-current".to_string(),
+                    "zhima-cx".to_string(),
+                    json!({
+                        "auth": { "OPENAI_API_KEY": "db-key" },
+                        "config": "model_provider = \"zhima-cx\"\nmodel = \"gpt-5.5\"\n\n[model_providers.zhima-cx]\nname = \"zhima-cx\"\nbase_url = \"https://api.cx.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                    }),
+                    None,
+                ),
+            );
+        }
+
+        let db = crate::database::Database::init().expect("create db");
+        db.migrate_from_json(&config).expect("seed db");
+        db.set_current_provider("codex", "duplicate-current")
+            .expect("seed db current");
+        crate::settings::set_current_provider(
+            &crate::app_config::AppType::Codex,
+            Some("duplicate-current"),
+        )
+        .expect("seed local current");
+        drop(db);
+
+        let state = AppState::try_new_with_startup_recovery().expect("create startup state");
+
+        assert_eq!(
+            state
+                .db
+                .get_current_provider("codex")
+                .expect("read db current")
+                .as_deref(),
+            Some("duplicate-current"),
+            "startup should leave the stored current unchanged until the user chooses"
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&crate::app_config::AppType::Codex).as_deref(),
+            Some("duplicate-current")
+        );
+        let mismatch =
+            crate::services::provider::ProviderService::codex_current_provider_mismatch(&state)
+                .expect("read Codex current mismatch")
+                .expect("mismatch should be reported for the TUI");
+        assert_eq!(
+            mismatch.live_provider_id, "live-current",
+            "mismatch detection must honor the exact live model_provider key"
+        );
+        assert_eq!(mismatch.stored_provider_id, "duplicate-current");
+        assert_eq!(
+            std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+                .expect("read live config"),
+            live_config,
+            "startup current reconciliation must not rewrite live config.toml"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
     fn startup_seeds_official_providers_when_live_config_is_absent() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());

@@ -88,6 +88,15 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
+        Overlay::CodexCurrentProviderMismatch { selected, mismatch } => {
+            super::pickers::render_codex_current_provider_mismatch_overlay(
+                frame,
+                content_area,
+                theme,
+                *selected,
+                mismatch,
+            )
+        }
         Overlay::ModelFetchPicker {
             input,
             query,

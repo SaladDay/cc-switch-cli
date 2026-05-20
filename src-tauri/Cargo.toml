@@ -102,6 +102,7 @@ panic = "abort"
 strip = "symbols"
 
 [dev-dependencies]
+indoc = "2"
 minisign = "0.9.1"
 serial_test = "3"
 tempfile = "3"

@@ -281,8 +281,16 @@ command = "echo"
 
     let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "config.toml should contain synced MCP servers"
+        config_text.contains("mcp_servers.legacy"),
+        "Codex provider switch should preserve existing live MCP servers"
+    );
+    assert!(
+        !config_text.contains("mcp_servers.echo-server"),
+        "Codex provider switch should not inject managed MCP servers from cc-switch"
+    );
+    assert!(
+        config_text.contains("model_provider = \"latest\""),
+        "config.toml should point at the selected Codex provider"
     );
 
     let locked = app_state.config.read().expect("lock config after switch");

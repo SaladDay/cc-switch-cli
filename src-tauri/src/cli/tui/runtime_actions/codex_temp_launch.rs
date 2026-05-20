@@ -137,6 +137,7 @@ mod tests {
                     providers: ProvidersSnapshot {
                         current_id: current_id.to_string(),
                         rows,
+                        codex_current_mismatch: None,
                     },
                     ..UiData::default()
                 },

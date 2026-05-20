@@ -74,6 +74,25 @@ pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
     do_switch(ctx, id)
 }
 
+pub(super) fn accept_codex_live_current(
+    ctx: &mut RuntimeActionContext<'_>,
+    id: String,
+) -> Result<(), AppError> {
+    let state = load_state()?;
+    ProviderService::accept_codex_live_current_provider(&state, &id)?;
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.pending_overlay = None;
+    ctx.app.overlay = Overlay::None;
+    ctx.app.push_toast(
+        crate::t!(
+            "Codex current provider now follows config.toml.",
+            "Codex 当前供应商已跟随 config.toml。"
+        ),
+        ToastKind::Success,
+    );
+    Ok(())
+}
+
 pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
     let state = load_state()?;
     let imported = match ctx.app.app_type {

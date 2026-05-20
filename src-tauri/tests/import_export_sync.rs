@@ -148,7 +148,7 @@ fn sync_codex_provider_writes_auth_and_config() {
 }
 
 #[test]
-fn sync_codex_provider_preserves_live_model_provider_id_for_history() {
+fn sync_codex_provider_writes_selected_model_provider_id_to_live() {
     let _guard = lock_test_mutex();
     reset_test_fs();
 
@@ -202,8 +202,8 @@ requires_openai_auth = true
 
     assert_eq!(
         parsed.get("model_provider").and_then(|v| v.as_str()),
-        Some("rightcode"),
-        "legacy ConfigService sync should keep the stable live provider id"
+        Some("aihubmix"),
+        "ConfigService sync should write the selected provider id to live"
     );
 
     let model_providers = parsed
@@ -211,12 +211,12 @@ requires_openai_auth = true
         .and_then(|v| v.as_table())
         .expect("model_providers should exist");
     assert!(
-        model_providers.get("aihubmix").is_none(),
-        "provider-specific target id should not be written to live config"
+        model_providers.get("aihubmix").is_some(),
+        "provider-specific target id should be written to live config"
     );
     assert_eq!(
         model_providers
-            .get("rightcode")
+            .get("aihubmix")
             .and_then(|v| v.get("base_url"))
             .and_then(|v| v.as_str()),
         Some("https://aihubmix.example/v1")
@@ -229,7 +229,7 @@ requires_openai_auth = true
         .and_then(|v| v.as_str())
         .expect("synced config string");
     assert!(
-        synced_cfg.contains("[model_providers.rightcode]"),
+        synced_cfg.contains("[model_providers.aihubmix]"),
         "ConfigService keeps syncing provider config from live"
     );
 }

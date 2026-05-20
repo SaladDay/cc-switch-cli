@@ -194,6 +194,10 @@ pub enum Overlay {
     ClaudeApiFormatPicker {
         selected: usize,
     },
+    CodexCurrentProviderMismatch {
+        selected: usize,
+        mismatch: crate::services::provider::CodexCurrentProviderMismatch,
+    },
     ModelFetchPicker {
         request_id: u64,
         field: ProviderAddField,

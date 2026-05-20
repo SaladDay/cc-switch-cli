@@ -127,6 +127,99 @@ fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
 }
 
 #[test]
+#[serial(home_settings)]
+fn accept_codex_live_current_updates_current_without_rewriting_live_config() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+
+    let live_auth = json!({ "OPENAI_API_KEY": "live-fuli-key" });
+    let live_config = r#"model_provider = "zhima-fuli"
+model = "gpt-5.5"
+approval_mode = "auto-edit"
+
+[model_providers.zhima-fuli]
+name = "zhima-fuli"
+base_url = "https://fuli.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    crate::codex_config::write_codex_live_atomic(&live_auth, Some(live_config))
+        .expect("seed Codex live config");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "stored-current".to_string();
+        manager.providers.insert(
+            "stored-current".to_string(),
+            Provider::with_id(
+                "stored-current".to_string(),
+                "zhima-cx".to_string(),
+                codex_settings(
+                    "model_provider = \"zhima-cx\"\n\n[model_providers.zhima-cx]\nbase_url = \"https://cx.example/v1\"\n",
+                ),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "live-current".to_string(),
+            Provider::with_id(
+                "live-current".to_string(),
+                "zhima-fuli".to_string(),
+                codex_settings(
+                    "model_provider = \"zhima-fuli\"\n\n[model_providers.zhima-fuli]\nbase_url = \"https://old.example/v1\"\n",
+                ),
+                None,
+            ),
+        );
+    }
+    let state = state_from_config(config);
+    crate::settings::set_current_provider(&AppType::Codex, Some("stored-current"))
+        .expect("seed local current");
+
+    ProviderService::accept_codex_live_current_provider(&state, "live-current")
+        .expect("accept live current");
+
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read db current")
+            .as_deref(),
+        Some("live-current")
+    );
+    assert_eq!(
+        crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+        Some("live-current")
+    );
+    assert_eq!(
+        std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read Codex live config"),
+        live_config,
+        "accepting live current must not rewrite config.toml"
+    );
+
+    let guard = state.config.read().expect("read config");
+    let manager = guard.get_manager(&AppType::Codex).expect("codex manager");
+    assert_eq!(manager.current, "live-current");
+    let live_provider = manager
+        .providers
+        .get("live-current")
+        .expect("live provider remains");
+    assert_eq!(
+        live_provider
+            .settings_config
+            .get("auth")
+            .and_then(|value| value.get("OPENAI_API_KEY"))
+            .and_then(Value::as_str),
+        Some("live-fuli-key")
+    );
+}
+
+#[test]
 fn capture_codex_temp_launch_snapshot_clears_auth_when_auth_file_is_missing() {
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
@@ -3721,8 +3814,12 @@ fn common_config_snippet_can_be_disabled_per_provider_for_codex() {
 
     let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert!(
-        !live_text.contains("disable_response_storage = true"),
-        "common snippet should not be merged when applyCommonConfig=false"
+        live_text.contains("disable_response_storage = true"),
+        "provider switch should preserve existing live user preferences even when applyCommonConfig=false"
+    );
+    assert!(
+        live_text.contains("network_access = \"restricted\""),
+        "provider switch should preserve unrelated live preferences"
     );
     assert!(
         live_text.contains("base_url = \"https://api.two.example/v1\""),

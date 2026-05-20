@@ -25,8 +25,8 @@ use app::{Action, App, ToastKind};
 use runtime_actions::handle_action;
 #[cfg(test)]
 use runtime_actions::{
-    import_mcp_for_current_app_with, open_proxy_help_overlay_with, queue_managed_proxy_action,
-    run_external_editor_for_current_editor,
+    apply_preloaded_app_switch, import_mcp_for_current_app_with, open_proxy_help_overlay_with,
+    queue_managed_proxy_action, run_external_editor_for_current_editor,
 };
 #[cfg(test)]
 use runtime_skills::{
@@ -72,9 +72,25 @@ where
     F: FnOnce(&AppType) -> Result<data::UiData, AppError>,
 {
     let app_type = resolve_initial_app_type(app_override);
-    let app = App::new(Some(app_type));
+    let mut app = App::new(Some(app_type));
     let data = load_data(&app.app_type)?;
+    maybe_open_initial_codex_current_mismatch(&mut app, &data);
     Ok((app, data))
+}
+
+fn maybe_open_initial_codex_current_mismatch(app: &mut App, data: &data::UiData) {
+    if !matches!(app.app_type, AppType::Codex) || !matches!(&app.overlay, app::Overlay::None) {
+        return;
+    }
+
+    let Some(mismatch) = data.providers.codex_current_mismatch.clone() else {
+        return;
+    };
+
+    app.overlay = app::Overlay::CodexCurrentProviderMismatch {
+        selected: 0,
+        mismatch,
+    };
 }
 
 #[cfg(test)]

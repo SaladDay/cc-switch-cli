@@ -10,7 +10,13 @@ use super::ProviderService;
 
 const MIGRATION_MARKER: &str = "common_config_upstream_semantics_migrated_v1";
 const CODEX_RUNTIME_KEYS: &[&str] = &["projects", "trusted_workspaces"];
-const CODEX_IDENTITY_KEYS: &[&str] = &["model", "model_provider", "model_providers"];
+const CODEX_IDENTITY_KEYS: &[&str] = &[
+    "model",
+    "model_provider",
+    "profile",
+    "model_providers",
+    "profiles",
+];
 
 fn json_is_subset(target: &Value, source: &Value) -> bool {
     match source {

@@ -199,6 +199,9 @@ pub(super) fn render_providers(
         } else {
             keys.push(("Enter", texts::tui_key_details()));
             keys.push(("Space", texts::tui_key_switch()));
+            if crate::cli::tui::app::supports_temporary_provider_launch(&app.app_type) {
+                keys.push(("o", texts::tui_key_launch_temp()));
+            }
             if matches!(app.app_type, crate::app_config::AppType::Codex) {
                 keys.push(("i", texts::tui_key_import_current_config()));
             }
@@ -206,13 +209,10 @@ pub(super) fn render_providers(
                 ("a", texts::tui_key_add()),
                 ("e", texts::tui_key_edit()),
                 ("d", texts::tui_key_delete()),
-                ("t", texts::tui_key_test()),
             ]);
+            keys.push(("t", texts::tui_key_test()));
             if selected_supports_quota {
                 keys.push(("r", texts::tui_key_refresh()));
-            }
-            if crate::cli::tui::app::supports_temporary_provider_launch(&app.app_type) {
-                keys.push(("o", texts::tui_key_launch_temp()));
             }
             if crate::cli::tui::app::supports_failover_controls(&app.app_type) {
                 keys.push(("f", texts::tui_key_failover()));
@@ -346,15 +346,15 @@ pub(super) fn render_provider_detail(
             ("Space", texts::tui_key_switch()),
             ("e", texts::tui_key_edit()),
         ];
+        if crate::cli::tui::app::supports_temporary_provider_launch(&app.app_type) {
+            keys.push(("o", texts::tui_key_launch_temp()));
+        }
         keys.push(("t", texts::tui_key_test()));
         if data::quota_target_for_provider(&app.app_type, row).is_some() {
             keys.push(("r", texts::tui_key_refresh()));
         }
         if matches!(app.app_type, crate::app_config::AppType::OpenClaw) && row.is_in_config {
             keys.push(("x", texts::tui_key_set_default()));
-        }
-        if crate::cli::tui::app::supports_temporary_provider_launch(&app.app_type) {
-            keys.push(("o", texts::tui_key_launch_temp()));
         }
         if crate::cli::tui::app::supports_failover_controls(&app.app_type) {
             keys.push(("f", texts::tui_key_failover()));

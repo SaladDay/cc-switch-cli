@@ -57,7 +57,12 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
     }
 }
 
-fn apply_preloaded_app_switch(app: &mut App, data: &mut UiData, next: AppType, next_data: UiData) {
+pub(super) fn apply_preloaded_app_switch(
+    app: &mut App,
+    data: &mut UiData,
+    next: AppType,
+    next_data: UiData,
+) {
     app.clear_openclaw_daily_memory_search_state();
     app.app_type = next;
     let original_route = app.route.clone();
@@ -83,6 +88,7 @@ fn apply_preloaded_app_switch(app: &mut App, data: &mut UiData, next: AppType, n
         };
     }
     *data = next_data;
+    super::maybe_open_initial_codex_current_mismatch(app, data);
     app.reset_proxy_activity(
         data.proxy.estimated_input_tokens_total,
         data.proxy.estimated_output_tokens_total,
@@ -213,6 +219,7 @@ pub(crate) fn handle_action(
         Action::EditorOpenExternal => editor::open_external(&mut ctx),
         Action::EditorSubmit { submit, content } => editor::submit(&mut ctx, submit, content),
         Action::ProviderSwitch { id } => providers::switch(&mut ctx, id),
+        Action::CodexAcceptLiveCurrent { id } => providers::accept_codex_live_current(&mut ctx, id),
         Action::ProviderRemoveFromConfig { id } => providers::remove_from_config(&mut ctx, id),
         Action::ProviderSetDefaultModel {
             provider_id,

@@ -6,6 +6,9 @@ impl App {
         key: KeyEvent,
         data: &UiData,
     ) -> Option<Action> {
+        if let Some(action) = self.handle_codex_current_provider_mismatch_key(key) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_claude_api_format_picker_key(key, data) {
             return Some(action);
         }
@@ -46,6 +49,41 @@ impl App {
             return Some(action);
         }
         None
+    }
+
+    fn handle_codex_current_provider_mismatch_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::CodexCurrentProviderMismatch { selected, mismatch } = &mut self.overlay else {
+            return None;
+        };
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(1);
+                Action::None
+            }
+            KeyCode::Enter => {
+                let action = if *selected == 0 {
+                    Action::CodexAcceptLiveCurrent {
+                        id: mismatch.live_provider_id.clone(),
+                    }
+                } else {
+                    Action::ProviderSwitch {
+                        id: mismatch.stored_provider_id.clone(),
+                    }
+                };
+                self.overlay = Overlay::None;
+                action
+            }
+            _ => Action::None,
+        })
     }
 
     fn handle_claude_api_format_picker_key(

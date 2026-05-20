@@ -104,10 +104,14 @@ impl ProviderService {
         let root = doc.as_table_mut();
         root.remove("model");
         root.remove("model_provider");
+        root.remove("profile");
         // Legacy/alt formats might use a top-level base_url.
         root.remove("base_url");
         // Remove entire model_providers table (provider-specific configuration)
         root.remove("model_providers");
+        // Profiles can reference provider-specific model_provider keys and must
+        // stay with the provider snapshot.
+        root.remove("profiles");
         // Codex writes trust decisions for local workspaces at runtime. These
         // must stay with the provider snapshot being backfilled, not become
         // common config that is merged into every provider.
@@ -374,12 +378,100 @@ impl ProviderService {
         changed
     }
 
+    fn current_live_codex_anchor_key() -> Option<String> {
+        let config_text = match crate::codex_config::read_codex_config_text() {
+            Ok(text) => text,
+            Err(err) => {
+                log::warn!("skip Codex live-anchor repair: failed to read live config: {err}");
+                return None;
+            }
+        };
+
+        Self::codex_provider_key_from_config_text(&config_text)
+    }
+
+    fn repair_live_anchor_conflicting_codex_provider_keys(
+        manager: &mut crate::provider::ProviderManager,
+        live_anchor_key: Option<&str>,
+    ) -> bool {
+        let Some(live_anchor_key) = live_anchor_key
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return false;
+        };
+        let current_provider_id = manager.current.trim().to_string();
+        if current_provider_id.is_empty() {
+            return false;
+        }
+
+        let provider_ids = manager.providers.keys().cloned().collect::<Vec<_>>();
+        let mut occupied = manager
+            .providers
+            .values()
+            .filter_map(Self::provider_codex_model_provider_key)
+            .collect::<std::collections::HashSet<_>>();
+        let mut changed = false;
+
+        for provider_id in provider_ids {
+            if provider_id == current_provider_id {
+                continue;
+            }
+
+            let Some(existing) = manager.providers.get(&provider_id) else {
+                continue;
+            };
+            if Self::is_codex_official_provider(existing) {
+                continue;
+            }
+            if Self::provider_codex_model_provider_key(existing).as_deref() != Some(live_anchor_key)
+            {
+                continue;
+            }
+
+            let Some(provider) = manager.providers.get_mut(&provider_id) else {
+                continue;
+            };
+            let new_key =
+                Self::unique_codex_provider_key_for_conflict(provider, &occupied, live_anchor_key);
+            match Self::rewrite_provider_codex_model_provider_key(provider, &new_key) {
+                Ok(true) => {
+                    log::warn!(
+                        "auto-repaired Codex provider '{}' from live alias '{}' to '{}'",
+                        provider_id,
+                        live_anchor_key,
+                        new_key
+                    );
+                    occupied.insert(new_key);
+                    changed = true;
+                }
+                Ok(false) => {
+                    occupied.insert(new_key);
+                }
+                Err(err) => {
+                    log::warn!(
+                        "skip auto-repair for Codex provider '{}' colliding with live alias '{}': {}",
+                        provider_id,
+                        live_anchor_key,
+                        err
+                    );
+                }
+            }
+        }
+
+        changed
+    }
+
     fn collect_codex_providers_for_live_sync(config: &mut MultiAppConfig) -> (Vec<Provider>, bool) {
         let Some(manager) = config.get_manager_mut(&AppType::Codex) else {
             return (Vec::new(), false);
         };
 
-        let repaired = Self::repair_conflicting_custom_codex_provider_keys(manager);
+        let mut repaired = Self::repair_conflicting_custom_codex_provider_keys(manager);
+        repaired |= Self::repair_live_anchor_conflicting_codex_provider_keys(
+            manager,
+            Self::current_live_codex_anchor_key().as_deref(),
+        );
         let providers = manager.providers.values().cloned().collect::<Vec<_>>();
         (providers, repaired)
     }
@@ -644,6 +736,60 @@ impl ProviderService {
         Ok(providers)
     }
 
+    fn parse_codex_active_catalog_provider_from_live(
+        config_toml: &str,
+        auth: &Value,
+    ) -> Result<Option<LiveCodexCatalogProvider>, AppError> {
+        if config_toml.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let doc = config_toml
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| AppError::Config(format!("Codex live config TOML 无法解析: {e}")))?;
+        let Some(active_key) = doc
+            .get("model_provider")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+        let Some(active_item) = doc
+            .get("model_providers")
+            .and_then(|item| item.as_table_like())
+            .and_then(|providers| providers.get(active_key))
+        else {
+            return Ok(None);
+        };
+        let name = active_item
+            .as_table_like()
+            .and_then(|table| table.get("name"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(active_key)
+            .to_string();
+        let model = doc
+            .get("model")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+
+        Ok(Some(LiveCodexCatalogProvider {
+            key: active_key.to_string(),
+            name,
+            settings_config: json!({
+                "auth": auth.clone(),
+                "config": Self::build_codex_catalog_snapshot_config(
+                    active_key,
+                    active_item,
+                    model.as_deref()
+                ),
+            }),
+            is_active: true,
+        }))
+    }
+
     fn find_codex_import_target(
         manager: &crate::provider::ProviderManager,
         entry: &LiveCodexCatalogProvider,
@@ -788,6 +934,127 @@ impl ProviderService {
                 Ok((report, None))
             },
         )
+    }
+
+    fn codex_live_current_provider_match(
+        state: &AppState,
+    ) -> Result<Option<(String, LiveCodexCatalogProvider)>, AppError> {
+        let config_toml = crate::codex_config::read_and_validate_codex_config_text()?;
+        let Some(active_entry) = Self::parse_codex_active_catalog_provider_from_live(
+            &config_toml,
+            &Value::Object(Default::default()),
+        )?
+        else {
+            return Ok(None);
+        };
+
+        let guard = state.config.read().map_err(AppError::from)?;
+        let Some(manager) = guard.get_manager(&AppType::Codex) else {
+            return Ok(None);
+        };
+
+        match Self::find_codex_import_target(manager, &active_entry) {
+            Ok(Some((provider_id, _))) => Ok(Some((provider_id, active_entry))),
+            Ok(None) => Ok(None),
+            Err(()) => {
+                log::warn!(
+                    "skip Codex live current resolution: active key '{}' matches multiple providers",
+                    active_entry.key
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    pub(crate) fn codex_live_current_provider_id(
+        state: &AppState,
+    ) -> Result<Option<String>, AppError> {
+        Ok(Self::codex_live_current_provider_match(state)?.map(|(provider_id, _)| provider_id))
+    }
+
+    pub(crate) fn codex_current_provider_mismatch(
+        state: &AppState,
+    ) -> Result<Option<CodexCurrentProviderMismatch>, AppError> {
+        let Some((live_provider_id, active_entry)) =
+            Self::codex_live_current_provider_match(state)?
+        else {
+            return Ok(None);
+        };
+        let Some(stored_provider_id) =
+            crate::settings::get_effective_current_provider(&state.db, &AppType::Codex)?
+        else {
+            return Ok(None);
+        };
+
+        if stored_provider_id == live_provider_id {
+            return Ok(None);
+        }
+
+        let guard = state.config.read().map_err(AppError::from)?;
+        let Some(manager) = guard.get_manager(&AppType::Codex) else {
+            return Ok(None);
+        };
+
+        let provider_name = |provider_id: &str| {
+            manager
+                .providers
+                .get(provider_id)
+                .map(|provider| provider.name.trim())
+                .filter(|name| !name.is_empty())
+                .unwrap_or(provider_id)
+                .to_string()
+        };
+
+        Ok(Some(CodexCurrentProviderMismatch {
+            stored_provider_name: provider_name(&stored_provider_id),
+            live_provider_name: provider_name(&live_provider_id),
+            stored_provider_id,
+            live_provider_id,
+            live_model_provider_key: active_entry.key,
+        }))
+    }
+
+    pub(crate) fn accept_codex_live_current_provider(
+        state: &AppState,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        let live_provider_id = Self::codex_live_current_provider_id(state)?.ok_or_else(|| {
+            AppError::Config("Codex live config does not point at a known provider".to_string())
+        })?;
+        if live_provider_id != provider_id {
+            return Err(AppError::Config(format!(
+                "Codex live current provider changed from `{provider_id}` to `{live_provider_id}`"
+            )));
+        }
+
+        let previous_current = {
+            let mut guard = state.config.write().map_err(AppError::from)?;
+            let manager = guard
+                .get_manager_mut(&AppType::Codex)
+                .ok_or_else(|| Self::app_not_found(&AppType::Codex))?;
+            if !manager.providers.contains_key(provider_id) {
+                return Err(AppError::localized(
+                    "provider.not_found",
+                    format!("供应商不存在: {provider_id}"),
+                    format!("Provider not found: {provider_id}"),
+                ));
+            }
+            let previous = manager.current.clone();
+            manager.current = provider_id.to_string();
+            previous
+        };
+
+        if let Err(err) = Self::refresh_provider_snapshot(state, &AppType::Codex, provider_id) {
+            if let Ok(mut guard) = state.config.write() {
+                if let Some(manager) = guard.get_manager_mut(&AppType::Codex) {
+                    manager.current = previous_current;
+                }
+            }
+            return Err(err);
+        }
+
+        crate::settings::set_current_provider(&AppType::Codex, Some(provider_id))?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -994,13 +1261,15 @@ impl ProviderService {
 
     /// Write Codex live configuration.
     ///
-    /// Aligned with upstream: the stored `settings_config.config` is the full config.toml text.
-    /// We write it directly to `~/.codex/config.toml`, optionally merging the common config snippet.
-    /// Auth is handled separately via auth.json.
+    /// Instead of replacing the entire config.toml, we overlay only the
+    /// provider-specific fields (model_provider, model, [model_providers])
+    /// onto the current live config. This preserves user preferences like
+    /// approval_mode, disable_response_storage, [mcp_servers], etc.
     pub(super) fn write_codex_live(
         provider: &Provider,
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
+        preserve_live_preferences: bool,
     ) -> Result<(), AppError> {
         if !crate::sync_policy::should_sync_live(&AppType::Codex) {
             return Ok(());
@@ -1033,10 +1302,21 @@ impl ProviderService {
         } else {
             Some(auth)
         };
-        crate::codex_config::write_codex_live_atomic_optional_auth_with_stable_provider(
-            auth_to_write,
-            Some(cfg_text),
+
+        // ## Read current live config and merge — only overlay provider fields
+        let config_path = crate::codex_config::get_codex_config_path();
+        let live_text = if config_path.exists() {
+            std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?
+        } else {
+            String::new()
+        };
+        let merged = crate::codex_config::merge_provider_into_codex_live_config(
+            &live_text,
+            cfg_text,
+            preserve_live_preferences,
         )?;
+
+        crate::codex_config::write_codex_live_atomic_optional_auth(auth_to_write, Some(&merged))?;
 
         Ok(())
     }

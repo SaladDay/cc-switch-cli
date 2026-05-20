@@ -151,6 +151,8 @@ impl QuotaSnapshot {
 pub struct ProvidersSnapshot {
     pub current_id: String,
     pub rows: Vec<ProviderRow>,
+    pub(crate) codex_current_mismatch:
+        Option<crate::services::provider::CodexCurrentProviderMismatch>,
 }
 
 #[derive(Debug, Clone)]
@@ -585,7 +587,17 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
         rows
     };
 
-    Ok(ProvidersSnapshot { current_id, rows })
+    let codex_current_mismatch = if matches!(app_type, AppType::Codex) {
+        ProviderService::codex_current_provider_mismatch(state)?
+    } else {
+        None
+    };
+
+    Ok(ProvidersSnapshot {
+        current_id,
+        rows,
+        codex_current_mismatch,
+    })
 }
 
 fn sort_providers(providers: &IndexMap<String, Provider>) -> Vec<(String, Provider)> {

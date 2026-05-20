@@ -465,6 +465,7 @@ dependencies = [
  "hyper",
  "indexmap",
  "indicatif",
+ "indoc",
  "inquire",
  "json-five",
  "json5",

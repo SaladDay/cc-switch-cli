@@ -153,6 +153,87 @@ pub(super) fn render_claude_model_picker_overlay(
     }
 }
 
+pub(super) fn render_codex_current_provider_mismatch_overlay(
+    frame: &mut Frame<'_>,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+    mismatch: &crate::services::provider::CodexCurrentProviderMismatch,
+) {
+    let area = centered_rect_fixed(OVERLAY_FIXED_LG.0, 14, content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, true))
+        .title(crate::t!("Codex Current Provider", "Codex 当前供应商"));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(4),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_cancel()),
+        ],
+    );
+
+    let message = format!(
+        "{}\n{}: {} ({})\n{}: {}",
+        crate::t!(
+            "Codex config.toml and cc-switch disagree about the current provider.",
+            "Codex config.toml 与 cc-switch 记录的当前供应商不一致。"
+        ),
+        crate::t!("config.toml", "config.toml"),
+        mismatch.live_provider_name,
+        mismatch.live_model_provider_key,
+        crate::t!("cc-switch", "cc-switch"),
+        mismatch.stored_provider_name
+    );
+    frame.render_widget(
+        Paragraph::new(message)
+            .wrap(Wrap { trim: false })
+            .style(Style::default()),
+        inset_top(chunks[1], 1),
+    );
+
+    let items = [
+        format!(
+            "{}: {}",
+            crate::t!("Use config.toml", "使用 config.toml"),
+            mismatch.live_provider_name
+        ),
+        format!(
+            "{}: {}",
+            crate::t!("Switch Codex to cc-switch", "将 Codex 切到 cc-switch 记录"),
+            mismatch.stored_provider_name
+        ),
+    ]
+    .into_iter()
+    .map(|label| ListItem::new(Line::from(Span::raw(label))));
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = ListState::default();
+    state.select(Some(selected.min(1)));
+    frame.render_stateful_widget(list, inset_top(chunks[2], 1), &mut state);
+}
+
 pub(super) fn render_claude_api_format_picker_overlay(
     frame: &mut Frame<'_>,
     app: &App,

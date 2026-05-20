@@ -194,8 +194,12 @@ command = "echo"
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "config.toml should contain synced MCP servers"
+        config_text.contains("mcp_servers.legacy"),
+        "config.toml should preserve existing live MCP servers"
+    );
+    assert!(
+        !config_text.contains("mcp_servers.echo-server"),
+        "Codex provider switch should not inject managed MCP servers from cc-switch"
     );
 
     let guard = state.config.read().expect("read config after switch");
@@ -239,7 +243,193 @@ command = "echo"
 }
 
 #[test]
-fn provider_service_switch_codex_preserves_live_model_provider_id_for_history() {
+fn switch_codex_backfills_actual_live_current_when_stored_current_is_stale() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({ "OPENAI_API_KEY": "live-fuli-key" });
+    let live_config = r#"model_provider = "zhima-fuli"
+model = "gpt-5.5"
+
+[model_providers.zhima-fuli]
+name = "zhima-fuli"
+base_url = "https://fuli.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&live_auth, Some(live_config))
+        .expect("seed existing Codex live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "stored-current".to_string();
+        manager.providers.insert(
+            "stored-current".to_string(),
+            Provider::with_id(
+                "stored-current".to_string(),
+                "zhima-cx".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "cx-key"},
+                    "config": "model_provider = \"zhima-cx\"\nmodel = \"gpt-5.5\"\n\n[model_providers.zhima-cx]\nname = \"zhima-cx\"\nbase_url = \"https://cx.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "live-current".to_string(),
+            Provider::with_id(
+                "live-current".to_string(),
+                "zhima-fuli".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "old-fuli-key"},
+                    "config": "model_provider = \"zhima-fuli\"\nmodel = \"gpt-5.5\"\n\n[model_providers.zhima-fuli]\nname = \"zhima-fuli\"\nbase_url = \"https://old-fuli.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "next-provider".to_string(),
+            Provider::with_id(
+                "next-provider".to_string(),
+                "Next".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "next-key"},
+                    "config": "model_provider = \"next\"\nmodel = \"gpt-5.5\"\n\n[model_providers.next]\nname = \"Next\"\nbase_url = \"https://next.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(initial_config);
+
+    ProviderService::switch(&state, AppType::Codex, "next-provider")
+        .expect("switch provider should succeed");
+
+    let guard = state.config.read().expect("read config after switch");
+    let manager = guard
+        .get_manager(&AppType::Codex)
+        .expect("codex manager after switch");
+    let stored_current = manager
+        .providers
+        .get("stored-current")
+        .expect("stored current provider remains");
+    let stored_text = stored_current
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    assert!(
+        stored_text.contains("https://cx.example/v1"),
+        "stale stored current must not receive the live provider snapshot"
+    );
+
+    let live_current = manager
+        .providers
+        .get("live-current")
+        .expect("live current provider remains");
+    assert_eq!(
+        live_current
+            .settings_config
+            .get("auth")
+            .and_then(|value| value.get("OPENAI_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("live-fuli-key"),
+        "actual live current should be backfilled with live auth before switching"
+    );
+    let live_text = live_current
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    assert!(
+        live_text.contains("https://fuli.example/v1"),
+        "actual live current should be backfilled with live config before switching"
+    );
+}
+
+#[test]
+fn switch_codex_provider_preserves_live_mcp_server_edits() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let legacy_auth = json!({ "OPENAI_API_KEY": "legacy-key" });
+    let legacy_config = r#"model_provider = "old"
+model = "gpt-5.2-codex"
+
+[model_providers.old]
+base_url = "https://api.old.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[mcp_servers.echo-server]
+type = "stdio"
+command = "external-tool"
+"#;
+    write_codex_live_atomic(&legacy_auth, Some(legacy_config))
+        .expect("seed existing codex live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Old".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "legacy-key"},
+                    "config": legacy_config
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "New".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "fresh-key"},
+                    "config": "model_provider = \"new\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.new]\nbase_url = \"https://api.new.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+                }),
+                None,
+            ),
+        );
+    }
+
+    insert_codex_managed_mcp(&mut initial_config);
+
+    let state = state_from_config(initial_config);
+    ProviderService::switch(&state, AppType::Codex, "new-provider")
+        .expect("switch provider should succeed");
+
+    let config_text =
+        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
+    let live: toml::Value = toml::from_str(&config_text).expect("parse live config.toml");
+    let command = live
+        .get("mcp_servers")
+        .and_then(|servers| servers.get("echo-server"))
+        .and_then(|server| server.get("command"))
+        .and_then(|value| value.as_str());
+
+    assert_eq!(
+        command,
+        Some("external-tool"),
+        "Codex provider switch should not resync managed MCP over live edits"
+    );
+}
+
+#[test]
+fn provider_service_switch_codex_writes_selected_model_provider_id_to_live() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -308,8 +498,8 @@ requires_openai_auth = true
 
     assert_eq!(
         parsed.get("model_provider").and_then(|v| v.as_str()),
-        Some("rightcode"),
-        "live Codex model_provider should stay stable so resume history remains visible"
+        Some("aihubmix"),
+        "live Codex model_provider should reflect the selected provider"
     );
 
     let model_providers = parsed
@@ -317,16 +507,16 @@ requires_openai_auth = true
         .and_then(|v| v.as_table())
         .expect("model_providers table exists");
     assert!(
-        model_providers.get("aihubmix").is_none(),
-        "target provider-specific id should be rewritten in live config"
+        model_providers.get("aihubmix").is_some(),
+        "live config should still expose the current provider catalog entry"
     );
     assert_eq!(
         model_providers
-            .get("rightcode")
+            .get("aihubmix")
             .and_then(|v| v.get("base_url"))
             .and_then(|v| v.as_str()),
         Some("https://aihubmix.example/v1"),
-        "stable provider id should point at the newly selected supplier endpoint"
+        "selected provider id should point at the newly selected supplier endpoint"
     );
 
     let guard = state.config.read().expect("read config after switch");
@@ -339,6 +529,19 @@ requires_openai_auth = true
     assert!(
         new_config_text.contains("[model_providers.aihubmix]"),
         "stored provider template should remain provider-specific after refresh"
+    );
+    let old_config_text = guard
+        .get_manager(&AppType::Codex)
+        .and_then(|manager| manager.providers.get("old-provider"))
+        .and_then(|provider| provider.settings_config.get("config"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let old_parsed: toml::Value =
+        toml::from_str(old_config_text).expect("parse old provider config after repair");
+    assert_eq!(
+        old_parsed.get("model_provider").and_then(|v| v.as_str()),
+        Some("rightcode"),
+        "previous provider snapshot should keep its provider-specific model_provider id"
     );
 }
 
@@ -642,8 +845,8 @@ command = "echo"
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        !config_text.contains("disable_response_storage = true"),
-        "new missing-meta providers should not apply common config implicitly after migration"
+        config_text.contains("disable_response_storage = true"),
+        "adding the current Codex provider should preserve existing live user preferences"
     );
     assert!(
         config_text.contains("[mcp_servers.echo-server]"),
@@ -934,8 +1137,8 @@ requires_openai_auth = true
         "live config should remain pointed at the actual current provider from db"
     );
     assert!(
-        !config_text.contains("https://api.other-after.example/v1"),
-        "updating a non-current provider should not rewrite live config from the edited provider"
+        config_text.contains("model_provider = \"current\""),
+        "updating a non-current provider should not switch the active live provider"
     );
     assert!(
         !config_text.contains("[mcp_servers.echo-server]"),
@@ -1031,8 +1234,8 @@ requires_openai_auth = true
         "live config should remain pointed at the actual current provider from db"
     );
     assert!(
-        !config_text.contains("https://api.new.example/v1"),
-        "adding a non-current provider should not rewrite live config from the new provider"
+        config_text.contains("model_provider = \"current\""),
+        "adding a non-current provider should not switch the active live provider"
     );
     assert!(
         !config_text.contains("[mcp_servers.echo-server]"),

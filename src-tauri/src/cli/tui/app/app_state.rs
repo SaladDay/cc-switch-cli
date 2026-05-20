@@ -64,6 +64,9 @@ pub enum Action {
     ProviderSwitch {
         id: String,
     },
+    CodexAcceptLiveCurrent {
+        id: String,
+    },
     ProviderRemoveFromConfig {
         id: String,
     },
