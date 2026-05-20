@@ -18,7 +18,7 @@ pub mod webdav_sync;
 pub use auth::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus};
 pub use codex_oauth::CodexOAuthService;
 pub use config::ConfigService;
-pub use mcp::McpService;
+pub use mcp::{McpLiveDriftEntry, McpLiveDriftKind, McpLiveDriftReport, McpService};
 pub use prompt::PromptService;
 pub use provider::ProviderService;
 pub use proxy::ProxyService;

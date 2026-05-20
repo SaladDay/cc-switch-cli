@@ -658,6 +658,197 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
     Ok(changed_total)
 }
 
+/// Read Codex live MCP servers from ~/.codex/config.toml as normalized cc-switch specs.
+///
+/// Supports the official `[mcp_servers]` table and the historical `[mcp.servers]`
+/// table for compatibility. Invalid individual server entries are skipped, matching
+/// `import_from_codex` behavior.
+pub fn read_codex_live_mcp_servers_map() -> Result<HashMap<String, Value>, AppError> {
+    let text = crate::codex_config::read_and_validate_codex_config_text()?;
+    if text.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let root: toml::Table = toml::from_str(&text)
+        .map_err(|e| AppError::McpValidation(format!("解析 ~/.codex/config.toml 失败: {e}")))?;
+
+    let mut servers = HashMap::new();
+
+    if let Some(servers_tbl) = root
+        .get("mcp")
+        .and_then(|mcp_val| mcp_val.as_table())
+        .and_then(|mcp_tbl| mcp_tbl.get("servers"))
+        .and_then(|servers_val| servers_val.as_table())
+    {
+        collect_codex_live_mcp_servers(servers_tbl, &mut servers);
+    }
+
+    if let Some(servers_tbl) = root.get("mcp_servers").and_then(|value| value.as_table()) {
+        collect_codex_live_mcp_servers(servers_tbl, &mut servers);
+    }
+
+    Ok(servers)
+}
+
+fn collect_codex_live_mcp_servers(
+    servers_tbl: &toml::value::Table,
+    servers: &mut HashMap<String, Value>,
+) {
+    for (id, entry_val) in servers_tbl.iter() {
+        let Some(entry_tbl) = entry_val.as_table() else {
+            continue;
+        };
+
+        let spec_v = codex_live_mcp_entry_to_json_spec(entry_tbl);
+        if let Err(e) = validate_server_spec(&spec_v) {
+            log::warn!("跳过无效 Codex MCP 项 '{id}': {e}");
+            continue;
+        }
+
+        servers.insert(id.clone(), spec_v);
+    }
+}
+
+fn toml_value_to_json(toml_val: &toml::Value) -> Option<Value> {
+    match toml_val {
+        toml::Value::String(s) => Some(json!(s)),
+        toml::Value::Integer(i) => Some(json!(i)),
+        toml::Value::Float(f) => Some(json!(f)),
+        toml::Value::Boolean(b) => Some(json!(b)),
+        toml::Value::Array(arr) => {
+            let json_arr: Vec<Value> = arr
+                .iter()
+                .filter_map(|item| match item {
+                    toml::Value::String(s) => Some(json!(s)),
+                    toml::Value::Integer(i) => Some(json!(i)),
+                    toml::Value::Float(f) => Some(json!(f)),
+                    toml::Value::Boolean(b) => Some(json!(b)),
+                    _ => None,
+                })
+                .collect();
+            if json_arr.is_empty() {
+                None
+            } else {
+                Some(Value::Array(json_arr))
+            }
+        }
+        toml::Value::Table(tbl) => {
+            let mut json_obj = serde_json::Map::new();
+            for (k, v) in tbl.iter() {
+                if let Some(s) = v.as_str() {
+                    json_obj.insert(k.clone(), json!(s));
+                }
+            }
+            if json_obj.is_empty() {
+                None
+            } else {
+                Some(Value::Object(json_obj))
+            }
+        }
+        toml::Value::Datetime(_) => None,
+    }
+}
+
+fn codex_live_mcp_entry_to_json_spec(entry_tbl: &toml::value::Table) -> Value {
+    // Codex 的远程 MCP 可以只写 `url`，不显式提供 `type`。
+    // 仅在 `type` 真正缺失时才推断为 HTTP，避免掩盖显式但非法的配置。
+    let typ = if entry_tbl.contains_key("type") {
+        entry_tbl.get("type").and_then(|v| v.as_str())
+    } else {
+        entry_tbl
+            .get("url")
+            .and_then(|v| v.as_str())
+            .filter(|url| !url.trim().is_empty())
+            .map(|_| "http")
+            .or(Some("stdio"))
+    };
+
+    let mut spec = serde_json::Map::new();
+    if let Some(typ) = typ {
+        spec.insert("type".into(), json!(typ));
+    } else if let Some(type_val) = entry_tbl.get("type").and_then(toml_value_to_json) {
+        spec.insert("type".into(), type_val);
+    }
+
+    let core_fields = match typ {
+        Some("stdio") => vec!["type", "command", "args", "env", "cwd"],
+        Some("http") | Some("sse") => vec!["type", "url", "http_headers"],
+        _ => vec!["type"],
+    };
+
+    match typ {
+        Some("stdio") => {
+            if let Some(cmd) = entry_tbl.get("command").and_then(|v| v.as_str()) {
+                spec.insert("command".into(), json!(cmd));
+            }
+            if let Some(args) = entry_tbl.get("args").and_then(|v| v.as_array()) {
+                let arr = args
+                    .iter()
+                    .filter_map(|x| x.as_str())
+                    .map(|s| json!(s))
+                    .collect::<Vec<_>>();
+                if !arr.is_empty() {
+                    spec.insert("args".into(), Value::Array(arr));
+                }
+            }
+            if let Some(cwd) = entry_tbl.get("cwd").and_then(|v| v.as_str()) {
+                if !cwd.trim().is_empty() {
+                    spec.insert("cwd".into(), json!(cwd));
+                }
+            }
+            if let Some(env_tbl) = entry_tbl.get("env").and_then(|v| v.as_table()) {
+                let mut env_json = serde_json::Map::new();
+                for (k, v) in env_tbl.iter() {
+                    if let Some(sv) = v.as_str() {
+                        env_json.insert(k.clone(), json!(sv));
+                    }
+                }
+                if !env_json.is_empty() {
+                    spec.insert("env".into(), Value::Object(env_json));
+                }
+            }
+        }
+        Some("http") | Some("sse") => {
+            if let Some(url) = entry_tbl.get("url").and_then(|v| v.as_str()) {
+                spec.insert("url".into(), json!(url));
+            }
+            // Read from http_headers (correct Codex format) or headers (legacy) with priority to http_headers.
+            let headers_tbl = entry_tbl
+                .get("http_headers")
+                .and_then(|v| v.as_table())
+                .or_else(|| entry_tbl.get("headers").and_then(|v| v.as_table()));
+
+            if let Some(headers_tbl) = headers_tbl {
+                let mut headers_json = serde_json::Map::new();
+                for (k, v) in headers_tbl.iter() {
+                    if let Some(sv) = v.as_str() {
+                        headers_json.insert(k.clone(), json!(sv));
+                    }
+                }
+                if !headers_json.is_empty() {
+                    spec.insert("headers".into(), Value::Object(headers_json));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    for (key, toml_val) in entry_tbl.iter() {
+        if core_fields.contains(&key.as_str()) {
+            continue;
+        }
+
+        if let Some(val) = toml_value_to_json(toml_val) {
+            spec.insert(key.clone(), val);
+            log::debug!("导入扩展字段 '{key}' = {toml_val:?}");
+        } else {
+            log::debug!("跳过复杂字段 '{key}' (TOML → JSON)");
+        }
+    }
+
+    Value::Object(spec)
+}
+
 /// 将 config.json 中 Codex 的 enabled==true 项以 TOML 形式写入 ~/.codex/config.toml
 ///
 /// 格式策略：

@@ -3,8 +3,8 @@ use std::{collections::HashMap, fs};
 use serde_json::json;
 
 use cc_switch_lib::{
-    get_claude_mcp_path, get_claude_settings_path, AppError, AppType, McpApps, McpServer,
-    McpService, MultiAppConfig, ProviderService,
+    get_claude_mcp_path, get_claude_settings_path, AppError, AppType, McpApps, McpLiveDriftKind,
+    McpServer, McpService, MultiAppConfig, ProviderService,
 };
 
 #[path = "support.rs"]
@@ -558,6 +558,239 @@ fn set_mcp_enabled_for_codex_writes_remote_headers_once_as_http_headers() {
     assert!(
         !toml_text.contains("[mcp_servers.remote-headers.headers]"),
         "codex config should not also write legacy headers table, got: {toml_text}"
+    );
+}
+
+#[test]
+fn codex_mcp_live_drift_reports_changed_live_only_db_only_and_in_sync() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"[mcp_servers.changed]
+type = "stdio"
+command = "live-command"
+
+[mcp_servers.in_sync]
+type = "stdio"
+command = "same-command"
+
+[mcp_servers.live_only]
+type = "http"
+url = "https://live.example.com/mcp"
+"#,
+    )
+    .expect("write codex config");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers = Some(HashMap::new());
+    let servers = config.mcp.servers.as_mut().unwrap();
+    for (id, command) in [
+        ("changed", "db-command"),
+        ("db_only", "db-only-command"),
+        ("in_sync", "same-command"),
+    ] {
+        servers.insert(
+            id.to_string(),
+            McpServer {
+                id: id.to_string(),
+                name: id.to_string(),
+                server: json!({
+                    "type": "stdio",
+                    "command": command
+                }),
+                apps: McpApps {
+                    claude: false,
+                    codex: true,
+                    gemini: false,
+                    opencode: false,
+                    openclaw: false,
+                    hermes: false,
+                },
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: Vec::new(),
+            },
+        );
+    }
+
+    let state = state_from_config(config);
+    let report = McpService::get_live_drift(&state, AppType::Codex).expect("get live drift");
+
+    assert_eq!(report.app, AppType::Codex);
+    let entries = report
+        .entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+
+    assert_eq!(entries["changed"].kind, McpLiveDriftKind::Changed);
+    assert_eq!(
+        entries["changed"].db_spec.as_ref().unwrap()["command"],
+        "db-command"
+    );
+    assert_eq!(
+        entries["changed"].live_spec.as_ref().unwrap()["command"],
+        "live-command"
+    );
+
+    assert_eq!(entries["db_only"].kind, McpLiveDriftKind::DbOnly);
+    assert!(entries["db_only"].db_spec.is_some());
+    assert!(entries["db_only"].live_spec.is_none());
+
+    assert_eq!(entries["live_only"].kind, McpLiveDriftKind::LiveOnly);
+    assert!(entries["live_only"].db_spec.is_none());
+    assert!(entries["live_only"].live_spec.is_some());
+
+    assert_eq!(entries["in_sync"].kind, McpLiveDriftKind::InSync);
+}
+
+#[test]
+fn codex_mcp_import_live_server_overwrites_spec_and_preserves_metadata() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"[mcp_servers.changed]
+type = "stdio"
+command = "live-command"
+
+[mcp_servers.live_only]
+type = "http"
+url = "https://live.example.com/mcp"
+"#,
+    )
+    .expect("write codex config");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers = Some(HashMap::new());
+    config.mcp.servers.as_mut().unwrap().insert(
+        "changed".to_string(),
+        McpServer {
+            id: "changed".to_string(),
+            name: "Existing Name".to_string(),
+            server: json!({
+                "type": "stdio",
+                "command": "db-command"
+            }),
+            apps: McpApps::default(),
+            description: Some("keep description".to_string()),
+            homepage: Some("https://homepage.example.com".to_string()),
+            docs: Some("https://docs.example.com".to_string()),
+            tags: vec!["keep-tag".to_string()],
+        },
+    );
+
+    let state = state_from_config(config);
+
+    McpService::import_live_server(&state, AppType::Codex, "changed")
+        .expect("import changed live server");
+    McpService::import_live_server(&state, AppType::Codex, "live_only")
+        .expect("import live-only server");
+
+    let guard = state.config.read().expect("lock config");
+    let servers = guard.mcp.servers.as_ref().expect("servers");
+
+    let changed = servers.get("changed").expect("changed server");
+    assert_eq!(changed.server["command"], "live-command");
+    assert!(changed.apps.codex, "Codex app should be enabled");
+    assert_eq!(changed.name, "Existing Name");
+    assert_eq!(changed.description.as_deref(), Some("keep description"));
+    assert_eq!(
+        changed.homepage.as_deref(),
+        Some("https://homepage.example.com")
+    );
+    assert_eq!(changed.docs.as_deref(), Some("https://docs.example.com"));
+    assert_eq!(changed.tags, vec!["keep-tag".to_string()]);
+
+    let live_only = servers.get("live_only").expect("live-only server");
+    assert_eq!(live_only.id, "live_only");
+    assert_eq!(live_only.name, "live_only");
+    assert_eq!(live_only.server["type"], "http");
+    assert_eq!(live_only.server["url"], "https://live.example.com/mcp");
+    assert!(live_only.apps.codex);
+    assert!(!live_only.apps.claude);
+    assert!(!live_only.apps.gemini);
+    assert!(!live_only.apps.opencode);
+    assert!(!live_only.apps.openclaw);
+    assert!(!live_only.apps.hermes);
+}
+
+#[test]
+fn codex_mcp_push_db_server_to_live_overwrites_live_spec() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).expect("create codex dir");
+    fs::write(
+        codex_dir.join("config.toml"),
+        r#"[mcp_servers.changed]
+type = "stdio"
+command = "live-command"
+"#,
+    )
+    .expect("write codex config");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers = Some(HashMap::new());
+    config.mcp.servers.as_mut().unwrap().insert(
+        "changed".to_string(),
+        McpServer {
+            id: "changed".to_string(),
+            name: "Changed".to_string(),
+            server: json!({
+                "type": "stdio",
+                "command": "db-command",
+                "args": ["from-db"]
+            }),
+            apps: McpApps {
+                claude: false,
+                codex: true,
+                gemini: false,
+                opencode: false,
+                openclaw: false,
+                hermes: false,
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    );
+
+    let state = state_from_config(config);
+    McpService::push_db_server_to_live(&state, AppType::Codex, "changed")
+        .expect("push db server to live");
+
+    let toml_text =
+        fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read codex config");
+    let live: toml::Value = toml::from_str(&toml_text).expect("parse codex config");
+    let changed = live
+        .get("mcp_servers")
+        .and_then(|servers| servers.get("changed"))
+        .expect("changed live server");
+    assert_eq!(
+        changed.get("command").and_then(|value| value.as_str()),
+        Some("db-command")
+    );
+    assert_eq!(
+        changed
+            .get("args")
+            .and_then(|value| value.as_array())
+            .and_then(|args| args.first())
+            .and_then(|value| value.as_str()),
+        Some("from-db")
     );
 }
 

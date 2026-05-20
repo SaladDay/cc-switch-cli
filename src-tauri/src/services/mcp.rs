@@ -1,9 +1,36 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use crate::app_config::{AppType, McpServer, MultiAppConfig};
+use crate::app_config::{AppType, McpApps, McpServer, MultiAppConfig};
 use crate::error::AppError;
 use crate::mcp;
 use crate::store::AppState;
+use serde_json::Value;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpLiveDriftKind {
+    InSync,
+    LiveOnly,
+    DbOnly,
+    Changed,
+    LiveInvalid,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpLiveDriftEntry {
+    pub app: AppType,
+    pub id: String,
+    pub kind: McpLiveDriftKind,
+    pub db_spec: Option<Value>,
+    pub live_spec: Option<Value>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpLiveDriftReport {
+    pub app: AppType,
+    pub entries: Vec<McpLiveDriftEntry>,
+}
 
 /// MCP 相关业务逻辑（v3.7.0 统一结构）
 pub struct McpService;
@@ -24,6 +51,144 @@ impl McpService {
             "检测到旧版 MCP 结构，请重启应用完成迁移",
             "Old MCP structure detected, please restart app to complete migration",
         ))
+    }
+
+    pub fn get_live_drift(state: &AppState, app: AppType) -> Result<McpLiveDriftReport, AppError> {
+        let live_servers = match Self::read_live_mcp_servers(&app) {
+            Ok(servers) => servers,
+            Err(err) => {
+                return Ok(McpLiveDriftReport {
+                    app: app.clone(),
+                    entries: vec![McpLiveDriftEntry {
+                        app,
+                        id: String::new(),
+                        kind: McpLiveDriftKind::LiveInvalid,
+                        db_spec: None,
+                        live_spec: None,
+                        message: Some(err.to_string()),
+                    }],
+                });
+            }
+        };
+
+        let db_servers = Self::get_all_servers(state)?;
+        let mut ids = BTreeSet::new();
+
+        for id in live_servers.keys() {
+            ids.insert(id.clone());
+        }
+
+        for (id, server) in &db_servers {
+            if server.apps.is_enabled_for(&app) || live_servers.contains_key(id) {
+                ids.insert(id.clone());
+            }
+        }
+
+        let mut entries = Vec::new();
+        for id in ids {
+            let db_server = db_servers
+                .get(&id)
+                .filter(|server| server.apps.is_enabled_for(&app));
+            let db_spec = db_server.map(|server| server.server.clone());
+            let live_spec = live_servers.get(&id).cloned();
+
+            let kind = match (&db_spec, &live_spec) {
+                (Some(db), Some(live)) => {
+                    if normalize_json_value(db) == normalize_json_value(live) {
+                        McpLiveDriftKind::InSync
+                    } else {
+                        McpLiveDriftKind::Changed
+                    }
+                }
+                (Some(_), None) => McpLiveDriftKind::DbOnly,
+                (None, Some(_)) => McpLiveDriftKind::LiveOnly,
+                (None, None) => continue,
+            };
+
+            entries.push(McpLiveDriftEntry {
+                app: app.clone(),
+                id,
+                kind,
+                db_spec,
+                live_spec,
+                message: None,
+            });
+        }
+
+        Ok(McpLiveDriftReport { app, entries })
+    }
+
+    fn read_live_mcp_servers(app: &AppType) -> Result<HashMap<String, Value>, AppError> {
+        match app {
+            AppType::Codex => mcp::read_codex_live_mcp_servers_map(),
+            _ => Ok(HashMap::new()),
+        }
+    }
+
+    pub fn import_live_server(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
+        let live_servers = Self::read_live_mcp_servers(&app)?;
+        let live_spec = live_servers.get(id).cloned().ok_or_else(|| {
+            AppError::McpValidation(format!(
+                "{} live MCP server '{}' not found",
+                app.as_str(),
+                id
+            ))
+        })?;
+
+        {
+            let mut cfg = state.config.write()?;
+            let servers = cfg.mcp.servers.get_or_insert_with(HashMap::new);
+
+            if let Some(existing) = servers.get_mut(id) {
+                existing.server = live_spec;
+                existing.apps.set_enabled_for(&app, true);
+            } else {
+                let mut apps = McpApps::default();
+                apps.set_enabled_for(&app, true);
+                servers.insert(
+                    id.to_string(),
+                    McpServer {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                        server: live_spec,
+                        apps,
+                        description: None,
+                        homepage: None,
+                        docs: None,
+                        tags: Vec::new(),
+                    },
+                );
+            }
+        }
+
+        state.save()?;
+        Ok(())
+    }
+
+    pub fn push_db_server_to_live(
+        state: &AppState,
+        app: AppType,
+        id: &str,
+    ) -> Result<(), AppError> {
+        let server = {
+            let cfg = state.config.read()?;
+            cfg.mcp
+                .servers
+                .as_ref()
+                .and_then(|servers| servers.get(id))
+                .cloned()
+        }
+        .ok_or_else(|| AppError::McpValidation(format!("MCP server '{id}' not found")))?;
+
+        if !server.apps.is_enabled_for(&app) {
+            return Err(AppError::McpValidation(format!(
+                "MCP server '{}' is not enabled for {}",
+                id,
+                app.as_str()
+            )));
+        }
+
+        Self::sync_server_to_app(state, &server, &app)
     }
 
     /// 添加或更新 MCP 服务器
@@ -315,5 +480,23 @@ impl McpService {
         drop(cfg);
         state.save()?;
         Ok(count)
+    }
+}
+
+fn normalize_json_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(normalize_json_value).collect()),
+        Value::Object(map) => {
+            let mut normalized = serde_json::Map::new();
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort();
+            for key in keys {
+                if let Some(value) = map.get(key) {
+                    normalized.insert(key.clone(), normalize_json_value(value));
+                }
+            }
+            Value::Object(normalized)
+        }
+        _ => value.clone(),
     }
 }

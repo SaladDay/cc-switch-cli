@@ -617,6 +617,67 @@ url = "https://example.com"
 }
 
 #[test]
+fn read_codex_live_mcp_servers_map_parses_supported_shapes() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+    fs::write(
+        &path,
+        r#"[mcp_servers.echo_server]
+type = "stdio"
+command = "echo"
+args = ["hello", "world"]
+cwd = "/tmp/project"
+
+[mcp_servers.echo_server.env]
+API_KEY = "secret"
+EMPTY = ""
+
+[mcp_servers.http_server]
+url = "https://example.com/mcp"
+
+[mcp_servers.http_server.http_headers]
+Authorization = "Bearer token"
+
+[mcp.servers.legacy_sse]
+type = "sse"
+url = "https://legacy.example.com/sse"
+
+[mcp.servers.legacy_sse.headers]
+X_Legacy = "yes"
+"#,
+    )
+    .expect("write codex config");
+
+    let servers =
+        cc_switch_lib::read_codex_live_mcp_servers_map().expect("read codex live MCP servers");
+
+    let echo = servers.get("echo_server").expect("echo server");
+    assert_eq!(echo["type"], "stdio");
+    assert_eq!(echo["command"], "echo");
+    assert_eq!(echo["args"], json!(["hello", "world"]));
+    assert_eq!(echo["cwd"], "/tmp/project");
+    assert_eq!(echo["env"]["API_KEY"], "secret");
+    assert_eq!(echo["env"]["EMPTY"], "");
+
+    let http = servers.get("http_server").expect("http server");
+    assert_eq!(
+        http["type"], "http",
+        "URL-only Codex MCP entries should normalize to http"
+    );
+    assert_eq!(http["url"], "https://example.com/mcp");
+    assert_eq!(http["headers"]["Authorization"], "Bearer token");
+
+    let legacy = servers.get("legacy_sse").expect("legacy server");
+    assert_eq!(legacy["type"], "sse");
+    assert_eq!(legacy["url"], "https://legacy.example.com/sse");
+    assert_eq!(legacy["headers"]["X_Legacy"], "yes");
+}
+
+#[test]
 fn import_from_codex_infers_http_when_url_is_present_without_type() {
     let _guard = lock_test_mutex();
     reset_test_fs();
