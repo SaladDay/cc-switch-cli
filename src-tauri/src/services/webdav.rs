@@ -8,7 +8,6 @@ use std::time::Duration;
 use futures::StreamExt;
 use reqwest::{Client, Method, StatusCode};
 use url::Url;
-use uuid::Uuid;
 
 use crate::error::AppError;
 
@@ -360,37 +359,6 @@ pub async fn get_bytes(
     }
 }
 
-pub async fn verify_readback_matches(
-    base_url: &str,
-    url: &str,
-    auth: &WebDavAuth,
-    expected_bytes: &[u8],
-    resource_name: &str,
-) -> Result<(), AppError> {
-    let max_bytes = u64::try_from(expected_bytes.len()).unwrap_or(u64::MAX);
-    let Some((readback, _)) = get_bytes(url, auth, Some(max_bytes)).await? else {
-        return Err(AppError::Message(with_service_hint(
-            base_url,
-            format!(
-                "WebDAV {resource_name} readback missing after PUT: {}",
-                redact_url(url)
-            ),
-        )));
-    };
-
-    if readback != expected_bytes {
-        return Err(AppError::Message(with_service_hint(
-            base_url,
-            format!(
-                "WebDAV {resource_name} readback mismatch: {}",
-                redact_url(url)
-            ),
-        )));
-    }
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // HEAD
 // ---------------------------------------------------------------------------
@@ -506,64 +474,6 @@ pub async fn delete_resource(url: &str, auth: &WebDavAuth) -> Result<bool, AppEr
 
 pub async fn delete_collection(url: &str, auth: &WebDavAuth) -> Result<bool, AppError> {
     delete_resource(url, auth).await
-}
-
-pub async fn verify_round_trip_readability(
-    base_url: &str,
-    dir_segments: &[String],
-    auth: &WebDavAuth,
-) -> Result<(), AppError> {
-    let probe_name = format!("cc-switch-probe-{}.tmp", Uuid::new_v4());
-    let mut probe_segments = dir_segments.to_vec();
-    probe_segments.push(probe_name);
-    let probe_url = build_remote_url(base_url, &probe_segments)?;
-    let probe_bytes = format!("cc-switch-webdav-probe:{}", Uuid::new_v4()).into_bytes();
-
-    let probe_result = async {
-        put_bytes(
-            &probe_url,
-            auth,
-            probe_bytes.clone(),
-            "application/octet-stream",
-        )
-        .await?;
-
-        verify_readback_matches(base_url, &probe_url, auth, &probe_bytes, "probe").await?;
-
-        Ok(())
-    }
-    .await;
-
-    let cleanup_result = delete_resource(&probe_url, auth).await;
-
-    match probe_result {
-        Ok(()) => {
-            match cleanup_result {
-                Ok(true) => {}
-                Ok(false) => {
-                    log::debug!(
-                        "[WebDAV] Probe cleanup DELETE reported missing after successful round trip: {}",
-                        redact_url(&probe_url)
-                    );
-                }
-                Err(err) => {
-                    log::debug!(
-                        "[WebDAV] Probe cleanup DELETE failed after successful round trip: {}: {err}",
-                        redact_url(&probe_url)
-                    );
-                }
-            }
-            Ok(())
-        }
-        Err(primary_err) => {
-            if let Err(cleanup_err) = cleanup_result {
-                log::debug!(
-                    "[WebDAV] Failed to clean up probe file after probe failure: {cleanup_err}"
-                );
-            }
-            Err(primary_err)
-        }
-    }
 }
 
 pub async fn ensure_remote_directories(
