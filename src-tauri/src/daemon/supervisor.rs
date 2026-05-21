@@ -178,6 +178,16 @@ impl Supervisor {
             .stderr(Stdio::null())
             .kill_on_drop(true);
 
+        #[cfg(unix)]
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
         let spawned = match cmd.spawn() {
             Ok(child) => child,
             Err(err) => {

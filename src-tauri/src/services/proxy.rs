@@ -354,6 +354,56 @@ impl ProxyService {
         }
     }
 
+    async fn should_drop_takeover_via_daemon(&self, app_type: &AppType) -> Result<bool, String> {
+        let Some(session) = self.load_persisted_runtime_session_for_app(app_type) else {
+            self.remove_stale_daemon_socket_if_unreachable();
+            return Ok(false);
+        };
+
+        if !session.kind.is_managed_external() {
+            return Ok(true);
+        }
+
+        if !Self::is_process_alive(session.pid) {
+            self.clear_persisted_runtime_session_for_app(app_type)?;
+            return Ok(false);
+        }
+
+        match Self::probe_external_proxy_status(&session).await {
+            ExternalProxyStatusProbe::Matched(_) => Ok(true),
+            ExternalProxyStatusProbe::Mismatched | ExternalProxyStatusProbe::Unreachable => {
+                self.clear_persisted_runtime_session_for_app(app_type)?;
+                Ok(false)
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn remove_stale_daemon_socket_if_unreachable(&self) {
+        use std::io::ErrorKind;
+
+        let socket_path = crate::daemon::paths::socket_path();
+        if !socket_path.exists() {
+            return;
+        }
+
+        match std::os::unix::net::UnixStream::connect(&socket_path) {
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                ) =>
+            {
+                let _ = std::fs::remove_file(socket_path);
+            }
+            Err(_) => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn remove_stale_daemon_socket_if_unreachable(&self) {}
+
     /// Foreground-only fallback for when no daemon is reachable. Drops the
     /// per-app takeover via the same code path the supervisor uses, takes the
     /// cross-process state-mutation guard around it (so a concurrent CLI
@@ -432,7 +482,11 @@ impl ProxyService {
 
         // Disable: route through the daemon when one is running so it stays
         // the sole writer of `proxy_runtime_session`.
-        self.daemon_drop_takeover(app_type_enum.as_str()).await
+        if self.should_drop_takeover_via_daemon(&app_type_enum).await? {
+            self.daemon_drop_takeover(app_type_enum.as_str()).await
+        } else {
+            self.local_disable_takeover(app_type_enum.as_str()).await
+        }
     }
 
     async fn start_with_resolved_config_unlocked(
