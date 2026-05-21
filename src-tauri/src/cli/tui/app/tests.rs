@@ -1276,9 +1276,9 @@ mod tests {
     #[test]
     fn model_fetch_picker_enter_with_picker_row_returns_to_claude_model_picker() {
         let mut app = App::new(Some(AppType::Claude));
-        app.form = Some(FormState::ProviderAdd(
-            ProviderAddFormState::new(AppType::Claude),
-        ));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
             field: ProviderAddField::ClaudeModelConfig,
@@ -1314,9 +1314,9 @@ mod tests {
     #[test]
     fn model_fetch_picker_enter_without_picker_row_sets_overlay_none() {
         let mut app = App::new(Some(AppType::Claude));
-        app.form = Some(FormState::ProviderAdd(
-            ProviderAddFormState::new(AppType::Claude),
-        ));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
             field: ProviderAddField::ClaudeModelConfig,
@@ -1346,9 +1346,9 @@ mod tests {
     #[test]
     fn model_fetch_picker_esc_with_picker_row_returns_to_claude_model_picker() {
         let mut app = App::new(Some(AppType::Claude));
-        app.form = Some(FormState::ProviderAdd(
-            ProviderAddFormState::new(AppType::Claude),
-        ));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
             field: ProviderAddField::ClaudeModelConfig,
@@ -1381,9 +1381,9 @@ mod tests {
     #[test]
     fn model_fetch_picker_enter_empty_model_with_picker_row_returns_to_claude_model_picker() {
         let mut app = App::new(Some(AppType::Claude));
-        app.form = Some(FormState::ProviderAdd(
-            ProviderAddFormState::new(AppType::Claude),
-        ));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
             field: ProviderAddField::ClaudeModelConfig,
@@ -1416,9 +1416,9 @@ mod tests {
     #[test]
     fn model_fetch_picker_enter_updates_correct_claude_idx_slot() {
         let mut app = App::new(Some(AppType::Claude));
-        app.form = Some(FormState::ProviderAdd(
-            ProviderAddFormState::new(AppType::Claude),
-        ));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
         app.overlay = Overlay::ModelFetchPicker {
             request_id: 1,
             field: ProviderAddField::ClaudeModelConfig,
