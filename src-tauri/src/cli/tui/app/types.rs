@@ -223,6 +223,7 @@ pub enum Overlay {
         request_id: u64,
         field: ProviderAddField,
         claude_idx: Option<usize>,
+        model_picker_selected_row: Option<usize>,
         input: TextInput,
         query: String,
         fetching: bool,

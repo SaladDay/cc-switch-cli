@@ -351,6 +351,7 @@ impl App {
         let Overlay::ModelFetchPicker {
             field,
             claude_idx,
+            model_picker_selected_row,
             input,
             query,
             models,
@@ -373,7 +374,14 @@ impl App {
 
         Some(match key.code {
             KeyCode::Esc => {
-                self.overlay = Overlay::None;
+                if let Some(selected) = model_picker_selected_row {
+                    self.overlay = Overlay::ClaudeModelPicker {
+                        selected: *selected,
+                        editing: false,
+                    };
+                } else {
+                    self.overlay = Overlay::None;
+                }
                 Action::None
             }
             KeyCode::Up => {
@@ -403,13 +411,28 @@ impl App {
             KeyCode::Enter => {
                 let selected_model = input.value.trim().to_string();
                 if selected_model.is_empty() {
-                    self.overlay = Overlay::None;
+                    if let Some(selected) = model_picker_selected_row {
+                        self.overlay = Overlay::ClaudeModelPicker {
+                            selected: *selected,
+                            editing: false,
+                        };
+                    } else {
+                        self.overlay = Overlay::None;
+                    }
                     return Some(Action::None);
                 }
 
                 let field = *field;
                 let claude_idx = *claude_idx;
-                self.overlay = Overlay::None;
+                let return_to_picker = *model_picker_selected_row;
+                if let Some(selected) = return_to_picker {
+                    self.overlay = Overlay::ClaudeModelPicker {
+                        selected,
+                        editing: false,
+                    };
+                } else {
+                    self.overlay = Overlay::None;
+                }
 
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
                     if field == ProviderAddField::ClaudeModelConfig {

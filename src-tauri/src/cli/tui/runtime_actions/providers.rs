@@ -492,10 +492,16 @@ pub(super) fn model_fetch(
     };
     let request_id = next_model_fetch_request_id();
 
+    let model_picker_selected_row = match &ctx.app.overlay {
+        Overlay::ClaudeModelPicker { selected, .. } => Some(*selected),
+        _ => None,
+    };
+
     ctx.app.overlay = Overlay::ModelFetchPicker {
         request_id,
         field: field.clone(),
         claude_idx,
+        model_picker_selected_row,
         input: TextInput::new(""),
         query: String::new(),
         fetching: true,
