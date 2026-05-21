@@ -151,6 +151,7 @@ mod tests {
             request_id: 1,
             field: ProviderAddField::Name,
             claude_idx: None,
+            model_picker_selected_row: None,
             input: TextInput::new(""),
             query: String::new(),
             fetching: false,
@@ -1249,6 +1250,7 @@ mod tests {
             request_id: 1,
             field: ProviderAddField::Name,
             claude_idx: None,
+            model_picker_selected_row: None,
             input: TextInput::new("alpha beta"),
             query: "alpha beta".to_string(),
             fetching: false,
@@ -1269,6 +1271,152 @@ mod tests {
                     && input.cursor == ">alpha ".chars().count()
                     && query == ">alpha "
         ));
+    }
+
+    #[test]
+    fn model_fetch_picker_enter_with_picker_row_returns_to_claude_model_picker() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(0),
+            model_picker_selected_row: Some(2),
+            input: TextInput::new("claude-sonnet-4-20250514"),
+            query: String::new(),
+            fetching: false,
+            models: vec!["claude-sonnet-4-20250514".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+
+        app.on_key(key(KeyCode::Enter), &data());
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 2,
+                editing: false,
+            }
+        ));
+        let provider = match app.form.as_ref().unwrap() {
+            FormState::ProviderAdd(p) => p,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(
+            provider.claude_model_input(0).unwrap().value,
+            "claude-sonnet-4-20250514"
+        );
+    }
+
+    #[test]
+    fn model_fetch_picker_enter_without_picker_row_sets_overlay_none() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(0),
+            model_picker_selected_row: None,
+            input: TextInput::new("claude-sonnet-4-20250514"),
+            query: String::new(),
+            fetching: false,
+            models: vec!["claude-sonnet-4-20250514".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+
+        app.on_key(key(KeyCode::Enter), &data());
+
+        assert!(matches!(app.overlay, Overlay::None));
+        let provider = match app.form.as_ref().unwrap() {
+            FormState::ProviderAdd(p) => p,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(
+            provider.claude_model_input(0).unwrap().value,
+            "claude-sonnet-4-20250514"
+        );
+    }
+
+    #[test]
+    fn model_fetch_picker_enter_empty_model_with_picker_row_returns_to_claude_model_picker() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(0),
+            model_picker_selected_row: Some(3),
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: false,
+            models: Vec::new(),
+            error: None,
+            selected_idx: 0,
+        };
+
+        app.on_key(key(KeyCode::Enter), &data());
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 3,
+                editing: false,
+            }
+        ));
+        let provider = match app.form.as_ref().unwrap() {
+            FormState::ProviderAdd(p) => p,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(provider.claude_model_input(0).unwrap().value, "");
+    }
+
+    #[test]
+    fn model_fetch_picker_enter_updates_correct_claude_idx_slot() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(2),
+            model_picker_selected_row: Some(2),
+            input: TextInput::new("claude-haiku-4-20250514"),
+            query: String::new(),
+            fetching: false,
+            models: vec!["claude-haiku-4-20250514".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+
+        app.on_key(key(KeyCode::Enter), &data());
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker { selected: 2, .. }
+        ));
+        let provider = match app.form.as_ref().unwrap() {
+            FormState::ProviderAdd(p) => p,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(
+            provider.claude_model_input(0).unwrap().value,
+            "",
+            "slot 0 should remain empty"
+        );
+        assert_eq!(
+            provider.claude_model_input(2).unwrap().value,
+            "claude-haiku-4-20250514",
+            "slot 2 should be updated"
+        );
     }
 
     #[test]
