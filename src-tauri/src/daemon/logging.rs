@@ -17,7 +17,7 @@ use log::{Level, LevelFilter, Log, Metadata, Record};
 
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
-static INSTALLED: OnceLock<()> = OnceLock::new();
+static INSTALL_RESULT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 struct DaemonLogger {
     path: PathBuf,
@@ -125,24 +125,19 @@ fn level_label(level: Level) -> &'static str {
 /// log path. Idempotent — subsequent calls return the originally chosen path
 /// without re-installing.
 pub fn install(path: &Path, level: LevelFilter) -> Result<PathBuf, String> {
-    let mut installed_path: Option<PathBuf> = None;
-    INSTALLED.get_or_init(|| match DaemonLogger::open(path, level) {
-        Ok(logger) => {
+    INSTALL_RESULT
+        .get_or_init(|| {
+            let logger = DaemonLogger::open(path, level)
+                .map_err(|err| format!("open daemon logger at {} failed: {err}", path.display()))?;
             let resolved = logger.path.clone();
             let boxed: Box<dyn Log> = Box::new(logger);
-            if log::set_boxed_logger(boxed).is_ok() {
-                log::set_max_level(level);
-            }
-            installed_path = Some(resolved);
-        }
-        Err(_) => {
-            installed_path = None;
-        }
-    });
-
-    installed_path
-        .or_else(|| Some(path.to_path_buf()))
-        .ok_or_else(|| format!("install daemon logger at {} failed", path.display()))
+            log::set_boxed_logger(boxed).map_err(|err| {
+                format!("install daemon logger at {} failed: {err}", path.display())
+            })?;
+            log::set_max_level(level);
+            Ok(resolved)
+        })
+        .clone()
 }
 
 #[cfg(test)]

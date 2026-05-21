@@ -50,11 +50,28 @@ struct SupervisorInner {
     workers: HashMap<AppType, WorkerInfo>,
     pending_hellos: HashMap<String, oneshot::Sender<WorkerInfo>>,
     pending_tokens: HashMap<String, String>,
-    stopping_workers: HashSet<AppType>,
+    pending_worker_pids: HashMap<AppType, u32>,
+    stopping_workers: HashSet<(AppType, u32)>,
+    cancelled_apps: HashSet<AppType>,
     restart: RestartPolicy,
     last_restart_at: Option<chrono::DateTime<chrono::Utc>>,
     restart_count: u32,
     shutdown_requested: bool,
+    teardown_in_progress: bool,
+}
+
+struct WorkerStopPlan {
+    pids: Vec<u32>,
+    should_shutdown: bool,
+    previous_shutdown_requested: bool,
+    cancelled_pending: Vec<CancelledPendingWorker>,
+}
+
+struct CancelledPendingWorker {
+    app: AppType,
+    pid: u32,
+    token: Option<String>,
+    hello: Option<oneshot::Sender<WorkerInfo>>,
 }
 
 #[derive(Clone)]
@@ -96,21 +113,33 @@ impl Supervisor {
         self.proxy.recover_takeovers_on_startup().await
     }
 
-    /// Bring up a worker if none is running, then return its bound address.
-    ///
-    /// Concurrent callers serialize through `spawn_lock` so we never spawn two
-    /// workers in parallel (which would fight for the listen port and corrupt
-    /// `pending_hello`). After acquiring the lock we re-check `inner.worker` so
-    /// later callers reuse the worker the first one brought up.
-    async fn ensure_worker(&self, app: AppType) -> Result<WorkerInfo, String> {
-        let _spawn_guard = self.spawn_lock.lock().await;
+    async fn ensure_worker_locked(&self, app: AppType) -> Result<WorkerInfo, String> {
         let app_key = app.as_str().to_string();
 
         let (session_token, hello_rx) = {
             let mut inner = self.inner.lock().await;
+            if inner.shutdown_requested || inner.teardown_in_progress {
+                return Err("proxy daemon is shutting down".to_string());
+            }
             if let Some(info) = inner.workers.get(&app).cloned() {
+                if inner.stopping_workers.contains(&(app.clone(), info.pid)) {
+                    return Err(format!(
+                        "{app_key} proxy worker is stopping; retry after it exits"
+                    ));
+                }
+                inner.cancelled_apps.remove(&app);
                 return Ok(info);
             }
+            if inner
+                .stopping_workers
+                .iter()
+                .any(|(stopping_app, _)| stopping_app == &app)
+            {
+                return Err(format!(
+                    "{app_key} proxy worker is stopping; retry after it exits"
+                ));
+            }
+            inner.cancelled_apps.remove(&app);
             let (tx, rx) = oneshot::channel();
             inner.pending_hellos.insert(app_key.clone(), tx);
             let token = uuid::Uuid::new_v4().to_string();
@@ -118,16 +147,20 @@ impl Supervisor {
             (token, rx)
         };
 
-        let app_config = self
-            .db
-            .get_proxy_config_for_app(&app_key)
-            .await
-            .map_err(|err| format!("load proxy config for {app_key} failed: {err}"))?;
-        let global_config = self
-            .db
-            .get_global_proxy_config()
-            .await
-            .map_err(|err| format!("load global proxy config failed: {err}"))?;
+        let app_config = match self.db.get_proxy_config_for_app(&app_key).await {
+            Ok(config) => config,
+            Err(err) => {
+                self.clear_pending_worker_registration(&app).await;
+                return Err(format!("load proxy config for {app_key} failed: {err}"));
+            }
+        };
+        let global_config = match self.db.get_global_proxy_config().await {
+            Ok(config) => config,
+            Err(err) => {
+                self.clear_pending_worker_registration(&app).await;
+                return Err(format!("load global proxy config failed: {err}"));
+            }
+        };
 
         let mut cmd = Command::new(&self.binary_path);
         cmd.arg("proxy")
@@ -145,12 +178,24 @@ impl Supervisor {
             .stderr(Stdio::null())
             .kill_on_drop(true);
 
-        let spawned = cmd
-            .spawn()
-            .map_err(|err| format!("spawn {app_key} proxy worker failed: {err}"))?;
-        let pid = spawned
-            .id()
-            .ok_or_else(|| format!("spawned {app_key} worker has no pid"))?;
+        let spawned = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                self.clear_pending_worker_registration(&app).await;
+                return Err(format!("spawn {app_key} proxy worker failed: {err}"));
+            }
+        };
+        let pid = match spawned.id() {
+            Some(pid) => pid,
+            None => {
+                self.clear_pending_worker_registration(&app).await;
+                return Err(format!("spawned {app_key} worker has no pid"));
+            }
+        };
+        {
+            let mut inner = self.inner.lock().await;
+            inner.pending_worker_pids.insert(app.clone(), pid);
+        }
         log::info!("[daemon] spawned {app_key} worker pid={pid}");
 
         let supervisor = self.clone();
@@ -161,9 +206,26 @@ impl Supervisor {
 
         let info = match tokio::time::timeout(WORKER_HELLO_TIMEOUT, hello_rx).await {
             Ok(Ok(info)) => info,
-            Ok(Err(_)) => return Err(format!("{app_key} worker exited before hello")),
-            Err(_) => return Err(format!("{app_key} worker hello timed out")),
+            Ok(Err(_)) => {
+                self.clear_pending_worker_registration(&app).await;
+                return Err(format!("{app_key} worker exited before hello"));
+            }
+            Err(_) => {
+                self.abandon_starting_worker(&app, Some(pid)).await;
+                return Err(format!("{app_key} worker hello timed out"));
+            }
         };
+
+        let became_stopping = {
+            let inner = self.inner.lock().await;
+            inner.shutdown_requested
+                || inner.teardown_in_progress
+                || inner.stopping_workers.contains(&(app.clone(), info.pid))
+        };
+        if became_stopping {
+            self.abandon_starting_worker(&app, Some(info.pid)).await;
+            return Err("proxy daemon is shutting down".to_string());
+        }
 
         {
             let mut inner = self.inner.lock().await;
@@ -171,6 +233,8 @@ impl Supervisor {
             inner.last_restart_at = Some(chrono::Utc::now());
             inner.restart.on_worker_started(Instant::now());
             inner.pending_tokens.remove(&app_key);
+            inner.pending_worker_pids.remove(&app);
+            inner.shutdown_requested = false;
         }
         self.persist_runtime_session().await?;
         Ok(info)
@@ -186,20 +250,31 @@ impl Supervisor {
             }
         };
 
-        let info = match self.ensure_worker(app.clone()).await {
-            Ok(info) => info,
-            Err(err) => {
-                return Response::Error { message: err };
-            }
-        };
-
-        if let Err(err) = self.proxy.set_global_enabled(true).await {
-            return Response::Error {
-                message: err.to_string(),
-            };
+        if let Err(err) = self.proxy.validate_app_proxy_activation(&app, None).await {
+            return Response::Error { message: err };
         }
 
-        if let Err(err) = self.proxy.set_takeover_for_app(app.as_str(), true).await {
+        let _spawn_guard = self.spawn_lock.lock().await;
+        let info = match self.ensure_worker_locked(app.clone()).await {
+            Ok(info) => info,
+            Err(err) => return Response::Error { message: err },
+        };
+
+        let activation = async {
+            self.proxy
+                .set_global_enabled(true)
+                .await
+                .map_err(|err| err.to_string())?;
+            self.proxy.set_takeover_for_app(app.as_str(), true).await
+        }
+        .await;
+
+        if let Err(err) = activation {
+            log::warn!(
+                "[daemon] enabling {} takeover failed after worker start, cleaning up: {err}",
+                app.as_str()
+            );
+            self.stop_worker_after_enable_failure(app.clone()).await;
             return Response::Error { message: err };
         }
 
@@ -209,6 +284,191 @@ impl Supervisor {
             session_token: info.session_token,
             pid: info.pid,
         }
+    }
+
+    async fn clear_pending_worker_registration(&self, app: &AppType) {
+        let app_key = app.as_str().to_string();
+        let mut inner = self.inner.lock().await;
+        inner.pending_tokens.remove(&app_key);
+        inner.pending_hellos.remove(&app_key);
+        inner.pending_worker_pids.remove(app);
+    }
+
+    async fn abandon_starting_worker(&self, app: &AppType, pid: Option<u32>) {
+        let app_key = app.as_str().to_string();
+        {
+            let mut inner = self.inner.lock().await;
+            inner.pending_tokens.remove(&app_key);
+            inner.pending_hellos.remove(&app_key);
+            inner.pending_worker_pids.remove(app);
+            if let Some(pid) = pid {
+                inner.stopping_workers.insert((app.clone(), pid));
+            }
+        }
+        if let Err(err) = send_sigterm(pid) {
+            log::warn!("[daemon] stopping abandoned {app_key} worker failed: {err}");
+        }
+    }
+
+    async fn stop_worker_after_enable_failure(&self, app: AppType) {
+        let plan = self.plan_stop_for_app(app.clone()).await;
+
+        if let Err(err) = self.proxy.clear_daemon_takeover_for_app(app.as_str()).await {
+            log::warn!(
+                "[daemon] restoring {} takeover after enable failure failed: {err}",
+                app.as_str()
+            );
+        }
+
+        if let Err(err) = self.persist_runtime_session().await {
+            log::warn!(
+                "[daemon] clearing runtime session after {} enable failure failed: {err}",
+                app.as_str()
+            );
+        }
+
+        let takeovers = self.read_takeover_flags().await;
+        let has_active_takeover = takeovers.claude || takeovers.codex || takeovers.gemini;
+        if !has_active_takeover {
+            if let Err(err) = self.proxy.set_global_enabled(false).await {
+                log::warn!(
+                    "[daemon] clearing global proxy switch after {} enable failure failed: {err}",
+                    app.as_str()
+                );
+            }
+        }
+        for pid in &plan.pids {
+            if let Err(err) = send_sigterm(Some(*pid)) {
+                log::warn!(
+                    "[daemon] stopping {} worker after enable failure failed: {err}",
+                    app.as_str()
+                );
+            }
+        }
+        if plan.should_shutdown && plan.pids.is_empty() {
+            self.shutdown_notify.notify_waiters();
+        }
+    }
+
+    fn has_remaining_workers_locked(inner: &SupervisorInner) -> bool {
+        !inner.workers.is_empty() || !inner.pending_worker_pids.is_empty()
+    }
+
+    fn remaining_workers_are_only_stopping_locked(inner: &SupervisorInner) -> bool {
+        Self::has_remaining_workers_locked(inner)
+            && inner
+                .workers
+                .iter()
+                .all(|(app, worker)| inner.stopping_workers.contains(&(app.clone(), worker.pid)))
+            && inner
+                .pending_worker_pids
+                .iter()
+                .all(|(app, pid)| inner.stopping_workers.contains(&(app.clone(), *pid)))
+    }
+
+    async fn plan_stop_for_app(&self, app: AppType) -> WorkerStopPlan {
+        let app_key = app.as_str().to_string();
+        let mut inner = self.inner.lock().await;
+        let mut pids = Vec::new();
+        let previous_shutdown_requested = inner.shutdown_requested;
+        let mut cancelled_pending = Vec::new();
+        inner.cancelled_apps.insert(app.clone());
+
+        if let Some(pid) = inner.workers.get(&app).map(|info| info.pid) {
+            inner.stopping_workers.insert((app.clone(), pid));
+            pids.push(pid);
+        }
+        if let Some(pid) = inner.pending_worker_pids.remove(&app) {
+            inner.stopping_workers.insert((app.clone(), pid));
+            pids.push(pid);
+            cancelled_pending.push(CancelledPendingWorker {
+                app: app.clone(),
+                pid,
+                token: inner.pending_tokens.remove(&app_key),
+                hello: inner.pending_hellos.remove(&app_key),
+            });
+        }
+
+        pids.sort_unstable();
+        pids.dedup();
+        let target_had_worker = !pids.is_empty();
+        let no_remaining_workers = !Self::has_remaining_workers_locked(&inner)
+            || (target_had_worker && Self::remaining_workers_are_only_stopping_locked(&inner));
+        if target_had_worker && no_remaining_workers {
+            inner.shutdown_requested = true;
+        }
+
+        WorkerStopPlan {
+            pids,
+            should_shutdown: target_had_worker && no_remaining_workers,
+            previous_shutdown_requested,
+            cancelled_pending,
+        }
+    }
+
+    async fn rollback_stop_plan_for_app(&self, app: &AppType, mut plan: WorkerStopPlan) {
+        let mut inner = self.inner.lock().await;
+        for pid in &plan.pids {
+            inner.stopping_workers.remove(&(app.clone(), *pid));
+        }
+        inner.cancelled_apps.remove(app);
+        for pending in plan.cancelled_pending.drain(..) {
+            let app_key = pending.app.as_str().to_string();
+            inner.pending_worker_pids.insert(pending.app, pending.pid);
+            if let Some(token) = pending.token {
+                inner.pending_tokens.insert(app_key.clone(), token);
+            }
+            if let Some(hello) = pending.hello {
+                inner.pending_hellos.insert(app_key, hello);
+            }
+        }
+        inner.shutdown_requested = plan.previous_shutdown_requested;
+    }
+
+    async fn plan_stop_all_workers(&self, teardown_in_progress: bool) -> Vec<u32> {
+        let mut inner = self.inner.lock().await;
+        inner.shutdown_requested = true;
+        if teardown_in_progress {
+            inner.teardown_in_progress = true;
+        }
+        inner
+            .cancelled_apps
+            .extend([AppType::Claude, AppType::Codex, AppType::Gemini]);
+
+        let workers = inner
+            .workers
+            .iter()
+            .map(|(app, worker)| (app.clone(), worker.pid))
+            .collect::<Vec<_>>();
+        let pending = inner
+            .pending_worker_pids
+            .iter()
+            .map(|(app, pid)| (app.clone(), *pid))
+            .collect::<Vec<_>>();
+
+        let mut pids = Vec::new();
+        for (app, pid) in workers.into_iter().chain(pending.into_iter()) {
+            inner.stopping_workers.insert((app, pid));
+            pids.push(pid);
+        }
+
+        let pending_apps = inner
+            .pending_worker_pids
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for app in pending_apps {
+            inner.pending_worker_pids.remove(&app);
+            let app_key = app.as_str().to_string();
+            inner.pending_tokens.remove(&app_key);
+            if let Some(tx) = inner.pending_hellos.remove(&app_key) {
+                drop(tx);
+            }
+        }
+
+        pids.sort_unstable();
+        pids.dedup();
+        pids
     }
 
     async fn handle_drop_takeover(&self, app_type: &str) -> Response {
@@ -221,26 +481,31 @@ impl Supervisor {
             }
         };
 
-        if let Err(err) = self.proxy.set_takeover_for_app(app.as_str(), false).await {
+        let _spawn_guard = self.spawn_lock.lock().await;
+        let stop_plan = self.plan_stop_for_app(app.clone()).await;
+        if let Err(err) = self.proxy.clear_daemon_takeover_for_app(app.as_str()).await {
+            self.rollback_stop_plan_for_app(&app, stop_plan).await;
             return Response::Error { message: err };
         }
-
-        let (stop_pid, had_worker, should_shutdown) = {
-            let mut inner = self.inner.lock().await;
-            let pid = inner.workers.get(&app).map(|w| w.pid);
-            if pid.is_some() {
-                inner.stopping_workers.insert(app.clone());
-                if inner.workers.len() <= 1 {
-                    inner.shutdown_requested = true;
-                }
+        let takeovers = self.read_takeover_flags().await;
+        let has_active_takeover = takeovers.claude || takeovers.codex || takeovers.gemini;
+        let mut global_disable_error = None;
+        if !has_active_takeover {
+            if let Err(err) = self.proxy.set_global_enabled(false).await {
+                global_disable_error = Some(err.to_string());
             }
-            (pid, pid.is_some(), inner.workers.len() <= 1)
-        };
-        let _ = send_sigterm(stop_pid);
-        if had_worker {
+        }
+
+        for pid in &stop_plan.pids {
+            let _ = send_sigterm(Some(*pid));
+        }
+        if !stop_plan.pids.is_empty() {
             tokio::time::sleep(Duration::from_millis(100)).await;
-        } else if should_shutdown {
+        } else if stop_plan.should_shutdown {
             self.shutdown_notify.notify_waiters();
+        }
+        if let Some(message) = global_disable_error {
+            return Response::Error { message };
         }
         Response::Ok
     }
@@ -263,17 +528,28 @@ impl Supervisor {
                 message: "session token mismatch".to_string(),
             };
         };
+        let Some(app_type) = parse_app_type(&app_key) else {
+            return Response::Error {
+                message: format!("proxy takeover not supported for app: {app_key}"),
+            };
+        };
+        if let Some(expected_pid) = inner.pending_worker_pids.get(&app_type) {
+            if *expected_pid != pid {
+                log::warn!(
+                    "[daemon] worker hello pid mismatch for {app_key}: expected {expected_pid}, got {pid}"
+                );
+                return Response::Error {
+                    message: "worker pid mismatch".to_string(),
+                };
+            }
+        }
         let Some(tx) = inner.pending_hellos.remove(&app_key) else {
             log::warn!("[daemon] worker hello received but no pending ensure (pid={pid})");
             return Response::Error {
                 message: "no pending worker registration".to_string(),
             };
         };
-        let Some(app_type) = parse_app_type(&app_key) else {
-            return Response::Error {
-                message: format!("proxy takeover not supported for app: {app_key}"),
-            };
-        };
+        inner.pending_worker_pids.remove(&app_type);
         let info = WorkerInfo {
             app_type,
             pid,
@@ -299,6 +575,13 @@ impl Supervisor {
             }
         }
 
+        let _spawn_guard = self.spawn_lock.lock().await;
+        if let Err(err) = self.proxy.set_global_enabled(false).await {
+            return Response::Error {
+                message: err.to_string(),
+            };
+        }
+
         // Disabling: drop every active takeover so each app's live config is
         // restored, then stop the worker. We snapshot the active list under
         // the inner lock so we don't hold it while running per-app restores
@@ -315,7 +598,7 @@ impl Supervisor {
             }
         }
         for app in &active {
-            if let Err(err) = self.proxy.set_takeover_for_app(app.as_str(), false).await {
+            if let Err(err) = self.proxy.clear_daemon_takeover_for_app(app.as_str()).await {
                 log::warn!(
                     "[daemon] set_global_enabled(false): drop takeover for {} failed: {err}",
                     app.as_str()
@@ -323,11 +606,7 @@ impl Supervisor {
             }
         }
 
-        let stop_pids = {
-            let mut inner = self.inner.lock().await;
-            inner.shutdown_requested = true;
-            inner.workers.values().map(|w| w.pid).collect::<Vec<_>>()
-        };
+        let stop_pids = self.plan_stop_all_workers(false).await;
         for pid in &stop_pids {
             let _ = send_sigterm(Some(*pid));
         }
@@ -375,11 +654,8 @@ impl Supervisor {
     }
 
     pub async fn shutdown(&self) {
-        let stop_pids = {
-            let mut inner = self.inner.lock().await;
-            inner.shutdown_requested = true;
-            inner.workers.values().map(|w| w.pid).collect::<Vec<_>>()
-        };
+        let _spawn_guard = self.spawn_lock.lock().await;
+        let stop_pids = self.plan_stop_all_workers(true).await;
         for pid in stop_pids {
             let _ = send_sigterm(Some(pid));
         }
@@ -415,29 +691,21 @@ impl Supervisor {
         };
         log::info!("[daemon] {app_key} worker pid={pid} exited: {exit_status}");
 
-        let (intentional, has_remaining_workers) = {
-            let mut inner = self.inner.lock().await;
-            inner.workers.remove(&app);
-            inner.pending_tokens.remove(&app_key);
-            if let Some(tx) = inner.pending_hellos.remove(&app_key) {
-                drop(tx);
-            }
-            let intentional = inner.shutdown_requested || inner.stopping_workers.remove(&app);
-            (intentional, !inner.workers.is_empty())
-        };
+        let (intentional, has_remaining_workers, teardown_in_progress) =
+            self.record_worker_exit(&app, pid).await;
 
         let _ = self.persist_runtime_session().await;
 
         if intentional {
             log::info!("[daemon] {app_key} worker exit was expected, not restarting");
-            if !has_remaining_workers {
+            if !has_remaining_workers && !teardown_in_progress {
                 log::info!("[daemon] no remaining workers, exiting");
                 self.shutdown_notify.notify_waiters();
             }
             return;
         }
 
-        if let Err(err) = self.proxy.set_takeover_for_app(app.as_str(), false).await {
+        if let Err(err) = self.proxy.clear_daemon_takeover_for_app(app.as_str()).await {
             log::warn!("[daemon] restore takeover for {app_key} failed: {err}");
         }
 
@@ -454,6 +722,16 @@ impl Supervisor {
                     attempt + 1
                 );
                 tokio::time::sleep(delay).await;
+                if !self.should_restart_after_crash(&app).await {
+                    log::info!(
+                        "[daemon] {} worker restart cancelled after route was disabled",
+                        app.as_str()
+                    );
+                    if !has_remaining_workers && !teardown_in_progress {
+                        self.shutdown_notify.notify_waiters();
+                    }
+                    return;
+                }
                 {
                     let mut inner = self.inner.lock().await;
                     inner.restart_count = inner.restart_count.saturating_add(1);
@@ -466,11 +744,54 @@ impl Supervisor {
                 log::error!(
                     "[daemon] {app_key} worker pid={pid} circuit-broke after repeated crashes"
                 );
-                if !has_remaining_workers {
+                if !has_remaining_workers && !teardown_in_progress {
                     self.shutdown_notify.notify_waiters();
                 }
             }
         }
+    }
+
+    async fn record_worker_exit(&self, app: &AppType, pid: u32) -> (bool, bool, bool) {
+        let app_key = app.as_str().to_string();
+        let mut inner = self.inner.lock().await;
+
+        let registered_pid = inner.workers.get(app).map(|worker| worker.pid);
+        let was_registered = registered_pid == Some(pid);
+        if was_registered {
+            inner.workers.remove(app);
+        }
+
+        let pending_pid = inner.pending_worker_pids.get(app).copied();
+        let was_pending_startup = pending_pid == Some(pid);
+        if was_pending_startup {
+            inner.pending_worker_pids.remove(app);
+            inner.pending_tokens.remove(&app_key);
+            if let Some(tx) = inner.pending_hellos.remove(&app_key) {
+                drop(tx);
+            }
+        }
+
+        let was_stopping = inner.stopping_workers.remove(&(app.clone(), pid));
+        let stale_exit = registered_pid.is_some_and(|current_pid| current_pid != pid)
+            || pending_pid.is_some_and(|current_pid| current_pid != pid);
+        let intentional = inner.shutdown_requested
+            || was_stopping
+            || (!was_registered && was_pending_startup)
+            || stale_exit;
+
+        let has_remaining_workers = Self::has_remaining_workers_locked(&inner);
+        (
+            intentional,
+            has_remaining_workers,
+            inner.teardown_in_progress,
+        )
+    }
+
+    async fn should_restart_after_crash(&self, app: &AppType) -> bool {
+        let inner = self.inner.lock().await;
+        !inner.shutdown_requested
+            && !inner.teardown_in_progress
+            && !inner.cancelled_apps.contains(app)
     }
 
     fn respawn_after_crash<'a>(
@@ -478,7 +799,23 @@ impl Supervisor {
         app: AppType,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
-            let _info = self.ensure_worker(app.clone()).await?;
+            let _spawn_guard = self.spawn_lock.lock().await;
+            if !self.should_restart_after_crash(&app).await {
+                return Err(format!(
+                    "{} proxy worker restart was cancelled",
+                    app.as_str()
+                ));
+            }
+            let _info = self.ensure_worker_locked(app.clone()).await?;
+            {
+                let inner = self.inner.lock().await;
+                if inner.shutdown_requested
+                    || inner.teardown_in_progress
+                    || inner.cancelled_apps.contains(&app)
+                {
+                    return Err("proxy daemon is shutting down".to_string());
+                }
+            }
             if let Err(err) = self.proxy.set_takeover_for_app(app.as_str(), true).await {
                 log::warn!(
                     "[daemon] re-applying takeover for {} after restart failed: {err}",
@@ -576,4 +913,386 @@ fn send_sigterm(pid: Option<u32>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::daemon::ipc::protocol::Response;
+    use crate::provider::Provider;
+    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
+
+    struct TestHomeEnvGuard {
+        _lock: crate::test_support::TestHomeSettingsLock,
+        old_home: Option<OsString>,
+        old_userprofile: Option<OsString>,
+        old_config_dir: Option<OsString>,
+    }
+
+    impl TestHomeEnvGuard {
+        fn set(home: &Path) -> Self {
+            let lock = lock_test_home_and_settings();
+            let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
+            Self {
+                _lock: lock,
+                old_home,
+                old_userprofile,
+                old_config_dir,
+            }
+        }
+    }
+
+    impl Drop for TestHomeEnvGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.old_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match &self.old_config_dir {
+                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
+        }
+    }
+
+    fn supervisor_for_test(db: Arc<Database>, dir: &Path) -> Supervisor {
+        Supervisor::new(
+            db,
+            dir.join("daemon.sock"),
+            PathBuf::from("/bin/cc-switch-test-missing"),
+        )
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ensure_worker_validation_failure_does_not_start_worker_or_write_session() {
+        let temp_home = tempfile::tempdir().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db.clone(), temp_home.path());
+
+        let response = supervisor.handle_ensure_worker("claude").await;
+
+        assert!(
+            matches!(response, Response::Error { message } if message.contains("no active provider"))
+        );
+        assert_eq!(
+            db.get_setting(PROXY_RUNTIME_SESSION_KEY)
+                .expect("read runtime session"),
+            None
+        );
+        let inner = supervisor.inner.lock().await;
+        assert!(inner.workers.is_empty());
+        assert!(inner.pending_hellos.is_empty());
+        assert!(inner.pending_tokens.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ensure_worker_spawn_failure_clears_pending_registration() {
+        let temp_home = tempfile::tempdir().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        let db = Arc::new(Database::memory().expect("create database"));
+        let provider = Provider::with_id(
+            "p1".to_string(),
+            "Provider".to_string(),
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://example.com", "ANTHROPIC_AUTH_TOKEN": "token"}}),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current provider");
+        let supervisor = supervisor_for_test(db.clone(), temp_home.path());
+
+        let response = supervisor.handle_ensure_worker("claude").await;
+
+        assert!(
+            matches!(response, Response::Error { message } if message.contains("spawn claude proxy worker failed"))
+        );
+        assert_eq!(
+            db.get_setting(PROXY_RUNTIME_SESSION_KEY)
+                .expect("read runtime session"),
+            None
+        );
+        let inner = supervisor.inner.lock().await;
+        assert!(inner.workers.is_empty());
+        assert!(inner.pending_hellos.is_empty());
+        assert!(inner.pending_tokens.is_empty());
+    }
+
+    #[tokio::test]
+    async fn old_worker_exit_does_not_remove_restarted_worker_for_same_app() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, Path::new("/tmp"));
+        let app = AppType::Claude;
+        let old_pid = 1001;
+        let new_pid = 1002;
+
+        {
+            let mut inner = supervisor.inner.lock().await;
+            inner.workers.insert(
+                app.clone(),
+                WorkerInfo {
+                    app_type: app.clone(),
+                    pid: new_pid,
+                    address: "127.0.0.1".to_string(),
+                    port: 18080,
+                    session_token: "new-token".to_string(),
+                },
+            );
+            inner.stopping_workers.insert((app.clone(), old_pid));
+        }
+
+        let (intentional, has_remaining_workers, teardown_in_progress) =
+            supervisor.record_worker_exit(&app, old_pid).await;
+
+        assert!(intentional);
+        assert!(has_remaining_workers);
+        assert!(!teardown_in_progress);
+        let inner = supervisor.inner.lock().await;
+        assert_eq!(inner.workers.get(&app).map(|info| info.pid), Some(new_pid));
+        assert!(inner.stopping_workers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ensure_worker_does_not_reuse_stopping_worker() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, Path::new("/tmp"));
+        let app = AppType::Claude;
+        let pid = 1001;
+
+        {
+            let mut inner = supervisor.inner.lock().await;
+            inner.workers.insert(
+                app.clone(),
+                WorkerInfo {
+                    app_type: app.clone(),
+                    pid,
+                    address: "127.0.0.1".to_string(),
+                    port: 18080,
+                    session_token: "token".to_string(),
+                },
+            );
+            inner.stopping_workers.insert((app.clone(), pid));
+        }
+
+        let error = supervisor
+            .ensure_worker_locked(app)
+            .await
+            .expect_err("stopping worker must not be reused");
+
+        assert!(error.contains("worker is stopping"));
+    }
+
+    #[tokio::test]
+    async fn ensure_worker_rejects_shutdown_in_progress() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, Path::new("/tmp"));
+
+        {
+            let mut inner = supervisor.inner.lock().await;
+            inner.shutdown_requested = true;
+        }
+
+        let error = supervisor
+            .ensure_worker_locked(AppType::Claude)
+            .await
+            .expect_err("shutdown should reject new workers");
+
+        assert!(error.contains("shutting down"));
+    }
+
+    #[tokio::test]
+    async fn drop_inactive_app_does_not_shutdown_other_worker() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, Path::new("/tmp"));
+
+        {
+            let mut inner = supervisor.inner.lock().await;
+            inner.workers.insert(
+                AppType::Claude,
+                WorkerInfo {
+                    app_type: AppType::Claude,
+                    pid: 1001,
+                    address: "127.0.0.1".to_string(),
+                    port: 18080,
+                    session_token: "token".to_string(),
+                },
+            );
+        }
+
+        let plan = supervisor.plan_stop_for_app(AppType::Codex).await;
+
+        assert!(plan.pids.is_empty());
+        assert!(!plan.should_shutdown);
+        let inner = supervisor.inner.lock().await;
+        assert!(!inner.shutdown_requested);
+        assert!(
+            inner.cancelled_apps.contains(&AppType::Codex),
+            "dropping an inactive app should still cancel any delayed restart for that route"
+        );
+        assert_eq!(
+            inner.workers.get(&AppType::Claude).map(|info| info.pid),
+            Some(1001)
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_takeover_cancels_delayed_restart_for_target_app() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, Path::new("/tmp"));
+
+        let plan = supervisor.plan_stop_for_app(AppType::Claude).await;
+
+        assert!(plan.pids.is_empty());
+        assert!(!plan.should_shutdown);
+        assert!(
+            !supervisor
+                .should_restart_after_crash(&AppType::Claude)
+                .await,
+            "disabled app should not restart after crash backoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_takeover_cancels_pending_worker_for_target_app() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, Path::new("/tmp"));
+        let app = AppType::Claude;
+        let app_key = app.as_str().to_string();
+        let pending_pid = 1002;
+
+        {
+            let mut inner = supervisor.inner.lock().await;
+            let (tx, _rx) = oneshot::channel();
+            inner.pending_hellos.insert(app_key.clone(), tx);
+            inner
+                .pending_tokens
+                .insert(app_key.clone(), "token".to_string());
+            inner.pending_worker_pids.insert(app.clone(), pending_pid);
+        }
+
+        let plan = supervisor.plan_stop_for_app(app.clone()).await;
+
+        assert_eq!(plan.pids, vec![pending_pid]);
+        assert!(plan.should_shutdown);
+        let inner = supervisor.inner.lock().await;
+        assert!(inner.shutdown_requested);
+        assert!(inner.pending_hellos.is_empty());
+        assert!(inner.pending_tokens.is_empty());
+        assert!(inner.pending_worker_pids.is_empty());
+        assert!(inner.stopping_workers.contains(&(app, pending_pid)));
+        assert!(inner.cancelled_apps.contains(&AppType::Claude));
+    }
+
+    #[tokio::test]
+    async fn global_disable_cancels_pending_workers() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, Path::new("/tmp"));
+        let app = AppType::Claude;
+        let app_key = app.as_str().to_string();
+        let pending_pid = 1002;
+
+        {
+            let mut inner = supervisor.inner.lock().await;
+            let (tx, _rx) = oneshot::channel();
+            inner.pending_hellos.insert(app_key.clone(), tx);
+            inner
+                .pending_tokens
+                .insert(app_key.clone(), "token".to_string());
+            inner.pending_worker_pids.insert(app.clone(), pending_pid);
+        }
+
+        let pids = supervisor.plan_stop_all_workers(false).await;
+
+        assert_eq!(pids, vec![pending_pid]);
+        let inner = supervisor.inner.lock().await;
+        assert!(inner.shutdown_requested);
+        assert!(!inner.teardown_in_progress);
+        assert!(inner.pending_hellos.is_empty());
+        assert!(inner.pending_tokens.is_empty());
+        assert!(inner.pending_worker_pids.is_empty());
+        assert!(inner.stopping_workers.contains(&(app, pending_pid)));
+        assert!(inner.cancelled_apps.contains(&AppType::Claude));
+    }
+
+    #[tokio::test]
+    async fn shutdown_teardown_prevents_worker_exit_from_signalling_shutdown() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, Path::new("/tmp"));
+        let app = AppType::Claude;
+        let pid = 1001;
+
+        {
+            let mut inner = supervisor.inner.lock().await;
+            inner.workers.insert(
+                app.clone(),
+                WorkerInfo {
+                    app_type: app.clone(),
+                    pid,
+                    address: "127.0.0.1".to_string(),
+                    port: 18080,
+                    session_token: "token".to_string(),
+                },
+            );
+        }
+
+        let pids = supervisor.plan_stop_all_workers(true).await;
+        assert_eq!(pids, vec![pid]);
+
+        let (intentional, has_remaining_workers, teardown_in_progress) =
+            supervisor.record_worker_exit(&app, pid).await;
+
+        assert!(intentional);
+        assert!(!has_remaining_workers);
+        assert!(teardown_in_progress);
+    }
+
+    #[tokio::test]
+    async fn old_worker_exit_keeps_daemon_alive_for_pending_restarted_worker() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, Path::new("/tmp"));
+        let app = AppType::Claude;
+        let old_pid = 1001;
+        let pending_pid = 1002;
+
+        {
+            let mut inner = supervisor.inner.lock().await;
+            inner.pending_worker_pids.insert(app.clone(), pending_pid);
+            inner.stopping_workers.insert((app.clone(), old_pid));
+        }
+
+        let (intentional, has_remaining_workers, teardown_in_progress) =
+            supervisor.record_worker_exit(&app, old_pid).await;
+
+        assert!(intentional);
+        assert!(has_remaining_workers);
+        assert!(!teardown_in_progress);
+        let inner = supervisor.inner.lock().await;
+        assert_eq!(
+            inner.pending_worker_pids.get(&app).copied(),
+            Some(pending_pid)
+        );
+        assert!(inner.stopping_workers.is_empty());
+    }
 }

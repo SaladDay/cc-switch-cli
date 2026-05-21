@@ -7,6 +7,20 @@ fn main() {
     // 解析命令行参数
     let cli = Cli::parse();
 
+    init_logger_if_needed(&cli);
+
+    // 执行命令
+    if let Err(e) = run(cli) {
+        eprintln!("Error: {}", e);
+        process::exit(1);
+    }
+}
+
+fn init_logger_if_needed(cli: &Cli) {
+    if command_uses_own_logger(&cli.command) {
+        return;
+    }
+
     // 初始化日志（交互模式和命令行模式都避免干扰输出）
     let log_level = if cli.verbose {
         "debug"
@@ -14,11 +28,15 @@ fn main() {
         "error" // 默认只显示错误日志，避免 INFO 日志干扰命令输出
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
+}
 
-    // 执行命令
-    if let Err(e) = run(cli) {
-        eprintln!("Error: {}", e);
-        process::exit(1);
+fn command_uses_own_logger(command: &Option<Commands>) -> bool {
+    match command {
+        #[cfg(unix)]
+        Some(Commands::Daemon(cc_switch_lib::cli::commands::daemon::DaemonCommand::Start {
+            ..
+        })) => true,
+        _ => false,
     }
 }
 
@@ -53,6 +71,11 @@ fn run(cli: Cli) -> Result<(), AppError> {
 }
 
 fn command_requires_startup_state(command: &Option<Commands>) -> bool {
+    #[cfg(unix)]
+    if std::env::var_os(cc_switch_lib::daemon::supervisor::DAEMON_SOCKET_ENV).is_some() {
+        return false;
+    }
+
     match command {
         Some(Commands::Completions(_))
         | Some(Commands::Update(_))
@@ -72,7 +95,9 @@ fn initialize_startup_state_if_needed(command: &Option<Commands>) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::{command_requires_startup_state, initialize_startup_state_if_needed};
+    use super::{
+        command_requires_startup_state, command_uses_own_logger, initialize_startup_state_if_needed,
+    };
     use cc_switch_lib::cli::Cli;
     use clap::Parser;
     use serial_test::serial;
@@ -107,6 +132,21 @@ mod tests {
         let conn = rusqlite::Connection::open(&db_path).expect("open sqlite db");
         conn.execute("PRAGMA user_version = 999;", [])
             .expect("set future schema version");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_start_uses_daemon_file_logger() {
+        let cli = Cli::parse_from(["cc-switch", "daemon", "start"]);
+
+        assert!(command_uses_own_logger(&cli.command));
+    }
+
+    #[test]
+    fn normal_commands_use_env_logger() {
+        let cli = Cli::parse_from(["cc-switch", "provider", "list"]);
+
+        assert!(!command_uses_own_logger(&cli.command));
     }
 
     #[test]

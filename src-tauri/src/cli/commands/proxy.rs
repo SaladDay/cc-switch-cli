@@ -13,6 +13,9 @@ use crate::daemon::ipc::protocol::{Request as DaemonRequest, Response as DaemonR
 #[cfg(unix)]
 use crate::daemon::supervisor::{DAEMON_SOCKET_ENV, SESSION_TOKEN_ENV};
 
+const MIN_PROXY_LISTEN_PORT: u16 = 1024;
+const MAX_PROXY_LISTEN_PORT: u16 = u16::MAX;
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum ProxyCommand {
     /// Show current proxy configuration and routes
@@ -129,6 +132,7 @@ fn configure_proxy(app_type: AppType, listen_port: Option<u16>) -> Result<(), Ap
     let Some(listen_port) = listen_port else {
         return show_proxy();
     };
+    validate_listen_port(listen_port)?;
     if !matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
         return Err(AppError::InvalidInput(format!(
             "proxy takeover is not supported for {}",
@@ -184,7 +188,7 @@ fn serve_proxy(
             ));
         }
         let base_config = service.get_config().await?;
-        let effective_config = apply_overrides(&base_config, listen_address, listen_port);
+        let effective_config = apply_overrides(&base_config, listen_address, listen_port)?;
 
         let result = async {
             let server_info = service
@@ -192,20 +196,33 @@ fn serve_proxy(
                 .await
                 .map_err(AppError::Message)?;
 
+            let announced_to_daemon = {
+                #[cfg(unix)]
+                {
+                    match announce_to_daemon_if_managed(&server_info) {
+                        Ok(announced) => announced,
+                        Err(err) => {
+                            let _ = service.stop_with_restore().await;
+                            return Err(AppError::Message(err));
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            };
+
             if let Err(err) = apply_takeovers(&service, &takeovers).await {
                 let _ = service.stop_with_restore().await;
                 return Err(AppError::Message(err));
             }
 
-            #[cfg(unix)]
-            if let Err(err) = announce_to_daemon_if_managed(&server_info) {
-                let _ = service.stop_with_restore().await;
-                return Err(AppError::Message(err));
-            }
-
-            if let Err(err) = service.publish_runtime_session_if_needed(&server_info) {
-                let _ = service.stop_with_restore().await;
-                return Err(AppError::Message(err));
+            if !announced_to_daemon {
+                if let Err(err) = service.publish_runtime_session_if_needed(&server_info) {
+                    let _ = service.stop_with_restore().await;
+                    return Err(AppError::Message(err));
+                }
             }
             crate::services::state_coordination::clear_restore_mutation_guard_bypass_env();
 
@@ -275,9 +292,9 @@ fn serve_proxy(
 #[cfg(unix)]
 fn announce_to_daemon_if_managed(
     info: &crate::proxy::types::ProxyServerInfo,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let Some(socket_os) = std::env::var_os(DAEMON_SOCKET_ENV) else {
-        return Ok(());
+        return Ok(false);
     };
     let socket_path = std::path::PathBuf::from(socket_os);
     let session_token = std::env::var(SESSION_TOKEN_ENV)
@@ -291,7 +308,7 @@ fn announce_to_daemon_if_managed(
     let response = daemon_client::round_trip(&socket_path, &request)
         .map_err(|err| format!("worker hello to daemon failed: {err}"))?;
     match response {
-        DaemonResponse::Ok => Ok(()),
+        DaemonResponse::Ok => Ok(true),
         DaemonResponse::Error { message } => {
             Err(format!("daemon rejected worker hello: {message}"))
         }
@@ -326,7 +343,7 @@ fn apply_overrides(
     original: &ProxyConfig,
     listen_address: Option<String>,
     listen_port: Option<u16>,
-) -> ProxyConfig {
+) -> Result<ProxyConfig, AppError> {
     let mut config = original.clone();
     if let Some(address) = listen_address {
         config.listen_address = address;
@@ -334,7 +351,17 @@ fn apply_overrides(
     if let Some(port) = listen_port {
         config.listen_port = port;
     }
-    config
+    Ok(config)
+}
+
+fn validate_listen_port(port: u16) -> Result<(), AppError> {
+    if (MIN_PROXY_LISTEN_PORT..=MAX_PROXY_LISTEN_PORT).contains(&port) {
+        return Ok(());
+    }
+
+    Err(AppError::InvalidInput(format!(
+        "proxy listen port must be between {MIN_PROXY_LISTEN_PORT} and {MAX_PROXY_LISTEN_PORT}"
+    )))
 }
 
 fn load_proxy_app_configs(
@@ -584,7 +611,33 @@ mod tests {
         Database, MultiAppConfig, ProxyService,
     };
 
-    use super::{build_proxy_overview_lines, load_proxy_app_configs};
+    use super::{
+        apply_overrides, build_proxy_overview_lines, load_proxy_app_configs, validate_listen_port,
+    };
+
+    #[test]
+    fn cli_proxy_listen_port_validation_rejects_reserved_ports() {
+        let error = validate_listen_port(0).expect_err("port 0 should not be accepted from CLI");
+
+        assert!(error.to_string().contains("1024"));
+    }
+
+    #[test]
+    fn apply_overrides_allows_ephemeral_listen_port_for_foreground_serve() {
+        let config = crate::ProxyConfig::default();
+        let updated = apply_overrides(&config, None, Some(0))
+            .expect("foreground serve should allow an ephemeral port");
+
+        assert_eq!(updated.listen_port, 0);
+    }
+
+    #[test]
+    fn apply_overrides_accepts_user_listen_port_range() {
+        let config = crate::ProxyConfig::default();
+        let updated = apply_overrides(&config, None, Some(1024)).expect("1024 is allowed");
+
+        assert_eq!(updated.listen_port, 1024);
+    }
 
     #[test]
     fn proxy_overview_lines_include_runtime_status_and_takeover_state() {

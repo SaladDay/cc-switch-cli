@@ -81,7 +81,7 @@ pub async fn run(binary_path: PathBuf) -> Result<(), String> {
         }
     };
 
-    let _ = logging::install(&log_path, LevelFilter::Info);
+    logging::install(&log_path, LevelFilter::Info)?;
     log::info!(
         "[daemon] starting; pid={} socket={} log={}",
         std::process::id(),

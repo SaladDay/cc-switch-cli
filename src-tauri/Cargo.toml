@@ -64,7 +64,6 @@ json-five = "0.3.1"
 # Network and async
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "net", "process", "io-util"] }
-nix = { version = "0.29", features = ["signal", "process", "fs"] }
 futures = "0.3"
 async-stream = "0.3"
 bytes = "1.5"
