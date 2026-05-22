@@ -312,6 +312,7 @@ impl Overlay {
         match self {
             Overlay::TextInput(input) => input.is_editing(),
             Overlay::ClaudeModelPicker { editing, .. } => *editing,
+            Overlay::HermesModelsPicker { editing } => *editing,
             Overlay::ModelFetchPicker { .. } => true,
             Overlay::McpEnvEntryEditor(editor) => editor.is_editing(),
             Overlay::None

@@ -133,6 +133,7 @@ mod tests {
             editing: false,
         }
         .is_editing());
+        assert!(!Overlay::HermesModelsPicker { editing: false }.is_editing());
 
         assert!(Overlay::TextInput(TextInputState {
             title: "Title".to_string(),
@@ -147,6 +148,7 @@ mod tests {
             editing: true,
         }
         .is_editing());
+        assert!(Overlay::HermesModelsPicker { editing: true }.is_editing());
         assert!(Overlay::ModelFetchPicker {
             request_id: 1,
             field: ProviderAddField::Name,
