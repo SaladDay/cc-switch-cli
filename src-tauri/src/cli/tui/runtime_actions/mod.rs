@@ -360,9 +360,6 @@ pub(crate) fn handle_action(
             settings::enable_proxy_and_auto_failover(&mut ctx, app_type)
         }
         Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
-        Action::SetProxyTakeover { app_type, enabled } => {
-            settings::set_proxy_takeover(&mut ctx, app_type, enabled)
-        }
         Action::SetManagedProxyForCurrentApp { app_type, enabled } => queue_managed_proxy_action(
             ctx.app,
             ctx.proxy_req_tx,

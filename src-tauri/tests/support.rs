@@ -20,6 +20,8 @@ pub fn ensure_test_home() -> &'static Path {
     std::env::set_var("HOME", home);
     #[cfg(windows)]
     std::env::set_var("USERPROFILE", home);
+    std::env::set_var("XDG_RUNTIME_DIR", home.join("run"));
+    std::env::set_var("XDG_STATE_HOME", home.join("state"));
     home.as_path()
 }
 
@@ -33,6 +35,8 @@ pub fn reset_test_fs() {
         ".gemini",
         ".openclaw",
         ".config",
+        "run",
+        "state",
     ] {
         let path = home.join(sub);
         if path.exists() {

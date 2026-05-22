@@ -390,6 +390,25 @@ pub struct PromptMetaFormState {
     initial_snapshot: (String, String, String, String),
 }
 
+// This controls whether the main UI should consider itself in "editing mode" and e.g. respond to vim-style navigation.
+impl ProviderAddFormState {
+    pub fn is_editing(&self) -> bool {
+        self.editing || self.usage_query_editing
+    }
+}
+
+impl McpAddFormState {
+    pub fn is_editing(&self) -> bool {
+        self.editing
+    }
+}
+
+impl PromptMetaFormState {
+    pub fn is_editing(&self) -> bool {
+        self.editing || matches!(self.focus, FormFocus::Content)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum FormState {
     ProviderAdd(ProviderAddFormState),
@@ -403,6 +422,14 @@ impl FormState {
             FormState::ProviderAdd(form) => form.has_unsaved_changes(),
             FormState::McpAdd(form) => form.has_unsaved_changes(),
             FormState::PromptMeta(form) => form.has_unsaved_changes(),
+        }
+    }
+
+    pub fn is_editing(&self) -> bool {
+        match self {
+            FormState::ProviderAdd(form) => form.is_editing(),
+            FormState::McpAdd(form) => form.is_editing(),
+            FormState::PromptMeta(form) => form.is_editing(),
         }
     }
 }

@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.5.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.6.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -365,16 +365,21 @@ cc-switch config reset               # Reset to default configuration
 
 ### 🌉 Proxy Management
 
-Inspect and control the local multi-app proxy used by supported apps.
+Inspect and control daemon-managed per-app proxy routes for supported apps.
 
-**Features:** Persisted enable/disable switch, current route inspection, dashboard telemetry, and foreground serve mode for debugging.
+**Features:** independent enable/disable per app, per-app listen ports, daemon-managed workers, current route inspection, dashboard telemetry, and foreground serve mode for debugging.
 
 ```bash
-cc-switch proxy show                 # Show proxy configuration and routes
-cc-switch proxy enable               # Enable the persisted proxy switch
-cc-switch proxy disable              # Disable the persisted proxy switch
-cc-switch proxy serve                # Run the proxy in foreground
+cc-switch proxy show                              # Show proxy configuration, routes, and daemon worker status
+cc-switch proxy enable                            # Enable the Claude proxy route (default app)
+cc-switch --app codex proxy enable                # Enable the Codex proxy route
+cc-switch --app gemini proxy disable              # Disable the Gemini proxy route
+cc-switch --app claude proxy config --listen-port 15721
+cc-switch --app codex proxy config --listen-port 15722
+cc-switch proxy serve --takeover claude           # Foreground debug mode; refused while daemon-managed routes are active
 ```
+
+Normal CLI/TUI proxy enable/disable actions are routed through the daemon. The daemon auto-starts when the first app proxy route is activated, runs one worker per active supported app (Claude, Codex, Gemini), and exits automatically when no proxy routes remain active.
 
 ### 🧪 Environment & Local Tools
 

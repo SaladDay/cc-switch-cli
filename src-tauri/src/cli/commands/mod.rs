@@ -2,6 +2,8 @@ pub mod completions;
 pub mod config;
 mod config_common;
 pub mod config_webdav;
+#[cfg(unix)]
+pub mod daemon;
 pub mod env;
 pub mod failover;
 pub mod hermes;

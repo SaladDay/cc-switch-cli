@@ -74,6 +74,11 @@ pub enum Commands {
     #[command(subcommand)]
     Start(commands::start::StartCommand),
 
+    /// Manage the cc-switch supervisor daemon (start/stop/status/logs)
+    #[cfg(unix)]
+    #[command(subcommand)]
+    Daemon(commands::daemon::DaemonCommand),
+
     /// Manage environment variables and local CLI tool checks
     #[command(subcommand)]
     Env(commands::env::EnvCommand),
@@ -193,6 +198,27 @@ mod tests {
         match cli.command {
             Some(Commands::Proxy(super::commands::proxy::ProxyCommand::Disable)) => {}
             _ => panic!("expected proxy disable command"),
+        }
+    }
+
+    #[test]
+    fn parses_proxy_config_listen_port_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "--app",
+            "codex",
+            "proxy",
+            "config",
+            "--listen-port",
+            "15722",
+        ]);
+
+        assert_eq!(cli.app, Some(super::AppType::Codex));
+        match cli.command {
+            Some(Commands::Proxy(super::commands::proxy::ProxyCommand::Config { listen_port })) => {
+                assert_eq!(listen_port, Some(15722));
+            }
+            _ => panic!("expected proxy config command"),
         }
     }
 

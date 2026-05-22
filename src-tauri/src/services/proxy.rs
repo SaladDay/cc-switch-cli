@@ -3,13 +3,9 @@ mod codex_toml;
 use std::{
     collections::HashMap,
     future::Future,
-    process::{Command, Stdio},
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
     time::Duration,
 };
-
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -112,6 +108,13 @@ struct PersistedProxyRuntimeSession {
     kind: PersistedProxyRuntimeSessionKind,
     #[serde(default)]
     session_token: Option<String>,
+    #[serde(default)]
+    app_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedProxyRuntimeSessions {
+    workers: HashMap<String, PersistedProxyRuntimeSession>,
 }
 
 enum ExternalProxyStatusProbe {
@@ -206,7 +209,9 @@ impl ProxyService {
     }
 
     pub async fn start_managed_session(&self, app_type: &str) -> Result<ProxyServerInfo, String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        // This delegates to the daemon, whose IPC handler owns the state
+        // mutation guard while it rewrites live config. Holding the guard in
+        // the caller while waiting for the daemon can deadlock the handshake.
         self.start_managed_session_unlocked(app_type).await
     }
 
@@ -217,80 +222,218 @@ impl ProxyService {
         Self::ensure_managed_sessions_supported()?;
 
         let app_type = Self::takeover_app_from_str(app_type)?;
-        let current_status = self.get_status().await;
-        if current_status.running {
+        if self.has_running_foreground_runtime().await {
             return Err(
-                "proxy is already running; stop the current runtime before starting a managed session"
+                "proxy is already running in foreground mode; stop the current runtime before attaching another app to a managed session"
                     .to_string(),
             );
         }
-        self.validate_app_proxy_activation(&app_type, None).await?;
 
-        let executable = Self::resolve_managed_proxy_executable()?;
-        let session_token = uuid::Uuid::new_v4().to_string();
-        let mut child = Command::new(executable);
-        child
-            .arg("proxy")
-            .arg("serve")
-            .arg("--takeover")
-            .arg(app_type.as_str())
-            .env(
-                PROXY_RUNTIME_KIND_ENV_KEY,
-                PersistedProxyRuntimeSessionKind::ManagedExternal.as_env_value(),
-            )
-            .env(PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY, &session_token)
-            .env(
-                crate::services::state_coordination::RESTORE_GUARD_BYPASS_ENV_KEY,
-                "1",
-            )
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        let current_status = self.get_status().await;
+        let persisted_sessions = self.load_persisted_runtime_sessions();
+        if current_status.running && persisted_sessions.is_empty() {
+            return Err(
+                "proxy is already running in foreground mode; stop the current runtime before attaching another app to a managed session"
+                    .to_string(),
+            );
+        }
+        if current_status.running {
+            // Daemon is already running this worker. Just attach the app.
+            self.daemon_ensure_worker(app_type.as_str()).await
+        } else {
+            self.validate_app_proxy_activation(&app_type, None).await?;
+            self.daemon_ensure_worker(app_type.as_str()).await
+        }
+    }
 
+    async fn daemon_ensure_worker(&self, app_type: &str) -> Result<ProxyServerInfo, String> {
         #[cfg(unix)]
-        unsafe {
-            child.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
+        {
+            use crate::daemon::ipc::client;
+            use crate::daemon::ipc::protocol::{Request, Response};
+            let socket_path = crate::daemon::paths::socket_path();
+            let app_type = app_type.to_string();
+            let response = tokio::task::spawn_blocking(move || {
+                let mut stream = client::connect_or_spawn(&socket_path, || {
+                    let bin = Self::resolve_managed_proxy_executable()
+                        .map_err(client::ClientError::NoDaemon)?;
+                    Ok(bin)
+                })?;
+                client::exchange(&mut stream, &Request::EnsureWorker { app_type })
+            })
+            .await
+            .map_err(|err| format!("daemon ensure worker task panicked: {err}"))?
+            .map_err(|err| format!("daemon ensure worker failed: {err}"))?;
+
+            match response {
+                Response::Worker { address, port, .. } => Ok(ProxyServerInfo {
+                    address,
+                    port,
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                }),
+                Response::Error { message } => Err(message),
+                other => Err(format!(
+                    "daemon ensure worker returned unexpected response: {other:?}"
+                )),
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = app_type;
+            Err("managed sessions are only supported on unix".to_string())
+        }
+    }
+
+    async fn daemon_drop_takeover(&self, app_type: &str) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use crate::daemon::ipc::client;
+            use crate::daemon::ipc::protocol::{Request, Response};
+            use std::io::ErrorKind;
+            let socket_path = crate::daemon::paths::socket_path();
+            // No socket at all → daemon isn't running. Do the cleanup the
+            // daemon would have done so the DB and live config stay aligned
+            // with "this app is no longer being proxied".
+            if !socket_path.exists() {
+                return self.local_disable_takeover(app_type).await;
+            }
+            let app_type_owned = app_type.to_string();
+            let socket_for_task = socket_path.clone();
+            let outcome = tokio::task::spawn_blocking(
+                move || -> Result<Option<Response>, client::ClientError> {
+                    let mut stream = match client::connect(&socket_for_task) {
+                        Ok(s) => s,
+                        // ECONNREFUSED / ENOENT here means the socket inode is
+                        // a leftover from a daemon that died ungracefully —
+                        // nobody is listening. Treat as "no daemon" and let
+                        // the caller fall back to local cleanup.
+                        Err(client::ClientError::Io(e))
+                            if matches!(
+                                e.kind(),
+                                ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                            ) =>
+                        {
+                            return Ok(None);
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    client::exchange(
+                        &mut stream,
+                        &Request::DropTakeover {
+                            app_type: app_type_owned,
+                        },
+                    )
+                    .map(Some)
+                },
+            )
+            .await
+            .map_err(|err| format!("daemon drop takeover task panicked: {err}"))?
+            .map_err(|err| format!("daemon drop takeover failed: {err}"))?;
+
+            match outcome {
+                Some(Response::Ok) => Ok(()),
+                Some(Response::Error { message }) => Err(message),
+                Some(other) => Err(format!(
+                    "daemon drop takeover returned unexpected response: {other:?}"
+                )),
+                None => {
+                    // Stale socket inode — best-effort remove so the next call
+                    // takes the !socket_path.exists() short-circuit instead of
+                    // tripping over the same ECONNREFUSED again.
+                    let _ = std::fs::remove_file(&socket_path);
+                    self.local_disable_takeover(app_type).await
                 }
-                Ok(())
-            });
+            }
         }
 
-        let mut child = child
-            .spawn()
-            .map_err(|error| format!("spawn managed proxy session failed: {error}"))?;
-        let child_pid = child.id();
-
-        let start_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("poll managed proxy process failed: {error}"))?
-            {
-                return Err(format!(
-                    "managed proxy session exited before becoming ready: {}",
-                    status
-                ));
-            }
-
-            if let Some(info) = self
-                .managed_session_ready_info(child_pid, session_token.as_str())
-                .await
-            {
-                Self::spawn_managed_child_reaper(child);
-                return Ok(info);
-            }
-
-            if tokio::time::Instant::now() >= start_deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = self.clear_persisted_runtime_session();
-                return Err("managed proxy session did not become ready in time".to_string());
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        #[cfg(not(unix))]
+        {
+            let _ = app_type;
+            Err("managed sessions are only supported on unix".to_string())
         }
+    }
+
+    async fn should_drop_takeover_via_daemon(&self, app_type: &AppType) -> Result<bool, String> {
+        let Some(session) = self.load_persisted_runtime_session_for_app(app_type) else {
+            self.remove_stale_daemon_socket_if_unreachable();
+            return Ok(false);
+        };
+
+        if !session.kind.is_managed_external() {
+            return Ok(true);
+        }
+
+        if !Self::is_process_alive(session.pid) {
+            self.clear_persisted_runtime_session_for_app(app_type)?;
+            return Ok(false);
+        }
+
+        match Self::probe_external_proxy_status(&session).await {
+            ExternalProxyStatusProbe::Matched(_) => Ok(true),
+            ExternalProxyStatusProbe::Mismatched | ExternalProxyStatusProbe::Unreachable => {
+                self.clear_persisted_runtime_session_for_app(app_type)?;
+                Ok(false)
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn remove_stale_daemon_socket_if_unreachable(&self) {
+        use std::io::ErrorKind;
+
+        let socket_path = crate::daemon::paths::socket_path();
+        if !socket_path.exists() {
+            return;
+        }
+
+        match std::os::unix::net::UnixStream::connect(&socket_path) {
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                ) =>
+            {
+                let _ = std::fs::remove_file(socket_path);
+            }
+            Err(_) => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn remove_stale_daemon_socket_if_unreachable(&self) {}
+
+    /// Foreground-only fallback for when no daemon is reachable. Drops the
+    /// per-app takeover via the same code path the supervisor uses, takes the
+    /// cross-process state-mutation guard around it (so a concurrent CLI
+    /// invocation can't race the live-config restore), and clears the matching
+    /// daemon-managed runtime marker.
+    async fn local_disable_takeover(&self, app_type: &str) -> Result<(), String> {
+        let app = Self::takeover_app_from_str(app_type)?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        self.disable_takeover_for_app_unlocked(&app, false).await?;
+        if !self
+            .db
+            .is_live_takeover_active()
+            .await
+            .map_err(|error| format!("check active takeovers failed: {error}"))?
+        {
+            self.sync_persisted_global_proxy_enabled(false).await?;
+        }
+        if let Some(session) = self.load_persisted_runtime_session_for_app(&app) {
+            if session.kind.is_managed_external() {
+                if matches!(
+                    Self::probe_external_proxy_status(&session).await,
+                    ExternalProxyStatusProbe::Matched(_)
+                ) && Self::is_process_alive(session.pid)
+                {
+                    Self::terminate_external_process(session.pid).await?;
+                }
+            }
+        }
+        let _ = self.clear_persisted_runtime_session_for_app(&app);
+        Ok(())
     }
 
     pub async fn set_managed_session_for_app(
@@ -298,7 +441,13 @@ impl ProxyService {
         app_type: &str,
         enabled: bool,
     ) -> Result<(), String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        // Intentionally NO state-mutation guard here. This function purely
+        // delegates to the daemon (`daemon_ensure_worker` / `daemon_drop_takeover`)
+        // which acquires its own cross-process guard inside its IPC handler.
+        // Holding the guard on the foreground side and then making a synchronous
+        // IPC call deadlocks against the daemon's handler — observed as
+        // "Resource temporarily unavailable (os error 35)" once the IPC read
+        // times out.
         self.set_managed_session_for_app_unlocked(app_type, enabled)
             .await
     }
@@ -308,36 +457,36 @@ impl ProxyService {
         app_type: &str,
         enabled: bool,
     ) -> Result<(), String> {
-        let app_type = Self::takeover_app_from_str(app_type)?;
+        let app_type_enum = Self::takeover_app_from_str(app_type)?;
 
         if enabled {
+            if self.has_running_foreground_runtime().await {
+                return Err(
+                    "proxy is already running in foreground mode; stop the current runtime before attaching another app to a managed session"
+                        .to_string(),
+                );
+            }
+
             let status = self.get_status().await;
-            if !status.running {
-                self.start_managed_session_unlocked(app_type.as_str())
-                    .await?;
-                return Ok(());
+            if status.running && self.load_persisted_runtime_sessions().is_empty() {
+                return Err(
+                    "proxy is already running in foreground mode; stop the current runtime before attaching another app to a managed session"
+                        .to_string(),
+                );
             }
 
-            if self
-                .load_persisted_runtime_session()
-                .is_some_and(|session| session.kind.is_managed_external())
-            {
-                self.enable_takeover_for_app_unlocked(&app_type).await?;
-                return Ok(());
-            }
-
-            return Err(
-                "proxy is already running in foreground mode; stop the current runtime before attaching another app to a managed session"
-                    .to_string(),
-            );
+            // Daemon-driven path: ensure worker is up + takeover is on for this app.
+            self.daemon_ensure_worker(app_type_enum.as_str()).await?;
+            return Ok(());
         }
 
-        let stop_server_when_last = self
-            .load_persisted_runtime_session()
-            .map(|session| session.kind.is_managed_external())
-            .unwrap_or(false);
-        self.disable_takeover_for_app_unlocked(&app_type, stop_server_when_last)
-            .await
+        // Disable: route through the daemon when one is running so it stays
+        // the sole writer of `proxy_runtime_session`.
+        if self.should_drop_takeover_via_daemon(&app_type_enum).await? {
+            self.daemon_drop_takeover(app_type_enum.as_str()).await
+        } else {
+            self.local_disable_takeover(app_type_enum.as_str()).await
+        }
     }
 
     async fn start_with_resolved_config_unlocked(
@@ -367,6 +516,20 @@ impl ProxyService {
         }
         *self.runtime.server.write().await = Some(server);
         Ok(info)
+    }
+
+    async fn runtime_config_for_app(&self, app_type: &AppType) -> Result<ProxyConfig, String> {
+        let mut config = self.get_config().await.map_err(|e| e.to_string())?;
+        config.listen_port = self
+            .db
+            .get_app_proxy_preferred_port(app_type.as_str())
+            .map_err(|error| {
+                format!(
+                    "load proxy preference for {} failed: {error}",
+                    app_type.as_str()
+                )
+            })?;
+        Ok(config)
     }
 
     pub(crate) fn publish_runtime_session_if_needed(
@@ -444,16 +607,11 @@ impl ProxyService {
 
         if let Some(session) = self.load_persisted_runtime_session() {
             if session.kind.is_managed_external() {
-                let probe = Self::probe_external_proxy_status(&session).await;
-                let should_terminate = match probe {
-                    ExternalProxyStatusProbe::Matched(_) => true,
-                    ExternalProxyStatusProbe::Mismatched => false,
-                    ExternalProxyStatusProbe::Unreachable => {
-                        Self::has_managed_external_ownership_signal(&session)
-                    }
-                };
-
-                if Self::is_process_alive(session.pid) && should_terminate {
+                if matches!(
+                    Self::probe_external_proxy_status(&session).await,
+                    ExternalProxyStatusProbe::Matched(_)
+                ) && Self::is_process_alive(session.pid)
+                {
                     Self::terminate_external_process(session.pid).await?;
                     stopped_runtime = true;
                 }
@@ -478,44 +636,60 @@ impl ProxyService {
             return server.get_status().await;
         }
 
-        if let Some(session) = self.load_persisted_runtime_session() {
-            if session.kind.is_managed_external() {
-                if Self::is_process_alive(session.pid) {
-                    match Self::probe_external_proxy_status(&session).await {
-                        ExternalProxyStatusProbe::Matched(status) => return status,
-                        ExternalProxyStatusProbe::Mismatched => {
-                            let _ = self.clear_persisted_runtime_session();
-                            return ProxyStatus::default();
-                        }
-                        ExternalProxyStatusProbe::Unreachable => {
-                            if Self::has_managed_external_ownership_signal(&session) {
-                                let uptime_seconds =
-                                    chrono::DateTime::parse_from_rfc3339(&session.started_at)
-                                        .ok()
-                                        .map(|started_at| {
-                                            let started_at = started_at.with_timezone(&chrono::Utc);
-                                            (chrono::Utc::now() - started_at).num_seconds().max(0)
-                                                as u64
-                                        })
-                                        .unwrap_or(0);
+        let sessions = self.load_persisted_runtime_sessions();
+        if !sessions.is_empty()
+            && sessions
+                .iter()
+                .all(|session| session.kind.is_managed_external())
+        {
+            let mut workers = Vec::new();
+            let mut primary_status = None;
+            let mut stale_app_keys = Vec::new();
 
-                                return ProxyStatus {
-                                    running: true,
-                                    address: session.address.clone(),
-                                    port: session.port,
-                                    uptime_seconds,
-                                    managed_session_token: session.session_token.clone(),
-                                    ..ProxyStatus::default()
-                                };
-                            }
-                        }
-                    }
+            for session in sessions {
+                if !Self::is_process_alive(session.pid) {
+                    stale_app_keys.push(session.app_type.clone());
+                    continue;
                 }
 
-                let _ = self.clear_persisted_runtime_session();
-                return ProxyStatus::default();
+                match Self::probe_external_proxy_status(&session).await {
+                    ExternalProxyStatusProbe::Matched(status) => {
+                        workers.push(crate::proxy::types::ActiveWorker {
+                            app_type: session
+                                .app_type
+                                .clone()
+                                .unwrap_or_else(|| "proxy".to_string()),
+                            address: status.address.clone(),
+                            port: status.port,
+                            pid: Some(session.pid),
+                        });
+                        if primary_status.is_none() {
+                            primary_status = Some(status);
+                        }
+                    }
+                    ExternalProxyStatusProbe::Mismatched => {
+                        stale_app_keys.push(session.app_type.clone());
+                    }
+                    ExternalProxyStatusProbe::Unreachable => {
+                        stale_app_keys.push(session.app_type.clone());
+                    }
+                }
             }
 
+            if !stale_app_keys.is_empty() {
+                let _ = self.clear_persisted_runtime_sessions_for_app_keys(&stale_app_keys);
+            }
+
+            if let Some(mut status) = primary_status {
+                status.running = !workers.is_empty();
+                status.active_workers = workers;
+                return status;
+            }
+
+            return ProxyStatus::default();
+        }
+
+        if let Some(session) = sessions.into_iter().next() {
             if Self::is_process_alive(session.pid) {
                 let uptime_seconds = chrono::DateTime::parse_from_rfc3339(&session.started_at)
                     .ok()
@@ -538,6 +712,13 @@ impl ProxyService {
         }
 
         ProxyStatus::default()
+    }
+
+    async fn has_running_foreground_runtime(&self) -> bool {
+        if let Some(server) = self.runtime.server.read().await.as_ref() {
+            return server.get_status().await.running;
+        }
+        false
     }
 
     pub async fn get_config(&self) -> Result<ProxyConfig, AppError> {
@@ -644,8 +825,15 @@ impl ProxyService {
 
     async fn ensure_proxy_routing_active_for_app(&self, app_type: &str) -> Result<(), String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
-        if !self.is_running().await {
-            return Err("automatic failover requires the local proxy to be running".to_string());
+        let has_managed_worker = self
+            .load_persisted_runtime_session_for_app(&app_type)
+            .is_some_and(|session| {
+                session.kind.is_managed_external() && Self::is_process_alive(session.pid)
+            });
+        if !has_managed_worker {
+            return Err(
+                "automatic failover requires daemon-managed proxy routing for this app".to_string(),
+            );
         }
 
         let app_key = app_type.as_str();
@@ -678,18 +866,7 @@ impl ProxyService {
         let first_provider_id = self.first_failover_provider_id(app_type)?;
         let app_type = Self::takeover_app_from_str(app_type)?;
         let app_key = app_type.as_str();
-        {
-            let _guard =
-                crate::services::state_coordination::acquire_restore_mutation_guard().await?;
-            self.enable_takeover_for_app_unlocked_with_provider(
-                &app_type,
-                Some(&first_provider_id),
-            )
-            .await?;
-        }
-        self.set_global_enabled(true)
-            .await
-            .map_err(|e| e.to_string())?;
+        self.set_managed_session_for_app(app_key, true).await?;
         self.switch_proxy_target(app_key, &first_provider_id)
             .await?;
         self.persist_auto_failover_for_app(app_key, true).await?;
@@ -730,6 +907,13 @@ impl ProxyService {
             self.disable_takeover_for_app_unlocked(&app_type, true)
                 .await
         }
+    }
+
+    pub(crate) async fn clear_daemon_takeover_for_app(&self, app_type: &str) -> Result<(), String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        self.disable_takeover_for_app_unlocked(&app_type, false)
+            .await
     }
 
     pub async fn is_app_takeover_active(&self, app_type: &AppType) -> Result<bool, String> {
@@ -990,7 +1174,7 @@ impl ProxyService {
         Ok(())
     }
 
-    async fn validate_app_proxy_activation(
+    pub(crate) async fn validate_app_proxy_activation(
         &self,
         app_type: &AppType,
         fallback_provider_id: Option<&str>,
@@ -1099,7 +1283,7 @@ impl ProxyService {
             .await?;
 
         if !self.is_running().await {
-            let config = self.get_config().await.map_err(|e| e.to_string())?;
+            let config = self.runtime_config_for_app(app_type).await?;
             self.start_with_resolved_config_unlocked(config).await?;
         }
 
@@ -1137,7 +1321,7 @@ impl ProxyService {
                 .await?;
         }
 
-        let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls_for_app(app_type).await?;
         let mut taken_over = live;
         self.rewrite_live_for_proxy(app_type, &mut taken_over, &proxy_url, &proxy_codex_base_url)?;
         self.write_live_config_for_app(app_type, &taken_over)?;
@@ -1538,19 +1722,31 @@ impl ProxyService {
             .map(|live| (live, false))
     }
 
-    async fn build_proxy_urls(&self) -> Result<(String, String), String> {
-        let runtime_status = self.get_status().await;
+    async fn build_proxy_urls_for_app(
+        &self,
+        app_type: &AppType,
+    ) -> Result<(String, String), String> {
         let persisted = self.get_config().await.map_err(|e| e.to_string())?;
-        let listen_address = if runtime_status.running && !runtime_status.address.is_empty() {
-            runtime_status.address
-        } else {
-            persisted.listen_address.clone()
-        };
-        let listen_port = if runtime_status.running && runtime_status.port != 0 {
-            runtime_status.port
-        } else {
-            persisted.listen_port
-        };
+        let preferred_port = self
+            .db
+            .get_app_proxy_preferred_port(app_type.as_str())
+            .map_err(|error| {
+                format!(
+                    "load proxy preference for {} failed: {error}",
+                    app_type.as_str()
+                )
+            })?;
+        let session = self.load_persisted_runtime_session_for_app(app_type);
+        let listen_address = session
+            .as_ref()
+            .map(|session| session.address.clone())
+            .filter(|address| !address.trim().is_empty())
+            .unwrap_or_else(|| persisted.listen_address.clone());
+        let listen_port = session
+            .as_ref()
+            .map(|session| session.port)
+            .filter(|port| *port != 0)
+            .unwrap_or(preferred_port);
 
         let connect_host = match listen_address.as_str() {
             "0.0.0.0" => "127.0.0.1".to_string(),
@@ -1903,6 +2099,7 @@ impl ProxyService {
             session_token: std::env::var(PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY)
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
+            app_type: None,
         };
         let serialized = serde_json::to_string(&session)
             .map_err(|error| format!("serialize proxy runtime session failed: {error}"))?;
@@ -1921,7 +2118,7 @@ impl ProxyService {
             .map_err(|error| format!("clear proxy runtime session failed: {error}"))
     }
 
-    fn load_persisted_runtime_session(&self) -> Option<PersistedProxyRuntimeSession> {
+    fn load_raw_persisted_runtime_session(&self) -> Option<String> {
         let raw = self
             .db
             .get_setting(PROXY_RUNTIME_SESSION_KEY)
@@ -1929,16 +2126,108 @@ impl ProxyService {
             .flatten()?;
         let raw = raw.trim();
         if raw.is_empty() {
-            return None;
+            None
+        } else {
+            Some(raw.to_string())
+        }
+    }
+
+    fn load_persisted_runtime_sessions_map(
+        &self,
+    ) -> Option<HashMap<String, PersistedProxyRuntimeSession>> {
+        let raw = self.load_raw_persisted_runtime_session()?;
+        if let Ok(sessions) = serde_json::from_str::<PersistedProxyRuntimeSessions>(&raw) {
+            return Some(sessions.workers);
+        }
+        None
+    }
+
+    fn persist_persisted_runtime_sessions_map(
+        &self,
+        sessions: HashMap<String, PersistedProxyRuntimeSession>,
+    ) -> Result<(), String> {
+        if sessions.is_empty() {
+            return self.clear_persisted_runtime_session();
         }
 
-        match serde_json::from_str(raw) {
-            Ok(session) => Some(session),
+        let serialized =
+            serde_json::to_string(&PersistedProxyRuntimeSessions { workers: sessions })
+                .map_err(|error| format!("serialize proxy runtime sessions failed: {error}"))?;
+        self.db
+            .set_setting(PROXY_RUNTIME_SESSION_KEY, &serialized)
+            .map_err(|error| format!("persist proxy runtime sessions failed: {error}"))
+    }
+
+    fn clear_persisted_runtime_session_for_app(&self, app_type: &AppType) -> Result<(), String> {
+        let Some(mut sessions) = self.load_persisted_runtime_sessions_map() else {
+            return self.clear_persisted_runtime_session();
+        };
+        sessions.remove(app_type.as_str());
+        self.persist_persisted_runtime_sessions_map(sessions)
+    }
+
+    fn clear_persisted_runtime_sessions_for_app_keys(
+        &self,
+        app_keys: &[Option<String>],
+    ) -> Result<(), String> {
+        if app_keys.iter().any(Option::is_none) {
+            return self.clear_persisted_runtime_session();
+        }
+        let Some(mut sessions) = self.load_persisted_runtime_sessions_map() else {
+            return self.clear_persisted_runtime_session();
+        };
+        for app_key in app_keys.iter().filter_map(Option::as_deref) {
+            sessions.remove(app_key);
+        }
+        self.persist_persisted_runtime_sessions_map(sessions)
+    }
+
+    fn load_persisted_runtime_sessions(&self) -> Vec<PersistedProxyRuntimeSession> {
+        let Some(raw) = self.load_raw_persisted_runtime_session() else {
+            return Vec::new();
+        };
+
+        if let Ok(sessions) = serde_json::from_str::<PersistedProxyRuntimeSessions>(&raw) {
+            return sessions
+                .workers
+                .into_iter()
+                .map(|(app_type, mut session)| {
+                    if session.app_type.is_none() {
+                        session.app_type = Some(app_type);
+                    }
+                    session
+                })
+                .collect();
+        }
+
+        match serde_json::from_str::<PersistedProxyRuntimeSession>(&raw) {
+            Ok(session) => vec![session],
             Err(_) => {
                 let _ = self.clear_persisted_runtime_session();
-                None
+                Vec::new()
             }
         }
+    }
+
+    fn load_persisted_runtime_session(&self) -> Option<PersistedProxyRuntimeSession> {
+        self.load_persisted_runtime_sessions().into_iter().next()
+    }
+
+    fn load_persisted_runtime_session_for_app(
+        &self,
+        app_type: &AppType,
+    ) -> Option<PersistedProxyRuntimeSession> {
+        let app_key = app_type.as_str();
+        if let Some(mut sessions) = self.load_persisted_runtime_sessions_map() {
+            return sessions.remove(app_key).map(|mut session| {
+                if session.app_type.is_none() {
+                    session.app_type = Some(app_key.to_string());
+                }
+                session
+            });
+        }
+
+        self.load_persisted_runtime_session()
     }
 
     fn is_process_alive(pid: u32) -> bool {
@@ -1956,26 +2245,6 @@ impl ProxyService {
         {
             pid == std::process::id()
         }
-    }
-
-    fn has_managed_external_ownership_signal(session: &PersistedProxyRuntimeSession) -> bool {
-        session.session_token.is_some() && Self::is_detached_session_leader(session.pid)
-    }
-
-    #[cfg(unix)]
-    fn is_detached_session_leader(pid: u32) -> bool {
-        if pid == 0 {
-            return false;
-        }
-
-        let sid = unsafe { libc::getsid(pid as i32) };
-        let pgid = unsafe { libc::getpgid(pid as i32) };
-        sid == pid as i32 && pgid == pid as i32
-    }
-
-    #[cfg(not(unix))]
-    fn is_detached_session_leader(_pid: u32) -> bool {
-        false
     }
 
     async fn managed_session_ready_info(
@@ -2652,6 +2921,76 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn takeover_activation_uses_app_preferred_port_from_settings_kv() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "fresh-live-token"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "provider-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("reserve free local port");
+        let preferred_port = listener
+            .local_addr()
+            .expect("read reserved listener address")
+            .port();
+        drop(listener);
+        db.set_app_proxy_preferred_port("claude", preferred_port)
+            .expect("persist claude preferred proxy port");
+
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("enable claude takeover");
+
+        let status = service.get_status().await;
+        assert_eq!(status.port, preferred_port);
+        let live: Value =
+            read_json_file(&get_claude_settings_path()).expect("read claude live config");
+        let expected_proxy_url = format!("http://127.0.0.1:{preferred_port}");
+        assert_eq!(
+            live.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some(expected_proxy_url.as_str())
+        );
+
+        service.stop().await.expect("stop proxy runtime");
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn takeover_activation_rejects_empty_queue_when_failover_enabled() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestHomeEnvGuard::set(temp_home.path());
@@ -3248,6 +3587,49 @@ base_url = "https://api.openai.com/v1"
         service.stop().await.expect("stop proxy runtime");
     }
 
+    #[test]
+    fn loads_per_app_managed_runtime_sessions() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &json!({
+                "workers": {
+                    "claude": {
+                        "pid": std::process::id(),
+                        "address": "127.0.0.1",
+                        "port": 15721,
+                        "started_at": chrono::Utc::now().to_rfc3339(),
+                        "kind": "managed_external",
+                        "session_token": "claude-token"
+                    },
+                    "codex": {
+                        "pid": std::process::id(),
+                        "address": "127.0.0.1",
+                        "port": 15722,
+                        "started_at": chrono::Utc::now().to_rfc3339(),
+                        "kind": "managed_external",
+                        "session_token": "codex-token"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write runtime sessions");
+        let service = ProxyService::new(db);
+
+        let claude = service
+            .load_persisted_runtime_session_for_app(&AppType::Claude)
+            .expect("claude session");
+        let codex = service
+            .load_persisted_runtime_session_for_app(&AppType::Codex)
+            .expect("codex session");
+
+        assert_eq!(claude.app_type.as_deref(), Some("claude"));
+        assert_eq!(claude.port, 15721);
+        assert_eq!(codex.app_type.as_deref(), Some("codex"));
+        assert_eq!(codex.port, 15722);
+    }
+
     #[tokio::test]
     #[serial]
     async fn managed_external_runtime_publishes_session_when_ready_signal_is_sent() {
@@ -3451,6 +3833,7 @@ base_url = "https://api.openai.com/v1"
                 started_at: "2026-03-10T00:00:00Z".to_string(),
                 kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
                 session_token: Some("expected-session-token".to_string()),
+                app_type: Some("claude".to_string()),
             })
             .expect("serialize runtime session"),
         )
@@ -3518,6 +3901,7 @@ base_url = "https://api.openai.com/v1"
                 started_at: "2026-03-10T00:00:00Z".to_string(),
                 kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
                 session_token: Some("expected-session-token".to_string()),
+                app_type: Some("claude".to_string()),
             })
             .expect("serialize runtime session"),
         )
@@ -3586,6 +3970,7 @@ base_url = "https://api.openai.com/v1"
                 started_at: "2026-03-10T00:00:00Z".to_string(),
                 kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
                 session_token: Some("expected-session-token".to_string()),
+                app_type: Some("claude".to_string()),
             })
             .expect("serialize runtime session"),
         )

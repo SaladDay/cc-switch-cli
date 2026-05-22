@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.5.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.6.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -366,16 +366,21 @@ cc-switch config reset               # 重置为默认配置
 
 ### 🌉 代理管理
 
-查看并控制服务于各应用的本地多应用代理。
+查看并控制由守护进程管理的按应用代理路由。
 
-**功能：** 持久化开关、当前路由检查、首页遥测，以及用于调试的前台运行模式。
+**功能：** 每个应用可独立启用/禁用代理、每个应用可配置监听端口、由 daemon 管理 worker、当前路由检查、首页遥测，以及用于调试的前台运行模式。
 
 ```bash
-cc-switch proxy show                 # 显示代理配置和路由
-cc-switch proxy enable               # 启用持久化代理开关
-cc-switch proxy disable              # 禁用持久化代理开关
-cc-switch proxy serve                # 以前台模式运行代理
+cc-switch proxy show                              # 显示代理配置、路由和 daemon worker 状态
+cc-switch proxy enable                            # 启用 Claude 代理路由（默认应用）
+cc-switch --app codex proxy enable                # 启用 Codex 代理路由
+cc-switch --app gemini proxy disable              # 禁用 Gemini 代理路由
+cc-switch --app claude proxy config --listen-port 15721
+cc-switch --app codex proxy config --listen-port 15722
+cc-switch proxy serve --takeover claude           # 前台调试模式；存在 daemon 托管路由时会拒绝运行
 ```
+
+普通 CLI/TUI 的代理启用/禁用操作都会通过 daemon 执行。首次启用任一应用代理路由时 daemon 会自动启动；每个活跃的受支持应用（Claude、Codex、Gemini）各有一个 worker；当没有任何活跃代理路由时 daemon 会自动退出。
 
 ### 🧪 环境与本地工具
 

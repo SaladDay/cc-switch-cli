@@ -9,6 +9,17 @@ use rust_decimal::Decimal;
 
 use super::super::{lock_conn, Database};
 
+pub(crate) const PROXY_PREFERENCES_KEY: &str = "proxy_preferences_cli_only";
+
+fn default_app_preferred_port(app_type: &str) -> u16 {
+    match app_type {
+        "claude" => 15721,
+        "codex" => 15722,
+        "gemini" => 15723,
+        _ => 15721,
+    }
+}
+
 impl Database {
     // ==================== Global Proxy Config ====================
 
@@ -509,6 +520,42 @@ impl Database {
         Ok(())
     }
 
+    pub fn get_proxy_preferences(&self) -> Result<ProxyPreferences, AppError> {
+        let Some(raw) = self.get_setting(PROXY_PREFERENCES_KEY)? else {
+            return Ok(ProxyPreferences::default());
+        };
+        serde_json::from_str(&raw).map_err(|error| AppError::Json {
+            path: PROXY_PREFERENCES_KEY.to_string(),
+            source: error,
+        })
+    }
+
+    pub fn update_proxy_preferences(&self, preferences: &ProxyPreferences) -> Result<(), AppError> {
+        if preferences.apps.is_empty() {
+            self.delete_setting(PROXY_PREFERENCES_KEY)?;
+            return Ok(());
+        }
+        let serialized = serde_json::to_string(preferences)
+            .map_err(|source| AppError::JsonSerialize { source })?;
+        self.set_setting(PROXY_PREFERENCES_KEY, &serialized)
+    }
+
+    pub fn get_app_proxy_preferred_port(&self, app_type: &str) -> Result<u16, AppError> {
+        Ok(self
+            .get_proxy_preferences()?
+            .apps
+            .get(app_type)
+            .and_then(|preference| preference.preferred_port)
+            .unwrap_or_else(|| default_app_preferred_port(app_type)))
+    }
+
+    pub fn set_app_proxy_preferred_port(&self, app_type: &str, port: u16) -> Result<(), AppError> {
+        let mut preferences = self.get_proxy_preferences()?;
+        let entry = preferences.apps.entry(app_type.to_string()).or_default();
+        entry.preferred_port = Some(port);
+        self.update_proxy_preferences(&preferences)
+    }
+
     /// 设置 Live 接管状态（兼容旧版本，更新 enabled 字段）
     pub async fn set_live_takeover_active(&self, _active: bool) -> Result<(), AppError> {
         // 不再使用此字段，由 enabled 字段替代
@@ -913,6 +960,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    use crate::database::dao::proxy::PROXY_PREFERENCES_KEY;
     use crate::database::Database;
     use crate::error::AppError;
     use crate::provider::Provider;
@@ -1028,6 +1076,30 @@ mod tests {
         assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
         assert_eq!(db.get_proxy_flags_sync("codex"), (true, false));
         assert_eq!(db.get_proxy_flags_sync("gemini"), (true, false));
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_preferences_persist_preferred_ports_in_settings_kv() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        db.set_app_proxy_preferred_port("codex", 17022)?;
+        db.set_app_proxy_preferred_port("gemini", 17023)?;
+
+        let raw = db
+            .get_setting(PROXY_PREFERENCES_KEY)?
+            .expect("proxy preferences should be stored in settings");
+        assert!(raw.contains("\"preferredPort\":17022"));
+
+        let preferences = db.get_proxy_preferences()?;
+        assert_eq!(
+            preferences
+                .apps
+                .get("codex")
+                .and_then(|preference| preference.preferred_port),
+            Some(17022)
+        );
+
         Ok(())
     }
 

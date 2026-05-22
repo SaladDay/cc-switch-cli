@@ -932,32 +932,25 @@ impl App {
         } else {
             crate::t!("stopped", "未运行")
         };
-        let current_takeover = data.proxy.takeover_enabled_for(&self.app_type);
-        let current_app_routed = data.proxy.routes_current_app_through_proxy(&self.app_type);
-        let proxy_action_available = current_app_routed.is_some_and(|current_app_routed| {
-            !data.proxy.running || data.proxy.managed_runtime || current_app_routed
+        let current_route = data.proxy.routes_current_app_through_proxy(&self.app_type);
+        let proxy_action_available = current_route.is_some_and(|current_route| {
+            !data.proxy.running || data.proxy.managed_runtime || current_route
         });
-        let takeover_state = match current_takeover {
-            Some(true) => crate::t!("active", "已接管"),
-            Some(false) => crate::t!("inactive", "未接管"),
+        let route_state = match current_route {
+            Some(true) => crate::t!("enabled", "开启"),
+            Some(false) => crate::t!("disabled", "关闭"),
             None => crate::t!("not supported", "不支持"),
         };
-        let toggle_action = match current_app_routed {
-            Some(true) if proxy_action_available => Some(TextViewAction::ProxyToggleTakeover {
-                app_type: self.app_type.clone(),
-                enabled: false,
-            }),
-            Some(false) if proxy_action_available => Some(TextViewAction::ProxyToggleTakeover {
-                app_type: self.app_type.clone(),
-                enabled: true,
-            }),
-            _ => None,
+        let toggle_action = if current_route.is_some() && proxy_action_available {
+            Some(TextViewAction::ProxyToggleManagedRoute)
+        } else {
+            None
         };
 
         let mut lines = vec![
             crate::t!(
-                "Manual takeover status for the foreground proxy.",
-                "前台代理的手动接管状态。"
+                "Managed proxy routing for the current app.",
+                "当前应用的托管代理路由状态。"
             )
             .to_string(),
             String::new(),
@@ -971,19 +964,15 @@ impl App {
                 crate::t!("Current provider", "当前供应商"),
                 current_provider
             ),
+            format!("{}: {}", crate::t!("Runtime", "运行态"), runtime_state),
             format!(
                 "{}: {}",
-                crate::t!("Foreground runtime", "前台运行态"),
-                runtime_state
-            ),
-            format!(
-                "{}: {}",
-                crate::t!("Current app takeover", "当前应用接管"),
-                takeover_state
+                crate::t!("Current app route", "当前应用路由"),
+                route_state
             ),
             crate::t!(
-                "Manual takeover only. Automatic failover is disabled.",
-                "仅支持手动接管，不提供自动故障转移。"
+                "Proxy routes are started and stopped by the cc-switch daemon.",
+                "代理路由由 cc-switch daemon 启停。"
             )
             .to_string(),
         ];
@@ -1017,7 +1006,7 @@ impl App {
         }
 
         lines.push(String::new());
-        lines.push(match current_app_routed {
+        lines.push(match current_route {
             Some(true) => crate::t!(
                 "Press T to restore the current app to its live config.",
                 "按 T 恢复当前应用的 live 配置。"
@@ -1037,8 +1026,8 @@ impl App {
             )
             .to_string(),
             None => crate::t!(
-                "This app does not support proxy takeover in the TUI.",
-                "这个应用暂不支持在 TUI 中进行代理接管。"
+                "This app does not support managed proxy routing in the TUI.",
+                "这个应用暂不支持在 TUI 中使用托管代理路由。"
             )
             .to_string(),
         });

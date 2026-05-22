@@ -5,6 +5,8 @@ mod claude_plugin;
 mod codex_config;
 pub mod commands;
 mod config;
+#[cfg(unix)]
+pub mod daemon;
 mod database;
 mod deeplink;
 mod error;

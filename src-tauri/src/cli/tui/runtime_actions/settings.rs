@@ -5,8 +5,7 @@ use crate::cli::failover_policy::{
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 
-use super::super::data::{load_proxy_config, load_state, UiData};
-use super::helpers::open_proxy_help_overlay_with;
+use super::super::data::{load_state, UiData};
 use super::RuntimeActionContext;
 
 pub(super) fn set_proxy_enabled(
@@ -18,17 +17,18 @@ pub(super) fn set_proxy_enabled(
         .enable_all()
         .build()
         .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
-    let update = runtime.block_on(state.proxy_service.set_global_enabled(enabled))?;
-    let cleared_failover = update.cleared_auto_failover;
+    runtime
+        .block_on(
+            state
+                .proxy_service
+                .set_managed_session_for_app(ctx.app.app_type.as_str(), enabled),
+        )
+        .map_err(AppError::Message)?;
+
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(
         if enabled {
             crate::t!("Local proxy enabled.", "本地代理已开启。")
-        } else if cleared_failover > 0 {
-            crate::t!(
-                "Local proxy disabled. Automatic failover has been cleared.",
-                "本地代理已关闭，自动故障转移已清除。"
-            )
         } else {
             crate::t!("Local proxy disabled.", "本地代理已关闭。")
         },
@@ -50,9 +50,35 @@ pub(super) fn set_proxy_listen_port(
     ctx: &mut RuntimeActionContext<'_>,
     port: u16,
 ) -> Result<(), AppError> {
-    update_proxy_config(ctx, |config| {
-        config.listen_port = port;
-    })
+    let state = load_state()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
+    let status = runtime.block_on(state.proxy_service.get_status());
+    let app_running = status
+        .active_workers
+        .iter()
+        .any(|worker| worker.app_type == ctx.app.app_type.as_str());
+    if app_running {
+        *ctx.data = UiData::load(&ctx.app.app_type)?;
+        ctx.app.push_toast(
+            texts::tui_toast_proxy_settings_stop_before_edit(),
+            super::super::app::ToastKind::Info,
+        );
+        return Ok(());
+    }
+
+    state
+        .db
+        .set_app_proxy_preferred_port(ctx.app.app_type.as_str(), port)?;
+
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.push_toast(
+        texts::tui_toast_proxy_settings_saved(),
+        super::super::app::ToastKind::Success,
+    );
+    Ok(())
 }
 
 pub(super) fn set_proxy_auto_failover(
@@ -166,43 +192,6 @@ pub(super) fn set_openclaw_config_dir(
         );
     }
 
-    Ok(())
-}
-
-pub(super) fn set_proxy_takeover(
-    ctx: &mut RuntimeActionContext<'_>,
-    app_type: AppType,
-    enabled: bool,
-) -> Result<(), AppError> {
-    let state = load_state()?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
-
-    let status = runtime.block_on(state.proxy_service.get_status());
-    if enabled && !status.running {
-        ctx.app.push_toast(
-            texts::tui_toast_proxy_takeover_requires_running(),
-            super::super::app::ToastKind::Warning,
-        );
-        return Ok(());
-    }
-
-    runtime
-        .block_on(
-            state
-                .proxy_service
-                .set_takeover_for_app(app_type.as_str(), enabled),
-        )
-        .map_err(AppError::Message)?;
-
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    open_proxy_help_overlay_with(ctx.app, ctx.data, load_proxy_config)?;
-    ctx.app.push_toast(
-        texts::tui_toast_proxy_takeover_updated(app_type.as_str(), enabled),
-        super::super::app::ToastKind::Success,
-    );
     Ok(())
 }
 

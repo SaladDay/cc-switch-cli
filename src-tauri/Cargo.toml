@@ -1,6 +1,6 @@
 [package]
 name = "cc-switch"
-version = "5.5.0"
+version = "5.6.0"
 description = "All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode & OpenClaw"
 authors = ["Jason Young", "saladday"]
 license = "MIT"
@@ -63,7 +63,7 @@ json-five = "0.3.1"
 
 # Network and async
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "net", "process", "io-util"] }
 futures = "0.3"
 async-stream = "0.3"
 bytes = "1.5"

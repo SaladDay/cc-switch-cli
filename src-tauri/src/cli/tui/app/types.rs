@@ -119,6 +119,12 @@ pub struct TextInputState {
     pub secret: bool,
 }
 
+impl TextInputState {
+    pub const fn is_editing(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TextViewState {
     pub title: String,
@@ -129,22 +135,13 @@ pub struct TextViewState {
 
 #[derive(Debug, Clone)]
 pub enum TextViewAction {
-    ProxyToggleTakeover { app_type: AppType, enabled: bool },
+    ProxyToggleManagedRoute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommonSnippetViewSource {
     Global,
     ProviderForm,
-}
-
-impl TextViewAction {
-    pub fn key_label(&self) -> &'static str {
-        match self {
-            TextViewAction::ProxyToggleTakeover { enabled: true, .. } => texts::tui_key_takeover(),
-            TextViewAction::ProxyToggleTakeover { enabled: false, .. } => texts::tui_key_restore(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +174,10 @@ impl McpEnvEntryEditorState {
 
     pub fn value_active(&self) -> bool {
         matches!(self.field, McpEnvEditorField::Value)
+    }
+
+    pub fn is_editing(&self) -> bool {
+        true
     }
 }
 
@@ -303,5 +304,43 @@ pub enum Overlay {
 impl Overlay {
     pub fn is_active(&self) -> bool {
         !matches!(self, Overlay::None)
+    }
+
+    /// Whether this overlay is actively accepting text input.
+    /// This controls whether the main UI should consider itself in "editing mode" and e.g. respond to vim-style navigation.
+    pub fn is_editing(&self) -> bool {
+        match self {
+            Overlay::TextInput(input) => input.is_editing(),
+            Overlay::ClaudeModelPicker { editing, .. } => *editing,
+            Overlay::ModelFetchPicker { .. } => true,
+            Overlay::McpEnvEntryEditor(editor) => editor.is_editing(),
+            Overlay::None
+            | Overlay::Help
+            | Overlay::Confirm(_)
+            | Overlay::BackupPicker { .. }
+            | Overlay::TextView(_)
+            | Overlay::CommonSnippetPicker { .. }
+            | Overlay::ProviderTestMenu { .. }
+            | Overlay::FailoverQueueManager { .. }
+            | Overlay::ClaudeApiFormatPicker { .. }
+            | Overlay::UsageQueryTemplatePicker { .. }
+            | Overlay::OpenClawToolsProfilePicker { .. }
+            | Overlay::OpenClawAgentsFallbackPicker { .. }
+            | Overlay::McpAppsPicker { .. }
+            | Overlay::VisibleAppsPicker { .. }
+            | Overlay::SkillsAppsPicker { .. }
+            | Overlay::SkillsImportPicker { .. }
+            | Overlay::SkillsSyncMethodPicker { .. }
+            | Overlay::McpEnvPicker { .. }
+            | Overlay::McpTypePicker { .. }
+            | Overlay::Loading { .. }
+            | Overlay::SpeedtestRunning { .. }
+            | Overlay::SpeedtestResult { .. }
+            | Overlay::StreamCheckRunning { .. }
+            | Overlay::StreamCheckResult { .. }
+            | Overlay::UpdateAvailable { .. }
+            | Overlay::UpdateDownloading { .. }
+            | Overlay::UpdateResult { .. } => false,
+        }
     }
 }
