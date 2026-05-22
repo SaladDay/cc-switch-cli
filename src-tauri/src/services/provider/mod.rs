@@ -1864,7 +1864,7 @@ impl ProviderService {
                         "Hermes configuration file not found",
                     ));
                 }
-                crate::hermes_config::read_hermes_config()
+                crate::hermes_config::read_hermes_config_json()
             }
             AppType::OpenClaw => {
                 let config_path = crate::openclaw_config::get_openclaw_config_path();
@@ -2268,6 +2268,7 @@ impl ProviderService {
                     ));
                 }
                 crate::hermes_config::set_provider(&provider.id, provider.settings_config.clone())
+                    .map(|_| ())
             }
             AppType::OpenClaw => {
                 let settings_config = provider.settings_config.clone();

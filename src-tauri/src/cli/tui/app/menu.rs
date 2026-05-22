@@ -86,6 +86,7 @@ impl App {
             Route::Providers | Route::ProviderDetail { .. } => NavItem::Providers,
             Route::Mcp => NavItem::Mcp,
             Route::Prompts => NavItem::Prompts,
+            Route::HermesMemory => NavItem::HermesMemory,
             Route::Config => NavItem::Config,
             Route::ConfigOpenClawWorkspace | Route::ConfigOpenClawDailyMemory => {
                 if matches!(app_type, AppType::OpenClaw) {
@@ -111,13 +112,6 @@ impl App {
             Route::ConfigOpenClawAgents => {
                 if matches!(app_type, AppType::OpenClaw) {
                     NavItem::OpenClawAgents
-                } else {
-                    NavItem::Config
-                }
-            }
-            Route::HermesMemory => {
-                if matches!(app_type, AppType::Hermes) {
-                    NavItem::HermesMemory
                 } else {
                     NavItem::Config
                 }
@@ -328,6 +322,15 @@ impl App {
             return Action::Quit;
         }
 
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char(','))
+            && !self.overlay.is_active()
+            && self.editor.is_none()
+            && self.form.is_none()
+        {
+            return self.push_route_and_switch(Route::Settings);
+        }
+
         if self.overlay.is_active() {
             return self.on_overlay_key(key, data);
         }
@@ -370,6 +373,10 @@ impl App {
                 return Action::None;
             }
             KeyCode::Char('/') => {
+                self.filter.active = true;
+                return Action::None;
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.filter.active = true;
                 return Action::None;
             }
@@ -496,13 +503,13 @@ impl App {
             Route::ProviderDetail { id } => self.on_provider_detail_key(key, data, &id),
             Route::Mcp => self.on_mcp_key(key, data),
             Route::Prompts => self.on_prompts_key(key, data),
+            Route::HermesMemory => self.on_hermes_memory_key(key, data),
             Route::Config => self.on_config_key(key, data),
             Route::ConfigOpenClawWorkspace => self.on_config_openclaw_workspace_key(key, data),
             Route::ConfigOpenClawDailyMemory => self.on_config_openclaw_daily_memory_key(key, data),
             Route::ConfigOpenClawEnv => self.on_config_openclaw_env_key(key, data),
             Route::ConfigOpenClawTools => self.on_config_openclaw_tools_key(key, data),
             Route::ConfigOpenClawAgents => self.on_config_openclaw_agents_key(key, data),
-            Route::HermesMemory => self.on_hermes_memory_key(key, data),
             Route::ConfigWebDav => self.on_config_webdav_key(key, data),
             Route::Skills => self.on_skills_installed_key(key, data),
             Route::SkillsDiscover => self.on_skills_discover_key(key),
@@ -517,40 +524,6 @@ impl App {
             },
         }
     }
-
-    fn on_hermes_memory_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
-        match key.code {
-            KeyCode::Up => {
-                self.hermes_memory_idx = self.hermes_memory_idx.saturating_sub(1);
-                Action::None
-            }
-            KeyCode::Down => {
-                self.hermes_memory_idx = (self.hermes_memory_idx + 1).min(1);
-                Action::None
-            }
-            KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('E') => Action::HermesMemoryOpen {
-                kind: self.selected_hermes_memory_kind(),
-            },
-            KeyCode::Char(' ') => {
-                let kind = self.selected_hermes_memory_kind();
-                let enabled = match kind {
-                    MemoryKind::Memory => !data.config.hermes_memory.memory_enabled,
-                    MemoryKind::User => !data.config.hermes_memory.user_enabled,
-                };
-                Action::HermesMemorySetEnabled { kind, enabled }
-            }
-            _ => Action::None,
-        }
-    }
-
-    pub(crate) fn selected_hermes_memory_kind(&self) -> MemoryKind {
-        if self.hermes_memory_idx == 0 {
-            MemoryKind::Memory
-        } else {
-            MemoryKind::User
-        }
-    }
-
     pub(crate) fn clamp_selections(&mut self, data: &UiData) {
         let providers_len = visible_providers(&self.app_type, &self.filter, data).len();
         if providers_len == 0 {
@@ -624,7 +597,12 @@ impl App {
             self.daily_memory_idx = self.daily_memory_idx.min(daily_memory_len - 1);
         }
 
-        self.hermes_memory_idx = self.hermes_memory_idx.min(1);
+        let hermes_memory_len = crate::cli::tui::app::HERMES_MEMORY_ROW_COUNT;
+        if hermes_memory_len == 0 {
+            self.hermes_memory_idx = 0;
+        } else {
+            self.hermes_memory_idx = self.hermes_memory_idx.min(hermes_memory_len - 1);
+        }
 
         let config_webdav_len = visible_webdav_config_items(&self.filter).len();
         if config_webdav_len == 0 {

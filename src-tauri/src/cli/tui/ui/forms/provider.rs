@@ -6,19 +6,12 @@ fn claude_api_format_label(api_format: crate::cli::tui::form::ClaudeApiFormat) -
     texts::tui_claude_api_format_value(api_format.as_str()).to_string()
 }
 
-fn hermes_api_mode_label(api_mode: crate::cli::tui::form::HermesApiMode) -> String {
-    texts::tui_hermes_api_mode_value(api_mode.as_str()).to_string()
-}
-
 fn should_redact_provider_field(
     provider: &super::form::ProviderAddFormState,
     field: ProviderAddField,
 ) -> bool {
-    matches!(
-        (&provider.app_type, field),
-        (&AppType::OpenClaw, ProviderAddField::OpenCodeApiKey)
-            | (&AppType::Hermes, ProviderAddField::HermesApiKey)
-    )
+    matches!(provider.app_type, AppType::OpenClaw)
+        && matches!(field, ProviderAddField::OpenCodeApiKey)
 }
 
 fn common_json_preview_value(app_type: &AppType, common_snippet: &str) -> Option<Value> {
@@ -255,7 +248,7 @@ pub(crate) fn render_provider_add_form(
         fields
             .iter()
             .zip(rows_data.iter())
-            .filter(|(field, _row)| !matches!(field, ProviderAddField::CommonConfigDivider))
+            .filter(|(field, _row)| !provider_field_is_divider(**field))
             .map(|(_field, (label, _value))| label.as_str())
             .chain(std::iter::once(texts::tui_header_field())),
         1,
@@ -271,10 +264,7 @@ pub(crate) fn render_provider_add_form(
         .iter()
         .zip(rows_data.iter())
         .map(|(field, (label, value))| {
-            if matches!(
-                field,
-                ProviderAddField::CommonConfigDivider | ProviderAddField::UsageQueryDivider
-            ) {
+            if provider_field_is_divider(*field) {
                 let dashes_left = "┄".repeat(40);
                 let dashes_right = "┄".repeat(200);
                 Row::new(vec![
@@ -840,20 +830,15 @@ pub(crate) fn provider_field_label_and_value(
     field: ProviderAddField,
 ) -> (String, String) {
     let label = match field {
+        ProviderAddField::Id if provider.app_type == AppType::Hermes => {
+            texts::tui_label_hermes_provider_key().to_string()
+        }
         ProviderAddField::Id => texts::tui_label_id().to_string(),
         ProviderAddField::Name => texts::header_name().to_string(),
         ProviderAddField::WebsiteUrl => {
             strip_trailing_colon(texts::website_url_label()).to_string()
         }
         ProviderAddField::Notes => strip_trailing_colon(texts::notes_label()).to_string(),
-        ProviderAddField::HermesApiMode => texts::tui_label_hermes_api_mode().to_string(),
-        ProviderAddField::HermesBaseUrl => texts::tui_label_base_url().to_string(),
-        ProviderAddField::HermesApiKey => texts::tui_label_api_key().to_string(),
-        ProviderAddField::HermesModel => texts::model_label().to_string(),
-        ProviderAddField::HermesModels => texts::tui_label_hermes_models().to_string(),
-        ProviderAddField::HermesRateLimitDelay => {
-            texts::tui_label_hermes_rate_limit_delay().to_string()
-        }
         ProviderAddField::ClaudeBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::ClaudeApiFormat => texts::tui_label_claude_api_format().to_string(),
         ProviderAddField::ClaudeApiKey => texts::tui_label_api_key().to_string(),
@@ -895,6 +880,14 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::OpenCodeModelName => texts::tui_label_opencode_model_name().to_string(),
         ProviderAddField::OpenCodeModelContextLimit => texts::tui_label_context_limit().to_string(),
         ProviderAddField::OpenCodeModelOutputLimit => texts::tui_label_output_limit().to_string(),
+        ProviderAddField::HermesApiMode => texts::tui_label_hermes_api_mode().to_string(),
+        ProviderAddField::HermesApiKey => texts::tui_label_api_key().to_string(),
+        ProviderAddField::HermesBaseUrl => texts::tui_label_hermes_base_url().to_string(),
+        ProviderAddField::HermesModels => texts::tui_label_hermes_models().to_string(),
+        ProviderAddField::HermesRateLimitDelay => {
+            texts::tui_label_hermes_rate_limit_delay().to_string()
+        }
+        ProviderAddField::HermesAdvancedDivider => "- - - - - - - - -".to_string(),
         ProviderAddField::CommonConfigDivider => "- - - - - - - - -".to_string(),
         ProviderAddField::CommonSnippet => texts::tui_config_item_common_snippet().to_string(),
         ProviderAddField::IncludeCommonConfig => texts::tui_form_attach_common_config().to_string(),
@@ -903,8 +896,6 @@ pub(crate) fn provider_field_label_and_value(
     };
 
     let value = match field {
-        ProviderAddField::HermesApiMode => hermes_api_mode_label(provider.hermes_api_mode),
-        ProviderAddField::HermesModels => provider.hermes_models_summary(),
         ProviderAddField::ClaudeApiFormat => claude_api_format_label(provider.claude_api_format),
         ProviderAddField::CodexWireApi => provider.codex_wire_api.as_str().to_string(),
         ProviderAddField::CodexRequiresOpenaiAuth => {
@@ -946,6 +937,12 @@ pub(crate) fn provider_field_label_and_value(
             }
         }
         ProviderAddField::OpenClawModels => provider.openclaw_models_summary(),
+        ProviderAddField::HermesApiMode => {
+            texts::tui_hermes_api_mode_value(provider.hermes_api_mode_value()).to_string()
+        }
+        ProviderAddField::HermesModels => provider.hermes_models_summary(),
+        ProviderAddField::HermesRateLimitDelay => provider.hermes_rate_limit_delay.value.clone(),
+        ProviderAddField::HermesAdvancedDivider => "- - - - - - - - - -".to_string(),
         ProviderAddField::CommonConfigDivider => "- - - - - - - - - -".to_string(),
         ProviderAddField::CommonSnippet => texts::tui_key_open().to_string(),
         ProviderAddField::UsageQueryDivider => String::new(),
@@ -988,6 +985,7 @@ pub(crate) fn provider_field_editor_line(
                 | ProviderAddField::CodexApiKey
                 | ProviderAddField::GeminiApiKey
                 | ProviderAddField::OpenCodeApiKey
+                | ProviderAddField::HermesApiKey
         ) {
             input.value.clone()
         } else {
@@ -1029,10 +1027,6 @@ pub(crate) fn provider_field_editor_line(
             ProviderAddField::GeminiAuthType => {
                 format!("auth_type = {}", provider.gemini_auth_type.as_str())
             }
-            ProviderAddField::HermesApiMode => {
-                format!("api_mode = {}", provider.hermes_api_mode.as_str())
-            }
-            ProviderAddField::HermesModels => texts::tui_hermes_models_open_hint().to_string(),
             ProviderAddField::OpenClawApiProtocol => {
                 format!("api = {}", provider.opencode_npm_package.value.trim())
             }
@@ -1040,8 +1034,22 @@ pub(crate) fn provider_field_editor_line(
                 format!("send_user_agent = {}", provider.openclaw_user_agent)
             }
             ProviderAddField::OpenClawModels => texts::tui_openclaw_models_open_hint().to_string(),
+            ProviderAddField::HermesApiMode => {
+                format!("api_mode = {}", provider.hermes_api_mode_value())
+            }
+            ProviderAddField::HermesModels => texts::tui_hermes_models_open_hint().to_string(),
+            ProviderAddField::HermesAdvancedDivider => String::new(),
             _ => String::new(),
         };
         (Line::raw(text), 0)
     }
+}
+
+fn provider_field_is_divider(field: ProviderAddField) -> bool {
+    matches!(
+        field,
+        ProviderAddField::HermesAdvancedDivider
+            | ProviderAddField::CommonConfigDivider
+            | ProviderAddField::UsageQueryDivider
+    )
 }

@@ -8,7 +8,6 @@ use crate::settings::{
 
 use super::super::app::{App, ConfirmAction, ConfirmOverlay, LoadingKind, Overlay, ToastKind};
 use super::super::data::{load_state, UiData};
-use super::super::form::FormState;
 use super::super::runtime_actions::app_display_name;
 use super::types::{
     build_stream_check_result_lines, LocalEnvMsg, ModelFetchMsg, ProxyMsg, QuotaMsg,
@@ -145,62 +144,6 @@ pub(crate) fn handle_model_fetch_msg(app: &mut App, msg: ModelFetchMsg) {
             claude_idx,
             result,
         } => {
-            // Special case: when the user invoked "Fetch Models" from the
-            // Hermes provider form's `HermesModels` row, we don't want the
-            // single-pick picker UX. Instead, merge all returned model IDs
-            // directly into the form's `hermes_models` list (the upstream
-            // `HermesFormFields.handleFetchModels` shape).
-            if matches!(field, crate::cli::tui::form::ProviderAddField::HermesModels) {
-                if let Overlay::ModelFetchPicker {
-                    request_id: current_request_id,
-                    field: ref current_field,
-                    ..
-                } = app.overlay
-                {
-                    if current_request_id != request_id {
-                        return;
-                    }
-                    if !matches!(
-                        current_field,
-                        crate::cli::tui::form::ProviderAddField::HermesModels
-                    ) {
-                        return;
-                    }
-                } else {
-                    // Picker was already dismissed; nothing to do.
-                    return;
-                }
-
-                match result {
-                    Ok(fetched_models) => {
-                        if fetched_models.is_empty() {
-                            app.overlay = Overlay::None;
-                            app.push_toast(texts::tui_model_fetch_no_models(), ToastKind::Warning);
-                            return;
-                        }
-                        let total_fetched = fetched_models.len();
-                        let merge_result =
-                            if let Some(FormState::ProviderAdd(provider)) = app.form.as_mut() {
-                                Some(provider.merge_fetched_hermes_models(&fetched_models))
-                            } else {
-                                None
-                            };
-                        app.overlay = Overlay::None;
-                        if let Some((added, total)) = merge_result {
-                            app.push_toast(
-                                texts::tui_toast_hermes_models_fetched(added, total_fetched, total),
-                                ToastKind::Success,
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        app.overlay = Overlay::None;
-                        app.push_toast(texts::tui_model_fetch_error_hint(&err), ToastKind::Error);
-                    }
-                }
-                return;
-            }
-
             if let Overlay::ModelFetchPicker {
                 request_id: current_request_id,
                 fetching: ref mut f,

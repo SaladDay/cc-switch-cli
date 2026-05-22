@@ -129,7 +129,7 @@ pub fn write_hermes_config_source(source: &str) -> Result<(), AppError> {
 
 /// Read the Hermes config file as `serde_yaml::Value`. Returns an empty
 /// `Mapping` if the file is missing or empty.
-pub fn read_hermes_config_yaml() -> Result<serde_yaml::Value, AppError> {
+pub fn read_hermes_config() -> Result<serde_yaml::Value, AppError> {
     let path = get_hermes_config_path();
     if !path.exists() {
         return Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
@@ -144,10 +144,10 @@ pub fn read_hermes_config_yaml() -> Result<serde_yaml::Value, AppError> {
         .map_err(|e| AppError::Config(format!("Failed to parse Hermes config as YAML: {e}")))
 }
 
-/// Read the Hermes config file as `serde_json::Value` (legacy API used by
-/// the service layer).
-pub fn read_hermes_config() -> Result<Value, AppError> {
-    let yaml_value = read_hermes_config_yaml()?;
+/// Read the Hermes config file as `serde_json::Value` for service-layer
+/// callers that expose full live config as JSON.
+pub fn read_hermes_config_json() -> Result<Value, AppError> {
+    let yaml_value = read_hermes_config()?;
     yaml_to_json(&yaml_value)
 }
 
@@ -604,7 +604,7 @@ fn ensure_provider_writable(
 /// On name collision, the list wins. The `models` field is denormalised
 /// from the YAML dict back to an ordered array.
 pub fn get_providers() -> Result<IndexMap<String, Value>, AppError> {
-    let config = read_hermes_config_yaml()?;
+    let config = read_hermes_config()?;
     let mut map = IndexMap::new();
 
     if let Some(seq) = config.get("custom_providers").and_then(|v| v.as_sequence()) {
@@ -656,12 +656,10 @@ pub fn get_provider(name: &str) -> Result<Option<Value>, AppError> {
 /// - For existing entries, performs a forward-compat merge: fields present
 ///   on disk but not submitted by the UI are preserved.
 /// - Holds the write lock end-to-end to avoid TOCTOU races.
-pub fn set_provider(name: &str, provider_config: Value) -> Result<(), AppError> {
-    let _guard = hermes_write_lock()
-        .lock()
-        .map_err(|e| AppError::Config(format!("Failed to acquire Hermes write lock: {e}")))?;
+pub fn set_provider(name: &str, provider_config: Value) -> Result<HermesWriteOutcome, AppError> {
+    let _guard = hermes_write_lock().lock()?;
 
-    let config = read_hermes_config_yaml()?;
+    let config = read_hermes_config()?;
     ensure_provider_writable(&config, name, "edit")?;
 
     let mut providers: Vec<serde_yaml::Value> = config
@@ -713,18 +711,15 @@ pub fn set_provider(name: &str, provider_config: Value) -> Result<(), AppError> 
     }
 
     let providers_value = serde_yaml::Value::Sequence(providers);
-    write_yaml_section_to_config_locked("custom_providers", &providers_value)?;
-    Ok(())
+    write_yaml_section_to_config_locked("custom_providers", &providers_value)
 }
 
 /// Remove a provider from the `custom_providers:` list.
-pub fn remove_provider(name: &str) -> Result<(), AppError> {
-    let _guard = hermes_write_lock()
-        .lock()
-        .map_err(|e| AppError::Config(format!("Failed to acquire Hermes write lock: {e}")))?;
-    let config = read_hermes_config_yaml()?;
+pub fn remove_provider(name: &str) -> Result<HermesWriteOutcome, AppError> {
+    let _guard = hermes_write_lock().lock()?;
+    let config = read_hermes_config()?;
 
-    ensure_provider_writable(&config, name, "delete")?;
+    ensure_provider_writable(&config, name, "remove")?;
 
     let mut providers: Vec<serde_yaml::Value> = config
         .get("custom_providers")
@@ -735,12 +730,11 @@ pub fn remove_provider(name: &str) -> Result<(), AppError> {
     let original_len = providers.len();
     providers.retain(|p| p.get("name").and_then(|n| n.as_str()) != Some(name));
     if providers.len() == original_len {
-        return Ok(());
+        return Ok(HermesWriteOutcome::default());
     }
 
     let providers_value = serde_yaml::Value::Sequence(providers);
-    write_yaml_section_to_config_locked("custom_providers", &providers_value)?;
-    Ok(())
+    write_yaml_section_to_config_locked("custom_providers", &providers_value)
 }
 
 // ============================================================================
@@ -749,28 +743,14 @@ pub fn remove_provider(name: &str) -> Result<(), AppError> {
 
 fn primary_model_id_from_value(value: &Value) -> Option<String> {
     value
-        .get("model")
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|models| models.first())
+        .and_then(|model| model.get("id"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .or_else(|| {
-            value
-                .get("models")
-                .and_then(Value::as_object)
-                .and_then(|models| models.keys().next().cloned())
-        })
-        .or_else(|| {
-            value
-                .get("models")
-                .and_then(Value::as_array)
-                .and_then(|models| models.first())
-                .and_then(|model| model.get("id"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
 }
 
 fn provider_matches_model(provider: &Value, model_id: &str) -> bool {
@@ -805,7 +785,7 @@ fn provider_matches_model(provider: &Value, model_id: &str) -> bool {
 /// Get the currently active provider id (driven by top-level
 /// `model.provider`).
 pub fn get_current_provider_id() -> Result<Option<String>, AppError> {
-    let config = read_hermes_config()?;
+    let config = read_hermes_config_json()?;
     let Some(model) = config.get("model").and_then(Value::as_object) else {
         return Ok(None);
     };
@@ -816,15 +796,7 @@ pub fn get_current_provider_id() -> Result<Option<String>, AppError> {
         .map(str::trim)
         .unwrap_or_default();
 
-    if let Some(custom_id) = provider_ref.strip_prefix("custom:") {
-        let custom_id = custom_id.trim();
-        if !custom_id.is_empty() {
-            return Ok(Some(custom_id.to_string()));
-        }
-    }
-
-    // Direct name match (v12+ `providers:` dict).
-    if !provider_ref.is_empty() && provider_ref != "custom" {
+    if !provider_ref.is_empty() {
         if get_providers()?.contains_key(provider_ref) {
             return Ok(Some(provider_ref.to_string()));
         }
@@ -853,17 +825,8 @@ pub fn get_current_provider_id() -> Result<Option<String>, AppError> {
 /// `model.provider` is always updated; `model.default` is only overwritten
 /// when the new provider declares at least one model — otherwise the old
 /// value is preserved to avoid leaving Hermes without an available model.
-pub fn set_current_provider(id: &str, provider: &Value) -> Result<(), AppError> {
-    let current = get_model_config()?.unwrap_or_default();
-
-    let first_model_id = primary_model_id_from_value(provider);
-    let merged = HermesModelConfig {
-        default: first_model_id.or(current.default.clone()),
-        provider: Some(format!("custom:{id}")),
-        ..current
-    };
-    set_model_config(&merged)?;
-    Ok(())
+pub fn set_current_provider(id: &str, provider: &Value) -> Result<HermesWriteOutcome, AppError> {
+    apply_switch_defaults(id, provider)
 }
 
 // ============================================================================
@@ -872,7 +835,7 @@ pub fn set_current_provider(id: &str, provider: &Value) -> Result<(), AppError> 
 
 /// Read the top-level `model:` section.
 pub fn get_model_config() -> Result<Option<HermesModelConfig>, AppError> {
-    let config = read_hermes_config_yaml()?;
+    let config = read_hermes_config()?;
     let Some(model_value) = config.get("model") else {
         return Ok(None);
     };
@@ -883,16 +846,18 @@ pub fn get_model_config() -> Result<Option<HermesModelConfig>, AppError> {
 }
 
 /// Write the top-level `model:` section.
-pub fn set_model_config(model: &HermesModelConfig) -> Result<(), AppError> {
+pub fn set_model_config(model: &HermesModelConfig) -> Result<HermesWriteOutcome, AppError> {
     let json_val =
         serde_json::to_value(model).map_err(|e| AppError::JsonSerialize { source: e })?;
     let yaml_val = json_to_yaml(&json_val)?;
-    write_yaml_section_to_config("model", &yaml_val)?;
-    Ok(())
+    write_yaml_section_to_config("model", &yaml_val)
 }
 
 /// Refresh the top-level `model:` defaults when switching providers.
-pub fn apply_switch_defaults(provider_id: &str, settings_config: &Value) -> Result<(), AppError> {
+pub fn apply_switch_defaults(
+    provider_id: &str,
+    settings_config: &Value,
+) -> Result<HermesWriteOutcome, AppError> {
     let first_model_id = primary_model_id_from_value(settings_config);
 
     let current = get_model_config()?.unwrap_or_default();
@@ -901,8 +866,7 @@ pub fn apply_switch_defaults(provider_id: &str, settings_config: &Value) -> Resu
         provider: Some(provider_id.to_string()),
         ..current
     };
-    set_model_config(&merged)?;
-    Ok(())
+    set_model_config(&merged)
 }
 
 // ============================================================================
@@ -911,7 +875,7 @@ pub fn apply_switch_defaults(provider_id: &str, settings_config: &Value) -> Resu
 
 /// Get the `mcp_servers:` section.
 pub fn get_mcp_servers_yaml() -> Result<serde_yaml::Mapping, AppError> {
-    let config = read_hermes_config_yaml()?;
+    let config = read_hermes_config()?;
     Ok(config
         .get("mcp_servers")
         .and_then(|v| v.as_mapping())
@@ -927,7 +891,7 @@ where
     let _guard = hermes_write_lock()
         .lock()
         .map_err(|e| AppError::Config(format!("Failed to acquire Hermes write lock: {e}")))?;
-    let config = read_hermes_config_yaml()?;
+    let config = read_hermes_config()?;
     let mut servers = config
         .get("mcp_servers")
         .and_then(|v| v.as_mapping())
@@ -1012,11 +976,9 @@ impl Default for HermesMemoryLimits {
 
 /// Toggle a memory blob on/off while preserving the rest of the `memory:`
 /// section.
-pub fn set_memory_enabled(kind: MemoryKind, enabled: bool) -> Result<(), AppError> {
-    let _guard = hermes_write_lock()
-        .lock()
-        .map_err(|e| AppError::Config(format!("Failed to acquire Hermes write lock: {e}")))?;
-    let config = read_hermes_config_yaml()?;
+pub fn set_memory_enabled(kind: MemoryKind, enabled: bool) -> Result<HermesWriteOutcome, AppError> {
+    let _guard = hermes_write_lock().lock()?;
+    let config = read_hermes_config()?;
 
     let mut memory = match config.get("memory") {
         Some(serde_yaml::Value::Mapping(m)) => m.clone(),
@@ -1032,15 +994,14 @@ pub fn set_memory_enabled(kind: MemoryKind, enabled: bool) -> Result<(), AppErro
         serde_yaml::Value::Bool(enabled),
     );
 
-    write_yaml_section_to_config_locked("memory", &serde_yaml::Value::Mapping(memory))?;
-    Ok(())
+    write_yaml_section_to_config_locked("memory", &serde_yaml::Value::Mapping(memory))
 }
 
 /// Read memory budgets + enable flags. Falls back to defaults for any
 /// field that fails to parse.
 pub fn read_memory_limits() -> Result<HermesMemoryLimits, AppError> {
     let mut out = HermesMemoryLimits::default();
-    let config = read_hermes_config_yaml()?;
+    let config = read_hermes_config()?;
     let Some(memory) = config.get("memory") else {
         return Ok(out);
     };
@@ -1144,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn set_and_get_provider_roundtrip() {
         with_test_home(|| {
             let provider = json!({
@@ -1164,7 +1125,7 @@ mod tests {
             assert_eq!(arr.len(), 2);
             // first model id reflected to top-level
             // (read goes through get_providers which strips dict form back to array)
-            let yaml = read_hermes_config_yaml().unwrap();
+            let yaml = read_hermes_config().unwrap();
             let seq = yaml["custom_providers"].as_sequence().unwrap();
             let entry = seq
                 .iter()
@@ -1177,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn remove_provider_works() {
         with_test_home(|| {
             set_provider("foo", json!({"base_url": "u1"})).unwrap();
@@ -1190,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn dict_only_provider_is_read_only() {
         with_test_home(|| {
             let raw = "providers:\n  remote:\n    name: remote\n    base_url: u\n";
@@ -1207,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn section_writes_preserve_other_sections() {
         with_test_home(|| {
             let raw = "# leading comment\n\
@@ -1224,7 +1185,7 @@ custom_providers: []\n";
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn memory_round_trip() {
         with_test_home(|| {
             write_memory(MemoryKind::Memory, "hello").unwrap();
@@ -1234,7 +1195,7 @@ custom_providers: []\n";
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn memory_limits_defaults_when_absent() {
         with_test_home(|| {
             let limits = read_memory_limits().unwrap();
@@ -1246,7 +1207,7 @@ custom_providers: []\n";
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn memory_set_enabled_preserves_other_fields() {
         with_test_home(|| {
             let raw = "memory:\n  memory_char_limit: 4000\n  user_char_limit: 2000\n";
@@ -1260,7 +1221,7 @@ custom_providers: []\n";
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn set_current_provider_writes_model_section() {
         with_test_home(|| {
             set_provider(
@@ -1280,6 +1241,9 @@ custom_providers: []\n";
             .unwrap();
             let id = get_current_provider_id().unwrap().unwrap();
             assert_eq!(id, "acme");
+
+            let model = get_model_config().unwrap().unwrap();
+            assert_eq!(model.provider.as_deref(), Some("acme"));
         });
     }
 }

@@ -7,7 +7,7 @@ use super::codex_config::{
 };
 use super::{
     ClaudeApiFormat, GeminiAuthType, ProviderAddFormState, UsageQueryTemplate,
-    HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
+    OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
 };
 
 impl ProviderAddFormState {
@@ -288,83 +288,35 @@ impl ProviderAddFormState {
                 }
             }
             AppType::Hermes => {
-                settings_obj.remove("apiKey");
-                settings_obj.remove("baseUrl");
-                settings_obj.remove("baseURL");
-                settings_obj.remove("endpoint");
-                settings_obj.remove("apiMode");
-
-                let provider_name = self.hermes_provider_name();
-                if provider_name.is_empty() {
-                    settings_obj.remove("name");
-                } else {
-                    settings_obj.insert("name".to_string(), json!(provider_name));
+                for legacy_key in ["api", "apiKey", "apiMode", "baseUrl", "baseURL", "endpoint"] {
+                    settings_obj.remove(legacy_key);
                 }
 
-                let source = settings_obj
-                    .get("_cc_source")
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or("custom_providers");
-                settings_obj.insert("_cc_source".to_string(), json!(source));
+                settings_obj.insert("api_mode".to_string(), json!(self.hermes_api_mode_value()));
 
-                settings_obj.insert(
-                    "api_mode".to_string(),
-                    json!(if self.hermes_api_mode.as_str().trim().is_empty() {
-                        HERMES_DEFAULT_API_MODE
-                    } else {
-                        self.hermes_api_mode.as_str()
-                    }),
-                );
-
+                let base_url = self
+                    .hermes_base_url
+                    .value
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_string();
+                set_or_remove_trimmed(settings_obj, "base_url", &base_url);
                 set_or_remove_trimmed(settings_obj, "api_key", &self.hermes_api_key.value);
-                set_or_remove_trimmed(settings_obj, "base_url", &self.hermes_base_url.value);
-                set_or_remove_trimmed(settings_obj, "model", &self.hermes_model.value);
 
-                // Always write `settings_config.models` as an
-                // array-of-objects (`hermes_config::set_provider` converts
-                // it to a dict before writing YAML). Skip placeholder
-                // entries whose `id` is blank.
-                let normalized_models: Vec<Value> = self
-                    .hermes_models
-                    .iter()
-                    .filter(|item| {
-                        item.get("id")
-                            .and_then(Value::as_str)
-                            .map(|s| !s.trim().is_empty())
-                            .unwrap_or(false)
-                    })
-                    .cloned()
-                    .collect();
-
-                if !normalized_models.is_empty() {
-                    settings_obj.insert("models".to_string(), Value::Array(normalized_models));
-                } else {
+                if self.hermes_models.is_empty() {
                     settings_obj.remove("models");
+                } else {
+                    settings_obj.insert(
+                        "models".to_string(),
+                        Value::Array(self.hermes_models.clone()),
+                    );
                 }
 
-                // 供应商级速率限制（单位：秒）。空串或非法数字时移除字段。
-                let raw_delay = self.hermes_rate_limit_delay.value.trim();
-                if raw_delay.is_empty() {
-                    settings_obj.remove("rate_limit_delay");
-                } else {
-                    match raw_delay.parse::<f64>() {
-                        Ok(value) if value.is_finite() && value >= 0.0 => {
-                            settings_obj.insert(
-                                "rate_limit_delay".to_string(),
-                                serde_json::Number::from_f64(value)
-                                    .map(Value::Number)
-                                    .unwrap_or_else(|| json!(raw_delay)),
-                            );
-                        }
-                        _ => {
-                            // Fall back to writing the raw string so user input
-                            // round-trips and an obvious error surfaces in Hermes
-                            // rather than being silently dropped.
-                            settings_obj.insert("rate_limit_delay".to_string(), json!(raw_delay));
-                        }
-                    }
-                }
+                set_or_remove_f64(
+                    settings_obj,
+                    "rate_limit_delay",
+                    &self.hermes_rate_limit_delay.value,
+                );
             }
             AppType::OpenClaw => {
                 settings_obj.remove("npm");
@@ -819,6 +771,21 @@ fn set_or_remove_u64(obj: &mut serde_json::Map<String, Value>, key: &str, raw: &
         obj.remove(key);
     } else if let Ok(value) = trimmed.parse::<u64>() {
         obj.insert(key.to_string(), json!(value));
+    } else {
+        obj.remove(key);
+    }
+}
+
+fn set_or_remove_f64(obj: &mut serde_json::Map<String, Value>, key: &str, raw: &str) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        obj.remove(key);
+    } else if let Ok(value) = trimmed.parse::<f64>() {
+        if value.is_finite() && value >= 0.0 {
+            obj.insert(key.to_string(), json!(value));
+        } else {
+            obj.remove(key);
+        }
     } else {
         obj.remove(key);
     }

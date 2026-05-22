@@ -3629,6 +3629,38 @@ command = "npx"
 }
 
 #[test]
+fn extract_codex_common_config_keeps_profile_settings_provider_owned() {
+    let config_toml = r#"model_provider = "first"
+model = "gpt-5"
+profile = "work"
+disable_response_storage = true
+
+[model_providers.first]
+base_url = "https://api.example/v1"
+
+[profiles.work]
+model_provider = "first"
+model = "gpt-5"
+"#;
+
+    let extracted = ProviderService::extract_codex_common_config_from_config_toml(config_toml)
+        .expect("extract");
+
+    assert!(
+        extracted.contains("disable_response_storage = true"),
+        "regular shared settings should still be extracted"
+    );
+    assert!(
+        !extracted.contains("profile = \"work\""),
+        "active profile belongs to the provider snapshot"
+    );
+    assert!(
+        !extracted.contains("[profiles.work]"),
+        "profile overrides can carry provider-specific model_provider ids"
+    );
+}
+
+#[test]
 #[serial]
 fn provider_add_tolerates_invalid_codex_common_snippet_during_storage_normalization() {
     let temp_home = TempDir::new().expect("create temp home");

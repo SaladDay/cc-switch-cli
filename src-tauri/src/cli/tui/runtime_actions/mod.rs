@@ -46,12 +46,27 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             | super::route::Route::SettingsProxy => route.clone(),
             _ => super::route::Route::Main,
         },
+        AppType::Hermes => match route {
+            super::route::Route::Main
+            | super::route::Route::Providers
+            | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Mcp
+            | super::route::Route::HermesMemory
+            | super::route::Route::Skills
+            | super::route::Route::SkillsDiscover
+            | super::route::Route::SkillsRepos
+            | super::route::Route::SkillDetail { .. }
+            | super::route::Route::Settings
+            | super::route::Route::SettingsProxy => route.clone(),
+            _ => super::route::Route::Main,
+        },
         _ => match route {
             super::route::Route::ConfigOpenClawWorkspace
             | super::route::Route::ConfigOpenClawDailyMemory
             | super::route::Route::ConfigOpenClawEnv
             | super::route::Route::ConfigOpenClawTools
             | super::route::Route::ConfigOpenClawAgents => super::route::Route::Config,
+            super::route::Route::HermesMemory => super::route::Route::Main,
             _ => route.clone(),
         },
     }
@@ -213,10 +228,6 @@ pub(crate) fn handle_action(
             editor::extract_common_snippet_into_editor(&mut ctx, app_type)
         }
         Action::EditorSubmit { submit, content } => editor::submit(&mut ctx, submit, content),
-        Action::HermesMemoryOpen { kind } => config::open_hermes_memory(&mut ctx, kind),
-        Action::HermesMemorySetEnabled { kind, enabled } => {
-            config::set_hermes_memory_enabled(&mut ctx, kind, enabled)
-        }
         Action::ProviderSwitch { id } => providers::switch(&mut ctx, id),
         Action::ProviderRemoveFromConfig { id } => providers::remove_from_config(&mut ctx, id),
         Action::ProviderSetDefaultModel {
@@ -309,6 +320,11 @@ pub(crate) fn handle_action(
         Action::OpenClawOpenDirectory { subdir } => {
             config::open_openclaw_directory(&mut ctx, subdir)
         }
+        Action::HermesMemoryOpen { kind } => config::open_hermes_memory(&mut ctx, kind),
+        Action::HermesMemorySetEnabled { kind, enabled } => {
+            config::set_hermes_memory_enabled(&mut ctx, kind, enabled)
+        }
+        Action::HermesOpenMemoryDirectory => config::open_hermes_memory_directory(&mut ctx),
         Action::ConfigReset => config::reset(&mut ctx),
         Action::SetSkipClaudeOnboarding { enabled } => {
             crate::settings::set_skip_claude_onboarding(enabled)?;

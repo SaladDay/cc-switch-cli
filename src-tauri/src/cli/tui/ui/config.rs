@@ -2369,6 +2369,132 @@ fn render_openclaw_daily_memory(
     frame.render_stateful_widget(table, inset_left(chunks[2], CONTENT_INSET_LEFT), &mut state);
 }
 
+pub(super) fn render_hermes_memory(
+    frame: &mut Frame<'_>,
+    app: &App,
+    data: &UiData,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(texts::tui_hermes_memory_title());
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    if app.focus == Focus::Content {
+        render_key_bar_center(
+            frame,
+            chunks[0],
+            theme,
+            &[
+                ("Enter", texts::tui_key_edit()),
+                ("Space/x", texts::tui_key_toggle()),
+                ("o", texts::tui_key_open_directory()),
+            ],
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{}: {}",
+            texts::tui_hermes_memory_directory_label(),
+            data.config.hermes_memory.directory_path.display()
+        ))
+        .wrap(Wrap { trim: false }),
+        inset_left(chunks[1], CONTENT_INSET_LEFT),
+    );
+
+    let rows = [
+        crate::hermes_config::MemoryKind::Memory,
+        crate::hermes_config::MemoryKind::User,
+    ]
+    .into_iter()
+    .map(|kind| {
+        let content = data.config.hermes_memory.content(kind);
+        let current = content.chars().count();
+        let limit = data.config.hermes_memory.limit(kind);
+        let enabled = data.config.hermes_memory.enabled(kind);
+        let status = if enabled {
+            texts::enabled()
+        } else {
+            texts::disabled()
+        };
+        let preview = content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(90)
+            .collect::<String>();
+        Row::new(vec![
+            Cell::from(hermes_memory_display_name(kind)),
+            Cell::from(status),
+            Cell::from(format!("{current}/{limit}")),
+            Cell::from(if preview.trim().is_empty() {
+                texts::tui_na().to_string()
+            } else {
+                preview
+            }),
+        ])
+    });
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(18),
+            Constraint::Length(12),
+            Constraint::Length(14),
+            Constraint::Min(10),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from(texts::tui_hermes_memory_file_label()),
+            Cell::from(texts::tui_hermes_memory_status_label()),
+            Cell::from(texts::tui_hermes_memory_usage_label()),
+            Cell::from(texts::tui_hermes_memory_preview_label()),
+        ])
+        .style(Style::default().fg(theme.comment)),
+    )
+    .block(Block::default().borders(Borders::NONE))
+    .row_highlight_style(selection_style(theme))
+    .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = TableState::default();
+    state.select(Some(app.hermes_memory_idx));
+    frame.render_stateful_widget(table, inset_left(chunks[2], CONTENT_INSET_LEFT), &mut state);
+}
+
+fn hermes_memory_display_name(kind: crate::hermes_config::MemoryKind) -> String {
+    match kind {
+        crate::hermes_config::MemoryKind::Memory => {
+            format!(
+                "{} ({})",
+                texts::tui_hermes_memory_agent_tab(),
+                kind.filename()
+            )
+        }
+        crate::hermes_config::MemoryKind::User => {
+            format!(
+                "{} ({})",
+                texts::tui_hermes_memory_user_tab(),
+                kind.filename()
+            )
+        }
+    }
+}
+
 pub(super) fn render_settings(
     frame: &mut Frame<'_>,
     app: &App,

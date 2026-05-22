@@ -64,7 +64,7 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
     </td>
     <td>
       Thanks to <b>RightCode</b> for sponsoring this project! RightCode reliably provides routing services for models such as Claude Code, Codex, and Gemini. It features a highly cost-effective Codex monthly subscription plan and <b>supports quota rollovers—unused quota from one day can be carried over and used the next day.</b> <br/>
-      RightCode offers a special deal for CC-Switch CLI users: register via <a href="https://www.right.codes/register?aff=ccswitch-cli">this link</a> and get <b>25% bonus pay-as-you-go credits</b> on every top-up!
+      RightCode offers a special deal for CC-Switch CLI users: register via <a href="https://www.right.codes/register?aff=ccswitch-cli">this link</a> and get <b>5% bonus pay-as-you-go credits</b> on every top-up!
     </td>
   </tr>
   <tr>

@@ -57,9 +57,10 @@ impl TextEditCommand {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct TextInputPolicy {
     pub max_chars: Option<usize>,
+    pub sanitize: Option<fn(char) -> Option<char>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +135,9 @@ impl TextInput {
             TextEditCommand::DeleteToLineEnd => self.delete_to_line_end(),
             TextEditCommand::DeleteWordBackward => self.delete_word_backward(),
             TextEditCommand::Insert(c) => {
+                let Some(c) = policy.sanitize.map_or(Some(c), |sanitize| sanitize(c)) else {
+                    return false;
+                };
                 if policy
                     .max_chars
                     .is_some_and(|max_chars| self.len_chars() >= max_chars)
@@ -356,7 +360,10 @@ mod tests {
         let edit = input
             .apply_key_with_policy(
                 KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
-                TextInputPolicy { max_chars: Some(3) },
+                TextInputPolicy {
+                    max_chars: Some(3),
+                    sanitize: None,
+                },
             )
             .expect("printable input should be handled");
 

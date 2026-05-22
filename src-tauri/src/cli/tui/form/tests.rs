@@ -1364,27 +1364,6 @@ fn mcp_http_form_replaces_stdio_fields_with_url() {
 }
 
 #[test]
-fn mcp_form_includes_hermes_app_after_opencode() {
-    let form = McpAddFormState::new();
-    let fields = form.fields();
-
-    let opencode_idx = fields
-        .iter()
-        .position(|field| *field == McpAddField::AppOpenCode)
-        .expect("MCP AppOpenCode field should exist");
-    let hermes_idx = fields
-        .iter()
-        .position(|field| *field == McpAddField::AppHermes)
-        .expect("MCP AppHermes field should exist");
-
-    assert!(
-        opencode_idx < hermes_idx,
-        "MCP AppHermes field should appear after AppOpenCode"
-    );
-    assert!(form.input(McpAddField::AppHermes).is_none());
-}
-
-#[test]
 fn mcp_form_restores_remote_server_type_and_url() {
     let server = crate::app_config::McpServer {
         id: "docs-langchain".to_string(),
@@ -1944,6 +1923,143 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
         !std::ptr::eq(openclaw_defs, opencode_defs),
         "OpenClaw should keep its own template mapping instead of aliasing OpenCode"
     );
+}
+
+#[test]
+fn provider_add_form_hermes_exposes_upstream_provider_fields_only() {
+    let form = ProviderAddFormState::new(AppType::Hermes);
+    let fields = form.fields();
+
+    assert_eq!(
+        fields,
+        vec![
+            ProviderAddField::Id,
+            ProviderAddField::Name,
+            ProviderAddField::WebsiteUrl,
+            ProviderAddField::Notes,
+            ProviderAddField::HermesApiMode,
+            ProviderAddField::HermesBaseUrl,
+            ProviderAddField::HermesApiKey,
+            ProviderAddField::HermesModels,
+            ProviderAddField::HermesAdvancedDivider,
+            ProviderAddField::HermesRateLimitDelay,
+            ProviderAddField::UsageQueryDivider,
+            ProviderAddField::UsageQuery,
+        ]
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::CommonSnippet),
+        "Hermes provider form should not expose common config controls"
+    );
+}
+
+#[test]
+fn provider_add_form_hermes_rate_limit_delay_is_editable() {
+    let mut form = ProviderAddFormState::new(AppType::Hermes);
+    let fields = form.fields();
+    assert!(fields.contains(&ProviderAddField::HermesRateLimitDelay));
+    assert!(form.input(ProviderAddField::HermesRateLimitDelay).is_some());
+    assert!(form
+        .input_mut(ProviderAddField::HermesRateLimitDelay)
+        .is_some());
+    assert!(
+        form.input(ProviderAddField::HermesAdvancedDivider)
+            .is_none(),
+        "Hermes advanced divider must not be editable"
+    );
+
+    form.hermes_rate_limit_delay.set("0.5");
+    assert_eq!(
+        form.input(ProviderAddField::HermesRateLimitDelay)
+            .map(|input| input.value.as_str()),
+        Some("0.5")
+    );
+}
+
+#[test]
+fn provider_add_form_hermes_builds_upstream_snake_case_settings() {
+    let mut form = ProviderAddFormState::new(AppType::Hermes);
+    form.id.set("openrouter");
+    form.name.set("OpenRouter");
+    form.hermes_api_mode = "anthropic_messages".to_string();
+    form.hermes_base_url
+        .set(" https://openrouter.ai/api/v1/// ");
+    form.hermes_api_key.set(" sk-or-test ");
+    form.hermes_models = vec![json!({
+        "id": "anthropic/claude-opus-4-7",
+        "name": "Claude Opus 4.7",
+        "context_length": 1000000,
+    })];
+    form.hermes_rate_limit_delay.set("0.5");
+
+    let provider = form.to_provider_json_value();
+    let settings = provider["settingsConfig"].as_object().unwrap();
+    assert_eq!(settings.get("api_mode"), Some(&json!("anthropic_messages")));
+    assert_eq!(
+        settings.get("base_url"),
+        Some(&json!("https://openrouter.ai/api/v1"))
+    );
+    assert_eq!(settings.get("api_key"), Some(&json!("sk-or-test")));
+    assert_eq!(settings.get("rate_limit_delay"), Some(&json!(0.5)));
+    assert_eq!(settings["models"][0]["id"], "anthropic/claude-opus-4-7");
+    for legacy_key in ["api", "apiKey", "apiMode", "baseUrl", "baseURL", "endpoint"] {
+        assert!(
+            !settings.contains_key(legacy_key),
+            "Hermes save should drop legacy alias {legacy_key}"
+        );
+    }
+}
+
+#[test]
+fn provider_add_form_hermes_omits_optional_blank_values_but_writes_default_mode() {
+    let mut form = ProviderAddFormState::new(AppType::Hermes);
+    form.id.set("custom");
+    form.name.set("Custom Hermes");
+
+    let provider = form.to_provider_json_value();
+    let settings = provider["settingsConfig"].as_object().unwrap();
+    assert_eq!(settings.get("api_mode"), Some(&json!("chat_completions")));
+    assert!(settings.get("base_url").is_none());
+    assert!(settings.get("api_key").is_none());
+    assert!(settings.get("models").is_none());
+    assert!(settings.get("rate_limit_delay").is_none());
+}
+
+#[test]
+fn provider_add_form_hermes_loads_legacy_aliases_and_saves_canonical_shape() {
+    let provider = Provider::with_id(
+        "legacy".to_string(),
+        "Legacy Hermes".to_string(),
+        json!({
+            "apiMode": "bedrock_converse",
+            "baseUrl": "https://legacy.example/v1",
+            "apiKey": "sk-legacy",
+            "api": "openai-completions",
+            "models": [
+                { "id": "legacy-model", "name": "Legacy Model" }
+            ],
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Hermes, &provider);
+    assert_eq!(form.hermes_api_mode_value(), "bedrock_converse");
+    assert_eq!(form.hermes_base_url.value, "https://legacy.example/v1");
+    assert_eq!(form.hermes_api_key.value, "sk-legacy");
+    assert_eq!(form.hermes_models[0]["id"], "legacy-model");
+
+    let roundtrip = form.to_provider_json_value();
+    let settings = roundtrip["settingsConfig"].as_object().unwrap();
+    assert_eq!(settings.get("api_mode"), Some(&json!("bedrock_converse")));
+    assert_eq!(
+        settings.get("base_url"),
+        Some(&json!("https://legacy.example/v1"))
+    );
+    assert_eq!(settings.get("api_key"), Some(&json!("sk-legacy")));
+    assert!(settings.get("api").is_none());
+    assert!(settings.get("apiMode").is_none());
+    assert!(settings.get("baseUrl").is_none());
+    assert!(settings.get("apiKey").is_none());
 }
 
 #[test]
@@ -3079,121 +3195,4 @@ fn provider_add_form_usage_query_numeric_fields_match_upstream_normalization() {
 
     assert_eq!(script["timeout"], 10);
     assert_eq!(script["autoQueryInterval"], 0);
-}
-
-// ============================================================================
-// Hermes provider form: models list (array-of-objects representation)
-// ============================================================================
-
-#[test]
-fn hermes_apply_models_value_accepts_array_form() {
-    let mut form = ProviderAddFormState::new(AppType::Hermes);
-    let value = json!([
-        { "id": "claude-opus-4-7", "name": "Claude Opus 4.7", "context_length": 200000 },
-        { "id": "claude-sonnet-4", "name": "Claude Sonnet 4" },
-    ]);
-
-    form.apply_hermes_models_value(value).unwrap();
-
-    assert_eq!(form.hermes_models.len(), 2);
-    assert_eq!(form.hermes_models[0]["id"], "claude-opus-4-7");
-    assert_eq!(form.hermes_models[0]["context_length"], 200000);
-    assert_eq!(form.hermes_models[1]["id"], "claude-sonnet-4");
-    // The first id should back-fill the primary model field when blank.
-    assert_eq!(form.hermes_model.value, "claude-opus-4-7");
-}
-
-#[test]
-fn hermes_apply_models_value_accepts_dict_form_and_injects_id() {
-    let mut form = ProviderAddFormState::new(AppType::Hermes);
-    let value = json!({
-        "claude-opus-4-7": { "name": "Claude Opus 4.7", "context_length": 200000 },
-        "claude-sonnet-4": {},
-    });
-
-    form.apply_hermes_models_value(value).unwrap();
-
-    assert_eq!(form.hermes_models.len(), 2);
-    let ids: Vec<&str> = form
-        .hermes_models
-        .iter()
-        .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
-        .collect();
-    assert!(ids.contains(&"claude-opus-4-7"));
-    assert!(ids.contains(&"claude-sonnet-4"));
-}
-
-#[test]
-fn hermes_apply_models_value_drops_blank_id_placeholders() {
-    let mut form = ProviderAddFormState::new(AppType::Hermes);
-    // Editor skeleton: a single blank-id object — should be ignored.
-    let value = json!([
-        { "id": "", "name": "", "context_length": null },
-    ]);
-
-    form.apply_hermes_models_value(value).unwrap();
-
-    assert!(form.hermes_models.is_empty());
-}
-
-#[test]
-fn hermes_merge_fetched_models_skips_existing_and_backfills_primary() {
-    let mut form = ProviderAddFormState::new(AppType::Hermes);
-    form.hermes_models = vec![json!({ "id": "claude-opus-4-7", "name": "Existing" })];
-
-    let fetched = vec![
-        "claude-opus-4-7".to_string(),
-        "claude-sonnet-4".to_string(),
-        " kimi-k2 ".to_string(),
-        "".to_string(),
-    ];
-
-    let (added, total) = form.merge_fetched_hermes_models(&fetched);
-
-    assert_eq!(added, 2);
-    assert_eq!(total, 3);
-    assert_eq!(form.hermes_model.value, "claude-opus-4-7");
-
-    let ids: Vec<&str> = form
-        .hermes_models
-        .iter()
-        .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
-        .collect();
-    assert_eq!(ids, vec!["claude-opus-4-7", "claude-sonnet-4", "kimi-k2"]);
-}
-
-#[test]
-fn hermes_models_round_trip_settings_config_array_form() {
-    let mut form = ProviderAddFormState::new(AppType::Hermes);
-    form.name.set("my-provider");
-    form.hermes_api_key.set("sk-test");
-    form.hermes_base_url.set("https://api.example.com/v1");
-    form.hermes_model.set("claude-opus-4-7");
-    form.hermes_models = vec![
-        json!({ "id": "claude-opus-4-7", "name": "Opus", "context_length": 200000 }),
-        json!({ "id": "claude-sonnet-4", "name": "Sonnet" }),
-    ];
-
-    let provider_value = form.to_provider_json_value();
-    let models = provider_value
-        .get("settingsConfig")
-        .and_then(|sc| sc.get("models"))
-        .and_then(|v| v.as_array())
-        .expect("models should be an array in settings_config");
-    assert_eq!(models.len(), 2);
-    assert_eq!(models[0]["id"], "claude-opus-4-7");
-    assert_eq!(models[0]["context_length"], 200000);
-    assert_eq!(models[1]["id"], "claude-sonnet-4");
-}
-
-#[test]
-fn hermes_models_editor_text_shows_skeleton_when_empty() {
-    let form = ProviderAddFormState::new(AppType::Hermes);
-    let text = form.hermes_models_editor_text();
-    // Skeleton must round-trip through serde_json to a JSON array
-    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert!(value.is_array());
-    let arr = value.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["id"], "");
 }

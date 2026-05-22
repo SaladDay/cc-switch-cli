@@ -30,6 +30,9 @@ impl App {
                     ConfirmAction::ProviderDelete { id } => {
                         Action::ProviderDelete { id: id.clone() }
                     }
+                    ConfirmAction::ProviderRemoveFromConfig { id } => {
+                        Action::ProviderRemoveFromConfig { id: id.clone() }
+                    }
                     ConfirmAction::McpDelete { id } => Action::McpDelete { id: id.clone() },
                     ConfirmAction::PromptDelete { id } => Action::PromptDelete { id: id.clone() },
                     ConfirmAction::SkillsUninstall { directory } => Action::SkillsUninstall {

@@ -35,11 +35,9 @@ pub(crate) fn add_form_key_items(
                 ]);
             } else {
                 let enter_action = match selected_field {
-                    Some(
-                        ProviderAddField::CodexModel
-                        | ProviderAddField::GeminiModel
-                        | ProviderAddField::HermesModel,
-                    ) => texts::tui_key_fetch_model(),
+                    Some(ProviderAddField::CodexModel | ProviderAddField::GeminiModel) => {
+                        texts::tui_key_fetch_model()
+                    }
                     Some(
                         ProviderAddField::ClaudeModelConfig
                         | ProviderAddField::CommonSnippet
@@ -240,7 +238,16 @@ pub(crate) fn render_form_json_preview_with_highlights(
         .enumerate()
         .map(|(idx, s)| {
             if highlighted_lines.contains(&idx) {
-                Line::from(Span::styled(s.to_string(), highlight_style))
+                match s.find(|ch: char| !ch.is_whitespace()) {
+                    Some(start) => {
+                        let (indent, content) = s.split_at(start);
+                        Line::from(vec![
+                            Span::raw(indent.to_string()),
+                            Span::styled(content.to_string(), highlight_style),
+                        ])
+                    }
+                    None => Line::raw(s.to_string()),
+                }
             } else {
                 Line::raw(s.to_string())
             }

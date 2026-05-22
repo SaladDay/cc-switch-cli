@@ -21,7 +21,6 @@ mod tests {
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::commands::workspace::{DailyMemoryFileInfo, DailyMemorySearchResult, ALLOWED_FILES};
     use crate::error::AppError;
-    use crate::hermes_config::{read_memory, read_memory_limits, MemoryKind};
     use crate::prompt::Prompt;
     use crate::provider::Provider;
     use crate::services::PromptService;
@@ -143,6 +142,19 @@ mod tests {
         app.on_key(key(KeyCode::Char('a')), &data());
         app.on_key(key(KeyCode::Enter), &data());
         app
+    }
+
+    fn assert_provider_remove_confirm(app: &App, expected_id: &str, expected_name: &str) {
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                title,
+                message,
+                action: ConfirmAction::ProviderRemoveFromConfig { id },
+            }) if id == expected_id
+                && title == texts::tui_confirm_remove_provider_title()
+                && message == &texts::tui_confirm_remove_provider_message(expected_name)
+        ));
     }
 
     fn open_prompt_fields_form() -> App {
@@ -311,10 +323,6 @@ mod tests {
             .expect("workspace row should exist")
     }
 
-    fn hermes_memory_nav_index(app: &App) -> usize {
-        nav_index(app, NavItem::HermesMemory)
-    }
-
     fn run_runtime_action(
         app: &mut App,
         data: &mut UiData,
@@ -480,7 +488,7 @@ mod tests {
             .installed
             .push(installed_skill("hello-skill", "Hello Skill"));
 
-        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
         assert!(matches!(action, Action::None));
     }
 
@@ -574,6 +582,43 @@ mod tests {
     }
 
     #[test]
+    fn skills_apps_picker_can_select_hermes() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Skills;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.skills
+            .installed
+            .push(installed_skill("hello-skill", "Hello Skill"));
+
+        app.on_key(key(KeyCode::Char('m')), &data);
+        app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Down), &data);
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::SkillsAppsPicker { selected, apps, .. } if *selected == 4 && apps.hermes
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SkillsSetApps { directory, apps }
+                if directory == "hello-skill"
+                    && !apps.claude
+                    && !apps.codex
+                    && !apps.gemini
+                    && !apps.opencode
+                    && apps.hermes
+        ));
+    }
+
+    #[test]
     fn skills_apps_picker_from_openclaw_targets_hermes_last_visible_row() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Skills;
@@ -590,47 +635,6 @@ mod tests {
             &app.overlay,
             Overlay::SkillsAppsPicker { selected, .. } if *selected == 4
         ));
-
-        let action = app.on_key(key(KeyCode::Char(' ')), &data);
-        assert!(matches!(action, Action::None));
-        assert!(matches!(
-            &app.overlay,
-            Overlay::SkillsAppsPicker { selected, apps, .. }
-                if *selected == 4
-                    && !apps.claude
-                    && !apps.codex
-                    && !apps.gemini
-                    && !apps.opencode
-                    && apps.hermes
-        ));
-    }
-
-    #[test]
-    fn skills_apps_picker_keyboard_can_select_hermes() {
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::Skills;
-        app.focus = Focus::Content;
-
-        let mut data = UiData::default();
-        data.skills
-            .installed
-            .push(crate::services::skill::InstalledSkill {
-                id: "local:hello-skill".to_string(),
-                name: "Hello Skill".to_string(),
-                description: None,
-                directory: "hello-skill".to_string(),
-                repo_owner: None,
-                repo_name: None,
-                repo_branch: None,
-                readme_url: None,
-                apps: crate::app_config::SkillApps::default(),
-                installed_at: 0,
-            });
-
-        app.on_key(key(KeyCode::Char('m')), &data);
-        for _ in 0..4 {
-            app.on_key(key(KeyCode::Down), &data);
-        }
 
         let action = app.on_key(key(KeyCode::Char(' ')), &data);
         assert!(matches!(action, Action::None));
@@ -1268,6 +1272,366 @@ mod tests {
     }
 
     #[test]
+    fn provider_add_form_hermes_models_enter_opens_model_picker() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Hermes,
+        )));
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.hermes_base_url.set("https://api.example.com/v1");
+            form.hermes_api_key.set("sk-hermes");
+            form.field_idx = form
+                .fields()
+                .iter()
+                .position(|field| *field == ProviderAddField::HermesModels)
+                .expect("HermesModels field should exist");
+        }
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+        assert!(
+            app.editor.is_none(),
+            "Hermes Models Enter should not open a JSON editor"
+        );
+        assert!(matches!(
+            app.overlay,
+            Overlay::HermesModelsPicker { editing: false }
+        ));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert!(matches!(form.page, form::ProviderFormPage::Main));
+    }
+
+    #[test]
+    fn provider_add_form_hermes_navigation_skips_advanced_divider() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Hermes,
+        )));
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.editing = false;
+            let fields = form.fields();
+            form.field_idx = fields
+                .iter()
+                .position(|field| *field == ProviderAddField::HermesModels)
+                .expect("HermesModels field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        app.on_key(key(KeyCode::Down), &UiData::default());
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if form.fields().get(form.field_idx) == Some(&ProviderAddField::HermesRateLimitDelay)
+        ));
+
+        app.on_key(key(KeyCode::Up), &UiData::default());
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref form))
+                if form.fields().get(form.field_idx) == Some(&ProviderAddField::HermesModels)
+        ));
+    }
+
+    #[test]
+    fn provider_add_form_hermes_rate_limit_delay_rejects_invalid_number() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Hermes,
+        )));
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.id.set("hermes-provider");
+            form.name.set("Hermes Provider");
+            form.hermes_base_url.set("https://api.example.com/v1");
+            form.hermes_rate_limit_delay.set("..");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == ToastKind::Warning
+                    && toast.message == texts::tui_hermes_rate_limit_delay_invalid()
+        ));
+    }
+
+    #[test]
+    fn provider_add_form_hermes_rate_limit_delay_sanitizes_to_number_chars() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Hermes,
+        )));
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            let fields = form.fields();
+            form.field_idx = fields
+                .iter()
+                .position(|field| *field == ProviderAddField::HermesRateLimitDelay)
+                .expect("HermesRateLimitDelay field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        app.on_key(key(KeyCode::Enter), &data());
+        app.on_key(key(KeyCode::Char('a')), &data());
+        app.on_key(key(KeyCode::Char('0')), &data());
+        app.on_key(key(KeyCode::Char('.')), &data());
+        app.on_key(key(KeyCode::Char('5')), &data());
+
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert_eq!(form.hermes_rate_limit_delay.value, "0.5");
+    }
+
+    #[test]
+    fn provider_add_form_hermes_models_picker_fetch_is_explicit() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Hermes,
+        )));
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.hermes_base_url.set("https://api.example.com/v1");
+            form.hermes_api_key.set("sk-hermes");
+            form.open_hermes_models_picker();
+        }
+        app.overlay = Overlay::HermesModelsPicker { editing: false };
+
+        let action = app.on_key(key(KeyCode::Char('f')), &data());
+        assert!(matches!(
+            action,
+            Action::ProviderModelFetch {
+                base_url,
+                api_key: Some(api_key),
+                field: ProviderAddField::HermesModels,
+                claude_idx: None,
+            } if base_url == "https://api.example.com/v1" && api_key == "sk-hermes"
+        ));
+    }
+
+    #[test]
+    fn provider_add_form_hermes_models_picker_enter_does_not_fetch_or_add_models() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Hermes,
+        )));
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.hermes_base_url.set("https://api.example.com/v1");
+            form.hermes_api_key.set("sk-hermes");
+            form.open_hermes_models_picker();
+            form.hermes_models_field_idx = 0;
+        }
+        app.overlay = Overlay::HermesModelsPicker { editing: false };
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert!(
+            form.hermes_models.is_empty(),
+            "fetching should only open the fetched-model picker"
+        );
+    }
+
+    #[test]
+    fn provider_add_form_hermes_models_picker_fetch_requires_base_url_and_api_key() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Hermes,
+        )));
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.open_hermes_models_picker();
+        }
+        app.overlay = Overlay::HermesModelsPicker { editing: false };
+
+        let action = app.on_key(key(KeyCode::Char('f')), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast) if toast.message == texts::tui_model_fetch_need_config()
+        ));
+    }
+
+    #[test]
+    fn provider_add_form_hermes_models_picker_add_edit_and_delete_model() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Hermes,
+        )));
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.open_hermes_models_picker();
+        }
+        app.overlay = Overlay::HermesModelsPicker { editing: false };
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('a')), &data()),
+            Action::None
+        ));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert_eq!(form.hermes_models, vec![json!({ "id": "", "name": "" })]);
+        assert!(matches!(
+            form.selected_hermes_model_field(),
+            Some(form::HermesModelField::Id(0))
+        ));
+
+        app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(
+            app.overlay,
+            Overlay::HermesModelsPicker { editing: true }
+        ));
+        for ch in "gpt-5.4".chars() {
+            app.on_key(key(KeyCode::Char(ch)), &data());
+        }
+        app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(
+            app.overlay,
+            Overlay::HermesModelsPicker { editing: false }
+        ));
+
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert_eq!(form.hermes_models[0]["id"], "gpt-5.4");
+        assert_eq!(form.hermes_models[0]["name"], "");
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('d')), &data()),
+            Action::None
+        ));
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert!(form.hermes_models.is_empty());
+    }
+
+    #[test]
+    fn provider_add_form_hermes_models_picker_preserves_edit_cursor() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Hermes,
+        )));
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.open_hermes_models_picker();
+        }
+        app.overlay = Overlay::HermesModelsPicker { editing: false };
+
+        app.on_key(key(KeyCode::Char('a')), &data());
+        app.on_key(key(KeyCode::Enter), &data());
+        for ch in "gpt-54".chars() {
+            app.on_key(key(KeyCode::Char(ch)), &data());
+        }
+        app.on_key(key(KeyCode::Left), &data());
+        app.on_key(key(KeyCode::Char('.')), &data());
+
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert_eq!(form.hermes_models[0]["id"], "gpt-5.4");
+        assert_eq!(form.hermes_model_input.cursor, "gpt-5.".chars().count());
+    }
+
+    #[test]
+    fn model_fetch_picker_hermes_models_sets_current_model_id_only() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Hermes,
+        )));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_hermes_models_picker();
+            form.add_empty_hermes_model();
+            form.set_hermes_model_field_text(form::HermesModelField::Name(0), "Display Name");
+        }
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::HermesModels,
+            claude_idx: None,
+            input: TextInput::new("gpt-5.4"),
+            query: "gpt-5.4".to_string(),
+            fetching: false,
+            models: vec!["gpt-5.4".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+        app.pending_overlay = Some(Overlay::HermesModelsPicker { editing: false });
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::HermesModelsPicker { editing: false }
+        ));
+
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert_eq!(form.hermes_models.len(), 1);
+        assert_eq!(form.hermes_models[0]["id"], "gpt-5.4");
+        assert_eq!(form.hermes_models[0]["name"], "Display Name");
+    }
+
+    #[test]
+    fn provider_add_form_hermes_id_input_is_sanitized_like_upstream() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Hermes,
+        )));
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = FormFocus::Fields;
+            form.field_idx = 0;
+            form.editing = true;
+        }
+
+        for ch in "My Provider_1".chars() {
+            app.on_key(key(KeyCode::Char(ch)), &data());
+        }
+
+        let Some(FormState::ProviderAdd(form)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert_eq!(form.id.value, "myprovider1");
+    }
+
+    #[test]
     fn multiline_editor_supports_readline_shortcuts() {
         let mut app = App::new(Some(AppType::Claude));
         app.open_editor(
@@ -1684,7 +2048,8 @@ mod tests {
 
         data.providers.rows[0].is_in_config = true;
         let remove_action = app.on_key(key(KeyCode::Char('s')), &data);
-        assert!(matches!(remove_action, Action::ProviderRemoveFromConfig { id } if id == "p1"));
+        assert!(matches!(remove_action, Action::None));
+        assert_provider_remove_confirm(&app, "p1", "Provider One");
     }
 
     #[test]
@@ -1716,7 +2081,132 @@ mod tests {
 
         data.providers.rows[0].is_in_config = true;
         let remove_action = app.on_key(key(KeyCode::Char('s')), &data);
-        assert!(matches!(remove_action, Action::ProviderRemoveFromConfig { id } if id == "p1"));
+        assert!(matches!(remove_action, Action::None));
+        assert_provider_remove_confirm(&app, "p1", "Provider One");
+    }
+
+    #[test]
+    fn hermes_providers_s_key_adds_or_prompts_to_remove_live_config_membership() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "base_url": "https://example.com",
+                    "api_key": "sk-demo",
+                    "models": [{"id": "main"}]
+                }),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: false,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("main".to_string()),
+            default_model_id: None,
+        });
+
+        let add_action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(add_action, Action::ProviderSwitch { id } if id == "p1"));
+
+        data.providers.rows[0].is_in_config = true;
+        let remove_action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(remove_action, Action::None));
+        assert_provider_remove_confirm(&app, "p1", "Provider One");
+    }
+
+    #[test]
+    fn provider_remove_confirm_enter_removes_from_config() {
+        let mut app = App::new(Some(AppType::OpenCode));
+        app.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_confirm_remove_provider_title().to_string(),
+            message: texts::tui_confirm_remove_provider_message("Provider One"),
+            action: ConfirmAction::ProviderRemoveFromConfig {
+                id: "p1".to_string(),
+            },
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+
+        assert!(matches!(action, Action::ProviderRemoveFromConfig { id } if id == "p1"));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn hermes_providers_x_key_enables_provider_from_live_config() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "base_url": "https://example.com",
+                    "api_key": "sk-demo",
+                    "models": [{"id": "main"}]
+                }),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("main".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p1" && model_id == "main"
+        ));
+    }
+
+    #[test]
+    fn hermes_providers_s_key_blocks_removing_active_provider() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "base_url": "https://example.com",
+                    "api_key": "sk-demo",
+                    "models": [{"id": "main"}]
+                }),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: true,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: true,
+            primary_model_id: Some("main".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(app.toast.is_some());
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     #[test]
@@ -1750,6 +2240,48 @@ mod tests {
             "saved-only provider should open edit form"
         );
         assert!(app.toast.is_none(), "saved-only edit should not be blocked");
+    }
+
+    #[test]
+    fn hermes_providers_e_key_blocks_read_only_provider() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "remote".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "remote".to_string(),
+                "Remote".to_string(),
+                json!({
+                    "_cc_source": crate::hermes_config::PROVIDER_SOURCE_DICT,
+                    "base_url": "https://example.com",
+                    "models": [{"id": "main"}]
+                }),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("main".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(
+            app.form.is_none(),
+            "read-only provider should not open edit form"
+        );
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == ToastKind::Info
+                    && toast.message == texts::tui_toast_provider_managed_by_hermes()
+        ));
     }
 
     #[test]
@@ -1809,7 +2341,8 @@ mod tests {
         });
 
         let action = app.on_key(key(KeyCode::Char('s')), &data);
-        assert!(matches!(action, Action::ProviderRemoveFromConfig { id } if id == "p2"));
+        assert!(matches!(action, Action::None));
+        assert_provider_remove_confirm(&app, "p2", "Provider Two");
         assert!(app.toast.is_none());
     }
 
@@ -1911,6 +2444,88 @@ mod tests {
             app.toast.is_none(),
             "should not show a blocking warning toast"
         );
+    }
+
+    #[test]
+    fn hermes_providers_d_key_allows_deleting_current_writable_provider() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "local".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "local".to_string(),
+                "Local".to_string(),
+                json!({
+                    "_cc_source": crate::hermes_config::PROVIDER_SOURCE_CUSTOM_LIST,
+                    "base_url": "https://example.com",
+                    "models": [{"id": "main"}]
+                }),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: true,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: true,
+            primary_model_id: Some("main".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('d')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ProviderDelete { id },
+                ..
+            }) if id == "local"
+        ));
+        assert!(
+            app.toast.is_none(),
+            "Hermes additive current provider delete should not be blocked"
+        );
+    }
+
+    #[test]
+    fn hermes_providers_d_key_blocks_read_only_provider() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "remote".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "remote".to_string(),
+                "Remote".to_string(),
+                json!({
+                    "_cc_source": crate::hermes_config::PROVIDER_SOURCE_DICT,
+                    "base_url": "https://example.com",
+                    "models": [{"id": "main"}]
+                }),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("main".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('d')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == ToastKind::Info
+                    && toast.message == texts::tui_toast_provider_managed_by_hermes()
+        ));
     }
 
     #[test]
@@ -2082,6 +2697,44 @@ mod tests {
     }
 
     #[test]
+    fn hermes_provider_detail_x_key_enables_provider() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "base_url": "https://example.com",
+                    "api_key": "sk-demo",
+                    "models": [{"id": "main"}]
+                }),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("main".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p1" && model_id == "main"
+        ));
+    }
+
+    #[test]
     fn openclaw_provider_detail_e_key_allows_editing_saved_only_provider() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ProviderDetail {
@@ -2114,6 +2767,50 @@ mod tests {
             "saved-only provider should open edit form"
         );
         assert!(app.toast.is_none(), "saved-only edit should not be blocked");
+    }
+
+    #[test]
+    fn hermes_provider_detail_blocks_read_only_edit() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.route = Route::ProviderDetail {
+            id: "remote".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "remote".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "remote".to_string(),
+                "Remote".to_string(),
+                json!({
+                    "_cc_source": crate::hermes_config::PROVIDER_SOURCE_DICT,
+                    "base_url": "https://example.com",
+                    "models": [{"id": "main"}]
+                }),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: true,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: true,
+            primary_model_id: Some("main".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(
+            app.form.is_none(),
+            "read-only provider should not open edit form"
+        );
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == ToastKind::Info
+                    && toast.message == texts::tui_toast_provider_managed_by_hermes()
+        ));
     }
 
     #[test]
@@ -2211,7 +2908,8 @@ mod tests {
         });
 
         let action = app.on_key(key(KeyCode::Char('s')), &data);
-        assert!(matches!(action, Action::ProviderRemoveFromConfig { id } if id == "p2"));
+        assert!(matches!(action, Action::None));
+        assert_provider_remove_confirm(&app, "p2", "Provider Two");
         assert!(app.toast.is_none());
     }
 
@@ -2540,7 +3238,54 @@ mod tests {
     }
 
     #[test]
-    fn mcp_apps_picker_from_openclaw_targets_opencode_last_visible_row() {
+    fn mcp_apps_picker_can_select_hermes() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Mcp;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.mcp.rows.push(super::super::data::McpRow {
+            id: "m1".to_string(),
+            server: crate::app_config::McpServer {
+                id: "m1".to_string(),
+                name: "Server".to_string(),
+                server: json!({}),
+                apps: crate::app_config::McpApps::default(),
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: vec![],
+            },
+        });
+
+        app.on_key(key(KeyCode::Char('m')), &data);
+        app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Down), &data);
+        app.on_key(key(KeyCode::Down), &data);
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::McpAppsPicker { selected, apps, .. } if *selected == 4 && apps.hermes
+        ));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::McpSetApps { id, apps }
+                if id == "m1"
+                    && !apps.claude
+                    && !apps.codex
+                    && !apps.gemini
+                    && !apps.opencode
+                    && apps.hermes
+        ));
+    }
+
+    #[test]
+    fn mcp_apps_picker_from_openclaw_targets_hermes_last_visible_row() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Mcp;
         app.focus = Focus::Content;
@@ -3873,126 +4618,6 @@ mod tests {
     }
 
     #[test]
-    fn hermes_nav_memory_enter_opens_dedicated_subroute() {
-        let mut app = App::new(Some(AppType::Hermes));
-        app.focus = Focus::Nav;
-        app.nav_idx = hermes_memory_nav_index(&app);
-
-        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
-
-        assert!(matches!(action, Action::SwitchRoute(Route::HermesMemory)));
-        assert!(matches!(app.route, Route::HermesMemory));
-        assert_eq!(app.route_stack, vec![Route::Main]);
-    }
-
-    #[test]
-    fn hermes_memory_enter_opens_selected_blob_editor() {
-        let mut app = App::new(Some(AppType::Hermes));
-        app.route = Route::HermesMemory;
-        app.focus = Focus::Content;
-        app.hermes_memory_idx = 1;
-
-        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
-
-        assert!(matches!(
-            action,
-            Action::HermesMemoryOpen {
-                kind: MemoryKind::User
-            }
-        ));
-    }
-
-    #[test]
-    fn hermes_memory_space_toggles_selected_blob() {
-        let mut app = App::new(Some(AppType::Hermes));
-        app.route = Route::HermesMemory;
-        app.focus = Focus::Content;
-        app.hermes_memory_idx = 0;
-        let mut data = UiData::default();
-        data.config.hermes_memory.memory_enabled = true;
-
-        let action = app.on_key(key(KeyCode::Char(' ')), &data);
-
-        assert!(matches!(
-            action,
-            Action::HermesMemorySetEnabled {
-                kind: MemoryKind::Memory,
-                enabled: false
-            }
-        ));
-    }
-
-    #[test]
-    #[serial]
-    fn hermes_memory_runtime_open_and_submit_writes_file() {
-        let temp = TempDir::new().expect("temp home");
-        let _env = EnvGuard::set_home(temp.path());
-        let mut app = App::new(Some(AppType::Hermes));
-        let mut data = UiData::default();
-        data.config.hermes_memory.memory_content = "old memory".to_string();
-
-        run_runtime_action(
-            &mut app,
-            &mut data,
-            Action::HermesMemoryOpen {
-                kind: MemoryKind::Memory,
-            },
-        )
-        .expect("open memory editor");
-
-        let editor = app.editor.as_ref().expect("editor should open");
-        assert_eq!(
-            editor.submit,
-            EditorSubmit::HermesMemory {
-                kind: MemoryKind::Memory
-            }
-        );
-        assert_eq!(editor.initial_text, "old memory");
-
-        run_runtime_action(
-            &mut app,
-            &mut data,
-            Action::EditorSubmit {
-                submit: EditorSubmit::HermesMemory {
-                    kind: MemoryKind::Memory,
-                },
-                content: "new memory".to_string(),
-            },
-        )
-        .expect("submit memory editor");
-
-        assert_eq!(
-            read_memory(MemoryKind::Memory).expect("read memory"),
-            "new memory"
-        );
-        assert_eq!(data.config.hermes_memory.memory_content, "new memory");
-        assert!(app.editor.is_none());
-    }
-
-    #[test]
-    #[serial]
-    fn hermes_memory_runtime_toggle_writes_config() {
-        let temp = TempDir::new().expect("temp home");
-        let _env = EnvGuard::set_home(temp.path());
-        let mut app = App::new(Some(AppType::Hermes));
-        let mut data = UiData::default();
-
-        run_runtime_action(
-            &mut app,
-            &mut data,
-            Action::HermesMemorySetEnabled {
-                kind: MemoryKind::User,
-                enabled: false,
-            },
-        )
-        .expect("toggle user memory");
-
-        let limits = read_memory_limits().expect("read memory limits");
-        assert!(!limits.user_enabled);
-        assert!(!data.config.hermes_memory.user_enabled);
-    }
-
-    #[test]
     fn openclaw_nav_split_keeps_non_openclaw_generic_routes() {
         let cases = [
             (NavItem::Mcp, Route::Mcp),
@@ -4401,7 +5026,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     #[serial(home_settings)]
     fn openclaw_workspace_open_failure_is_localized() {
@@ -4527,7 +5151,6 @@ mod tests {
         assert_eq!(editor.text(), "late content");
     }
 
-    #[cfg(unix)]
     #[test]
     #[serial(home_settings)]
     fn openclaw_daily_memory_save_failure_is_localized() {

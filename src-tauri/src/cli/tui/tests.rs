@@ -588,6 +588,10 @@ fn model_fetch_strategy_matches_provider_field() {
         model_fetch_strategy_for_field(ProviderAddField::ClaudeModelConfig),
         ModelFetchStrategy::Anthropic
     );
+    assert_eq!(
+        model_fetch_strategy_for_field(ProviderAddField::HermesModels),
+        ModelFetchStrategy::Bearer
+    );
 }
 
 #[test]

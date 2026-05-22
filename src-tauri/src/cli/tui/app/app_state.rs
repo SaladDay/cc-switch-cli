@@ -164,13 +164,6 @@ pub enum Action {
     OpenClawDailyMemoryOpenFile {
         filename: String,
     },
-    HermesMemoryOpen {
-        kind: MemoryKind,
-    },
-    HermesMemorySetEnabled {
-        kind: MemoryKind,
-        enabled: bool,
-    },
     OpenClawDailyMemorySearch {
         query: String,
     },
@@ -180,6 +173,14 @@ pub enum Action {
     OpenClawOpenDirectory {
         subdir: String,
     },
+    HermesMemoryOpen {
+        kind: crate::hermes_config::MemoryKind,
+    },
+    HermesMemorySetEnabled {
+        kind: crate::hermes_config::MemoryKind,
+        enabled: bool,
+    },
+    HermesOpenMemoryDirectory,
     ConfigReset,
 
     EditorSubmit {

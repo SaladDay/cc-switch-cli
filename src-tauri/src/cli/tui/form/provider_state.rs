@@ -10,8 +10,9 @@ use super::provider_json::{
 use super::provider_state_loading::populate_form_from_provider;
 use super::{
     ClaudeApiFormat, CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType,
-    HermesApiMode, ProviderAddField, ProviderAddFormState, ProviderFormPage, TextInput,
-    UsageQueryField, UsageQueryTemplate, HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
+    HermesModelField, ProviderAddField, ProviderAddFormState, ProviderFormPage, TextInput,
+    UsageQueryField, UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE,
+    OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
 impl ProviderAddFormState {
@@ -136,12 +137,6 @@ impl ProviderAddFormState {
             gemini_api_key: TextInput::new(""),
             gemini_base_url: TextInput::new("https://generativelanguage.googleapis.com"),
             gemini_model: TextInput::new(""),
-            hermes_api_mode: HermesApiMode::from_raw(HERMES_DEFAULT_API_MODE),
-            hermes_api_key: TextInput::new(""),
-            hermes_base_url: TextInput::new(""),
-            hermes_model: TextInput::new(""),
-            hermes_models: Vec::new(),
-            hermes_rate_limit_delay: TextInput::new(""),
             openclaw_user_agent: false,
             openclaw_models: Vec::new(),
             usage_query_enabled: false,
@@ -162,6 +157,14 @@ impl ProviderAddFormState {
             opencode_model_context_limit: TextInput::new(""),
             opencode_model_output_limit: TextInput::new(""),
             opencode_model_original_id: None,
+            hermes_api_mode: HERMES_DEFAULT_API_MODE.to_string(),
+            hermes_api_key: TextInput::new(""),
+            hermes_base_url: TextInput::new(""),
+            hermes_models: Vec::new(),
+            hermes_models_field_idx: 0,
+            hermes_models_editing: false,
+            hermes_model_input: TextInput::new(""),
+            hermes_rate_limit_delay: TextInput::new(""),
             initial_snapshot: Value::Null,
         };
         form.capture_initial_snapshot();
@@ -291,7 +294,7 @@ impl ProviderAddFormState {
             ProviderAddField::Notes,
         ];
 
-        if matches!(self.app_type, AppType::OpenClaw | AppType::Hermes) {
+        if matches!(self.app_type, AppType::Hermes | AppType::OpenClaw) {
             fields.insert(0, ProviderAddField::Id);
         }
 
@@ -333,8 +336,8 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::HermesApiMode);
                 fields.push(ProviderAddField::HermesBaseUrl);
                 fields.push(ProviderAddField::HermesApiKey);
-                fields.push(ProviderAddField::HermesModel);
                 fields.push(ProviderAddField::HermesModels);
+                fields.push(ProviderAddField::HermesAdvancedDivider);
                 fields.push(ProviderAddField::HermesRateLimitDelay);
             }
             AppType::OpenClaw => {
@@ -427,10 +430,6 @@ impl ProviderAddFormState {
             ProviderAddField::Name => Some(&self.name),
             ProviderAddField::WebsiteUrl => Some(&self.website_url),
             ProviderAddField::Notes => Some(&self.notes),
-            ProviderAddField::HermesBaseUrl => Some(&self.hermes_base_url),
-            ProviderAddField::HermesApiKey => Some(&self.hermes_api_key),
-            ProviderAddField::HermesModel => Some(&self.hermes_model),
-            ProviderAddField::HermesRateLimitDelay => Some(&self.hermes_rate_limit_delay),
             ProviderAddField::ClaudeBaseUrl => Some(&self.claude_base_url),
             ProviderAddField::ClaudeApiKey => Some(&self.claude_api_key),
             ProviderAddField::CodexBaseUrl => Some(&self.codex_base_url),
@@ -447,17 +446,21 @@ impl ProviderAddFormState {
             ProviderAddField::OpenCodeModelName => Some(&self.opencode_model_name),
             ProviderAddField::OpenCodeModelContextLimit => Some(&self.opencode_model_context_limit),
             ProviderAddField::OpenCodeModelOutputLimit => Some(&self.opencode_model_output_limit),
+            ProviderAddField::HermesApiKey => Some(&self.hermes_api_key),
+            ProviderAddField::HermesBaseUrl => Some(&self.hermes_base_url),
+            ProviderAddField::HermesRateLimitDelay => Some(&self.hermes_rate_limit_delay),
             ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
             | ProviderAddField::ClaudeModelConfig
             | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::GeminiAuthType
-            | ProviderAddField::HermesApiMode
-            | ProviderAddField::HermesModels
             | ProviderAddField::OpenClawApiProtocol
             | ProviderAddField::OpenClawUserAgent
             | ProviderAddField::OpenClawModels
+            | ProviderAddField::HermesApiMode
+            | ProviderAddField::HermesModels
+            | ProviderAddField::HermesAdvancedDivider
             | ProviderAddField::CommonConfigDivider
             | ProviderAddField::CommonSnippet
             | ProviderAddField::IncludeCommonConfig
@@ -472,10 +475,6 @@ impl ProviderAddFormState {
             ProviderAddField::Name => Some(&mut self.name),
             ProviderAddField::WebsiteUrl => Some(&mut self.website_url),
             ProviderAddField::Notes => Some(&mut self.notes),
-            ProviderAddField::HermesBaseUrl => Some(&mut self.hermes_base_url),
-            ProviderAddField::HermesApiKey => Some(&mut self.hermes_api_key),
-            ProviderAddField::HermesModel => Some(&mut self.hermes_model),
-            ProviderAddField::HermesRateLimitDelay => Some(&mut self.hermes_rate_limit_delay),
             ProviderAddField::ClaudeBaseUrl => Some(&mut self.claude_base_url),
             ProviderAddField::ClaudeApiKey => Some(&mut self.claude_api_key),
             ProviderAddField::CodexBaseUrl => Some(&mut self.codex_base_url),
@@ -496,17 +495,21 @@ impl ProviderAddFormState {
             ProviderAddField::OpenCodeModelOutputLimit => {
                 Some(&mut self.opencode_model_output_limit)
             }
+            ProviderAddField::HermesApiKey => Some(&mut self.hermes_api_key),
+            ProviderAddField::HermesBaseUrl => Some(&mut self.hermes_base_url),
+            ProviderAddField::HermesRateLimitDelay => Some(&mut self.hermes_rate_limit_delay),
             ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
             | ProviderAddField::ClaudeModelConfig
             | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::GeminiAuthType
-            | ProviderAddField::HermesApiMode
-            | ProviderAddField::HermesModels
             | ProviderAddField::OpenClawApiProtocol
             | ProviderAddField::OpenClawUserAgent
             | ProviderAddField::OpenClawModels
+            | ProviderAddField::HermesApiMode
+            | ProviderAddField::HermesModels
+            | ProviderAddField::HermesAdvancedDivider
             | ProviderAddField::CommonConfigDivider
             | ProviderAddField::CommonSnippet
             | ProviderAddField::IncludeCommonConfig
@@ -581,6 +584,175 @@ impl ProviderAddFormState {
         self.page = ProviderFormPage::Main;
         self.focus = FormFocus::Fields;
         self.usage_query_editing = false;
+    }
+
+    pub fn open_hermes_models_picker(&mut self) {
+        if !matches!(self.app_type, AppType::Hermes) {
+            return;
+        }
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        self.hermes_models_editing = false;
+        let len = self.hermes_model_fields().len();
+        self.hermes_models_field_idx = self.hermes_models_field_idx.min(len.saturating_sub(1));
+        self.sync_hermes_model_input_from_selection();
+    }
+
+    pub fn close_hermes_models_picker(&mut self) {
+        self.hermes_models_editing = false;
+        self.hermes_model_input.set("");
+    }
+
+    pub fn hermes_model_fields(&self) -> Vec<HermesModelField> {
+        let mut fields = Vec::with_capacity(self.hermes_models.len().saturating_mul(3));
+        for index in 0..self.hermes_models.len() {
+            fields.push(HermesModelField::Id(index));
+            fields.push(HermesModelField::Name(index));
+            fields.push(HermesModelField::ContextLength(index));
+        }
+        fields
+    }
+
+    pub fn selected_hermes_model_field(&self) -> Option<HermesModelField> {
+        let fields = self.hermes_model_fields();
+        fields
+            .get(
+                self.hermes_models_field_idx
+                    .min(fields.len().saturating_sub(1)),
+            )
+            .copied()
+    }
+
+    pub fn add_empty_hermes_model(&mut self) {
+        if !matches!(self.app_type, AppType::Hermes) {
+            return;
+        }
+        self.hermes_models.push(json!({ "id": "", "name": "" }));
+        self.hermes_models_field_idx = self
+            .hermes_model_fields()
+            .iter()
+            .position(|field| matches!(field, HermesModelField::Id(index) if *index == self.hermes_models.len().saturating_sub(1)))
+            .unwrap_or(self.hermes_models_field_idx);
+        self.sync_hermes_model_input_from_selection();
+    }
+
+    pub fn remove_hermes_model(&mut self, index: usize) {
+        if index >= self.hermes_models.len() {
+            return;
+        }
+        self.hermes_models.remove(index);
+        let fields_len = self.hermes_model_fields().len();
+        self.hermes_models_field_idx = self
+            .hermes_models_field_idx
+            .min(fields_len.saturating_sub(1));
+        self.hermes_models_editing = false;
+        self.sync_hermes_model_input_from_selection();
+    }
+
+    pub fn remove_selected_hermes_model(&mut self) -> bool {
+        let Some(field) = self.selected_hermes_model_field() else {
+            return false;
+        };
+        let index = match field {
+            HermesModelField::Id(index)
+            | HermesModelField::Name(index)
+            | HermesModelField::ContextLength(index) => index,
+        };
+        if index >= self.hermes_models.len() {
+            return false;
+        }
+        self.remove_hermes_model(index);
+        true
+    }
+
+    pub fn hermes_model_field_input(&self, field: HermesModelField) -> Option<TextInput> {
+        let (index, key) = match field {
+            HermesModelField::Id(index) => (index, "id"),
+            HermesModelField::Name(index) => (index, "name"),
+            HermesModelField::ContextLength(index) => (index, "context_length"),
+        };
+        let model = self.hermes_models.get(index)?;
+        let value = model
+            .get(key)
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| value.as_i64().map(|number| number.to_string()))
+                    .or_else(|| value.as_u64().map(|number| number.to_string()))
+            })
+            .unwrap_or_default();
+        Some(TextInput::new(value))
+    }
+
+    pub fn sync_hermes_model_input_from_selection(&mut self) {
+        let input = self
+            .selected_hermes_model_field()
+            .and_then(|field| self.hermes_model_field_input(field))
+            .unwrap_or_else(|| TextInput::new(""));
+        self.hermes_model_input = input;
+    }
+
+    pub fn set_hermes_model_field_text(&mut self, field: HermesModelField, value: &str) {
+        let (index, key) = match field {
+            HermesModelField::Id(index) => (index, "id"),
+            HermesModelField::Name(index) => (index, "name"),
+            HermesModelField::ContextLength(index) => (index, "context_length"),
+        };
+        let Some(model) = self.hermes_models.get_mut(index) else {
+            return;
+        };
+        if !model.is_object() {
+            *model = json!({});
+        }
+        let Some(obj) = model.as_object_mut() else {
+            return;
+        };
+        let trimmed = value.trim();
+        if key == "context_length" {
+            if trimmed.is_empty() {
+                obj.remove(key);
+            } else if let Ok(number) = trimmed.parse::<u64>() {
+                obj.insert(key.to_string(), json!(number));
+            } else {
+                obj.insert(key.to_string(), json!(trimmed));
+            }
+        } else {
+            obj.insert(key.to_string(), json!(value));
+        }
+    }
+
+    pub(crate) fn set_selected_hermes_model_id_from_picker(&mut self, model_id: &str) -> bool {
+        if !matches!(self.app_type, AppType::Hermes) {
+            return false;
+        }
+        let model_id = model_id.trim();
+        if model_id.is_empty() {
+            return false;
+        }
+
+        let selected = self.selected_hermes_model_field();
+        let target_index = match selected {
+            Some(HermesModelField::Id(index)) if index < self.hermes_models.len() => index,
+            Some(HermesModelField::Name(index) | HermesModelField::ContextLength(index))
+                if index < self.hermes_models.len() =>
+            {
+                index
+            }
+            _ => {
+                self.add_empty_hermes_model();
+                self.hermes_models.len().saturating_sub(1)
+            }
+        };
+
+        self.set_hermes_model_field_text(HermesModelField::Id(target_index), model_id);
+        self.hermes_models_field_idx = self
+            .hermes_model_fields()
+            .iter()
+            .position(|field| *field == HermesModelField::Id(target_index))
+            .unwrap_or(self.hermes_models_field_idx);
+        self.sync_hermes_model_input_from_selection();
+        true
     }
 
     pub fn touch_usage_query(&mut self) {
@@ -845,20 +1017,6 @@ impl ProviderAddFormState {
         self.claude_hide_attribution_touched = true;
     }
 
-    pub(crate) fn hermes_provider_name(&self) -> String {
-        let id = self.id.value.trim();
-        if !id.is_empty() {
-            return id.to_string();
-        }
-
-        let name = self.name.value.trim();
-        if !name.is_empty() {
-            return name.to_string();
-        }
-
-        String::new()
-    }
-
     pub fn is_claude_official_provider(&self) -> bool {
         if !matches!(self.app_type, AppType::Claude) {
             return false;
@@ -910,6 +1068,7 @@ impl ProviderAddFormState {
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
+        let previous_hermes_models_field_idx = self.hermes_models_field_idx;
         let previous_json_scroll = self.json_scroll;
         let previous_codex_preview_section = self.codex_preview_section;
         let previous_codex_auth_scroll = self.codex_auth_scroll;
@@ -947,6 +1106,7 @@ impl ProviderAddFormState {
         next.codex_config_scroll = previous_codex_config_scroll;
         next.editing = false;
         next.usage_query_editing = false;
+        next.hermes_models_editing = false;
         let fields_len = next.fields().len();
         next.field_idx = if fields_len == 0 {
             0
@@ -959,6 +1119,13 @@ impl ProviderAddFormState {
         } else {
             previous_usage_query_field_idx.min(usage_fields_len - 1)
         };
+        let hermes_model_fields_len = next.hermes_model_fields().len();
+        next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
+            0
+        } else {
+            previous_hermes_models_field_idx.min(hermes_model_fields_len - 1)
+        };
+        next.sync_hermes_model_input_from_selection();
 
         if let FormMode::Edit { id } = previous_mode {
             next.id.set(id);
@@ -979,6 +1146,7 @@ impl ProviderAddFormState {
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
+        let previous_hermes_models_field_idx = self.hermes_models_field_idx;
         let previous_json_scroll = self.json_scroll;
         let previous_codex_preview_section = self.codex_preview_section;
         let previous_codex_auth_scroll = self.codex_auth_scroll;
@@ -1026,6 +1194,7 @@ impl ProviderAddFormState {
         next.codex_config_scroll = previous_codex_config_scroll;
         next.editing = false;
         next.usage_query_editing = false;
+        next.hermes_models_editing = false;
 
         let fields_len = next.fields().len();
         next.field_idx = if fields_len == 0 {
@@ -1039,6 +1208,13 @@ impl ProviderAddFormState {
         } else {
             previous_usage_query_field_idx.min(usage_fields_len - 1)
         };
+        let hermes_model_fields_len = next.hermes_model_fields().len();
+        next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
+            0
+        } else {
+            previous_hermes_models_field_idx.min(hermes_model_fields_len - 1)
+        };
+        next.sync_hermes_model_input_from_selection();
 
         if let FormMode::Edit { id } = previous_mode {
             next.id.set(id);
@@ -1097,160 +1273,27 @@ impl ProviderAddFormState {
         }
     }
 
+    pub(crate) fn cycle_hermes_api_mode(&mut self) {
+        let current = HERMES_API_MODES
+            .iter()
+            .position(|mode| *mode == self.hermes_api_mode.trim())
+            .unwrap_or(0);
+        self.hermes_api_mode = HERMES_API_MODES[(current + 1) % HERMES_API_MODES.len()].to_string();
+    }
+
+    pub(crate) fn hermes_api_mode_value(&self) -> &str {
+        if HERMES_API_MODES
+            .iter()
+            .any(|mode| *mode == self.hermes_api_mode.trim())
+        {
+            self.hermes_api_mode.trim()
+        } else {
+            HERMES_DEFAULT_API_MODE
+        }
+    }
+
     pub(crate) fn hermes_models_summary(&self) -> String {
         texts::tui_hermes_models_summary(self.hermes_models.len())
-    }
-
-    pub(crate) fn hermes_models_editor_text(&self) -> String {
-        // 始终以 array-of-objects 形式呈现，便于用户在编辑器中按行修改：
-        //   [{ "id": "...", "name": "...", "context_length": 200000 }, ...]
-        //
-        // 这与 cc-switch 上游 `HermesFormFields` 的内部表示一致；写入 YAML 时
-        // 由 `hermes_config::set_provider` 调用 `normalize_provider_models_for_write`
-        // 转换为 dict 形式。
-        if self.hermes_models.is_empty() {
-            // 提供一个最小骨架，让首次进入编辑器的用户能直接照样填写
-            return "[\n  {\n    \"id\": \"\",\n    \"name\": \"\",\n    \"context_length\": null\n  }\n]\n".to_string();
-        }
-        serde_json::to_string_pretty(&Value::Array(self.hermes_models.clone()))
-            .unwrap_or_else(|_| "[]".to_string())
-    }
-
-    pub(crate) fn ensure_hermes_model_entry(&mut self, selected_model: &str) {
-        let selected_model = selected_model.trim();
-        if selected_model.is_empty() {
-            return;
-        }
-        let already_present = self.hermes_models.iter().any(|entry| {
-            entry
-                .get("id")
-                .and_then(Value::as_str)
-                .map(|id| id == selected_model)
-                .unwrap_or(false)
-        });
-        if !already_present {
-            self.hermes_models.push(json!({
-                "id": selected_model,
-                "name": selected_model,
-            }));
-        }
-    }
-
-    pub fn apply_hermes_models_value(&mut self, models_value: Value) -> Result<(), String> {
-        if !matches!(self.app_type, AppType::Hermes) {
-            return Ok(());
-        }
-        // 接受两种输入形态，最终内部规范为 array：
-        //   1) `[{ id, name?, context_length? }, ...]`  —— 上游 UI 内部表示
-        //   2) `{ id: { name?, context_length?, ... }, ... }` —— Hermes YAML 表示
-        let normalized: Vec<Value> = match models_value {
-            Value::Array(items) => {
-                let mut out: Vec<Value> = Vec::with_capacity(items.len());
-                for item in items {
-                    let Value::Object(mut obj) = item else {
-                        return Err(texts::tui_toast_json_must_be_object_or_array().to_string());
-                    };
-                    let id_ok = obj
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(|s| !s.trim().is_empty())
-                        .unwrap_or(false);
-                    if !id_ok {
-                        // 跳过没有 id 的空骨架行（编辑器初次进入时的占位会被丢弃）
-                        if obj.get("id").is_none() {
-                            continue;
-                        }
-                        let id_blank = obj
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .map(|s| s.trim().is_empty())
-                            .unwrap_or(false);
-                        if id_blank {
-                            continue;
-                        }
-                    }
-                    if let Some(id_val) = obj.get("id").cloned() {
-                        if let Some(s) = id_val.as_str() {
-                            obj.insert("id".to_string(), Value::String(s.trim().to_string()));
-                        }
-                    }
-                    out.push(Value::Object(obj));
-                }
-                out
-            }
-            Value::Object(map) => {
-                let mut out: Vec<Value> = Vec::with_capacity(map.len());
-                for (id, value) in map {
-                    let mut obj = match value {
-                        Value::Object(obj) => obj,
-                        Value::Null => serde_json::Map::new(),
-                        _ => {
-                            return Err(texts::tui_toast_json_must_be_object_or_array().to_string())
-                        }
-                    };
-                    if id.trim().is_empty() {
-                        continue;
-                    }
-                    obj.insert("id".to_string(), Value::String(id));
-                    out.push(Value::Object(obj));
-                }
-                out
-            }
-            _ => return Err(texts::tui_toast_json_must_be_object_or_array().to_string()),
-        };
-
-        self.hermes_models = normalized;
-        // 若主模型字段为空，且新列表非空，则用第一个条目的 id 回填主模型
-        if self.hermes_model.is_blank() {
-            if let Some(first_id) = self
-                .hermes_models
-                .first()
-                .and_then(|m| m.get("id"))
-                .and_then(Value::as_str)
-            {
-                self.hermes_model.set(first_id.to_string());
-            }
-        }
-        Ok(())
-    }
-
-    /// 用从 `/v1/models` 拉到的模型 ID 列表合并到现有 `hermes_models`：
-    /// 已存在的 id 保持原条目不变；缺失的 id 追加为 `{ id, name: id }`。
-    /// 返回 `(added, total)`，供 UI toast 反馈。
-    pub fn merge_fetched_hermes_models(&mut self, fetched_ids: &[String]) -> (usize, usize) {
-        let mut added = 0usize;
-        for raw_id in fetched_ids {
-            let id = raw_id.trim();
-            if id.is_empty() {
-                continue;
-            }
-            let exists = self.hermes_models.iter().any(|entry| {
-                entry
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(|existing| existing == id)
-                    .unwrap_or(false)
-            });
-            if !exists {
-                self.hermes_models.push(json!({
-                    "id": id,
-                    "name": id,
-                }));
-                added += 1;
-            }
-        }
-        // 若主模型字段仍为空且我们至少新增了一个条目，使用第一个 fetched id 回填
-        if self.hermes_model.is_blank() {
-            if let Some(first_id) = self
-                .hermes_models
-                .first()
-                .and_then(|m| m.get("id"))
-                .and_then(Value::as_str)
-            {
-                self.hermes_model.set(first_id.to_string());
-            }
-        }
-        (added, self.hermes_models.len())
     }
 
     pub(crate) fn openclaw_models_summary(&self) -> String {

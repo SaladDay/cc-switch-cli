@@ -58,6 +58,7 @@ impl Toast {
 pub enum ConfirmAction {
     Quit,
     ProviderDelete { id: String },
+    ProviderRemoveFromConfig { id: String },
     McpDelete { id: String },
     PromptDelete { id: String },
     SkillsUninstall { directory: String },
@@ -208,6 +209,9 @@ pub enum Overlay {
     },
     UsageQueryTemplatePicker {
         selected: usize,
+    },
+    HermesModelsPicker {
+        editing: bool,
     },
     ModelFetchPicker {
         request_id: u64,

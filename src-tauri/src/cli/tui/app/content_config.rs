@@ -1,5 +1,7 @@
 use super::*;
 
+pub(crate) const HERMES_MEMORY_ROW_COUNT: usize = 2;
+
 impl App {
     fn open_openclaw_editor<T: serde::Serialize>(
         &mut self,
@@ -228,6 +230,28 @@ impl App {
             KeyCode::Char('o') => Action::OpenClawOpenDirectory {
                 subdir: "memory".to_string(),
             },
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn on_hermes_memory_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        let selected = hermes_memory_kind_for_index(self.hermes_memory_idx);
+        match key.code {
+            KeyCode::Up => {
+                self.hermes_memory_idx = self.hermes_memory_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                self.hermes_memory_idx =
+                    (self.hermes_memory_idx + 1).min(HERMES_MEMORY_ROW_COUNT - 1);
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char('e') => Action::HermesMemoryOpen { kind: selected },
+            KeyCode::Char(' ') | KeyCode::Char('x') => Action::HermesMemorySetEnabled {
+                kind: selected,
+                enabled: !data.config.hermes_memory.enabled(selected),
+            },
+            KeyCode::Char('o') => Action::HermesOpenMemoryDirectory,
             _ => Action::None,
         }
     }
@@ -1168,5 +1192,12 @@ impl App {
         let id = crate::services::PromptService::generate_prompt_id(&name, &existing_ids);
         self.form = Some(FormState::PromptMeta(PromptMetaFormState::new(id, name)));
         self.focus = Focus::Content;
+    }
+}
+
+pub(crate) fn hermes_memory_kind_for_index(index: usize) -> crate::hermes_config::MemoryKind {
+    match index.min(HERMES_MEMORY_ROW_COUNT - 1) {
+        1 => crate::hermes_config::MemoryKind::User,
+        _ => crate::hermes_config::MemoryKind::Memory,
     }
 }

@@ -18,7 +18,6 @@ pub enum EditorSubmit {
         id: String,
     },
     ProviderFormApplyJson,
-    ProviderFormApplyHermesModels,
     ProviderFormApplyOpenClawModels,
     ProviderFormApplyUsageScriptCode,
     ProviderFormApplyCodexAuth,
@@ -42,7 +41,7 @@ pub enum EditorSubmit {
         filename: String,
     },
     HermesMemory {
-        kind: MemoryKind,
+        kind: crate::hermes_config::MemoryKind,
     },
     ConfigOpenClawEnv,
     ConfigOpenClawTools,

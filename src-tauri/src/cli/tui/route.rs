@@ -7,13 +7,13 @@ pub enum Route {
     ProviderDetail { id: String },
     Mcp,
     Prompts,
+    HermesMemory,
     Config,
     ConfigOpenClawWorkspace,
     ConfigOpenClawDailyMemory,
     ConfigOpenClawEnv,
     ConfigOpenClawTools,
     ConfigOpenClawAgents,
-    HermesMemory,
     ConfigWebDav,
     Skills,
     SkillsDiscover,
@@ -29,13 +29,13 @@ pub enum NavItem {
     Providers,
     Mcp,
     Prompts,
+    HermesMemory,
     Config,
     Skills,
     OpenClawWorkspace,
     OpenClawEnv,
     OpenClawTools,
     OpenClawAgents,
-    HermesMemory,
     Settings,
     Exit,
 }
@@ -63,24 +63,21 @@ impl NavItem {
         NavItem::Exit,
     ];
 
-    pub const HERMES_ALL: [NavItem; 8] = [
+    pub const HERMES_ALL: [NavItem; 7] = [
         NavItem::Main,
         NavItem::Providers,
-        NavItem::Mcp,
         NavItem::Skills,
         NavItem::HermesMemory,
-        NavItem::Config,
+        NavItem::Mcp,
         NavItem::Settings,
         NavItem::Exit,
     ];
 
     pub fn all_for_app(app_type: &AppType) -> &'static [NavItem] {
-        if matches!(app_type, AppType::OpenClaw) {
-            &Self::OPENCLAW_ALL
-        } else if matches!(app_type, AppType::Hermes) {
-            &Self::HERMES_ALL
-        } else {
-            &Self::ALL
+        match app_type {
+            AppType::OpenClaw => &Self::OPENCLAW_ALL,
+            AppType::Hermes => &Self::HERMES_ALL,
+            _ => &Self::ALL,
         }
     }
 
@@ -90,13 +87,13 @@ impl NavItem {
             NavItem::Providers => Some(Route::Providers),
             NavItem::Mcp => Some(Route::Mcp),
             NavItem::Prompts => Some(Route::Prompts),
+            NavItem::HermesMemory => Some(Route::HermesMemory),
             NavItem::Config => Some(Route::Config),
             NavItem::Skills => Some(Route::Skills),
             NavItem::OpenClawWorkspace => Some(Route::ConfigOpenClawWorkspace),
             NavItem::OpenClawEnv => Some(Route::ConfigOpenClawEnv),
             NavItem::OpenClawTools => Some(Route::ConfigOpenClawTools),
             NavItem::OpenClawAgents => Some(Route::ConfigOpenClawAgents),
-            NavItem::HermesMemory => Some(Route::HermesMemory),
             NavItem::Settings => Some(Route::Settings),
             NavItem::Exit => None,
         }
@@ -122,5 +119,15 @@ mod tests {
             skills < prompts,
             "skills should appear above prompts in the left nav"
         );
+    }
+
+    #[test]
+    fn hermes_nav_uses_memory_instead_of_prompts() {
+        assert!(NavItem::HERMES_ALL
+            .iter()
+            .any(|item| matches!(item, NavItem::HermesMemory)));
+        assert!(!NavItem::HERMES_ALL
+            .iter()
+            .any(|item| matches!(item, NavItem::Prompts)));
     }
 }

@@ -5,7 +5,6 @@ use crate::cli::i18n::texts;
 use crate::cli::tui::form::strip_common_config_from_settings;
 use crate::commands::workspace;
 use crate::error::AppError;
-use crate::hermes_config::{write_memory, MemoryKind};
 use crate::openclaw_config::{
     set_agents_defaults, set_env_config, set_tools_config, OpenClawAgentsDefaults,
     OpenClawEnvConfig, OpenClawToolsConfig,
@@ -245,9 +244,6 @@ pub(super) fn submit(
         } => submit_prompt_create(ctx, id, name, description, content),
         EditorSubmit::PromptEdit { id } => submit_prompt_edit(ctx, id, content),
         EditorSubmit::ProviderFormApplyJson => submit_provider_form_apply_json(ctx, content),
-        EditorSubmit::ProviderFormApplyHermesModels => {
-            submit_provider_form_apply_hermes_models(ctx, content)
-        }
         EditorSubmit::ProviderFormApplyOpenClawModels => {
             submit_provider_form_apply_openclaw_models(ctx, content)
         }
@@ -283,19 +279,16 @@ pub(super) fn submit(
 
 fn submit_hermes_memory(
     ctx: &mut RuntimeActionContext<'_>,
-    kind: MemoryKind,
+    kind: crate::hermes_config::MemoryKind,
     content: String,
 ) -> Result<(), AppError> {
-    write_memory(kind, &content)?;
-    match kind {
-        MemoryKind::Memory => ctx.data.config.hermes_memory.memory_content = content,
-        MemoryKind::User => ctx.data.config.hermes_memory.user_content = content,
-    }
+    crate::hermes_config::write_memory(kind, &content)?;
     ctx.app.editor = None;
     ctx.app.push_toast(
-        crate::t!("Hermes memory saved", "Hermes 记忆已保存"),
+        texts::tui_hermes_memory_saved(super::config::hermes_memory_kind_label(kind)),
         ToastKind::Success,
     );
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
     Ok(())
 }
 
@@ -557,17 +550,6 @@ fn submit_provider_form_apply_json(
             let mut provider_value = form.to_provider_json_value();
             if let Some(obj) = provider_value.as_object_mut() {
                 obj.insert("settingsConfig".to_string(), settings_value.clone());
-                if matches!(form.app_type, AppType::Hermes) {
-                    if let Some(name) = settings_value
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                    {
-                        obj.insert("id".to_string(), json!(name));
-                        obj.insert("name".to_string(), json!(name));
-                    }
-                }
             }
             Some(provider_value)
         }
@@ -634,50 +616,6 @@ fn submit_provider_form_apply_usage_script_code(
         form.usage_query_code = content;
         form.touch_usage_query();
     }
-    ctx.app.editor = None;
-    Ok(())
-}
-
-fn submit_provider_form_apply_hermes_models(
-    ctx: &mut RuntimeActionContext<'_>,
-    content: String,
-) -> Result<(), AppError> {
-    // 允许用户提交空文本来清空模型列表（apply_hermes_models_value 期望
-    // array / object 中的一个，因此空字符串需在此处转换为空数组）。
-    let trimmed = content.trim();
-    let models_value: Value = if trimmed.is_empty() {
-        Value::Array(Vec::new())
-    } else {
-        match serde_json::from_str(trimmed) {
-            Ok(value) => value,
-            Err(e) => {
-                ctx.app.push_toast(
-                    texts::tui_toast_invalid_json(&e.to_string()),
-                    ToastKind::Error,
-                );
-                return Ok(());
-            }
-        }
-    };
-
-    if !models_value.is_array() && !models_value.is_object() {
-        ctx.app.push_toast(
-            texts::tui_toast_json_must_be_object_or_array(),
-            ToastKind::Error,
-        );
-        return Ok(());
-    }
-
-    let apply_result = match ctx.app.form.as_mut() {
-        Some(FormState::ProviderAdd(form)) => form.apply_hermes_models_value(models_value),
-        _ => Ok(()),
-    };
-
-    if let Err(err) = apply_result {
-        ctx.app.push_toast(err, ToastKind::Error);
-        return Ok(());
-    }
-
     ctx.app.editor = None;
     Ok(())
 }

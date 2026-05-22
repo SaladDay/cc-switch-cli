@@ -1,24 +1,56 @@
 use super::*;
 
 impl App {
-    fn provider_switch_action(&mut self, row: &super::data::ProviderRow) -> Action {
-        if matches!(self.app_type, AppType::OpenCode) {
-            if row.is_in_config {
-                return Action::ProviderRemoveFromConfig { id: row.id.clone() };
-            }
+    fn is_provider_read_only(&self, row: &super::data::ProviderRow) -> bool {
+        super::data::provider_is_read_only(&self.app_type, row)
+    }
 
-            return Action::ProviderSwitch { id: row.id.clone() };
-        }
-        if matches!(self.app_type, AppType::OpenClaw) {
+    fn can_delete_provider(&self, row: &super::data::ProviderRow) -> bool {
+        !self.is_provider_read_only(row) && (self.app_type.is_additive_mode() || !row.is_current)
+    }
+
+    fn show_provider_read_only_toast(&mut self) {
+        self.push_toast(
+            texts::tui_toast_provider_managed_by_hermes(),
+            ToastKind::Info,
+        );
+    }
+
+    fn open_provider_delete_confirm(&mut self, row: &super::data::ProviderRow) {
+        self.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_confirm_delete_provider_title().to_string(),
+            message: texts::tui_confirm_delete_provider_message(
+                &super::data::provider_display_name(&self.app_type, row),
+                &row.id,
+            ),
+            action: ConfirmAction::ProviderDelete { id: row.id.clone() },
+        });
+    }
+
+    fn open_provider_remove_confirm(&mut self, row: &super::data::ProviderRow) {
+        self.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_confirm_remove_provider_title().to_string(),
+            message: texts::tui_confirm_remove_provider_message(
+                &super::data::provider_display_name(&self.app_type, row),
+            ),
+            action: ConfirmAction::ProviderRemoveFromConfig { id: row.id.clone() },
+        });
+    }
+
+    fn provider_switch_action(&mut self, row: &super::data::ProviderRow) -> Action {
+        if self.app_type.is_additive_mode() {
             if row.is_in_config {
-                if row.is_default_model {
+                if matches!(self.app_type, AppType::OpenClaw | AppType::Hermes)
+                    && row.is_default_model
+                {
                     self.push_toast(
                         texts::tui_toast_provider_cannot_remove_default_model(),
                         ToastKind::Warning,
                     );
                     return Action::None;
                 }
-                return Action::ProviderRemoveFromConfig { id: row.id.clone() };
+                self.open_provider_remove_confirm(row);
+                return Action::None;
             }
 
             return Action::ProviderSwitch { id: row.id.clone() };
@@ -60,6 +92,31 @@ impl App {
         };
     }
 
+    fn provider_set_default_action(&mut self, row: &super::data::ProviderRow) -> Action {
+        if !matches!(self.app_type, AppType::OpenClaw | AppType::Hermes) {
+            return Action::None;
+        }
+        if !row.is_in_config {
+            self.push_toast(
+                texts::tui_toast_provider_default_requires_live_config(),
+                ToastKind::Warning,
+            );
+            return Action::None;
+        }
+        let model_id = row.primary_model_id.clone().unwrap_or_default();
+        if matches!(self.app_type, AppType::OpenClaw) && model_id.is_empty() {
+            self.push_toast(
+                texts::tui_toast_provider_default_model_missing(),
+                ToastKind::Warning,
+            );
+            return Action::None;
+        }
+        Action::ProviderSetDefaultModel {
+            provider_id: row.id.clone(),
+            model_id,
+        }
+    }
+
     pub(crate) fn on_providers_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         let visible = visible_providers(&self.app_type, &self.filter, data);
         match key.code {
@@ -90,6 +147,10 @@ impl App {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
+                if self.is_provider_read_only(row) {
+                    self.show_provider_read_only_toast();
+                    return Action::None;
+                }
                 self.open_provider_edit_form(row, data);
                 Action::None
             }
@@ -103,47 +164,24 @@ impl App {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                if !matches!(self.app_type, AppType::OpenClaw) {
-                    return Action::None;
-                }
-                if !row.is_in_config {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_requires_live_config(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                }
-                let Some(model_id) = row.primary_model_id.clone() else {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_model_missing(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                };
-                Action::ProviderSetDefaultModel {
-                    provider_id: row.id.clone(),
-                    model_id,
-                }
+                self.provider_set_default_action(row)
             }
             KeyCode::Char('d') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                if row.is_current {
+                if self.is_provider_read_only(row) {
+                    self.show_provider_read_only_toast();
+                    return Action::None;
+                }
+                if !self.can_delete_provider(row) {
                     self.push_toast(
                         texts::tui_toast_provider_cannot_delete_current(),
                         ToastKind::Warning,
                     );
                     return Action::None;
                 }
-                self.overlay = Overlay::Confirm(ConfirmOverlay {
-                    title: texts::tui_confirm_delete_provider_title().to_string(),
-                    message: texts::tui_confirm_delete_provider_message(
-                        &super::data::provider_display_name(&self.app_type, row),
-                        &row.id,
-                    ),
-                    action: ConfirmAction::ProviderDelete { id: row.id.clone() },
-                });
+                self.open_provider_delete_confirm(row);
                 Action::None
             }
             KeyCode::Char('t') => {
@@ -204,34 +242,16 @@ impl App {
 
         match key.code {
             KeyCode::Char('e') => {
+                if self.is_provider_read_only(row) {
+                    self.show_provider_read_only_toast();
+                    return Action::None;
+                }
                 self.open_provider_edit_form(row, data);
                 Action::None
             }
             KeyCode::Enter => Action::None,
             KeyCode::Char('s') | KeyCode::Char(' ') => self.provider_switch_action(row),
-            KeyCode::Char('x') => {
-                if !matches!(self.app_type, AppType::OpenClaw) {
-                    return Action::None;
-                }
-                if !row.is_in_config {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_requires_live_config(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                }
-                let Some(model_id) = row.primary_model_id.clone() else {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_model_missing(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                };
-                Action::ProviderSetDefaultModel {
-                    provider_id: row.id.clone(),
-                    model_id,
-                }
-            }
+            KeyCode::Char('x') => self.provider_set_default_action(row),
             KeyCode::Char('t') => {
                 self.open_provider_test_menu(row);
                 Action::None

@@ -7,7 +7,6 @@ use crate::app_config::AppType;
 use crate::cli::i18n::current_language;
 use crate::cli::i18n::texts;
 use crate::cli::i18n::Language;
-use crate::hermes_config::MemoryKind;
 use crate::services::skill::SyncMethod;
 
 use super::data::UiData;
@@ -37,6 +36,7 @@ pub(crate) use app_state::{
     Action, App, ConfigItem, LocalProxySettingsItem, MoveDirection, ProxyVisualTransition,
     SettingsItem, WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
 };
+pub(crate) use content_config::HERMES_MEMORY_ROW_COUNT;
 pub use editor_state::{EditorKind, EditorMode, EditorState, EditorSubmit};
 pub(crate) use helpers::*;
 pub use types::{

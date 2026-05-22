@@ -895,6 +895,7 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
             | Route::ProviderDetail { .. }
             | Route::Mcp
             | Route::Prompts
+            | Route::HermesMemory
             | Route::Config
             | Route::ConfigOpenClawWorkspace
             | Route::ConfigOpenClawDailyMemory

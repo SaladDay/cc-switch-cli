@@ -706,6 +706,14 @@ pub fn tui_toast_provider_cannot_delete_current() -> &'static str {
     }
 }
 
+pub fn tui_toast_provider_managed_by_hermes() -> &'static str {
+    if is_chinese() {
+        "该供应商由 Hermes 管理，请在 Hermes Web UI 中编辑。"
+    } else {
+        "This provider is managed by Hermes. Edit it in the Hermes Web UI."
+    }
+}
+
 pub fn tui_confirm_delete_provider_title() -> &'static str {
     if is_chinese() {
         "删除供应商"

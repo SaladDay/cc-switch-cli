@@ -57,6 +57,7 @@ pub(super) fn set_apps(
         AppType::Codex,
         AppType::Gemini,
         AppType::OpenCode,
+        AppType::Hermes,
     ] {
         let next_enabled = apps.is_enabled_for(&app_type);
         if before.is_enabled_for(&app_type) == next_enabled {
