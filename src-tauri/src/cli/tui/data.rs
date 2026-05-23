@@ -369,7 +369,7 @@ impl UiData {
     // This method is called repeatedly during editing.
     // The ProvidersSnapshot in UiData never change, so it is safe to cache the existing_provider_ids.
     // However, the tests relied on a mutable and ProvidersSnapshot in UiData,
-    // so keep it re-computed every time for simplicity. 
+    // so keep it re-computed every time for simplicity.
     // If performance becomes an issue, we can refactor the tests to allow caching the existing_provider_ids.
     pub(crate) fn existing_provider_ids(&self) -> Vec<String> {
         self.providers
