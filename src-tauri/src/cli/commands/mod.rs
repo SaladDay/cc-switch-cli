@@ -2,6 +2,7 @@ pub mod completions;
 pub mod config;
 mod config_common;
 pub mod config_webdav;
+pub mod copilot;
 #[cfg(unix)]
 pub mod daemon;
 pub mod env;

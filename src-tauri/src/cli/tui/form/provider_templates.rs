@@ -13,6 +13,7 @@ enum ProviderTemplateId {
     CodexOAuth,
     OpenAiOfficial,
     GoogleOAuth,
+    GitHubCopilot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +141,7 @@ static SPONSOR_PROVIDER_PRESETS_HERMES: [SponsorProviderPreset; 1] = [SPONSOR_PR
 static SPONSOR_PROVIDER_PRESETS_OPENCLAW: [SponsorProviderPreset; 2] =
     [SPONSOR_PROVIDER_PRESETS[1], SPONSOR_PROVIDER_PRESETS[2]];
 
-static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 3] = [
+static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 4] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Custom,
         label: "Custom",
@@ -152,6 +153,10 @@ static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 3] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::CodexOAuth,
         label: "Codex",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::GitHubCopilot,
+        label: "GitHub Copilot",
     },
 ];
 
@@ -388,6 +393,30 @@ impl ProviderAddFormState {
                     self.name.set("Google OAuth");
                     self.website_url.set("https://ai.google.dev");
                     self.gemini_auth_type = GeminiAuthType::OAuth;
+                }
+                ProviderTemplateId::GitHubCopilot => {
+                    self.extra = json!({
+                        "meta": {
+                            "providerType": "github_copilot",
+                            "apiFormat": "openai_chat",
+                            "authBinding": {
+                                "source": "managed_account",
+                                "authProvider": "github_copilot",
+                            }
+                        }
+                    });
+                    self.name.set("GitHub Copilot");
+                    self.website_url
+                        .set("https://github.com/features/copilot");
+                    self.claude_base_url.set("https://api.githubcopilot.com");
+                    self.claude_api_format = ClaudeApiFormat::OpenAiChat;
+                    self.claude_api_key.set("");
+                    self.claude_model.set("claude-sonnet-4.6");
+                    self.claude_haiku_model.set("claude-haiku-4.5");
+                    self.claude_sonnet_model.set("claude-sonnet-4.6");
+                    self.claude_opus_model.set("claude-sonnet-4.6");
+                    self.claude_reasoning_model.set("");
+                    self.claude_model_config_touched = false;
                 }
             };
         }

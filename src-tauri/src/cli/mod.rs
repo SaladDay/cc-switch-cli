@@ -65,6 +65,10 @@ pub enum Commands {
     #[command(subcommand)]
     Failover(commands::failover::FailoverCommand),
 
+    /// GitHub Copilot OAuth: login, logout, list accounts
+    #[command(subcommand)]
+    Copilot(commands::copilot::CopilotCommand),
+
     /// Hermes-specific commands (memory blobs etc.)
     #[command(subcommand)]
     Hermes(commands::hermes::HermesCommand),

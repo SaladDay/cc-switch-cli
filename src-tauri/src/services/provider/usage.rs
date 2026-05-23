@@ -1,12 +1,9 @@
-use std::sync::OnceLock;
-
 use regex::Regex;
-use tokio::sync::RwLock;
 
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::provider::{Provider, UsageData, UsageResult, UsageScript};
-use crate::proxy::providers::copilot_auth::CopilotAuthManager;
+use crate::services::CopilotService;
 use crate::settings;
 use crate::store::AppState;
 use crate::usage_script;
@@ -17,8 +14,6 @@ const TEMPLATE_TYPE_GITHUB_COPILOT: &str = "github_copilot";
 const TEMPLATE_TYPE_TOKEN_PLAN: &str = "token_plan";
 const TEMPLATE_TYPE_BALANCE: &str = "balance";
 const COPILOT_UNIT_PREMIUM: &str = "requests";
-
-static CLI_COPILOT_AUTH_MANAGER: OnceLock<RwLock<CopilotAuthManager>> = OnceLock::new();
 
 impl ProviderService {
     /// 执行用量脚本并格式化结果（私有辅助方法）
@@ -247,17 +242,11 @@ impl ProviderService {
         let copilot_account_id = provider
             .and_then(|p| p.meta.as_ref())
             .and_then(|m| m.managed_account_id_for(TEMPLATE_TYPE_GITHUB_COPILOT));
-        let manager = CLI_COPILOT_AUTH_MANAGER.get_or_init(|| {
-            RwLock::new(CopilotAuthManager::new(crate::config::get_app_config_dir()))
-        });
-        let auth_manager = manager.read().await;
         let usage = match copilot_account_id.as_deref() {
-            Some(account_id) => auth_manager
-                .fetch_usage_for_account(account_id)
+            Some(account_id) => CopilotService::fetch_usage_for_account(account_id)
                 .await
                 .map_err(|e| format!("Failed to fetch Copilot usage: {e}"))?,
-            None => auth_manager
-                .fetch_usage()
+            None => CopilotService::fetch_usage()
                 .await
                 .map_err(|e| format!("Failed to fetch Copilot usage: {e}"))?,
         };

@@ -46,6 +46,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "Claude Official",
             "Codex",
+            "GitHub Copilot",
             "* PackyCode",
             "* AICodeMirror",
             "* Cubence",
@@ -223,6 +224,26 @@ fn provider_add_form_google_oauth_template_marks_official_metadata() {
     assert_eq!(
         provider["meta"]["partnerPromotionKey"], "google-official",
         "Google OAuth should be distinguishable from stripped custom Gemini providers"
+    );
+}
+
+#[test]
+fn provider_add_form_github_copilot_template_seeds_managed_account_metadata() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    let existing_ids = Vec::<String>::new();
+    let idx = template_index_by_label(AppType::Claude, "GitHub Copilot");
+
+    form.apply_template(idx, &existing_ids);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["meta"]["providerType"], "github_copilot");
+    assert_eq!(provider["meta"]["apiFormat"], "openai_chat");
+    assert_eq!(
+        provider["meta"]["authBinding"]["source"], "managed_account",
+        "Copilot template must mark itself as managed_account so token injection runs"
+    );
+    assert_eq!(
+        provider["meta"]["authBinding"]["authProvider"], "github_copilot"
     );
 }
 

@@ -1471,3 +1471,121 @@ pub fn tui_settings_openclaw_config_dir_prompt() -> &'static str {
 pub fn tui_settings_openclaw_config_dir_default_value() -> &'static str {
     "Default (~/.openclaw)"
 }
+
+// --- GitHub Copilot ---
+
+pub fn copilot_template_label() -> &'static str {
+    "GitHub Copilot"
+}
+
+pub fn copilot_template_hint_run_login() -> &'static str {
+    if is_chinese() {
+        "保存后请运行 `cc-switch copilot login` 完成 GitHub 设备码授权"
+    } else {
+        "After saving, run `cc-switch copilot login` to complete GitHub device-code authorization"
+    }
+}
+
+pub fn copilot_login_starting() -> &'static str {
+    if is_chinese() {
+        "正在向 GitHub 申请设备码..."
+    } else {
+        "Requesting device code from GitHub..."
+    }
+}
+
+pub fn copilot_login_visit_url(url: &str, code: &str) -> String {
+    if is_chinese() {
+        format!("请在浏览器打开 {url} 并输入授权码：{code}")
+    } else {
+        format!("Open {url} in your browser and enter the user code: {code}")
+    }
+}
+
+pub fn copilot_login_waiting() -> &'static str {
+    if is_chinese() {
+        "等待 GitHub 授权完成..."
+    } else {
+        "Waiting for GitHub authorization to complete..."
+    }
+}
+
+pub fn copilot_login_success(login: &str) -> String {
+    if is_chinese() {
+        format!("已成功登录 GitHub 账号：{login}")
+    } else {
+        format!("Successfully signed in to GitHub account: {login}")
+    }
+}
+
+pub fn copilot_login_failed(error: &str) -> String {
+    if is_chinese() {
+        format!("登录失败：{error}")
+    } else {
+        format!("Login failed: {error}")
+    }
+}
+
+pub fn copilot_login_create_provider_prompt() -> &'static str {
+    if is_chinese() {
+        "是否在 Claude 下创建 GitHub Copilot 供应商？"
+    } else {
+        "Create a GitHub Copilot provider under Claude?"
+    }
+}
+
+pub fn copilot_login_switch_to_provider_prompt() -> &'static str {
+    if is_chinese() {
+        "是否立即切换到该供应商？"
+    } else {
+        "Switch to this provider now?"
+    }
+}
+
+pub fn copilot_logout_success() -> &'static str {
+    if is_chinese() {
+        "已注销所有 GitHub Copilot 账号"
+    } else {
+        "Signed out of all GitHub Copilot accounts"
+    }
+}
+
+pub fn copilot_logout_account_success(account_id: &str) -> String {
+    if is_chinese() {
+        format!("已注销账号：{account_id}")
+    } else {
+        format!("Signed out of account: {account_id}")
+    }
+}
+
+pub fn copilot_no_accounts() -> &'static str {
+    if is_chinese() {
+        "暂无已认证的 GitHub Copilot 账号。运行 `cc-switch copilot login` 进行登录。"
+    } else {
+        "No authenticated GitHub Copilot accounts. Run `cc-switch copilot login` to sign in."
+    }
+}
+
+pub fn copilot_default_set(account_id: &str) -> String {
+    if is_chinese() {
+        format!("默认账号已设置为：{account_id}")
+    } else {
+        format!("Default account set to: {account_id}")
+    }
+}
+
+pub fn copilot_account_list_header() -> &'static str {
+    if is_chinese() {
+        "已认证的 GitHub 账号："
+    } else {
+        "Authenticated GitHub accounts:"
+    }
+}
+
+pub fn copilot_login_device_code_expired() -> &'static str {
+    if is_chinese() {
+        "设备码已过期，请重新运行登录命令。"
+    } else {
+        "Device code expired. Please re-run the login command."
+    }
+}

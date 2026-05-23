@@ -1,22 +1,29 @@
 use axum::http::HeaderMap;
 use serde_json::Value;
 
-use crate::services::CodexOAuthService;
+use crate::services::CopilotService;
 use crate::{app_config::AppType, provider::Provider};
 
 use super::super::{
     body_filter::filter_private_params_with_whitelist,
+    copilot_optimizer::{
+        classify_request, deterministic_interaction_id, deterministic_request_id,
+        merge_tool_results, sanitize_orphan_tool_results, strip_thinking_blocks,
+        CopilotClassification,
+    },
     error::ProxyError,
     http_client,
     json_canonical::canonicalize_value,
     model_mapper::apply_model_mapping,
     providers::{
-        apply_codex_chat_upstream_model, get_adapter, resolve_codex_chat_reasoning_config,
-        should_convert_codex_responses_to_chat, transform_codex_chat, AuthStrategy,
-        ProviderAdapter,
+        apply_codex_chat_upstream_model, copilot_model_map::apply_copilot_model_normalization,
+        get_adapter, resolve_codex_chat_reasoning_config, should_convert_codex_responses_to_chat,
+        transform_codex_chat, AuthStrategy, ProviderAdapter,
     },
 };
 use super::{ForwardOptions, RequestForwarder};
+
+use crate::services::CodexOAuthService;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 
@@ -72,11 +79,13 @@ impl RequestForwarder {
         let adapter = get_adapter(app_type);
         let is_claude_request = matches!(app_type, AppType::Claude);
         let mut upstream_endpoint = self.router.upstream_endpoint(app_type, provider, endpoint);
-        let base_url = adapter.extract_base_url(provider)?;
+        let mut base_url = adapter.extract_base_url(provider)?;
         let (mut mapped_body, _, _) = apply_model_mapping(body.clone(), provider);
         let codex_responses_to_chat = should_convert_codex_responses_to_chat(provider, endpoint)
             && matches!(app_type, AppType::Codex);
         let needs_transform = adapter.needs_transform(provider);
+
+        let is_copilot = is_claude_request && is_github_copilot_provider(provider);
 
         if is_claude_request && self.optimizer_config.enabled && is_bedrock_provider(provider) {
             if self.optimizer_config.thinking_optimizer {
@@ -87,6 +96,58 @@ impl RequestForwarder {
             }
             if self.optimizer_config.cache_injection {
                 super::super::cache_injector::inject(&mut mapped_body, &self.optimizer_config);
+            }
+        }
+
+        if is_copilot {
+            mapped_body = apply_copilot_model_normalization(mapped_body);
+        }
+
+        let copilot_optimization = if is_copilot && self.copilot_optimizer_config.enabled {
+            let has_anthropic_beta = headers.contains_key("anthropic-beta");
+            let classification = classify_request(
+                &mapped_body,
+                has_anthropic_beta,
+                self.copilot_optimizer_config.compact_detection,
+                self.copilot_optimizer_config.subagent_detection,
+            );
+
+            mapped_body = sanitize_orphan_tool_results(mapped_body);
+            if self.copilot_optimizer_config.tool_result_merging {
+                mapped_body = merge_tool_results(mapped_body);
+            }
+            if self.copilot_optimizer_config.strip_thinking {
+                mapped_body = strip_thinking_blocks(mapped_body);
+            }
+            if self.copilot_optimizer_config.warmup_downgrade && classification.is_warmup {
+                mapped_body["model"] =
+                    serde_json::json!(&self.copilot_optimizer_config.warmup_model);
+            }
+
+            let session_id = extract_copilot_session_id(body, headers);
+            let det_request_id = if self.copilot_optimizer_config.deterministic_request_id {
+                Some(deterministic_request_id(&mapped_body, &session_id))
+            } else {
+                None
+            };
+            let interaction_id = deterministic_interaction_id(&session_id);
+
+            Some((classification, det_request_id, interaction_id))
+        } else {
+            None
+        };
+
+        if is_copilot {
+            let account_id = provider
+                .meta
+                .as_ref()
+                .and_then(|m| m.managed_account_id_for("github_copilot"));
+            let dynamic_endpoint = match account_id.as_deref() {
+                Some(id) => CopilotService::get_api_endpoint(id).await,
+                None => CopilotService::get_default_api_endpoint().await,
+            };
+            if dynamic_endpoint != base_url {
+                base_url = dynamic_endpoint;
             }
         }
 
@@ -135,6 +196,8 @@ impl RequestForwarder {
             self.session_client_provided
                 .then_some(self.session_id.as_str()),
             force_identity_encoding,
+            copilot_optimization,
+            &self.copilot_optimizer_config,
         )
         .await
     }
@@ -153,6 +216,60 @@ fn prepare_upstream_request_body(request_body: Value) -> Value {
     canonicalize_value(filter_private_params_with_whitelist(request_body, &[]))
 }
 
+fn is_github_copilot_provider(provider: &Provider) -> bool {
+    if let Some(meta) = provider.meta.as_ref() {
+        if meta.provider_type.as_deref() == Some("github_copilot") {
+            return true;
+        }
+    }
+    provider
+        .settings_config
+        .get("env")
+        .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+        .and_then(|v| v.as_str())
+        .map(|url| url.contains("githubcopilot.com"))
+        .unwrap_or(false)
+}
+
+fn extract_copilot_session_id(body: &Value, headers: &HeaderMap) -> String {
+    let metadata = body.get("metadata");
+    if let Some(user_id) = metadata
+        .and_then(|m| m.get("user_id"))
+        .and_then(|v| v.as_str())
+    {
+        if let Some((_, session_id)) = user_id.split_once("_session_") {
+            if !session_id.is_empty() {
+                return session_id.to_string();
+            }
+        }
+    }
+    if let Some(session_id) = metadata
+        .and_then(|m| m.get("session_id"))
+        .and_then(|v| v.as_str())
+    {
+        if !session_id.is_empty() {
+            return session_id.to_string();
+        }
+    }
+    if let Some(user_id) = metadata
+        .and_then(|m| m.get("user_id"))
+        .and_then(|v| v.as_str())
+    {
+        if !user_id.is_empty() {
+            return user_id.to_string();
+        }
+    }
+    if let Some(session_id) = headers.get("x-session-id").and_then(|v| v.to_str().ok()) {
+        if !session_id.is_empty() {
+            return session_id.to_string();
+        }
+    }
+    String::new()
+}
+
+// PLACEHOLDER_BUILD_REQUEST
+
+#[allow(clippy::too_many_arguments)]
 async fn build_request(
     client: &reqwest::Client,
     adapter: &dyn ProviderAdapter,
@@ -165,6 +282,8 @@ async fn build_request(
     is_claude_request: bool,
     client_session_id: Option<&str>,
     force_identity_encoding: bool,
+    copilot_optimization: Option<(CopilotClassification, Option<String>, Option<String>)>,
+    copilot_optimizer_config: &super::super::types::CopilotOptimizerConfig,
 ) -> Result<reqwest::RequestBuilder, ProxyError> {
     let (endpoint_path, endpoint_query) = split_endpoint_and_query(endpoint);
     let url = if base_url
@@ -177,7 +296,7 @@ async fn build_request(
     } else {
         adapter.build_url(base_url, endpoint)
     };
-    let mut request = client.post(url);
+    let mut request = client.post(&url);
 
     for (key, value) in headers {
         if key.as_str().eq_ignore_ascii_case("accept-encoding") {
@@ -226,42 +345,68 @@ async fn build_request(
         request = request.header("accept-encoding", "identity");
     }
 
+    // PLACEHOLDER_AUTH_SECTION
+
     if let Some(auth) = adapter.extract_auth(provider) {
         let mut effective_auth = auth.clone();
-        if auth.strategy == AuthStrategy::CodexOAuth {
-            let account_id = provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.managed_account_id_for("codex_oauth"));
+        match auth.strategy {
+            AuthStrategy::CodexOAuth => {
+                let account_id = provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.managed_account_id_for("codex_oauth"));
 
-            match match &account_id {
-                Some(id) => CodexOAuthService::get_valid_token_for_account(id).await,
-                None => CodexOAuthService::get_valid_token().await,
-            } {
-                Ok(token) => {
-                    effective_auth.api_key = token;
-                    request = adapter.add_auth_headers(request, &effective_auth);
-                    let resolved_account_id = match account_id {
-                        Some(id) => Some(id),
-                        None => CodexOAuthService::default_account_id().await,
-                    };
-                    if let Some(account_id) = resolved_account_id {
-                        request = request.header("ChatGPT-Account-Id", account_id);
-                    }
-                    if let Some(session_id) = client_session_id {
-                        for (name, value) in build_codex_oauth_session_headers(session_id) {
-                            request = request.header(name, value);
+                match match &account_id {
+                    Some(id) => CodexOAuthService::get_valid_token_for_account(id).await,
+                    None => CodexOAuthService::get_valid_token().await,
+                } {
+                    Ok(token) => {
+                        effective_auth.api_key = token;
+                        request = adapter.add_auth_headers(request, &effective_auth);
+                        let resolved_account_id = match account_id {
+                            Some(id) => Some(id),
+                            None => CodexOAuthService::default_account_id().await,
+                        };
+                        if let Some(account_id) = resolved_account_id {
+                            request = request.header("ChatGPT-Account-Id", account_id);
+                        }
+                        if let Some(session_id) = client_session_id {
+                            for (name, value) in build_codex_oauth_session_headers(session_id) {
+                                request = request.header(name, value);
+                            }
                         }
                     }
-                }
-                Err(error) => {
-                    return Err(ProxyError::AuthError(format!(
-                        "Codex OAuth 认证失败: {error}"
-                    )));
+                    Err(error) => {
+                        return Err(ProxyError::AuthError(format!(
+                            "Codex OAuth 认证失败: {error}"
+                        )));
+                    }
                 }
             }
-        } else {
-            request = adapter.add_auth_headers(request, &effective_auth);
+            AuthStrategy::GitHubCopilot => {
+                let account_id = provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.managed_account_id_for("github_copilot"));
+
+                match match account_id.as_deref() {
+                    Some(id) => CopilotService::get_valid_token_for_account(id).await,
+                    None => CopilotService::get_valid_token().await,
+                } {
+                    Ok(token) => {
+                        effective_auth.api_key = token;
+                        request = adapter.add_auth_headers(request, &effective_auth);
+                    }
+                    Err(error) => {
+                        return Err(ProxyError::AuthError(format!(
+                            "GitHub Copilot 认证失败: {error}"
+                        )));
+                    }
+                }
+            }
+            _ => {
+                request = adapter.add_auth_headers(request, &effective_auth);
+            }
         }
     }
 
@@ -273,9 +418,26 @@ async fn build_request(
         request = request.header("anthropic-version", version);
     }
 
+    if let Some((classification, det_request_id, interaction_id)) = copilot_optimization {
+        if copilot_optimizer_config.request_classification {
+            request = request.header("x-initiator", classification.initiator);
+        }
+        if classification.is_subagent {
+            request = request.header("x-interaction-type", "conversation-subagent");
+        }
+        if let Some(ref det_id) = det_request_id {
+            request = request.header("x-request-id", det_id.as_str());
+        }
+        if let Some(ref iid) = interaction_id {
+            request = request.header("x-interaction-id", iid.as_str());
+        }
+    }
+
     reject_proxy_placeholder_for_managed_account_upstream(&request)?;
     Ok(request.json(request_body))
 }
+
+// PLACEHOLDER_REMAINING_FNS
 
 fn split_endpoint_and_query(endpoint: &str) -> (&str, Option<&str>) {
     endpoint
@@ -408,7 +570,7 @@ fn build_codex_oauth_session_headers(
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_upstream_request_body;
+    use super::*;
     use serde_json::json;
 
     #[test]

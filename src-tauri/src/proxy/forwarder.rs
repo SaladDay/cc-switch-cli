@@ -18,6 +18,7 @@ use super::{
     thinking_rectifier::{
         normalize_thinking_type, rectify_anthropic_request, should_rectify_thinking_signature,
     },
+    types::CopilotOptimizerConfig,
     types::OptimizerConfig,
     types::RectifierConfig,
 };
@@ -30,6 +31,7 @@ pub struct RequestForwarder {
     session_id: String,
     session_client_provided: bool,
     codex_chat_history: Option<Arc<CodexChatHistoryStore>>,
+    copilot_optimizer_config: CopilotOptimizerConfig,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -114,6 +116,7 @@ impl RequestForwarder {
             session_id: String::new(),
             session_client_provided: false,
             codex_chat_history: None,
+            copilot_optimizer_config: CopilotOptimizerConfig::default(),
         })
     }
 
@@ -130,6 +133,14 @@ impl RequestForwarder {
 
     pub fn with_codex_chat_history(mut self, history: Arc<CodexChatHistoryStore>) -> Self {
         self.codex_chat_history = Some(history);
+        self
+    }
+
+    pub fn with_copilot_optimizer_config(
+        mut self,
+        copilot_optimizer_config: CopilotOptimizerConfig,
+    ) -> Self {
+        self.copilot_optimizer_config = copilot_optimizer_config;
         self
     }
 

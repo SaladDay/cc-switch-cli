@@ -216,6 +216,27 @@ fn add_provider(app_type: AppType) -> Result<(), AppError> {
     println!("{}", highlight("Add New Provider"));
     println!("{}", "=".repeat(50));
 
+    // GitHub Copilot fast-path for Claude: offer device-code login + auto provider creation.
+    if matches!(app_type, AppType::Claude) {
+        let use_copilot = Confirm::new(texts::copilot_login_create_provider_prompt())
+            .with_default(false)
+            .prompt()
+            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+        if use_copilot {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    AppError::Message(format!("failed to create async runtime: {e}"))
+                })?;
+            let cmd = crate::cli::commands::copilot::CopilotCommand::Login {
+                domain: None,
+                no_provider: false,
+            };
+            return runtime.block_on(crate::cli::commands::copilot::execute_async(cmd));
+        }
+    }
+
     let add_mode = if supports_official_provider(&app_type) {
         let choices = vec![
             texts::add_official_provider(),

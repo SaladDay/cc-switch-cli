@@ -4,6 +4,7 @@ pub mod codex_oauth;
 pub mod codex_oauth_models;
 pub mod coding_plan;
 pub mod config;
+pub mod copilot;
 pub mod env_checker;
 #[allow(dead_code)]
 pub mod env_manager;
@@ -25,6 +26,7 @@ pub mod webdav_sync;
 pub use auth::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus};
 pub use codex_oauth::CodexOAuthService;
 pub use config::ConfigService;
+pub use copilot::CopilotService;
 pub use mcp::McpService;
 pub use model_fetch::FetchedModel;
 pub use prompt::PromptService;
