@@ -333,6 +333,22 @@ fn convert_messages_to_input(messages: &[Value]) -> Result<Vec<Value>, ProxyErro
     Ok(input)
 }
 
+pub(crate) fn sanitize_anthropic_tool_use_input(tool_name: &str, mut input: Value) -> Value {
+    if tool_name == "Read" {
+        if let Some(object) = input.as_object_mut() {
+            if object
+                .get("pages")
+                .and_then(Value::as_str)
+                .is_some_and(|pages| pages.trim().is_empty())
+            {
+                object.remove("pages");
+            }
+        }
+    }
+
+    input
+}
+
 pub fn responses_to_anthropic(body: Value) -> Result<Value, ProxyError> {
     let output = body
         .get("output")
@@ -374,6 +390,7 @@ pub fn responses_to_anthropic(body: Value) -> Result<Value, ProxyError> {
                     .and_then(|a| a.as_str())
                     .unwrap_or("{}");
                 let input: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
+                let input = sanitize_anthropic_tool_use_input(name, input);
 
                 content.push(json!({
                     "type": "tool_use",
@@ -540,5 +557,68 @@ mod tests {
         let result = anthropic_to_responses(input, None, false).expect("transform responses");
 
         assert_eq!(result["reasoning"]["effort"], json!("xhigh"));
+    }
+
+    #[test]
+    fn responses_to_anthropic_removes_empty_pages_from_read_tool_input() {
+        let input = json!({
+            "id": "resp_1",
+            "status": "completed",
+            "model": "gpt-4.1-mini",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_read",
+                "name": "Read",
+                "arguments": "{\"file_path\":\"/tmp/example.txt\",\"pages\":\"\"}"
+            }]
+        });
+
+        let result = responses_to_anthropic(input).expect("transform responses");
+
+        assert_eq!(
+            result["content"][0]["input"],
+            json!({"file_path": "/tmp/example.txt"})
+        );
+    }
+
+    #[test]
+    fn responses_to_anthropic_preserves_non_empty_read_pages() {
+        let input = json!({
+            "id": "resp_1",
+            "status": "completed",
+            "model": "gpt-4.1-mini",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_read",
+                "name": "Read",
+                "arguments": "{\"file_path\":\"/tmp/example.pdf\",\"pages\":\"1-3\"}"
+            }]
+        });
+
+        let result = responses_to_anthropic(input).expect("transform responses");
+
+        assert_eq!(
+            result["content"][0]["input"],
+            json!({"file_path": "/tmp/example.pdf", "pages": "1-3"})
+        );
+    }
+
+    #[test]
+    fn responses_to_anthropic_does_not_sanitize_non_read_tool_pages() {
+        let input = json!({
+            "id": "resp_1",
+            "status": "completed",
+            "model": "gpt-4.1-mini",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_other",
+                "name": "OtherTool",
+                "arguments": "{\"pages\":\"\"}"
+            }]
+        });
+
+        let result = responses_to_anthropic(input).expect("transform responses");
+
+        assert_eq!(result["content"][0]["input"], json!({"pages": ""}));
     }
 }

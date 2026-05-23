@@ -5,7 +5,19 @@ use std::collections::{HashMap, HashSet};
 
 use crate::proxy::response::StreamCompletion;
 
-use super::transform_responses::{build_anthropic_usage_from_responses, map_responses_stop_reason};
+use super::transform_responses::{
+    build_anthropic_usage_from_responses, map_responses_stop_reason,
+    sanitize_anthropic_tool_use_input,
+};
+
+fn sanitize_tool_arguments_json(tool_name: &str, arguments: &str) -> String {
+    let Ok(input) = serde_json::from_str::<Value>(arguments) else {
+        return arguments.to_string();
+    };
+
+    serde_json::to_string(&sanitize_anthropic_tool_use_input(tool_name, input))
+        .unwrap_or_else(|_| arguments.to_string())
+}
 
 #[inline]
 fn response_object_from_event(data: &Value) -> &Value {
@@ -95,6 +107,8 @@ pub fn create_anthropic_sse_stream_from_responses(
         let mut open_indices: HashSet<u32> = HashSet::new();
         let mut fallback_open_index: Option<u32> = None;
         let mut tool_index_by_item_id: HashMap<String, u32> = HashMap::new();
+        let mut tool_name_by_index: HashMap<u32, String> = HashMap::new();
+        let mut read_arguments_by_index: HashMap<u32, String> = HashMap::new();
         let mut last_tool_index: Option<u32> = None;
 
         tokio::pin!(stream);
@@ -292,6 +306,7 @@ pub fn create_anthropic_sse_stream_from_responses(
                                             tool_index_by_item_id.insert(item_id.to_string(), index);
                                         }
                                         last_tool_index = Some(index);
+                                        tool_name_by_index.insert(index, name.to_string());
 
                                         if open_indices.contains(&index) {
                                             continue;
@@ -331,6 +346,20 @@ pub fn create_anthropic_sse_stream_from_responses(
                                         assigned
                                     });
 
+                                    if let Some(item_id) = item_id {
+                                        tool_index_by_item_id
+                                            .entry(item_id.to_string())
+                                            .or_insert(index);
+                                    }
+                                    last_tool_index = Some(index);
+
+                                    if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
+                                        tool_name_by_index.insert(index, name.to_string());
+                                    }
+                                    let is_read_tool = tool_name_by_index
+                                        .get(&index)
+                                        .is_some_and(|name| name == "Read");
+
                                     if !open_indices.contains(&index) {
                                         let start_event = json!({
                                             "type": "content_block_start",
@@ -351,6 +380,14 @@ pub fn create_anthropic_sse_stream_from_responses(
                                         let start_sse = format!("event: content_block_start\ndata: {}\n\n", serde_json::to_string(&start_event).unwrap_or_default());
                                         yield Ok(Bytes::from(start_sse));
                                         open_indices.insert(index);
+                                    }
+
+                                    if is_read_tool {
+                                        read_arguments_by_index
+                                            .entry(index)
+                                            .or_default()
+                                            .push_str(delta);
+                                        continue;
                                     }
 
                                     let event = json!({
@@ -381,9 +418,33 @@ pub fn create_anthropic_sse_stream_from_responses(
                                     if !open_indices.remove(&index) {
                                         continue;
                                     }
+                                    if tool_name_by_index
+                                        .get(&index)
+                                        .is_some_and(|name| name == "Read")
+                                    {
+                                        let arguments = data
+                                            .get("arguments")
+                                            .and_then(|v| v.as_str())
+                                            .map(ToOwned::to_owned)
+                                            .or_else(|| read_arguments_by_index.remove(&index))
+                                            .unwrap_or_default();
+                                        let sanitized = sanitize_tool_arguments_json("Read", &arguments);
+                                        let delta_event = json!({
+                                            "type": "content_block_delta",
+                                            "index": index,
+                                            "delta": {
+                                                "type": "input_json_delta",
+                                                "partial_json": sanitized
+                                            }
+                                        });
+                                        let delta_sse = format!("event: content_block_delta\ndata: {}\n\n", serde_json::to_string(&delta_event).unwrap_or_default());
+                                        yield Ok(Bytes::from(delta_sse));
+                                    }
                                     let event = json!({ "type": "content_block_stop", "index": index });
                                     let sse = format!("event: content_block_stop\ndata: {}\n\n", serde_json::to_string(&event).unwrap_or_default());
                                     yield Ok(Bytes::from(sse));
+                                    tool_name_by_index.remove(&index);
+                                    read_arguments_by_index.remove(&index);
                                     if let Some(item_id) = item_id {
                                         tool_index_by_item_id.remove(item_id);
                                     }
@@ -431,6 +492,39 @@ pub fn create_anthropic_sse_stream_from_responses(
                                         .pointer("/incomplete_details/reason")
                                         .and_then(|r| r.as_str()),
                                 );
+
+                                if !read_arguments_by_index.is_empty() {
+                                    let mut buffered_indices: Vec<u32> = read_arguments_by_index
+                                        .keys()
+                                        .copied()
+                                        .collect();
+                                    buffered_indices.sort_unstable();
+                                    for index in buffered_indices {
+                                        if !open_indices.contains(&index) {
+                                            continue;
+                                        }
+                                        if !tool_name_by_index
+                                            .get(&index)
+                                            .is_some_and(|name| name == "Read")
+                                        {
+                                            continue;
+                                        }
+                                        let arguments = read_arguments_by_index
+                                            .remove(&index)
+                                            .unwrap_or_default();
+                                        let sanitized = sanitize_tool_arguments_json("Read", &arguments);
+                                        let delta_event = json!({
+                                            "type": "content_block_delta",
+                                            "index": index,
+                                            "delta": {
+                                                "type": "input_json_delta",
+                                                "partial_json": sanitized
+                                            }
+                                        });
+                                        let delta_sse = format!("event: content_block_delta\ndata: {}\n\n", serde_json::to_string(&delta_event).unwrap_or_default());
+                                        yield Ok(Bytes::from(delta_sse));
+                                    }
+                                }
 
                                 if !open_indices.is_empty() {
                                     let mut remaining: Vec<u32> = open_indices.iter().copied().collect();
@@ -490,6 +584,78 @@ pub fn create_anthropic_sse_stream_from_responses(
 mod tests {
     use super::*;
     use futures::{stream, StreamExt};
+
+    async fn collect_converted_events(input: &'static str) -> Vec<Value> {
+        let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(input))]);
+        let converted =
+            create_anthropic_sse_stream_from_responses(upstream, StreamCompletion::default());
+        let merged = converted
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
+            .collect::<String>();
+
+        merged
+            .split("\n\n")
+            .filter_map(|block| {
+                block.lines().find_map(|line| {
+                    line.strip_prefix("data: ")
+                        .and_then(|data| serde_json::from_str(data).ok())
+                })
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn streaming_responses_buffers_and_sanitizes_read_tool_arguments() {
+        let input = concat!(
+            "event: response.created\ndata: {\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4.1-mini\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_read\",\"name\":\"Read\"}}\n\n",
+            "event: response.function_call_arguments.delta\ndata: {\"item_id\":\"fc_1\",\"delta\":\"{\\\"file_path\\\":\"}\n\n",
+            "event: response.function_call_arguments.delta\ndata: {\"item_id\":\"fc_1\",\"delta\":\"\\\"/tmp/example.txt\\\",\\\"pages\\\":\\\"\\\"}\"}\n\n",
+            "event: response.function_call_arguments.done\ndata: {\"item_id\":\"fc_1\"}\n\n",
+            "event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
+        );
+
+        let events = collect_converted_events(input).await;
+        let partial_json = events
+            .iter()
+            .find_map(|event| {
+                (event["type"] == "content_block_delta")
+                    .then(|| event["delta"]["partial_json"].as_str())
+                    .flatten()
+            })
+            .expect("sanitized input_json_delta");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(partial_json).expect("valid JSON"),
+            json!({"file_path": "/tmp/example.txt"})
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_responses_preserves_non_read_tool_argument_deltas() {
+        let input = concat!(
+            "event: response.created\ndata: {\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4.1-mini\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_other\",\"name\":\"OtherTool\"}}\n\n",
+            "event: response.function_call_arguments.delta\ndata: {\"item_id\":\"fc_1\",\"delta\":\"{\\\"pages\\\":\\\"\\\"}\"}\n\n",
+            "event: response.function_call_arguments.done\ndata: {\"item_id\":\"fc_1\"}\n\n",
+            "event: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n"
+        );
+
+        let events = collect_converted_events(input).await;
+        let partial_json = events
+            .iter()
+            .find_map(|event| {
+                (event["type"] == "content_block_delta")
+                    .then(|| event["delta"]["partial_json"].as_str())
+                    .flatten()
+            })
+            .expect("forwarded input_json_delta");
+
+        assert_eq!(partial_json, "{\"pages\":\"\"}");
+    }
 
     #[tokio::test]
     async fn completed_event_ends_stream_without_waiting_for_upstream_eof() {
