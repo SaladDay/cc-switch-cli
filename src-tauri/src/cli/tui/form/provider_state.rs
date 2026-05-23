@@ -226,6 +226,7 @@ impl ProviderAddFormState {
         form.mode = FormMode::Add;
         form.id_is_manual = false;
         form.name.set(format!("{} copy", provider.name.trim()));
+        // Remove fields that should be unique or not copied over
         if let Some(extra) = form.extra.as_object_mut() {
             for key in ["id", "createdAt", "sortIndex", "inFailoverQueue"] {
                 extra.remove(key);
