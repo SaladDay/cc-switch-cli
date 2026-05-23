@@ -446,9 +446,43 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn duplicate_provider(_app_type: AppType, id: &str) -> Result<(), AppError> {
-    println!("{}", info(&format!("Duplicating provider '{}'...", id)));
-    println!("{}", error("Provider duplication is not yet implemented."));
+fn duplicate_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
+    let state = AppState::try_new()?;
+    let (original, existing_ids) = {
+        let config = state.config.read().map_err(AppError::from)?;
+        let manager = config
+            .get_manager(&app_type)
+            .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
+        let original = manager
+            .providers
+            .get(id)
+            .ok_or_else(|| {
+                let msg = texts::entity_not_found(texts::entity_provider(), id);
+                AppError::localized("provider.not_found", msg.clone(), msg)
+            })?
+            .clone();
+        let existing_ids = manager.providers.keys().cloned().collect::<Vec<_>>();
+        (original, existing_ids)
+    };
+
+    let duplicate_name = format!("{} copy", original.name.trim());
+    let duplicate_id = generate_provider_id(&duplicate_name, &existing_ids);
+    let mut duplicate = original;
+    duplicate.id = duplicate_id.clone();
+    duplicate.name = duplicate_name;
+    duplicate.created_at = None;
+    duplicate.sort_index = None;
+    duplicate.in_failover_queue = false;
+
+    ProviderService::add(&state, app_type, duplicate)?;
+
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Duplicated provider '{}' as '{}'",
+            id, duplicate_id
+        ))
+    );
     Ok(())
 }
 
