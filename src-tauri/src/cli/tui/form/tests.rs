@@ -2942,6 +2942,52 @@ fn provider_edit_form_roundtrip_no_duplicate_common_config_key() {
 }
 
 #[test]
+fn provider_copy_form_uses_new_record_identity_without_queue_state() {
+    use crate::provider::ProviderMeta;
+
+    let mut provider = Provider {
+        id: "test-provider".to_string(),
+        name: "Test Provider".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-test"
+            }
+        }),
+        website_url: Some("https://example.com".to_string()),
+        category: Some("third_party".to_string()),
+        created_at: Some(123),
+        sort_index: Some(7),
+        notes: Some("Keep visible notes".to_string()),
+        meta: Some(ProviderMeta {
+            endpoint_auto_select: Some(true),
+            ..Default::default()
+        }),
+        icon: Some("anthropic".to_string()),
+        icon_color: Some("#111111".to_string()),
+        in_failover_queue: true,
+    };
+    provider.meta.as_mut().unwrap().apply_common_config = Some(true);
+
+    let form = ProviderAddFormState::copy_from_provider_with_common_snippet(
+        AppType::Claude,
+        &provider,
+        "",
+        &["test-provider".to_string()],
+    );
+    let copied = form.to_provider_json_value();
+
+    assert!(matches!(form.mode, FormMode::Add));
+    assert_ne!(copied["id"], "test-provider");
+    assert_eq!(copied["name"], "Test Provider copy");
+    assert!(copied.get("createdAt").is_none());
+    assert!(copied.get("sortIndex").is_none());
+    assert!(copied.get("inFailoverQueue").is_none());
+    assert_eq!(copied["notes"], "Keep visible notes");
+    assert_eq!(copied["category"], "third_party");
+    assert_eq!(copied["meta"]["endpointAutoSelect"], true);
+}
+
+#[test]
 fn provider_edit_form_roundtrip_preserves_upstream_meta_auth_and_type_fields() {
     let provider_value = json!({
         "id": "provider-1",

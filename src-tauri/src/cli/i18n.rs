@@ -3070,6 +3070,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_copy() -> &'static str {
+        if is_chinese() {
+            "复制"
+        } else {
+            "copy"
+        }
+    }
+
     pub fn tui_key_delete() -> &'static str {
         if is_chinese() {
             "删除"

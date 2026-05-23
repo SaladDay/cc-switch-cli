@@ -365,6 +365,14 @@ impl UiData {
         self.proxy = load_proxy_snapshot(app_type)?;
         Ok(())
     }
+
+    pub(crate) fn existing_provider_ids(&self) -> Vec<String> {
+        self.providers
+            .rows
+            .iter()
+            .map(|row| row.id.clone())
+            .collect()
+    }
 }
 
 pub(crate) fn provider_display_name(app_type: &AppType, row: &ProviderRow) -> String {

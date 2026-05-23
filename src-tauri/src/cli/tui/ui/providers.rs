@@ -181,6 +181,7 @@ pub(super) fn render_providers(
             keys.push(("Enter", texts::tui_key_details()));
             keys.push(("Space", provider_switch_key_label(&app.app_type)));
             keys.push(("a", texts::tui_key_add()));
+            keys.push(("c", texts::tui_key_copy()));
             if let Some(row) = visible.get(app.provider_idx) {
                 if !data::provider_is_read_only(&app.app_type, row) {
                     keys.push(("e", texts::tui_key_edit()));

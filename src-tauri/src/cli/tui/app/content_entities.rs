@@ -143,6 +143,13 @@ impl App {
                 self.open_provider_add_form(data);
                 Action::None
             }
+            KeyCode::Char('c') => {
+                let Some(row) = visible.get(self.provider_idx) else {
+                    return Action::None;
+                };
+                self.open_provider_copy_form(row, data);
+                Action::None
+            }
             KeyCode::Char('e') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;

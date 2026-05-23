@@ -216,6 +216,29 @@ impl ProviderAddFormState {
         form
     }
 
+    pub fn copy_from_provider_with_common_snippet(
+        app_type: AppType,
+        provider: &Provider,
+        common_snippet: &str,
+        existing_ids: &[String],
+    ) -> Self {
+        let mut form = Self::from_provider_with_common_snippet(app_type, provider, common_snippet);
+        form.mode = FormMode::Add;
+        form.id_is_manual = false;
+        form.name.set(format!("{} copy", provider.name.trim()));
+        if let Some(extra) = form.extra.as_object_mut() {
+            for key in ["id", "createdAt", "sortIndex", "inFailoverQueue"] {
+                extra.remove(key);
+            }
+        }
+        form.id
+            .set(crate::cli::commands::provider_input::generate_provider_id(
+                form.name.value.trim(),
+                existing_ids,
+            ));
+        form
+    }
+
     pub fn supports_common_config(app_type: &AppType) -> bool {
         matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
     }
