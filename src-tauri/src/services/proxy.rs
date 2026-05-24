@@ -467,6 +467,9 @@ impl ProxyService {
                 );
             }
 
+            self.cleanup_legacy_managed_runtime_session_before_daemon_start()
+                .await?;
+
             let status = self.get_status().await;
             if status.running && self.load_persisted_runtime_sessions().is_empty() {
                 return Err(
@@ -487,6 +490,36 @@ impl ProxyService {
         } else {
             self.local_disable_takeover(app_type_enum.as_str()).await
         }
+    }
+
+    async fn cleanup_legacy_managed_runtime_session_before_daemon_start(
+        &self,
+    ) -> Result<(), String> {
+        let Some(session) = self.load_legacy_persisted_runtime_session() else {
+            return Ok(());
+        };
+        if !session.kind.is_managed_external() {
+            return Ok(());
+        }
+
+        // v5.6.1 compatibility shim for users upgrading from the pre-daemon
+        // managed proxy. Remove after several releases once old single-session
+        // runtime markers are no longer expected in the wild.
+        if Self::is_process_alive(session.pid) {
+            match Self::probe_external_proxy_status(&session).await {
+                ExternalProxyStatusProbe::Matched(_) => {
+                    Self::terminate_external_process(session.pid).await?;
+                }
+                ExternalProxyStatusProbe::Unreachable
+                    if Self::has_managed_external_ownership_signal(&session) =>
+                {
+                    Self::terminate_external_process(session.pid).await?;
+                }
+                ExternalProxyStatusProbe::Mismatched | ExternalProxyStatusProbe::Unreachable => {}
+            }
+        }
+        let _ = self.clear_persisted_runtime_session();
+        Ok(())
     }
 
     async fn start_with_resolved_config_unlocked(
@@ -1274,15 +1307,35 @@ impl ProxyService {
             .await
     }
 
+    pub(crate) async fn enable_takeover_for_daemon_worker(
+        &self,
+        app_type: &str,
+    ) -> Result<(), String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        self.enable_takeover_for_app_unlocked_with_options(&app_type, None, true)
+            .await
+    }
+
     async fn enable_takeover_for_app_unlocked_with_provider(
         &self,
         app_type: &AppType,
         fallback_provider_id: Option<&str>,
     ) -> Result<(), String> {
+        self.enable_takeover_for_app_unlocked_with_options(app_type, fallback_provider_id, false)
+            .await
+    }
+
+    async fn enable_takeover_for_app_unlocked_with_options(
+        &self,
+        app_type: &AppType,
+        fallback_provider_id: Option<&str>,
+        runtime_already_known: bool,
+    ) -> Result<(), String> {
         self.validate_app_proxy_activation(app_type, fallback_provider_id)
             .await?;
 
-        if !self.is_running().await {
+        if !runtime_already_known && !self.is_running().await {
             let config = self.runtime_config_for_app(app_type).await?;
             self.start_with_resolved_config_unlocked(config).await?;
         }
@@ -2142,6 +2195,14 @@ impl ProxyService {
         None
     }
 
+    fn load_legacy_persisted_runtime_session(&self) -> Option<PersistedProxyRuntimeSession> {
+        let raw = self.load_raw_persisted_runtime_session()?;
+        if serde_json::from_str::<PersistedProxyRuntimeSessions>(&raw).is_ok() {
+            return None;
+        }
+        serde_json::from_str::<PersistedProxyRuntimeSession>(&raw).ok()
+    }
+
     fn persist_persisted_runtime_sessions_map(
         &self,
         sessions: HashMap<String, PersistedProxyRuntimeSession>,
@@ -2245,6 +2306,26 @@ impl ProxyService {
         {
             pid == std::process::id()
         }
+    }
+
+    fn has_managed_external_ownership_signal(session: &PersistedProxyRuntimeSession) -> bool {
+        session.session_token.is_some() && Self::is_detached_session_leader(session.pid)
+    }
+
+    #[cfg(unix)]
+    fn is_detached_session_leader(pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
+
+        let sid = unsafe { libc::getsid(pid as i32) };
+        let pgid = unsafe { libc::getpgid(pid as i32) };
+        sid == pid as i32 && pgid == pid as i32
+    }
+
+    #[cfg(not(unix))]
+    fn is_detached_session_leader(_pid: u32) -> bool {
+        false
     }
 
     async fn managed_session_ready_info(
@@ -2493,6 +2574,8 @@ mod tests {
     use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
     use serial_test::serial;
     use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
@@ -3628,6 +3711,206 @@ base_url = "https://api.openai.com/v1"
         assert_eq!(claude.port, 15721);
         assert_eq!(codex.app_type.as_deref(), Some("codex"));
         assert_eq!(codex.port, 15722);
+    }
+
+    #[test]
+    fn loads_legacy_managed_runtime_session_only_from_single_session_shape() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &serde_json::to_string(&PersistedProxyRuntimeSession {
+                pid: 4242,
+                address: "127.0.0.1".to_string(),
+                port: 15721,
+                started_at: "2026-03-10T00:00:00Z".to_string(),
+                kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
+                session_token: Some("legacy-token".to_string()),
+                app_type: None,
+            })
+            .expect("serialize legacy runtime session"),
+        )
+        .expect("write legacy runtime session");
+
+        assert!(
+            service.load_legacy_persisted_runtime_session().is_some(),
+            "single-session managed runtime marker should be recognized as legacy"
+        );
+
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &json!({
+                "workers": {
+                    "claude": {
+                        "pid": 4242,
+                        "address": "127.0.0.1",
+                        "port": 15721,
+                        "started_at": "2026-03-10T00:00:00Z",
+                        "kind": "managed_external",
+                        "session_token": "daemon-token"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write daemon runtime sessions");
+
+        assert!(
+            service.load_legacy_persisted_runtime_session().is_none(),
+            "daemon workers map must not be treated as legacy upgrade residue"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_managed_runtime_cleanup_terminates_owned_unreachable_session() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind unused legacy proxy status port");
+        let port = listener
+            .local_addr()
+            .expect("read unused legacy proxy status port")
+            .port();
+        drop(listener);
+
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn detached legacy worker");
+        let pid = child.id();
+        let reaper = std::thread::spawn(move || child.wait());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &serde_json::to_string(&PersistedProxyRuntimeSession {
+                pid,
+                address: "127.0.0.1".to_string(),
+                port,
+                started_at: "2026-03-10T00:00:00Z".to_string(),
+                kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
+                session_token: Some("legacy-token".to_string()),
+                app_type: None,
+            })
+            .expect("serialize legacy runtime session"),
+        )
+        .expect("write legacy runtime session");
+
+        service
+            .cleanup_legacy_managed_runtime_session_before_daemon_start()
+            .await
+            .expect("cleanup legacy owned worker");
+
+        let stopped = !ProxyService::is_process_alive(pid);
+        if !stopped {
+            let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+        let _ = reaper.join();
+
+        assert!(
+            stopped,
+            "legacy owned managed worker should be stopped even when /status is unreachable"
+        );
+        assert!(
+            db.get_setting(PROXY_RUNTIME_SESSION_KEY)
+                .expect("read runtime session after cleanup")
+                .is_none(),
+            "legacy runtime marker should be cleared after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_known_worker_takeover_does_not_bind_proxy_port_again() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "live-token"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "provider-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+
+        let occupied = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("reserve daemon worker port");
+        let occupied_port = occupied
+            .local_addr()
+            .expect("read occupied listener address")
+            .port();
+        db.set_app_proxy_preferred_port("claude", occupied_port)
+            .expect("persist occupied preferred port");
+
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &json!({
+                "workers": {
+                    "claude": {
+                        "pid": std::process::id(),
+                        "address": "127.0.0.1",
+                        "port": occupied_port,
+                        "started_at": chrono::Utc::now().to_rfc3339(),
+                        "kind": "managed_external",
+                        "session_token": "daemon-token"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write daemon worker marker");
+
+        service
+            .enable_takeover_for_daemon_worker("claude")
+            .await
+            .expect("daemon-owned worker should skip a second bind attempt");
+
+        let live: Value =
+            read_json_file(&get_claude_settings_path()).expect("read claude live config");
+        let expected_proxy_url = format!("http://127.0.0.1:{occupied_port}");
+        assert_eq!(
+            live.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some(expected_proxy_url.as_str())
+        );
+
+        drop(occupied);
     }
 
     #[tokio::test]

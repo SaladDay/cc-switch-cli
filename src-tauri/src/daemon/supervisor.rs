@@ -275,7 +275,9 @@ impl Supervisor {
                 .set_global_enabled(true)
                 .await
                 .map_err(|err| err.to_string())?;
-            self.proxy.set_takeover_for_app(app.as_str(), true).await
+            self.proxy
+                .enable_takeover_for_daemon_worker(app.as_str())
+                .await
         }
         .await;
 
