@@ -534,10 +534,14 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => {
-                let selected_model = input.value.trim().to_string();
+                let mut selected_model = input.value.trim().to_string();
                 if selected_model.is_empty() {
-                    self.overlay = Overlay::None;
-                    return Some(Action::None);
+                    if let Some(first) = filtered.first() {
+                        selected_model = first.to_string();
+                    } else {
+                        self.overlay = Overlay::None;
+                        return Some(Action::None);
+                    }
                 }
 
                 let field = *field;
