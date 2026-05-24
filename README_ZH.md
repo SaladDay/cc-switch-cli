@@ -2,14 +2,14 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.5.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.6.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Claude Code、Codex、Gemini、OpenCode 与 OpenClaw 的命令行管理工具**
+**Claude Code、Codex、Gemini、OpenCode、Hermes 与 OpenClaw 的命令行管理工具**
 
-统一管理 Claude Code、Codex、Gemini、OpenCode 与 OpenClaw 的供应商配置，并按应用提供 MCP 服务器、Skills 扩展、提示词、本地代理路由和环境检查等能力。
+统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes 与 OpenClaw 的供应商配置，并按应用提供 MCP 服务器、Skills 扩展、提示词、本地代理路由和环境检查等能力。
 
 [English](README.md) | 中文
 
@@ -126,9 +126,10 @@ cc-switch proxy show                 # 查看代理路由和状态
 cc-switch --app claude provider list    # 管理 Claude 供应商
 cc-switch --app codex mcp sync          # 同步 Codex MCP 服务器
 cc-switch --app gemini prompts list     # 列出 Gemini 提示词
+cc-switch --app hermes provider list    # 管理 Hermes 供应商
 cc-switch --app openclaw provider list  # 管理 OpenClaw 供应商
 
-# 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`openclaw`
+# 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`hermes`、`openclaw`
 ```
 
 完整命令列表请参考「功能特性」章节。
@@ -242,7 +243,7 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 供应商管理
 
-管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode** 与 **OpenClaw** 的 API 配置。
+管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode**、**Hermes** 与 **OpenClaw** 的 API 配置。
 
 **功能：** 一键切换、Claude 独立 settings 导出、多端点支持、API 密钥管理、远端模型发现，以及按应用提供的速度测试、流式健康检查等诊断能力。
 
@@ -263,7 +264,7 @@ cc-switch provider export <id> --output ~/.claude/settings-demo.json # 自定义
 
 ### 🛠️ MCP 服务器管理
 
-跨 Claude、Codex、Gemini 与 OpenCode 管理模型上下文协议服务器。
+跨 Claude、Codex、Gemini、OpenCode 与 Hermes 管理模型上下文协议服务器。
 
 **功能：** 统一管理、多应用支持、三种传输类型（stdio/http/sse）、自动同步，以及面向 TOML / JSON live 配置的格式适配。
 
@@ -283,7 +284,7 @@ cc-switch mcp import --app claude    # 从实时配置导入
 
 管理 AI 编码助手的系统提示词预设。
 
-**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)、OpenCode (`AGENTS.md`)、OpenClaw (`AGENTS.md`)。
+**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)、OpenCode (`AGENTS.md`)、Hermes (`AGENTS.md`)、OpenClaw (`AGENTS.md`)。
 
 ```bash
 cc-switch prompts list               # 列出提示词预设
@@ -299,7 +300,7 @@ cc-switch prompts delete <id>        # 删除提示词
 
 ### 🎯 Skills 管理
 
-通过社区技能扩展 Claude Code/Codex/Gemini/OpenCode 的能力。
+通过社区技能扩展 Claude Code/Codex/Gemini/OpenCode/Hermes 的能力。
 
 **功能：** SSOT 技能仓库、多应用启用/禁用、同步到应用目录、扫描/导入未管理技能、仓库发现。
 
@@ -366,25 +367,30 @@ cc-switch config reset               # 重置为默认配置
 
 ### 🌉 代理管理
 
-查看并控制服务于各应用的本地多应用代理。
+查看并控制由守护进程管理的按应用代理路由。
 
-**功能：** 持久化开关、当前路由检查、首页遥测，以及用于调试的前台运行模式。
+**功能：** 每个应用可独立启用/禁用代理、每个应用可配置监听端口、由 daemon 管理 worker、当前路由检查、首页遥测，以及用于调试的前台运行模式。
 
 ```bash
-cc-switch proxy show                 # 显示代理配置和路由
-cc-switch proxy enable               # 启用持久化代理开关
-cc-switch proxy disable              # 禁用持久化代理开关
-cc-switch proxy serve                # 以前台模式运行代理
+cc-switch proxy show                              # 显示代理配置、路由和 daemon worker 状态
+cc-switch proxy enable                            # 启用 Claude 代理路由（默认应用）
+cc-switch --app codex proxy enable                # 启用 Codex 代理路由
+cc-switch --app gemini proxy disable              # 禁用 Gemini 代理路由
+cc-switch --app claude proxy config --listen-port 15721
+cc-switch --app codex proxy config --listen-port 15722
+cc-switch proxy serve --takeover claude           # 前台调试模式；存在 daemon 托管路由时会拒绝运行
 ```
+
+普通 CLI/TUI 的代理启用/禁用操作都会通过 daemon 执行。首次启用任一应用代理路由时 daemon 会自动启动；每个活跃的受支持应用（Claude、Codex、Gemini）各有一个 worker；当没有任何活跃代理路由时 daemon 会自动退出。
 
 ### 🧪 环境与本地工具
 
-检查环境变量冲突，以及 Claude/Codex/Gemini/OpenCode CLI 是否已经装好。
+检查环境变量冲突，以及 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLI 是否已经装好。
 
 ```bash
 cc-switch env check                  # 检查环境变量冲突
 cc-switch env list                   # 列出相关环境变量
-cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode CLI
+cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLI
 ```
 
 ### 🌐 多语言支持
@@ -426,7 +432,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 - **SQLite 持久化**：核心数据默认存放在 `~/.cc-switch/cc-switch.db`（若设置 `CC_SWITCH_CONFIG_DIR` 则改为该目录下）；旧版 `config.json` 仅保留给兼容与迁移路径使用
 - **Skills SSOT**：技能源文件默认保存在 `~/.cc-switch/skills/`（若设置 `CC_SWITCH_CONFIG_DIR` 则改为 `$CC_SWITCH_CONFIG_DIR/skills/`），安装状态和启用状态由数据库统一记录
-- **安全 Live 同步（默认）**：若目标应用尚未初始化，将跳过写入 live 文件（避免意外创建 `~/.claude`、`~/.codex`、`~/.gemini`、`~/.config/opencode` 或 `~/.openclaw`）
+- **安全 Live 同步（默认）**：若目标应用尚未初始化，将跳过写入 live 文件（避免意外创建 `~/.claude`、`~/.codex`、`~/.gemini`、`~/.config/opencode`、`~/.hermes` 或 `~/.openclaw`）
 - **原子写入**：临时文件 + 重命名模式防止损坏
 - **服务层复用**：100% 复用原 GUI 版本
 - **并发安全**：RwLock 配合作用域守卫
@@ -448,6 +454,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
   - Codex 配置目录优先使用 CC-Switch 的手动覆盖设置；未配置覆盖时，如果 `$CODEX_HOME` 指向已存在的目录则跟随 Codex 使用它，否则使用 `$HOME/.codex`。
 - Gemini: `~/.gemini/.env`（供应商环境变量）, `~/.gemini/settings.json`（设置 + MCP）, `~/.gemini/GEMINI.md`（提示词）
 - OpenCode: `~/.config/opencode/opencode.json`（供应商 + MCP + 运行时配置）, `~/.config/opencode/AGENTS.md`（提示词）
+- Hermes: `~/.hermes/config.yaml`（供应商 + MCP + 记忆设置）, `~/.hermes/AGENTS.md`（提示词）, `~/.hermes/skills/`（技能）, `~/.hermes/memories/`（记忆）
 - OpenClaw: `~/.openclaw/openclaw.json`（供应商 + Env/Tools/Agents Defaults）, `~/.openclaw/AGENTS.md`（提示词）
 
 ---
@@ -459,7 +466,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 <br>
 
-首先确认目标 CLI 已经至少运行过一次（即对应配置目录已存在）。如果应用未初始化，CC-Switch 会出于安全原因跳过写入 live 文件，并提示一条 warning。请先运行一次目标 CLI（例如 `claude --help` / `codex --help` / `gemini --help` / `opencode --help` / `openclaw --help`），然后再切换一次供应商。
+首先确认目标 CLI 已经至少运行过一次（即对应配置目录已存在）。如果应用未初始化，CC-Switch 会出于安全原因跳过写入 live 文件，并提示一条 warning。请先运行一次目标 CLI（例如 `claude --help` / `codex --help` / `gemini --help` / `opencode --help` / `openclaw --help`），或为 Hermes 创建 `~/.hermes` 目录，然后再切换一次供应商。
 
 这通常是由**环境变量冲突**引起的。如果你在系统环境变量中设置了 API 密钥（如 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`），它们会覆盖 CC-Switch 的配置。
 
@@ -493,11 +500,12 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 <br>
 
-CC-Switch 目前支持五个 AI 编程助手：
+CC-Switch 目前支持六个 AI 编程助手：
 - **Claude Code** (`--app claude`，默认)
 - **Codex** (`--app codex`)
 - **Gemini** (`--app gemini`)
 - **OpenCode** (`--app opencode`)
+- **Hermes** (`--app hermes`)
 - **OpenClaw** (`--app openclaw`)
 
 使用全局 `--app` 参数指定要管理的应用：

@@ -15,6 +15,7 @@ pub mod speedtest;
 pub(crate) mod state_coordination;
 pub mod stream_check;
 pub mod subscription;
+pub mod visible_apps;
 pub mod webdav;
 pub mod webdav_sync;
 

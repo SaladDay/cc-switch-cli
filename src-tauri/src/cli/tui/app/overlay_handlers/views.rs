@@ -121,7 +121,7 @@ impl App {
                 let has_action = matches!(
                     &self.overlay,
                     Overlay::TextView(TextViewState {
-                        action: Some(TextViewAction::ProxyToggleTakeover { .. }),
+                        action: Some(TextViewAction::ProxyToggleManagedRoute),
                         ..
                     })
                 );

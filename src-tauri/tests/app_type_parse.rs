@@ -6,6 +6,7 @@ use cc_switch_lib::AppType;
 fn parse_known_apps_case_insensitive_and_trim() {
     assert!(matches!(AppType::from_str("claude"), Ok(AppType::Claude)));
     assert!(matches!(AppType::from_str("codex"), Ok(AppType::Codex)));
+    assert!(matches!(AppType::from_str("hermes"), Ok(AppType::Hermes)));
     assert!(matches!(
         AppType::from_str("openclaw"),
         Ok(AppType::OpenClaw)
@@ -16,6 +17,10 @@ fn parse_known_apps_case_insensitive_and_trim() {
     ));
     assert!(matches!(AppType::from_str("\tcoDeX\t"), Ok(AppType::Codex)));
     assert!(matches!(
+        AppType::from_str(" HeRmEs\t"),
+        Ok(AppType::Hermes)
+    ));
+    assert!(matches!(
         AppType::from_str("\nOpenClaw\t"),
         Ok(AppType::OpenClaw)
     ));
@@ -25,6 +30,12 @@ fn parse_known_apps_case_insensitive_and_trim() {
 fn openclaw_is_listed_and_uses_additive_mode() {
     assert!(AppType::all().any(|app| app == AppType::OpenClaw));
     assert!(AppType::OpenClaw.is_additive_mode());
+}
+
+#[test]
+fn hermes_is_listed_and_uses_additive_mode() {
+    assert!(AppType::all().any(|app| app == AppType::Hermes));
+    assert!(AppType::Hermes.is_additive_mode());
 }
 
 #[test]

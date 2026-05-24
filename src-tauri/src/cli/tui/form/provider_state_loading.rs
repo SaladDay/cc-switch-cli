@@ -18,6 +18,7 @@ pub(super) fn populate_form_from_provider(
         AppType::Codex => populate_codex_form(form, provider),
         AppType::Gemini => populate_gemini_form(form, provider),
         AppType::OpenCode => populate_opencode_form(form, provider),
+        AppType::Hermes => populate_hermes_form(form, provider),
         AppType::OpenClaw => populate_openclaw_form(form, provider),
     }
     populate_usage_query_form(form, provider);
@@ -251,6 +252,49 @@ fn populate_opencode_form(form: &mut ProviderAddFormState, provider: &Provider) 
                     form.opencode_model_output_limit.set(output.to_string());
                 }
             }
+        }
+    }
+}
+
+fn populate_hermes_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    let settings = &provider.settings_config;
+
+    if let Some(api_mode) = settings
+        .get("api_mode")
+        .or_else(|| settings.get("apiMode"))
+        .and_then(|value| value.as_str())
+    {
+        if super::HERMES_API_MODES.iter().any(|mode| *mode == api_mode) {
+            form.hermes_api_mode = api_mode.to_string();
+        }
+    }
+
+    if let Some(base_url) = settings
+        .get("base_url")
+        .or_else(|| settings.get("baseUrl"))
+        .or_else(|| settings.get("baseURL"))
+        .or_else(|| settings.get("endpoint"))
+        .and_then(|value| value.as_str())
+    {
+        form.hermes_base_url.set(base_url);
+    }
+    if let Some(api_key) = settings
+        .get("api_key")
+        .or_else(|| settings.get("apiKey"))
+        .or_else(|| settings.get("auth_token"))
+        .and_then(|value| value.as_str())
+    {
+        form.hermes_api_key.set(api_key);
+    }
+    if let Some(models) = settings.get("models").and_then(|value| value.as_array()) {
+        form.hermes_models = models.clone();
+    }
+    if let Some(delay) = settings
+        .get("rate_limit_delay")
+        .and_then(|value| value.as_f64())
+    {
+        if delay.is_finite() && delay >= 0.0 {
+            form.hermes_rate_limit_delay.set(delay.to_string());
         }
     }
 }

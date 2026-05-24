@@ -161,6 +161,58 @@ fn provider_field_label_and_value_renders_claude_hide_attribution_toggle() {
 }
 
 #[test]
+fn provider_field_label_and_value_renders_na_for_blank_hermes_rate_limit_delay() {
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Hermes);
+
+    let (label, value) = super::provider_field_label_and_value(
+        &form,
+        crate::cli::tui::form::ProviderAddField::HermesRateLimitDelay,
+    );
+    assert_eq!(label, texts::tui_label_hermes_rate_limit_delay());
+    assert_eq!(value, texts::tui_na());
+
+    form.hermes_rate_limit_delay.set("0.5");
+    let (_label, value) = super::provider_field_label_and_value(
+        &form,
+        crate::cli::tui::form::ProviderAddField::HermesRateLimitDelay,
+    );
+    assert_eq!(value, "0.5");
+}
+
+#[test]
+fn provider_form_fields_show_dashed_divider_before_hermes_rate_limit_delay() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Hermes));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.form = Some(crate::cli::tui::form::FormState::ProviderAdd(
+        crate::cli::tui::form::ProviderAddFormState::new(AppType::Hermes),
+    ));
+
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+
+    let mut rate_limit_y = None;
+    for y in 0..buf.area.height {
+        let line = line_at(&buf, y);
+        if line.contains("Rate limit") || line.contains("请求间隔") {
+            rate_limit_y = Some(y);
+            break;
+        }
+    }
+
+    let rate_limit_y =
+        rate_limit_y.expect("Hermes rate limit delay row missing from provider form");
+    let above = line_at(&buf, rate_limit_y.saturating_sub(1));
+    assert!(
+        above.contains("┄┄┄"),
+        "expected dashed divider row above Hermes rate limit delay, got: {above}"
+    );
+}
+
+#[test]
 fn provider_form_renders_usage_query_entry_as_open_row() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -385,6 +437,24 @@ pub(super) fn line_at(buf: &Buffer, y: u16) -> String {
         out.push_str(buf[(x, y)].symbol());
     }
     out
+}
+
+fn cell_column_of(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
+    let cells = needle.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
+    if cells.is_empty() {
+        return Some(0);
+    }
+
+    for x in 0..buf.area.width {
+        if cells.iter().enumerate().all(|(offset, symbol)| {
+            let cell_x = x.saturating_add(offset as u16);
+            cell_x < buf.area.width && buf[(cell_x, y)].symbol() == symbol
+        }) {
+            return Some(x);
+        }
+    }
+
+    None
 }
 
 fn all_text(buf: &Buffer) -> String {
@@ -622,6 +692,7 @@ fn installed_skill(directory: &str, name: &str) -> InstalledSkill {
             codex: false,
             gemini: false,
             opencode: false,
+            hermes: false,
         },
         installed_at: 1,
     }
@@ -694,6 +765,36 @@ fn provider_form_fields_show_dashed_divider_before_common_snippet() {
 }
 
 #[test]
+fn hermes_models_overlay_separates_models_with_dashed_divider() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Hermes));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Hermes);
+    form.focus = FormFocus::Fields;
+    form.hermes_models = vec![
+        json!({ "id": "model-a", "name": "Model A" }),
+        json!({ "id": "model-b", "name": "Model B" }),
+    ];
+    form.open_hermes_models_picker();
+    app.form = Some(FormState::ProviderAdd(form));
+    app.overlay = Overlay::HermesModelsPicker { editing: false };
+
+    let content = all_text(&render(&app, &minimal_data(&app.app_type)));
+    let first_model = line_index(&content, &buffer_cell_text("model-a"));
+    let divider = line_index(&content, "┄┄┄");
+    let second_model = line_index(&content, &buffer_cell_text("model-b"));
+
+    assert!(
+        first_model < divider && divider < second_model,
+        "expected dashed divider between Hermes models, got:\n{content}"
+    );
+}
+
+#[test]
 fn provider_form_json_preview_highlights_common_config_lines() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -718,19 +819,21 @@ fn provider_form_json_preview_highlights_common_config_lines() {
     let buf = render(&app, &data);
     let theme = theme_for(&app.app_type);
     let mut common_bg = None;
+    let mut common_indent_bg = None;
     let mut provider_key_bg = None;
 
     for y in 0..buf.area.height {
-        let line = line_at(&buf, y);
-        if let Some(x) = line.find("\"COMMON_FLAG\"") {
-            common_bg = Some(buf[(x as u16, y)].bg);
+        if let Some(x) = cell_column_of(&buf, y, "\"COMMON_FLAG\"") {
+            common_bg = Some(buf[(x, y)].bg);
+            common_indent_bg = x.checked_sub(1).map(|indent_x| buf[(indent_x, y)].bg);
         }
-        if let Some(x) = line.find("\"ANTHROPIC_AUTH_TOKEN\"") {
-            provider_key_bg = Some(buf[(x as u16, y)].bg);
+        if let Some(x) = cell_column_of(&buf, y, "\"ANTHROPIC_AUTH_TOKEN\"") {
+            provider_key_bg = Some(buf[(x, y)].bg);
         }
     }
 
     assert_eq!(common_bg, Some(theme.surface));
+    assert_ne!(common_indent_bg, Some(theme.surface));
     assert_ne!(provider_key_bg, Some(theme.surface));
 }
 
@@ -845,6 +948,7 @@ fn header_only_renders_selected_visible_apps() {
         codex: true,
         gemini: false,
         opencode: false,
+        hermes: false,
         openclaw: true,
     })
     .expect("save visible apps");
@@ -873,6 +977,7 @@ fn header_keeps_all_app_tabs_visible_with_proxy_chip() {
         codex: true,
         gemini: true,
         opencode: true,
+        hermes: false,
         openclaw: true,
     })
     .expect("save visible apps");
@@ -901,6 +1006,7 @@ fn settings_page_shows_visible_apps_row_value() {
         codex: false,
         gemini: true,
         opencode: false,
+        hermes: false,
         openclaw: true,
     })
     .expect("save visible apps");
@@ -916,6 +1022,32 @@ fn settings_page_shows_visible_apps_row_value() {
         "{all}"
     );
     assert!(all.contains("claude, gemini, openclaw"), "{all}");
+}
+
+#[test]
+#[serial(home_settings)]
+fn settings_page_shows_visible_apps_mode_row_value() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Manual)
+        .expect("save visible apps mode");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_settings_visible_apps_mode_label()),
+        "{all}"
+    );
+    assert!(
+        all.contains(texts::tui_settings_visible_apps_mode_manual()),
+        "{all}"
+    );
 }
 
 #[test]
@@ -981,6 +1113,7 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
             codex: false,
             gemini: false,
             opencode: false,
+            hermes: false,
             openclaw: false,
         },
     };
@@ -995,6 +1128,7 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
         all.contains(texts::tui_settings_visible_apps_title()),
         "{all}"
     );
+    assert!(all.contains(AppType::Hermes.as_str()), "{all}");
     assert!(all.contains(AppType::OpenClaw.as_str()), "{all}");
     assert!(
         all.contains(texts::tui_toast_visible_apps_zero_selection_warning()),
@@ -1017,6 +1151,7 @@ fn visible_apps_picker_uses_space_toggle_key() {
             codex: false,
             gemini: false,
             opencode: false,
+            hermes: false,
             openclaw: false,
         },
     };
@@ -1025,6 +1160,44 @@ fn visible_apps_picker_uses_space_toggle_key() {
 
     assert!(all.contains("Space=toggle"), "{all}");
     assert!(!all.contains("x=toggle"), "{all}");
+}
+
+#[test]
+#[serial(home_settings)]
+fn visible_apps_picker_auto_mode_does_not_append_auto_suffix_to_apps() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps_mode(crate::settings::VisibleAppsMode::Auto)
+        .expect("save visible apps mode");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::VisibleAppsPicker {
+        selected: 2,
+        apps: crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: true,
+            opencode: true,
+            hermes: true,
+            openclaw: true,
+        },
+    };
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(all.contains(AppType::Gemini.as_str()), "{all}");
+    assert!(
+        !all.contains(&format!(
+            "{}  {}",
+            AppType::Gemini.as_str(),
+            texts::tui_settings_visible_apps_mode_auto()
+        )),
+        "{all}"
+    );
 }
 
 #[test]
@@ -1634,6 +1807,7 @@ fn home_connection_card_labels_mcp_and_skills_with_active_counts() {
                 codex: false,
                 gemini: false,
                 opencode: false,
+                hermes: false,
             },
             installed_at: 0,
         },
@@ -1710,6 +1884,11 @@ fn home_shows_local_env_check_section() {
     let all = all_text(&buf);
 
     assert!(all.contains("Local environment check"));
+    for tool_name in [
+        "Claude", "Codex", "Gemini", "OpenCode", "Hermes", "OpenClaw",
+    ] {
+        assert!(all.contains(tool_name), "missing {tool_name} in:\n{all}");
+    }
     assert!(!all.contains("Session Context"));
 }
 
@@ -2360,12 +2539,13 @@ fn skills_page_renders_sync_method_and_installed_rows() {
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    assert!(all.contains(&texts::tui_skills_installed_counts(1, 0, 0, 0)));
+    assert!(all.contains(&texts::tui_skills_installed_counts(1, 0, 0, 0, 0)));
     assert!(!all.contains(texts::tui_header_directory()));
     assert!(all.contains(AppType::Claude.as_str()));
     assert!(all.contains(AppType::Codex.as_str()));
     assert!(all.contains(AppType::Gemini.as_str()));
     assert!(all.contains(AppType::OpenCode.as_str()));
+    assert!(all.contains(AppType::Hermes.as_str()));
     assert!(!all.contains("hello-skill"));
     assert!(all.contains("Hello Skill"));
 }
@@ -2386,6 +2566,7 @@ fn skills_page_empty_state_keeps_mcp_style_table() {
     assert!(all.contains(texts::header_name()));
     assert!(all.contains(AppType::Claude.as_str()));
     assert!(all.contains(AppType::OpenCode.as_str()));
+    assert!(all.contains(AppType::Hermes.as_str()));
     assert!(!all.contains(texts::tui_skills_empty_title()));
     assert!(!all.contains(texts::tui_skills_empty_subtitle()));
 }
@@ -2444,6 +2625,7 @@ fn skills_page_shows_opencode_summary() {
         codex: false,
         gemini: false,
         opencode: true,
+        hermes: false,
     };
     data.skills.installed = vec![skill];
 
@@ -2451,6 +2633,33 @@ fn skills_page_shows_opencode_summary() {
     let all = all_text(&buf);
 
     assert!(all.contains("OpenCode: 1"));
+}
+
+#[test]
+fn skills_page_shows_hermes_column_and_summary() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Hermes));
+    app.route = Route::Skills;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    let mut skill = installed_skill("hello-skill", "Hello Skill");
+    skill.apps = SkillApps {
+        claude: false,
+        codex: false,
+        gemini: false,
+        opencode: false,
+        hermes: true,
+    };
+    data.skills.installed = vec![skill];
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains(AppType::Hermes.as_str()));
+    assert!(all.contains("Hermes: 1"));
 }
 
 #[test]
@@ -2471,6 +2680,7 @@ fn skill_detail_page_shows_opencode_enabled_state() {
         codex: false,
         gemini: false,
         opencode: true,
+        hermes: false,
     };
     data.skills.installed = vec![skill];
 
@@ -2480,6 +2690,36 @@ fn skill_detail_page_shows_opencode_enabled_state() {
     assert!(all.contains(texts::tui_label_enabled_for()));
     assert!(all.contains("OpenCode"));
     assert!(!all.contains("opencode=true"));
+}
+
+#[test]
+fn skill_detail_page_shows_hermes_enabled_state() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Hermes));
+    app.route = Route::SkillDetail {
+        directory: "hello-skill".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    let mut skill = installed_skill("hello-skill", "Hello Skill");
+    skill.apps = SkillApps {
+        claude: false,
+        codex: false,
+        gemini: false,
+        opencode: false,
+        hermes: true,
+    };
+    data.skills.installed = vec![skill];
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains(texts::tui_label_enabled_for()));
+    assert!(all.contains("Hermes"));
+    assert!(!all.contains("hermes=true"));
 }
 
 #[test]
@@ -2545,6 +2785,43 @@ fn mcp_page_renders_opencode_column() {
     let all = all_text(&buf);
 
     assert!(all.contains("opencode"));
+}
+
+#[test]
+fn mcp_page_renders_hermes_column() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Hermes));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.mcp.rows = vec![super::super::data::McpRow {
+        id: "m1".to_string(),
+        server: crate::app_config::McpServer {
+            id: "m1".to_string(),
+            name: "Server".to_string(),
+            server: json!({}),
+            apps: crate::app_config::McpApps {
+                claude: false,
+                codex: false,
+                gemini: false,
+                opencode: false,
+                hermes: true,
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: vec![],
+        },
+    }];
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains("hermes"));
+    assert!(all.contains("Hermes: 1"));
 }
 
 #[test]
@@ -5085,6 +5362,7 @@ fn workspace_openclaw_nav_uses_app_specific_labels_and_hides_generic_entries() {
         NavItem::OpenClawEnv,
         NavItem::OpenClawTools,
         NavItem::OpenClawAgents,
+        NavItem::Config,
         NavItem::Settings,
         NavItem::Exit,
     ]
@@ -5098,7 +5376,7 @@ fn workspace_openclaw_nav_uses_app_specific_labels_and_hides_generic_entries() {
     assert!(!all.contains(&nav_label_text(NavItem::Mcp)), "{all}");
     assert!(!all.contains(&nav_label_text(NavItem::Skills)), "{all}");
     assert!(!all.contains(&nav_label_text(NavItem::Prompts)), "{all}");
-    assert!(!all.contains(&nav_label_text(NavItem::Config)), "{all}");
+    assert!(all.contains(&nav_label_text(NavItem::Config)), "{all}");
 }
 
 #[test]
@@ -7158,7 +7436,7 @@ fn openclaw_provider_list_key_bar_uses_common_provider_actions() {
         all.push('\n');
     }
 
-    assert!(all.contains("Space switch"), "{all}");
+    assert!(all.contains("Space add/remove"), "{all}");
     assert!(all.contains("t test"), "{all}");
     assert!(all.contains("x set default"), "{all}");
     assert!(!all.contains("s add/remove"), "{all}");
@@ -7297,7 +7575,7 @@ fn opencode_provider_list_key_bar_uses_config_membership_actions() {
 
     let all = all_text(&render(&app, &data));
 
-    assert!(all.contains("Space switch"), "{all}");
+    assert!(all.contains("Space add/remove"), "{all}");
     assert!(all.contains("t test"), "{all}");
     assert!(!all.contains("s add/remove"), "{all}");
     assert!(!all.contains("c stream check"), "{all}");
@@ -7373,7 +7651,7 @@ fn openclaw_provider_detail_key_bar_uses_common_provider_actions() {
         all.push('\n');
     }
 
-    assert!(all.contains("Space switch"), "{all}");
+    assert!(all.contains("Space add/remove"), "{all}");
     assert!(all.contains("t test"), "{all}");
     assert!(all.contains("x set default"), "{all}");
     assert!(!all.contains("s add/remove"), "{all}");
@@ -7393,7 +7671,7 @@ fn opencode_provider_detail_key_bar_uses_config_membership_actions() {
 
     let all = all_text(&render(&app, &data));
 
-    assert!(all.contains("Space switch"), "{all}");
+    assert!(all.contains("Space add/remove"), "{all}");
     assert!(all.contains("t test"), "{all}");
     assert!(!all.contains("s add/remove"), "{all}");
     assert!(!all.contains("c stream check"), "{all}");
@@ -7419,6 +7697,29 @@ fn openclaw_provider_list_key_bar_shows_edit_for_tracked_provider() {
 
     assert!(all.contains("e edit"), "{all}");
     assert!(all.contains("x set default"), "{all}");
+}
+
+#[test]
+fn hermes_provider_list_key_bar_hides_edit_delete_for_read_only_provider() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Hermes));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].provider.settings_config = json!({
+        "_cc_source": crate::hermes_config::PROVIDER_SOURCE_DICT,
+        "base_url": "https://example.com",
+        "models": [{"id": "main"}]
+    });
+
+    let all = all_text(&render(&app, &data));
+
+    let keys = line_with(&all, "Space add/remove");
+    assert!(keys.contains("t test"), "{keys}");
+    assert!(!keys.contains("e edit"), "{keys}");
+    assert!(!keys.contains("d delete"), "{keys}");
 }
 
 #[test]
@@ -7718,9 +8019,10 @@ fn openclaw_provider_list_key_bar_localizes_actions_in_chinese() {
     let all = all_text(&render(&app, &minimal_data(&app.app_type)));
     let compact = all.replace(' ', "");
 
-    assert!(compact.contains("Space切换"), "{all}");
+    assert!(compact.contains("Space添加/移除"), "{all}");
     assert!(compact.contains("t测试"), "{all}");
     assert!(compact.contains("x设为默认"), "{all}");
+    assert!(!compact.contains("Space切换"), "{all}");
     assert!(!compact.contains("s添加/移除"), "{all}");
     assert!(!all.contains("add/remove"), "{all}");
     assert!(!all.contains("set default"), "{all}");
@@ -7741,9 +8043,10 @@ fn openclaw_provider_detail_key_bar_localizes_actions_in_chinese() {
     let all = all_text(&render(&app, &minimal_data(&app.app_type)));
     let compact = all.replace(' ', "");
 
-    assert!(compact.contains("Space切换"), "{all}");
+    assert!(compact.contains("Space添加/移除"), "{all}");
     assert!(compact.contains("t测试"), "{all}");
     assert!(compact.contains("x设为默认"), "{all}");
+    assert!(!compact.contains("Space切换"), "{all}");
     assert!(!compact.contains("s添加/移除"), "{all}");
     assert!(!all.contains("add/remove"), "{all}");
     assert!(!all.contains("set default"), "{all}");

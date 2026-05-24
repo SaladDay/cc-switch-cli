@@ -40,6 +40,9 @@ pub enum EditorSubmit {
     OpenClawDailyMemoryFile {
         filename: String,
     },
+    HermesMemory {
+        kind: crate::hermes_config::MemoryKind,
+    },
     ConfigOpenClawEnv,
     ConfigOpenClawTools,
     ConfigOpenClawAgents,

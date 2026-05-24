@@ -15,6 +15,9 @@ impl App {
         if let Some(action) = self.handle_usage_query_template_picker_key(key) {
             return Some(action);
         }
+        if let Some(action) = self.handle_hermes_models_picker_key(key) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_provider_test_menu_key(key, data) {
             return Some(action);
         }
@@ -51,6 +54,108 @@ impl App {
         None
     }
 
+    fn handle_hermes_models_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let editing = match self.overlay {
+            Overlay::HermesModelsPicker { editing } => editing,
+            _ => return None,
+        };
+
+        if editing {
+            return Some(self.handle_hermes_models_picker_editing_key(key));
+        }
+
+        Some(self.handle_hermes_models_picker_navigation_key(key))
+    }
+
+    fn handle_hermes_models_picker_editing_key(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.hermes_models_editing = false;
+                }
+                self.overlay = Overlay::HermesModelsPicker { editing: false };
+                Action::None
+            }
+            _ => {
+                if TextEditCommand::from_key(key).is_none() {
+                    return Action::None;
+                }
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                let Some(selected) = provider.selected_hermes_model_field() else {
+                    return Action::None;
+                };
+                if provider
+                    .hermes_model_input
+                    .apply_key(key)
+                    .is_some_and(|edit| edit.changed)
+                {
+                    let value = provider.hermes_model_input.value.clone();
+                    provider.set_hermes_model_field_text(selected, &value);
+                }
+                Action::None
+            }
+        }
+    }
+
+    fn handle_hermes_models_picker_navigation_key(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.close_hermes_models_picker();
+                }
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.hermes_models_field_idx =
+                        provider.hermes_models_field_idx.saturating_sub(1);
+                    provider.sync_hermes_model_input_from_selection();
+                }
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    let fields_len = provider.hermes_model_fields().len();
+                    if fields_len > 0 {
+                        provider.hermes_models_field_idx =
+                            (provider.hermes_models_field_idx + 1).min(fields_len - 1);
+                    } else {
+                        provider.hermes_models_field_idx = 0;
+                    }
+                    provider.sync_hermes_model_input_from_selection();
+                }
+                Action::None
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.add_empty_hermes_model();
+                }
+                Action::None
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete | KeyCode::Backspace => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.remove_selected_hermes_model();
+                }
+                Action::None
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') => self.build_hermes_models_fetch_action(),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    if provider.selected_hermes_model_field().is_some() {
+                        provider.sync_hermes_model_input_from_selection();
+                        provider.hermes_models_editing = true;
+                        self.overlay = Overlay::HermesModelsPicker { editing: true };
+                    }
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
     fn handle_sync_method_picker_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
         let Overlay::SkillsSyncMethodPicker { selected } = &mut self.overlay else {
             return None;
@@ -58,7 +163,7 @@ impl App {
 
         Some(match key.code {
             KeyCode::Esc => {
-                self.overlay = Overlay::None;
+                self.close_overlay();
                 Action::None
             }
             KeyCode::Up => {
@@ -66,7 +171,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(3);
+                *selected = (*selected + 1).min(4);
                 Action::None
             }
             KeyCode::Enter => {
@@ -455,6 +560,8 @@ impl App {
                                 provider.mark_claude_model_config_touched();
                             }
                         }
+                    } else if field == ProviderAddField::HermesModels {
+                        provider.set_selected_hermes_model_id_from_picker(&selected_model);
                     } else if let Some(input_field) = provider.input_mut(field) {
                         input_field.set(selected_model);
                     }
@@ -610,7 +717,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(3);
+                *selected = (*selected + 1).min(4);
                 Action::None
             }
             KeyCode::Char(' ') => {
@@ -691,12 +798,29 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(4);
+                *selected = (*selected + 1).min(5);
                 Action::None
             }
             KeyCode::Char(' ') => {
                 let app_type = app_type_for_picker_index(*selected);
-                let enabled = apps.is_enabled_for(&app_type);
+                let mut next = apps.clone();
+                let enabled = next.is_enabled_for(&app_type);
+                next.set_enabled_for(&app_type, !enabled);
+
+                if crate::settings::get_visible_apps_settings().mode
+                    == crate::settings::VisibleAppsMode::Auto
+                {
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_visible_apps_manual_switch_prompt_title().to_string(),
+                        message: texts::tui_visible_apps_manual_switch_prompt_message().to_string(),
+                        action: ConfirmAction::VisibleAppsSwitchToManual {
+                            apps: next,
+                            selected: *selected,
+                        },
+                    });
+                    return Some(Action::None);
+                }
+
                 apps.set_enabled_for(&app_type, !enabled);
                 Action::None
             }
@@ -743,7 +867,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(3);
+                *selected = (*selected + 1).min(4);
                 Action::None
             }
             KeyCode::Char(' ') => {

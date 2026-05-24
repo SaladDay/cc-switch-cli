@@ -44,7 +44,7 @@ pub fn common_snippet_has_effective_config(
             .ok()
             .and_then(|value| value.as_object().cloned())
             .is_some_and(|obj| !obj.is_empty()),
-        AppType::OpenCode | AppType::OpenClaw => false,
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
     }
 }
 
@@ -169,6 +169,7 @@ pub fn prompt_settings_config_for_add(
         (AppType::Codex, ProviderAddMode::ThirdParty) => prompt_codex_config(None),
         (AppType::Gemini, _) => prompt_gemini_config(None),
         (AppType::OpenCode, _) => Ok(json!({})),
+        (AppType::Hermes, _) => Ok(json!({})),
         (AppType::OpenClaw, _) => Ok(json!({})),
     }
 }
@@ -405,6 +406,7 @@ pub fn prompt_settings_config(
         }
         AppType::Gemini => prompt_gemini_config(current),
         AppType::OpenCode => Ok(current.cloned().unwrap_or_else(|| json!({}))),
+        AppType::Hermes => Ok(current.cloned().unwrap_or_else(|| json!({}))),
         AppType::OpenClaw => Ok(current.cloned().unwrap_or_else(|| json!({}))),
     }
 }
@@ -920,6 +922,49 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                 .settings_config
                 .get("models")
                 .and_then(|v| v.as_object())
+            {
+                println!("  {}: {}", texts::model_label(), models.len());
+            }
+        }
+        AppType::Hermes => {
+            if let Some(api_key) = provider
+                .settings_config
+                .get("apiKey")
+                .or_else(|| provider.settings_config.get("api_key"))
+                .and_then(|v| v.as_str())
+            {
+                println!(
+                    "  {}: {}",
+                    texts::api_key_display_label(),
+                    mask_api_key(api_key)
+                );
+            }
+            if let Some(base_url) = provider
+                .settings_config
+                .get("base_url")
+                .or_else(|| provider.settings_config.get("baseUrl"))
+                .or_else(|| provider.settings_config.get("baseURL"))
+                .or_else(|| provider.settings_config.get("endpoint"))
+                .and_then(|v| v.as_str())
+            {
+                println!("  {}: {}", texts::base_url_display_label(), base_url);
+            }
+            if let Some(model) = provider
+                .settings_config
+                .get("model")
+                .and_then(|v| v.as_str())
+            {
+                println!("  {}: {}", texts::model_label(), model);
+            } else if let Some(models) = provider
+                .settings_config
+                .get("models")
+                .and_then(|v| v.as_object())
+            {
+                println!("  {}: {}", texts::model_label(), models.len());
+            } else if let Some(models) = provider
+                .settings_config
+                .get("models")
+                .and_then(|v| v.as_array())
             {
                 println!("  {}: {}", texts::model_label(), models.len());
             }

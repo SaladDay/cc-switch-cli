@@ -94,6 +94,7 @@ struct PostCommitAction {
     refresh_snapshot: bool,
     common_config_snippet: Option<String>,
     takeover_active: bool,
+    activate_provider: bool,
 }
 
 impl ProviderService {
@@ -256,6 +257,8 @@ impl ProviderService {
     ) -> Result<bool, AppError> {
         let read_presence = || match app_type {
             AppType::OpenCode => crate::opencode_config::get_providers()
+                .map(|providers| providers.contains_key(provider_id)),
+            AppType::Hermes => crate::hermes_config::get_providers()
                 .map(|providers| providers.contains_key(provider_id)),
             AppType::OpenClaw => Self::valid_openclaw_live_provider_ids()
                 .map(|ids| ids.is_some_and(|ids| ids.contains(provider_id))),
@@ -450,6 +453,12 @@ impl ProviderService {
                 action.common_config_snippet.as_deref(),
                 apply_common_config,
             )?;
+            if action.activate_provider && matches!(action.app_type, AppType::Hermes) {
+                crate::hermes_config::set_current_provider(
+                    &action.provider.id,
+                    &action.provider.settings_config,
+                )?;
+            }
         }
         if action.sync_mcp {
             // 使用 v3.7.0 统一的 MCP 同步机制，支持所有应用
@@ -701,6 +710,26 @@ impl ProviderService {
                 }
                 state.save()?;
             }
+            AppType::Hermes => {
+                let providers = crate::hermes_config::get_providers()?;
+                let live_after = providers.get(provider_id).cloned().ok_or_else(|| {
+                    AppError::localized(
+                        "hermes.live.missing_provider",
+                        format!("Hermes live 配置中缺少供应商: {provider_id}"),
+                        format!("Hermes live config missing provider: {provider_id}"),
+                    )
+                })?;
+
+                {
+                    let mut guard = state.config.write().map_err(AppError::from)?;
+                    if let Some(manager) = guard.get_manager_mut(app_type) {
+                        if let Some(target) = manager.providers.get_mut(provider_id) {
+                            target.settings_config = live_after;
+                        }
+                    }
+                }
+                state.save()?;
+            }
             AppType::OpenClaw => {
                 let providers = crate::openclaw_config::get_providers()?;
                 let live_after = providers.get(provider_id).cloned().ok_or_else(|| {
@@ -776,7 +805,7 @@ impl ProviderService {
                 strict_current_provider_id,
                 old_snippet,
             ),
-            AppType::OpenCode | AppType::OpenClaw => Ok(()),
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(()),
         };
 
         match result {
@@ -843,6 +872,7 @@ impl ProviderService {
             refresh_snapshot: false,
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
             takeover_active,
+            activate_provider: false,
         }))
     }
 
@@ -891,7 +921,7 @@ impl ProviderService {
             }
             AppType::Gemini => live_settings.get("env") != provider_settings.get("env"),
             AppType::Claude => live_settings != provider_settings,
-            AppType::OpenCode | AppType::OpenClaw => false,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
         }
     }
 
@@ -1041,6 +1071,7 @@ impl ProviderService {
             AppType::Codex => Self::extract_codex_common_config(settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(settings_config),
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
+            AppType::Hermes => Self::extract_opencode_common_config(settings_config),
             AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
         }
     }
@@ -1405,6 +1436,10 @@ impl ProviderService {
 
     /// 获取当前供应商 ID
     pub fn current(state: &AppState, app_type: AppType) -> Result<String, AppError> {
+        if matches!(app_type, AppType::Hermes) {
+            return crate::hermes_config::get_current_provider_id()
+                .map(|opt| opt.unwrap_or_default());
+        }
         if app_type.is_additive_mode() {
             return Ok(String::new());
         }
@@ -1482,6 +1517,7 @@ impl ProviderService {
                     refresh_snapshot: false,
                     common_config_snippet,
                     takeover_active: false,
+                    activate_provider: false,
                 })
             } else {
                 None
@@ -1626,6 +1662,7 @@ impl ProviderService {
                     refresh_snapshot: false,
                     common_config_snippet,
                     takeover_active: false,
+                    activate_provider: false,
                 })
             } else {
                 None
@@ -1708,6 +1745,7 @@ impl ProviderService {
                 })
             }
             AppType::OpenCode => unreachable!("additive mode apps are handled earlier"),
+            AppType::Hermes => unreachable!("additive mode apps are handled earlier"),
             AppType::OpenClaw => unreachable!("additive mode apps are handled earlier"),
         };
 
@@ -1817,6 +1855,17 @@ impl ProviderService {
                 }
                 crate::opencode_config::read_opencode_config()
             }
+            AppType::Hermes => {
+                let config_path = crate::hermes_config::get_hermes_config_path();
+                if !config_path.exists() {
+                    return Err(AppError::localized(
+                        "hermes.config.missing",
+                        "Hermes 配置文件不存在",
+                        "Hermes configuration file not found",
+                    ));
+                }
+                crate::hermes_config::read_hermes_config_json()
+            }
             AppType::OpenClaw => {
                 let config_path = crate::openclaw_config::get_openclaw_config_path();
                 if !config_path.exists() {
@@ -1887,6 +1936,11 @@ impl ProviderService {
             AppType::OpenCode => {
                 if crate::opencode_config::get_opencode_dir().exists() {
                     crate::opencode_config::remove_provider(provider_id)?;
+                }
+            }
+            AppType::Hermes => {
+                if crate::hermes_config::get_hermes_dir().exists() {
+                    crate::hermes_config::remove_provider(provider_id)?;
                 }
             }
             AppType::OpenClaw => {
@@ -2107,6 +2161,7 @@ impl ProviderService {
                         .get(&app_type_clone)
                         .cloned(),
                     takeover_active: false,
+                    activate_provider: matches!(&app_type_clone, AppType::Hermes),
                 };
 
                 return Ok(((), Some(action)));
@@ -2130,6 +2185,7 @@ impl ProviderService {
                     effective_current_provider.as_deref(),
                 )?,
                 AppType::OpenCode => unreachable!("additive mode handled above"),
+                AppType::Hermes => unreachable!("additive mode handled above"),
                 AppType::OpenClaw => unreachable!("additive mode handled above"),
             };
 
@@ -2141,6 +2197,7 @@ impl ProviderService {
                 refresh_snapshot: true,
                 common_config_snippet: config.common_config_snippets.get(&app_type_clone).cloned(),
                 takeover_active: false,
+                activate_provider: false,
             };
 
             Ok(((), Some(action)))
@@ -2201,6 +2258,17 @@ impl ProviderService {
                     Ok(config) => crate::opencode_config::set_typed_provider(&provider.id, &config),
                     Err(_) => crate::opencode_config::set_provider(&provider.id, config_to_write),
                 }
+            }
+            AppType::Hermes => {
+                if !provider.settings_config.is_object() {
+                    return Err(AppError::localized(
+                        "provider.hermes.settings.not_object",
+                        "Hermes 配置必须是 JSON 对象",
+                        "Hermes configuration must be a JSON object",
+                    ));
+                }
+                crate::hermes_config::set_provider(&provider.id, provider.settings_config.clone())
+                    .map(|_| ())
             }
             AppType::OpenClaw => {
                 let settings_config = provider.settings_config.clone();
@@ -2428,6 +2496,9 @@ impl ProviderService {
             AppType::OpenCode => Err(AppError::Config(
                 "OpenCode does not support proxy takeover backups".into(),
             )),
+            AppType::Hermes => Err(AppError::Config(
+                "Hermes does not support proxy takeover backups".into(),
+            )),
             AppType::OpenClaw => Err(AppError::Config(
                 "OpenClaw does not support proxy takeover backups".into(),
             )),
@@ -2509,6 +2580,15 @@ impl ProviderService {
                         "provider.opencode.settings.not_object",
                         "OpenCode 配置必须是 JSON 对象",
                         "OpenCode configuration must be a JSON object",
+                    ));
+                }
+            }
+            AppType::Hermes => {
+                if !provider.settings_config.is_object() {
+                    return Err(AppError::localized(
+                        "provider.hermes.settings.not_object",
+                        "Hermes 配置必须是 JSON 对象",
+                        "Hermes configuration must be a JSON object",
                     ));
                 }
             }
@@ -2650,6 +2730,11 @@ impl ProviderService {
                         crate::opencode_config::remove_provider(provider_id)?;
                     }
                 }
+                AppType::Hermes => {
+                    if crate::hermes_config::get_hermes_dir().exists() {
+                        crate::hermes_config::remove_provider(provider_id)?;
+                    }
+                }
                 AppType::OpenClaw => {
                     if crate::openclaw_config::get_openclaw_dir().exists() {
                         crate::openclaw_config::remove_provider(provider_id)?;
@@ -2690,6 +2775,9 @@ impl ProviderService {
             AppType::OpenCode => {
                 let _ = provider_snapshot;
             }
+            AppType::Hermes => {
+                let _ = provider_snapshot;
+            }
             AppType::OpenClaw => {
                 let _ = provider_snapshot;
             }
@@ -2724,6 +2812,10 @@ impl ProviderService {
 
     pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
         live::import_openclaw_providers_from_live(state)
+    }
+
+    pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+        live::import_hermes_providers_from_live(state)
     }
 
     pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, AppError> {

@@ -1,7 +1,12 @@
 use super::super::theme;
 use super::super::*;
 
-pub(super) fn render_help_overlay(frame: &mut Frame<'_>, content_area: Rect, theme: &theme::Theme) {
+pub(super) fn render_help_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+) {
     let area = centered_rect(OVERLAY_LG.0, OVERLAY_LG.1, content_area);
     frame.render_widget(Clear, area);
 
@@ -21,7 +26,7 @@ pub(super) fn render_help_overlay(frame: &mut Frame<'_>, content_area: Rect, the
     render_key_bar_center(frame, chunks[0], theme, &[("Esc", texts::tui_key_close())]);
 
     let body_area = inset_top(chunks[1], 1);
-    let lines = texts::tui_help_text()
+    let lines = texts::tui_help_text_for_app(&app.app_type)
         .lines()
         .map(|s| Line::raw(s.to_string()))
         .collect::<Vec<_>>();
@@ -72,6 +77,30 @@ pub(super) fn render_confirm_overlay(
             &[
                 ("Enter", texts::tui_key_close()),
                 ("Esc", texts::tui_key_close()),
+            ],
+        );
+    } else if matches!(confirm.action, ConfirmAction::VisibleAppsAutoDetection) {
+        render_key_bar_center(
+            frame,
+            chunks[0],
+            theme,
+            &[
+                ("Enter", texts::tui_key_use_auto()),
+                ("N", texts::tui_key_keep_current()),
+                ("Esc", texts::tui_key_keep_current()),
+            ],
+        );
+    } else if matches!(
+        confirm.action,
+        ConfirmAction::VisibleAppsSwitchToManual { .. }
+    ) {
+        render_key_bar_center(
+            frame,
+            chunks[0],
+            theme,
+            &[
+                ("Enter", texts::tui_key_switch_to_manual()),
+                ("Esc", texts::tui_key_cancel()),
             ],
         );
     } else if matches!(

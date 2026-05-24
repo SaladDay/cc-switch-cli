@@ -571,6 +571,18 @@ pub mod texts {
         }
     }
 
+    pub fn tui_help_text_for_app(app_type: &crate::app_config::AppType) -> &'static str {
+        if matches!(app_type, crate::app_config::AppType::Hermes) {
+            if is_chinese() {
+                "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n文本输入：Ctrl+A/E 行首/行尾，Ctrl+U/K 删除行片段，Ctrl+W 删除前词，Alt+B/F 按词移动\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，Space 添加/移除，a 新增，e 编辑，d 删除，t 测试，r 刷新，f 管理故障转移，x 启用\n- 供应商详情：Space 添加/移除，e 编辑，t 测试，r 刷新，f 管理故障转移，x 启用\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 记忆管理：Enter 编辑，Space/x 启用/禁用，o 打开目录\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 设置：Enter 应用"
+            } else {
+                "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nText input: Ctrl+A/E move line, Ctrl+U/K delete line parts, Ctrl+W delete word, Alt+B/F move word\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, Space add/remove, a add, e edit, d delete, t test, r refresh, f manage failover, x enable\n- Provider Detail: Space add/remove, e edit, t test, r refresh, f manage failover, x enable\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Memory: Enter edit, Space/x toggle, o open directory\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Settings: Enter apply"
+            }
+        } else {
+            tui_help_text()
+        }
+    }
+
     pub fn tui_confirm_title() -> &'static str {
         if is_chinese() {
             "确认"
@@ -1638,6 +1650,127 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_hermes_api_mode() -> &'static str {
+        if is_chinese() {
+            "API 模式"
+        } else {
+            "API Mode"
+        }
+    }
+
+    pub fn tui_label_hermes_provider_key() -> &'static str {
+        if is_chinese() {
+            "供应商标识"
+        } else {
+            "Provider Key"
+        }
+    }
+
+    pub fn tui_label_hermes_base_url() -> &'static str {
+        if is_chinese() {
+            "API 端点"
+        } else {
+            "API Endpoint"
+        }
+    }
+
+    pub fn tui_label_hermes_models() -> &'static str {
+        if is_chinese() {
+            "模型列表"
+        } else {
+            "Models"
+        }
+    }
+
+    pub fn tui_label_hermes_rate_limit_delay() -> &'static str {
+        if is_chinese() {
+            "请求间隔（秒）"
+        } else {
+            "Rate limit delay (seconds)"
+        }
+    }
+
+    pub fn tui_hint_hermes_rate_limit_delay() -> &'static str {
+        if is_chinese() {
+            "连续请求间的最小间隔秒数（可选）。留空表示无限制。"
+        } else {
+            "Minimum delay in seconds between consecutive requests (optional). Leave empty for no limit."
+        }
+    }
+
+    pub fn tui_hermes_rate_limit_delay_invalid() -> &'static str {
+        if is_chinese() {
+            "请求间隔必须是大于等于 0 的数字"
+        } else {
+            "Rate limit delay must be a number greater than or equal to 0"
+        }
+    }
+
+    pub fn tui_hermes_provider_key_invalid() -> &'static str {
+        if is_chinese() {
+            "供应商标识只能包含小写字母、数字和连字符"
+        } else {
+            "Provider key can only contain lowercase letters, numbers, and hyphens"
+        }
+    }
+
+    pub fn tui_hermes_base_url_required() -> &'static str {
+        if is_chinese() {
+            "API 端点不能为空"
+        } else {
+            "API endpoint is required"
+        }
+    }
+
+    pub fn tui_hermes_base_url_scheme() -> &'static str {
+        if is_chinese() {
+            "请使用 http:// 或 https:// 开头的地址"
+        } else {
+            "Use an http:// or https:// address"
+        }
+    }
+
+    pub fn tui_hermes_base_url_invalid() -> &'static str {
+        if is_chinese() {
+            "API 端点不是有效的 URL"
+        } else {
+            "API endpoint is not a valid URL"
+        }
+    }
+
+    pub fn tui_hermes_api_mode_value(api_mode: &str) -> &'static str {
+        match api_mode {
+            "codex_responses" => {
+                if is_chinese() {
+                    "OpenAI Responses"
+                } else {
+                    "OpenAI Responses"
+                }
+            }
+            "anthropic_messages" => {
+                if is_chinese() {
+                    "Anthropic Messages"
+                } else {
+                    "Anthropic Messages"
+                }
+            }
+            "bedrock_converse" => {
+                if is_chinese() {
+                    "AWS Bedrock Converse"
+                } else {
+                    "AWS Bedrock Converse"
+                }
+            }
+            _ => {
+                if is_chinese() {
+                    "OpenAI Chat Completions"
+                } else {
+                    "OpenAI Chat Completions"
+                }
+            }
+        }
+    }
+
     pub fn tui_label_openclaw_status() -> &'static str {
         if is_chinese() {
             "状态"
@@ -1710,6 +1843,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_provider_status_in_use() -> &'static str {
+        if is_chinese() {
+            "已在用"
+        } else {
+            "in use"
+        }
+    }
+
     pub fn tui_openclaw_status_in_config_and_saved() -> &'static str {
         if is_chinese() {
             "配置中 + 已保存"
@@ -1778,11 +1919,244 @@ pub mod texts {
         }
     }
 
+    pub fn tui_hermes_models_summary(total: usize) -> String {
+        if is_chinese() {
+            if total == 0 {
+                "未配置模型".to_string()
+            } else {
+                format!("已配置 {total} 个模型")
+            }
+        } else if total == 0 {
+            "No models configured".to_string()
+        } else {
+            format!("{total} models configured")
+        }
+    }
+
+    pub fn tui_hermes_models_open_hint() -> &'static str {
+        if is_chinese() {
+            "Enter 编辑模型列表"
+        } else {
+            "Enter to edit models"
+        }
+    }
+
+    pub fn tui_hermes_models_title(provider_name: &str) -> String {
+        let name = provider_name.trim();
+        if is_chinese() {
+            if name.is_empty() {
+                "Hermes 模型列表".to_string()
+            } else {
+                format!("Hermes 模型列表: {name}")
+            }
+        } else if name.is_empty() {
+            "Hermes Models".to_string()
+        } else {
+            format!("Hermes Models: {name}")
+        }
+    }
+
+    pub fn tui_hermes_models_no_models() -> &'static str {
+        if is_chinese() {
+            "暂无模型配置。切换到此供应商时将不会更新默认模型。"
+        } else {
+            "No models configured. Switching to this provider won't change the default model."
+        }
+    }
+
+    pub fn tui_hermes_models_hint() -> &'static str {
+        if is_chinese() {
+            "切换到此供应商时，第一个模型会写入顶层 model.default。"
+        } else {
+            "On switch, the first model is written to top-level model.default."
+        }
+    }
+
+    pub fn tui_hermes_model_id_label(index: usize) -> String {
+        if is_chinese() {
+            if index == 1 {
+                format!("模型 {index} ID（默认模型）")
+            } else {
+                format!("模型 {index} ID（备选模型）")
+            }
+        } else if index == 1 {
+            format!("Model {index} ID (Default)")
+        } else {
+            format!("Model {index} ID (Alternate)")
+        }
+    }
+
+    pub fn tui_hermes_model_name_label(index: usize) -> String {
+        if is_chinese() {
+            format!("模型 {index} 显示名称")
+        } else {
+            format!("Model {index} Display Name")
+        }
+    }
+
+    pub fn tui_hermes_model_context_length_label(index: usize) -> String {
+        if is_chinese() {
+            format!("模型 {index} 上下文长度")
+        } else {
+            format!("Model {index} Context Length")
+        }
+    }
+
+    pub fn tui_hermes_models_fetch_hint() -> &'static str {
+        if is_chinese() {
+            "获取模型列表后，可在当前模型 ID 行选择模型"
+        } else {
+            "Fetch models, then select a model for the current model ID row"
+        }
+    }
+
+    pub fn tui_hermes_models_add_hint() -> &'static str {
+        if is_chinese() {
+            "添加一个空模型行"
+        } else {
+            "Add an empty model row"
+        }
+    }
+
+    pub fn tui_model_fetch_need_config() -> &'static str {
+        if is_chinese() {
+            "请先填写 API 端点和 API Key"
+        } else {
+            "Please fill in API endpoint and API Key first"
+        }
+    }
+
+    pub fn tui_model_fetch_need_api_key() -> &'static str {
+        if is_chinese() {
+            "请先填写 API Key"
+        } else {
+            "Please fill in API Key first"
+        }
+    }
+
+    pub fn tui_model_fetch_need_endpoint() -> &'static str {
+        if is_chinese() {
+            "请先填写 API 端点"
+        } else {
+            "Please fill in API endpoint first"
+        }
+    }
+
+    pub fn tui_hermes_memory_title() -> &'static str {
+        if is_chinese() {
+            "Hermes 记忆管理"
+        } else {
+            "Hermes Memory"
+        }
+    }
+
+    pub fn tui_hermes_memory_agent_tab() -> &'static str {
+        if is_chinese() {
+            "Agent 记忆"
+        } else {
+            "Agent Memory"
+        }
+    }
+
+    pub fn tui_hermes_memory_user_tab() -> &'static str {
+        if is_chinese() {
+            "用户记忆"
+        } else {
+            "User Memory"
+        }
+    }
+
+    pub fn tui_hermes_memory_directory_label() -> &'static str {
+        if is_chinese() {
+            "记忆目录"
+        } else {
+            "Memory directory"
+        }
+    }
+
+    pub fn tui_hermes_memory_file_label() -> &'static str {
+        if is_chinese() {
+            "文件"
+        } else {
+            "File"
+        }
+    }
+
+    pub fn tui_hermes_memory_status_label() -> &'static str {
+        if is_chinese() {
+            "状态"
+        } else {
+            "Status"
+        }
+    }
+
+    pub fn tui_hermes_memory_usage_label() -> &'static str {
+        if is_chinese() {
+            "用量"
+        } else {
+            "Usage"
+        }
+    }
+
+    pub fn tui_hermes_memory_preview_label() -> &'static str {
+        if is_chinese() {
+            "预览"
+        } else {
+            "Preview"
+        }
+    }
+
+    pub fn tui_hermes_memory_editor_title(label: &str) -> String {
+        if is_chinese() {
+            format!("编辑 {label}")
+        } else {
+            format!("Edit {label}")
+        }
+    }
+
+    pub fn tui_hermes_memory_saved(label: &str) -> String {
+        if is_chinese() {
+            format!("已保存 {label}")
+        } else {
+            format!("Saved {label}")
+        }
+    }
+
+    pub fn tui_hermes_memory_toggle_saved(label: &str, enabled: bool) -> String {
+        if is_chinese() {
+            if enabled {
+                format!("已启用 {label}")
+            } else {
+                format!("已禁用 {label}")
+            }
+        } else if enabled {
+            format!("Enabled {label}")
+        } else {
+            format!("Disabled {label}")
+        }
+    }
+
+    pub fn tui_hermes_memory_directory_open_failed(detail: &str) -> String {
+        if is_chinese() {
+            format!("打开记忆目录失败: {detail}")
+        } else {
+            format!("Failed to open memory directory: {detail}")
+        }
+    }
+
     pub fn tui_toast_json_must_be_array() -> &'static str {
         if is_chinese() {
             "JSON 必须是数组"
         } else {
             "JSON must be an array"
+        }
+    }
+
+    pub fn tui_toast_json_must_be_object_or_array() -> &'static str {
+        if is_chinese() {
+            "JSON 必须是对象或数组"
+        } else {
+            "JSON must be an object or array"
         }
     }
 
@@ -1925,6 +2299,14 @@ pub mod texts {
             "应用: OpenCode"
         } else {
             "App: OpenCode"
+        }
+    }
+
+    pub fn tui_label_app_hermes() -> &'static str {
+        if is_chinese() {
+            "应用: Hermes"
+        } else {
+            "App: Hermes"
         }
     }
 
@@ -2592,6 +2974,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_enable() -> &'static str {
+        if is_chinese() {
+            "启用"
+        } else {
+            "enable"
+        }
+    }
+
     pub fn tui_key_edit() -> &'static str {
         if is_chinese() {
             "编辑"
@@ -2952,6 +3342,30 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_use_auto() -> &'static str {
+        if is_chinese() {
+            "使用自动"
+        } else {
+            "use auto"
+        }
+    }
+
+    pub fn tui_key_keep_current() -> &'static str {
+        if is_chinese() {
+            "保留当前"
+        } else {
+            "keep current"
+        }
+    }
+
+    pub fn tui_key_switch_to_manual() -> &'static str {
+        if is_chinese() {
+            "切到手动"
+        } else {
+            "switch to manual"
+        }
+    }
+
     pub fn tui_key_no() -> &'static str {
         if is_chinese() {
             "返回"
@@ -3210,6 +3624,30 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_visible_apps_mode_label() -> &'static str {
+        if is_chinese() {
+            "可见应用模式"
+        } else {
+            "Visible Apps Mode"
+        }
+    }
+
+    pub fn tui_settings_visible_apps_mode_auto() -> &'static str {
+        if is_chinese() {
+            "自动"
+        } else {
+            "auto"
+        }
+    }
+
+    pub fn tui_settings_visible_apps_mode_manual() -> &'static str {
+        if is_chinese() {
+            "手动"
+        } else {
+            "manual"
+        }
+    }
+
     pub fn tui_settings_visible_apps_title() -> &'static str {
         if is_chinese() {
             "选择可见应用"
@@ -3371,6 +3809,62 @@ pub mod texts {
             "可见应用已保存。"
         } else {
             "Visible apps saved."
+        }
+    }
+
+    pub fn tui_toast_visible_apps_mode_saved(mode: &str) -> String {
+        if is_chinese() {
+            format!("可见应用模式已设为{mode}。")
+        } else {
+            format!("Visible apps mode set to {mode}.")
+        }
+    }
+
+    pub fn tui_toast_visible_apps_auto_updated(apps: &str) -> String {
+        if is_chinese() {
+            format!("已更新可见应用：{apps}")
+        } else {
+            format!("Visible apps updated: {apps}")
+        }
+    }
+
+    pub fn tui_toast_visible_apps_manual_hidden_installed(app: &str) -> String {
+        if is_chinese() {
+            format!("{app} 已安装但被隐藏。可在设置 > 可见应用中启用。")
+        } else {
+            format!("Installed but hidden: {app}. Enable them in Settings > Visible Apps.")
+        }
+    }
+
+    pub fn tui_visible_apps_auto_prompt_title() -> &'static str {
+        if is_chinese() {
+            "可见应用自动检测"
+        } else {
+            "Visible App Auto Detection"
+        }
+    }
+
+    pub fn tui_visible_apps_auto_prompt_message() -> &'static str {
+        if is_chinese() {
+            "CC Switch 可以根据已安装的本地 CLI 显示应用，并隐藏未安装的应用。"
+        } else {
+            "CC Switch can show installed apps and hide apps that are not installed."
+        }
+    }
+
+    pub fn tui_visible_apps_manual_switch_prompt_title() -> &'static str {
+        if is_chinese() {
+            "切换到手动模式"
+        } else {
+            "Switch to Manual Mode"
+        }
+    }
+
+    pub fn tui_visible_apps_manual_switch_prompt_message() -> &'static str {
+        if is_chinese() {
+            "自动模式下不可直接调整可见应用。切换到手动模式并应用这次更改？"
+        } else {
+            "Visible apps cannot be changed directly in auto mode. Switch to manual mode and apply this change?"
         }
     }
 
@@ -3610,14 +4104,15 @@ pub mod texts {
         codex: usize,
         gemini: usize,
         opencode: usize,
+        hermes: usize,
     ) -> String {
         if is_chinese() {
             format!(
-                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
             )
         } else {
             format!(
-                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
             )
         }
     }
@@ -3627,14 +4122,15 @@ pub mod texts {
         codex: usize,
         gemini: usize,
         opencode: usize,
+        hermes: usize,
     ) -> String {
         if is_chinese() {
             format!(
-                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
             )
         } else {
             format!(
-                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
             )
         }
     }
@@ -4793,6 +5289,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_provider_managed_by_hermes() -> &'static str {
+        if is_chinese() {
+            "该供应商由 Hermes 管理，请在 Hermes Web UI 中编辑。"
+        } else {
+            "This provider is managed by Hermes. Edit it in the Hermes Web UI."
+        }
+    }
+
     pub fn tui_toast_provider_cannot_remove_default_model() -> &'static str {
         if is_chinese() {
             "被当前默认模型引用的供应商不能直接从配置中移除。"
@@ -4849,6 +5353,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_provider_enabled(provider: &str) -> String {
+        if is_chinese() {
+            format!("已启用供应商: {}", provider)
+        } else {
+            format!("Provider enabled: {}", provider)
+        }
+    }
+
     pub fn tui_temp_launch_failed(message: &str) -> String {
         if is_chinese() {
             format!("临时启动失败: {}", message)
@@ -4870,6 +5382,26 @@ pub mod texts {
             format!("确定删除供应商 '{}' ({})？", name, id)
         } else {
             format!("Delete provider '{}' ({})?", name, id)
+        }
+    }
+
+    pub fn tui_confirm_remove_provider_title() -> &'static str {
+        if is_chinese() {
+            "移除供应商"
+        } else {
+            "Remove Provider"
+        }
+    }
+
+    pub fn tui_confirm_remove_provider_message(name: &str) -> String {
+        if is_chinese() {
+            format!(
+                "确定要从配置中移除供应商 \"{name}\" 吗？\n\n移除后该供应商将不再生效，但配置数据会保留在 CC Switch 中，您可以随时重新添加。"
+            )
+        } else {
+            format!(
+                "Are you sure you want to remove provider \"{name}\" from the configuration?\n\nAfter removal, this provider will no longer be active, but the configuration data will be retained in CC Switch. You can re-add it at any time."
+            )
         }
     }
 
@@ -6410,6 +6942,19 @@ pub mod texts {
 
     pub fn menu_openclaw_agents_variants() -> (&'static str, &'static str) {
         ("🤖 Agents Config", "🤖 Agents 配置")
+    }
+
+    pub fn menu_hermes_memory() -> &'static str {
+        let (en, zh) = menu_hermes_memory_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_hermes_memory_variants() -> (&'static str, &'static str) {
+        ("🧠 Memory", "🧠 记忆管理")
     }
 
     pub fn menu_settings() -> &'static str {

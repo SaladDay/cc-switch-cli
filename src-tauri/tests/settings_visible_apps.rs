@@ -13,6 +13,7 @@ mod app_config {
         Gemini,
         OpenCode,
         OpenClaw,
+        Hermes,
     }
 
     impl AppType {
@@ -23,6 +24,7 @@ mod app_config {
                 AppType::Gemini => "gemini",
                 AppType::OpenCode => "opencode",
                 AppType::OpenClaw => "openclaw",
+                AppType::Hermes => "hermes",
             }
         }
     }
@@ -211,7 +213,7 @@ use app_config::AppType;
 use error::AppError;
 use settings_impl::{
     default_visible_apps, get_settings, get_visible_apps, next_visible_app, reload_test_settings,
-    set_visible_apps, update_settings, AppSettings, VisibleApps,
+    set_visible_apps, update_settings, AppSettings, VisibleApps, VisibleAppsMode,
 };
 
 struct HomeGuard {
@@ -291,6 +293,7 @@ fn default_visible_apps_hide_gemini() {
             AppType::Claude,
             AppType::Codex,
             AppType::OpenCode,
+            AppType::Hermes,
             AppType::OpenClaw,
         ]
     );
@@ -308,6 +311,7 @@ fn set_visible_apps_persists_visible_apps_as_camel_case_json() {
         gemini: true,
         opencode: false,
         openclaw: true,
+        hermes: true,
     })
     .expect("persist visible apps");
 
@@ -324,6 +328,7 @@ fn set_visible_apps_persists_visible_apps_as_camel_case_json() {
             "gemini": true,
             "opencode": false,
             "openclaw": true,
+            "hermes": true,
         })
     );
 }
@@ -341,6 +346,7 @@ fn load_reads_valid_non_default_visible_apps_from_settings_json() {
                 "gemini": true,
                 "opencode": true,
                 "openclaw": false,
+                "hermes": true,
             }
         }),
     );
@@ -356,11 +362,17 @@ fn load_reads_valid_non_default_visible_apps_from_settings_json() {
             gemini: true,
             opencode: true,
             openclaw: false,
+            hermes: true,
         }
     );
     assert_eq!(
         visible.ordered_enabled(),
-        vec![AppType::Codex, AppType::Gemini, AppType::OpenCode]
+        vec![
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::OpenCode,
+            AppType::Hermes
+        ]
     );
 }
 
@@ -387,6 +399,7 @@ fn load_partial_visible_apps_object_uses_defaults_for_missing_keys() {
             gemini: false,
             opencode: true,
             openclaw: true,
+            hermes: true,
         }
     );
 }
@@ -414,6 +427,44 @@ fn missing_visible_apps_field_uses_defaults_without_losing_other_fields() {
 
 #[test]
 #[serial]
+fn new_settings_default_to_auto_visible_apps_mode_with_pending_prompt() {
+    let _home = HomeGuard::new();
+
+    let settings = get_settings();
+    assert_eq!(settings.visible_apps_settings.mode, VisibleAppsMode::Auto);
+    assert!(!settings.visible_apps_settings.auto_prompt_decided);
+}
+
+#[test]
+#[serial]
+fn existing_settings_without_visible_apps_settings_migrate_to_manual_mode() {
+    let home = HomeGuard::new();
+    write_settings_json(
+        &home,
+        json!({
+            "visibleApps": {
+                "claude": true,
+                "codex": false,
+                "gemini": true,
+                "opencode": false,
+                "hermes": false,
+                "openclaw": true
+            }
+        }),
+    );
+
+    reload_test_settings();
+
+    let settings = get_settings();
+    assert_eq!(settings.visible_apps_settings.mode, VisibleAppsMode::Manual);
+    assert!(settings.visible_apps_settings.auto_prompt_decided);
+    assert!(settings.visible_apps.claude);
+    assert!(settings.visible_apps.gemini);
+    assert!(settings.visible_apps.openclaw);
+}
+
+#[test]
+#[serial]
 fn set_visible_apps_rejects_zero_selection() {
     let _home = HomeGuard::new();
 
@@ -423,6 +474,7 @@ fn set_visible_apps_rejects_zero_selection() {
         gemini: false,
         opencode: false,
         openclaw: false,
+        hermes: false,
     })
     .expect_err("zero visible apps should be rejected");
 
@@ -444,6 +496,7 @@ fn update_settings_rejects_all_false_visible_apps() {
         gemini: false,
         opencode: false,
         openclaw: false,
+        hermes: false,
     };
 
     let err =
@@ -491,7 +544,8 @@ fn load_normalizes_all_false_visible_apps_to_defaults() {
                 "codex": false,
                 "gemini": false,
                 "opencode": false,
-                "openclaw": false
+                "openclaw": false,
+                "hermes": false
             }
         }),
     );
@@ -535,6 +589,7 @@ fn next_visible_app_wraps_and_skips_hidden_entries() {
         gemini: false,
         opencode: true,
         openclaw: true,
+        hermes: true,
     };
 
     assert_eq!(
@@ -546,8 +601,16 @@ fn next_visible_app_wraps_and_skips_hidden_entries() {
         Some(AppType::Claude)
     );
     assert_eq!(
+        next_visible_app(&visible, &AppType::Hermes, 1),
+        Some(AppType::OpenClaw)
+    );
+    assert_eq!(
         next_visible_app(&visible, &AppType::Claude, -1),
         Some(AppType::OpenClaw)
+    );
+    assert_eq!(
+        next_visible_app(&visible, &AppType::Hermes, -1),
+        Some(AppType::OpenCode)
     );
     assert_eq!(
         next_visible_app(&visible, &AppType::OpenCode, -1),

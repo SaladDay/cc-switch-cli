@@ -8,7 +8,7 @@ on:
       - "src-tauri/**"
       - ".github/workflows/rust-ci.yml"
       - ".github/workflows/release.yml"
-  pull_request_target:
+  pull_request:
     paths:
       - "src-tauri/**"
       - ".github/workflows/rust-ci.yml"
@@ -47,8 +47,8 @@ jobs:
         working-directory: src-tauri
         run: cargo fmt --check
 
-  failover-e2e:
-    name: failover E2E test
+  integration-tests:
+    name: Integration tests
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -63,9 +63,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          key: failover-e2e
+          key: integration-tests
 
-      - name: Run failover E2E test
+      - name: Failover
         working-directory: src-tauri
         run: |
           sandbox_home="$(mktemp -d)"
@@ -73,3 +73,12 @@ jobs:
           export USERPROFILE="$sandbox_home"
           export CC_SWITCH_CONFIG_DIR="$sandbox_home/.cc-switch"
           cargo test --test proxy_claude_forwarder_alignment proxy_claude_auto_failover_uses_activated_queue_providers -- --exact --nocapture
+
+      - name: Proxy daemon
+        working-directory: src-tauri
+        run: |
+          sandbox_home="$(mktemp -d)"
+          export HOME="$sandbox_home"
+          export USERPROFILE="$sandbox_home"
+          export CC_SWITCH_CONFIG_DIR="$sandbox_home/.cc-switch"
+          cargo test --test proxy_daemon proxy_enable_and_disable_cli_manage_daemon_worker -- --exact --nocapture

@@ -94,6 +94,12 @@ impl Database {
         // 启用外键约束
         conn.execute("PRAGMA foreign_keys = ON;", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
+        // 多进程并发：daemon 与 worker 都会打开这个文件，WAL + busy_timeout 让
+        // 短暂的 SQLITE_BUSY 自动重试而不是直接失败。
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| AppError::Database(e.to_string()))?;
 
         let db = Self {
             conn: Mutex::new(conn),

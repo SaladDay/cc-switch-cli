@@ -67,6 +67,7 @@ pub fn import_provider_from_deeplink(
                 Some("codex") => Some("https://openai.com".to_string()),
                 Some("gemini") => Some("https://ai.google.dev".to_string()),
                 Some("opencode") => Some("https://opencode.ai".to_string()),
+                Some("hermes") => Some("https://hermes.sh".to_string()),
                 _ => None,
             };
         }
@@ -139,6 +140,7 @@ fn build_provider_from_request(
         AppType::Codex => build_codex_settings(request),
         AppType::Gemini => build_gemini_settings(request),
         AppType::OpenCode => build_opencode_settings(request),
+        AppType::Hermes => build_hermes_settings(request),
         AppType::OpenClaw => build_openclaw_settings(request),
     };
 
@@ -329,6 +331,31 @@ fn build_opencode_settings(request: &DeepLinkImportRequest) -> serde_json::Value
     })
 }
 
+fn build_hermes_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
+    let endpoint = get_primary_endpoint(request);
+    let mut settings = serde_json::Map::new();
+    settings.insert(
+        "name".to_string(),
+        json!(request.name.clone().unwrap_or_else(|| "custom".to_string())),
+    );
+
+    if !endpoint.is_empty() {
+        settings.insert("baseUrl".to_string(), json!(endpoint));
+    }
+    if let Some(api_key) = &request.api_key {
+        settings.insert("apiKey".to_string(), json!(api_key));
+    }
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.insert("model".to_string(), json!(model));
+    }
+
+    Value::Object(settings)
+}
+
 fn build_openclaw_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
     if let Some(config) = &request.openclaw_config {
         let mut settings = match config {
@@ -434,6 +461,7 @@ pub fn parse_and_merge_config(
         "codex" => merge_codex_config(&mut merged, &config_value)?,
         "gemini" => merge_gemini_config(&mut merged, &config_value)?,
         "opencode" => merge_additive_config(&mut merged, &config_value)?,
+        "hermes" => merge_additive_config(&mut merged, &config_value)?,
         "openclaw" => merge_openclaw_config(&mut merged, &config_value)?,
         "" => return Ok(merged),
         other => return Err(AppError::InvalidInput(format!("Invalid app type: {other}"))),

@@ -57,22 +57,56 @@ impl Toast {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     Quit,
-    ProviderDelete { id: String },
-    McpDelete { id: String },
-    PromptDelete { id: String },
-    SkillsUninstall { directory: String },
-    SkillsRepoRemove { owner: String, name: String },
-    ConfigImport { path: String },
-    ConfigRestoreBackup { id: String },
+    ProviderDelete {
+        id: String,
+    },
+    ProviderRemoveFromConfig {
+        id: String,
+    },
+    McpDelete {
+        id: String,
+    },
+    PromptDelete {
+        id: String,
+    },
+    SkillsUninstall {
+        directory: String,
+    },
+    SkillsRepoRemove {
+        owner: String,
+        name: String,
+    },
+    ConfigImport {
+        path: String,
+    },
+    ConfigRestoreBackup {
+        id: String,
+    },
     ConfigReset,
-    SettingsSetSkipClaudeOnboarding { enabled: bool },
-    SettingsSetClaudePluginIntegration { enabled: bool },
+    SettingsSetSkipClaudeOnboarding {
+        enabled: bool,
+    },
+    SettingsSetClaudePluginIntegration {
+        enabled: bool,
+    },
+    VisibleAppsAutoDetection,
+    VisibleAppsSwitchToManual {
+        apps: crate::settings::VisibleApps,
+        selected: usize,
+    },
     ProviderApiFormatProxyNotice,
     CommonConfigNotice,
     UsageQueryNotice,
-    ProxyEnableAndAutoFailover { app_type: AppType },
-    PromptOpenImportCandidate { filename: String, content: String },
-    OpenClawDailyMemoryDelete { filename: String },
+    ProxyEnableAndAutoFailover {
+        app_type: AppType,
+    },
+    PromptOpenImportCandidate {
+        filename: String,
+        content: String,
+    },
+    OpenClawDailyMemoryDelete {
+        filename: String,
+    },
     FormSaveBeforeClose,
     EditorDiscard,
     EditorSaveBeforeClose,
@@ -134,22 +168,13 @@ pub struct TextViewState {
 
 #[derive(Debug, Clone)]
 pub enum TextViewAction {
-    ProxyToggleTakeover { app_type: AppType, enabled: bool },
+    ProxyToggleManagedRoute,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommonSnippetViewSource {
     Global,
     ProviderForm,
-}
-
-impl TextViewAction {
-    pub fn key_label(&self) -> &'static str {
-        match self {
-            TextViewAction::ProxyToggleTakeover { enabled: true, .. } => texts::tui_key_takeover(),
-            TextViewAction::ProxyToggleTakeover { enabled: false, .. } => texts::tui_key_restore(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +243,9 @@ pub enum Overlay {
     },
     UsageQueryTemplatePicker {
         selected: usize,
+    },
+    HermesModelsPicker {
+        editing: bool,
     },
     ModelFetchPicker {
         request_id: u64,
@@ -317,6 +345,7 @@ impl Overlay {
         match self {
             Overlay::TextInput(input) => input.is_editing(),
             Overlay::ClaudeModelPicker { editing, .. } => *editing,
+            Overlay::HermesModelsPicker { editing } => *editing,
             Overlay::ModelFetchPicker { .. } => true,
             Overlay::McpEnvEntryEditor(editor) => editor.is_editing(),
             Overlay::None

@@ -391,6 +391,7 @@ impl SkillService {
             AppType::Codex,
             AppType::Gemini,
             AppType::OpenCode,
+            AppType::Hermes,
         ]
         .into_iter()
     }
@@ -444,6 +445,11 @@ impl SkillService {
                     return Ok(custom.join("skills"));
                 }
             }
+            AppType::Hermes => {
+                if let Some(custom) = crate::settings::get_hermes_override_dir() {
+                    return Ok(custom.join("skills"));
+                }
+            }
             AppType::OpenClaw => {
                 if let Some(custom) = crate::settings::get_openclaw_override_dir() {
                     return Ok(custom.join("skills"));
@@ -464,6 +470,7 @@ impl SkillService {
             AppType::Codex => home.join(".codex").join("skills"),
             AppType::Gemini => home.join(".gemini").join("skills"),
             AppType::OpenCode => home.join(".config").join("opencode").join("skills"),
+            AppType::Hermes => home.join(".hermes").join("skills"),
             AppType::OpenClaw => home.join(".openclaw").join("skills"),
         })
     }
@@ -946,6 +953,7 @@ impl SkillService {
             AppType::Codex,
             AppType::Gemini,
             AppType::OpenCode,
+            AppType::Hermes,
         ] {
             if let Err(e) = Self::remove_from_app(&dir, &app) {
                 log::warn!("从 {app:?} 删除 Skill {dir} 失败: {e}");

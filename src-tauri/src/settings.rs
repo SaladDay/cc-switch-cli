@@ -18,6 +18,8 @@ pub struct VisibleApps {
     pub gemini: bool,
     #[serde(default = "default_visible_app_opencode")]
     pub opencode: bool,
+    #[serde(default = "default_visible_app_hermes")]
+    pub hermes: bool,
     #[serde(default = "default_visible_app_openclaw")]
     pub openclaw: bool,
 }
@@ -38,6 +40,10 @@ fn default_visible_app_opencode() -> bool {
     true
 }
 
+fn default_visible_app_hermes() -> bool {
+    true
+}
+
 fn default_visible_app_openclaw() -> bool {
     true
 }
@@ -48,7 +54,49 @@ pub fn default_visible_apps() -> VisibleApps {
         codex: true,
         gemini: false,
         opencode: true,
+        hermes: true,
         openclaw: true,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum VisibleAppsMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VisibleAppsSettings {
+    #[serde(default)]
+    pub mode: VisibleAppsMode,
+    #[serde(default)]
+    pub auto_prompt_decided: bool,
+    #[serde(default)]
+    pub manual_hidden_installed_notices: HashMap<String, bool>,
+    #[serde(default)]
+    pub last_detected_installed: HashMap<String, bool>,
+}
+
+impl Default for VisibleAppsSettings {
+    fn default() -> Self {
+        Self {
+            mode: VisibleAppsMode::Auto,
+            auto_prompt_decided: false,
+            manual_hidden_installed_notices: HashMap::new(),
+            last_detected_installed: HashMap::new(),
+        }
+    }
+}
+
+fn migrated_visible_apps_settings() -> VisibleAppsSettings {
+    VisibleAppsSettings {
+        mode: VisibleAppsMode::Manual,
+        auto_prompt_decided: true,
+        manual_hidden_installed_notices: HashMap::new(),
+        last_detected_installed: HashMap::new(),
     }
 }
 
@@ -72,6 +120,7 @@ impl VisibleApps {
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
             AppType::OpenCode => self.opencode,
+            AppType::Hermes => self.hermes,
             AppType::OpenClaw => self.openclaw,
         }
     }
@@ -82,6 +131,7 @@ impl VisibleApps {
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
             AppType::OpenCode => self.opencode = enabled,
+            AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => self.openclaw = enabled,
         }
     }
@@ -103,12 +153,13 @@ impl VisibleApps {
     }
 }
 
-fn app_order() -> [AppType; 5] {
+fn app_order() -> [AppType; 6] {
     [
         AppType::Claude,
         AppType::Codex,
         AppType::Gemini,
         AppType::OpenCode,
+        AppType::Hermes,
         AppType::OpenClaw,
     ]
 }
@@ -313,6 +364,8 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hermes_config_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_claude: Option<String>,
@@ -323,9 +376,13 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_opencode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_hermes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_openclaw: Option<String>,
     #[serde(default = "default_visible_apps")]
     pub visible_apps: VisibleApps,
+    #[serde(default = "migrated_visible_apps_settings")]
+    pub visible_apps_settings: VisibleAppsSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// 是否开机自启
@@ -369,13 +426,16 @@ impl Default for AppSettings {
             codex_config_dir: None,
             gemini_config_dir: None,
             opencode_config_dir: None,
+            hermes_config_dir: None,
             openclaw_config_dir: None,
             current_provider_claude: None,
             current_provider_codex: None,
             current_provider_gemini: None,
             current_provider_opencode: None,
+            current_provider_hermes: None,
             current_provider_openclaw: None,
             visible_apps: default_visible_apps(),
+            visible_apps_settings: VisibleAppsSettings::default(),
             language: None,
             launch_on_startup: false,
             skill_sync_method: crate::services::skill::SyncMethod::default(),
@@ -419,6 +479,13 @@ impl AppSettings {
 
         self.opencode_config_dir = self
             .opencode_config_dir
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        self.hermes_config_dir = self
+            .hermes_config_dir
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
@@ -594,6 +661,14 @@ pub fn get_opencode_override_dir() -> Option<PathBuf> {
         .map(|p| resolve_override_path(p))
 }
 
+pub fn get_hermes_override_dir() -> Option<PathBuf> {
+    let settings = settings_store().read().ok()?;
+    settings
+        .hermes_config_dir
+        .as_ref()
+        .map(|p| resolve_override_path(p))
+}
+
 pub fn get_openclaw_override_dir() -> Option<PathBuf> {
     let settings = settings_store().read().ok()?;
     settings
@@ -609,6 +684,7 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
         AppType::Codex => settings.current_provider_codex.clone(),
         AppType::Gemini => settings.current_provider_gemini.clone(),
         AppType::OpenCode => settings.current_provider_opencode.clone(),
+        AppType::Hermes => settings.current_provider_hermes.clone(),
         AppType::OpenClaw => settings.current_provider_openclaw.clone(),
     }
 }
@@ -621,6 +697,7 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
         AppType::Codex => settings.current_provider_codex = id.map(|value| value.to_string()),
         AppType::Gemini => settings.current_provider_gemini = id.map(|value| value.to_string()),
         AppType::OpenCode => settings.current_provider_opencode = id.map(|value| value.to_string()),
+        AppType::Hermes => settings.current_provider_hermes = id.map(|value| value.to_string()),
         AppType::OpenClaw => settings.current_provider_openclaw = id.map(|value| value.to_string()),
     }
 
@@ -639,6 +716,20 @@ pub fn set_visible_apps(visible_apps: VisibleApps) -> Result<(), AppError> {
 
     let mut settings = get_settings();
     settings.visible_apps = visible_apps;
+    update_settings(settings)
+}
+
+pub fn get_visible_apps_settings() -> VisibleAppsSettings {
+    settings_store()
+        .read()
+        .map(|settings| settings.visible_apps_settings.clone())
+        .unwrap_or_default()
+}
+
+pub fn set_visible_apps_mode(mode: VisibleAppsMode) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.visible_apps_settings.mode = mode;
+    settings.visible_apps_settings.auto_prompt_decided = true;
     update_settings(settings)
 }
 

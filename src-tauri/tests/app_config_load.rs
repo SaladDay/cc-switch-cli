@@ -147,6 +147,19 @@ fn default_config_contains_openclaw_prompt_root_and_manager() {
 }
 
 #[test]
+fn default_config_contains_hermes_prompt_root_and_manager() {
+    let config = MultiAppConfig::default();
+
+    assert!(config
+        .get_manager(&cc_switch_lib::AppType::Hermes)
+        .is_some());
+    assert!(
+        config.prompts.hermes.prompts.is_empty(),
+        "default Hermes prompt store should exist"
+    );
+}
+
+#[test]
 fn update_settings_persists_openclaw_override_dir() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -165,6 +178,28 @@ fn update_settings_persists_openclaw_override_dir() {
             .get("openclawConfigDir")
             .and_then(|entry| entry.as_str()),
         Some("~/custom-openclaw")
+    );
+}
+
+#[test]
+fn update_settings_persists_hermes_override_dir() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let _config_dir = ConfigDirEnvGuard::set(None);
+
+    let mut settings = AppSettings::default();
+    settings.hermes_config_dir = Some("~/custom-hermes".to_string());
+    update_settings(settings).expect("save settings with hermes override");
+
+    let path = home.join(".cc-switch").join("settings.json");
+    let raw = fs::read_to_string(&path).expect("read settings.json");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("parse settings.json");
+    assert_eq!(
+        value
+            .get("hermesConfigDir")
+            .and_then(|entry| entry.as_str()),
+        Some("~/custom-hermes")
     );
 }
 

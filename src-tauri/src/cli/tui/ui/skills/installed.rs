@@ -50,6 +50,7 @@ pub(super) fn render_skills_installed(
         Cell::from(crate::app_config::AppType::Codex.as_str()),
         Cell::from(crate::app_config::AppType::Gemini.as_str()),
         Cell::from(crate::app_config::AppType::OpenCode.as_str()),
+        Cell::from(crate::app_config::AppType::Hermes.as_str()),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
@@ -60,6 +61,7 @@ pub(super) fn render_skills_installed(
             Cell::from(skill_marker(skill.apps.codex)),
             Cell::from(skill_marker(skill.apps.gemini)),
             Cell::from(skill_marker(skill.apps.opencode)),
+            Cell::from(skill_marker(skill.apps.hermes)),
         ])
     });
 
@@ -71,6 +73,7 @@ pub(super) fn render_skills_installed(
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(10),
+            Constraint::Length(8),
         ],
     )
     .header(header)
@@ -108,12 +111,19 @@ fn installed_summary(data: &UiData) -> String {
         .iter()
         .filter(|s| s.apps.opencode)
         .count();
+    let enabled_hermes = data
+        .skills
+        .installed
+        .iter()
+        .filter(|s| s.apps.hermes)
+        .count();
 
     texts::tui_skills_installed_counts(
         enabled_claude,
         enabled_codex,
         enabled_gemini,
         enabled_opencode,
+        enabled_hermes,
     )
 }
 

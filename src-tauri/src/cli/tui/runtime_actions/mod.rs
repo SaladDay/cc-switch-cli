@@ -46,12 +46,27 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             | super::route::Route::SettingsProxy => route.clone(),
             _ => super::route::Route::Main,
         },
+        AppType::Hermes => match route {
+            super::route::Route::Main
+            | super::route::Route::Providers
+            | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Mcp
+            | super::route::Route::HermesMemory
+            | super::route::Route::Skills
+            | super::route::Route::SkillsDiscover
+            | super::route::Route::SkillsRepos
+            | super::route::Route::SkillDetail { .. }
+            | super::route::Route::Settings
+            | super::route::Route::SettingsProxy => route.clone(),
+            _ => super::route::Route::Main,
+        },
         _ => match route {
             super::route::Route::ConfigOpenClawWorkspace
             | super::route::Route::ConfigOpenClawDailyMemory
             | super::route::Route::ConfigOpenClawEnv
             | super::route::Route::ConfigOpenClawTools
             | super::route::Route::ConfigOpenClawAgents => super::route::Route::Config,
+            super::route::Route::HermesMemory => super::route::Route::Main,
             _ => route.clone(),
         },
     }
@@ -305,6 +320,11 @@ pub(crate) fn handle_action(
         Action::OpenClawOpenDirectory { subdir } => {
             config::open_openclaw_directory(&mut ctx, subdir)
         }
+        Action::HermesMemoryOpen { kind } => config::open_hermes_memory(&mut ctx, kind),
+        Action::HermesMemorySetEnabled { kind, enabled } => {
+            config::set_hermes_memory_enabled(&mut ctx, kind, enabled)
+        }
+        Action::HermesOpenMemoryDirectory => config::open_hermes_memory_directory(&mut ctx),
         Action::ConfigReset => config::reset(&mut ctx),
         Action::SetSkipClaudeOnboarding { enabled } => {
             crate::settings::set_skip_claude_onboarding(enabled)?;
@@ -340,9 +360,6 @@ pub(crate) fn handle_action(
             settings::enable_proxy_and_auto_failover(&mut ctx, app_type)
         }
         Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
-        Action::SetProxyTakeover { app_type, enabled } => {
-            settings::set_proxy_takeover(&mut ctx, app_type, enabled)
-        }
         Action::SetManagedProxyForCurrentApp { app_type, enabled } => queue_managed_proxy_action(
             ctx.app,
             ctx.proxy_req_tx,
@@ -356,7 +373,14 @@ pub(crate) fn handle_action(
                 .push_toast(texts::language_changed(), ToastKind::Success);
             Ok(())
         }
+        Action::SetVisibleAppsMode { mode } => settings::set_visible_apps_mode(&mut ctx, mode),
         Action::SetVisibleApps { apps } => settings::set_visible_apps(&mut ctx, apps),
+        Action::ConfirmVisibleAppsAutoDetection { use_auto } => {
+            settings::confirm_visible_apps_auto_detection(&mut ctx, use_auto)
+        }
+        Action::SwitchVisibleAppsToManual { apps, selected } => {
+            settings::switch_visible_apps_to_manual(&mut ctx, apps, selected)
+        }
         Action::CheckUpdate => updates::check(&mut ctx),
         Action::ConfirmUpdate => updates::confirm(&mut ctx),
         Action::CancelUpdate => {
@@ -595,6 +619,7 @@ mod tests {
             codex: true,
             gemini: true,
             opencode: true,
+            hermes: false,
             openclaw: true,
         })
         .expect("save initial visible apps");
@@ -604,6 +629,7 @@ mod tests {
             codex: false,
             gemini: false,
             opencode: false,
+            hermes: false,
             openclaw: false,
         };
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -663,6 +689,7 @@ mod tests {
             codex: true,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: true,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
@@ -684,6 +711,7 @@ mod tests {
                     codex: false,
                     gemini: false,
                     opencode: false,
+                    hermes: false,
                     openclaw: false,
                 },
             },
@@ -711,6 +739,7 @@ mod tests {
             codex: true,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: true,
         })
         .expect("save initial visible apps");
@@ -721,6 +750,7 @@ mod tests {
             codex: false,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: false,
         };
         let mut app = App::new(Some(AppType::Claude));
@@ -757,6 +787,7 @@ mod tests {
             codex: true,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: true,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
@@ -775,6 +806,7 @@ mod tests {
                     codex: false,
                     gemini: false,
                     opencode: false,
+                    hermes: false,
                     openclaw: false,
                 },
             },
@@ -789,6 +821,130 @@ mod tests {
             Some(toast)
                 if toast.kind == super::super::app::ToastKind::Warning
                     && toast.message == texts::tui_toast_visible_apps_zero_selection_warning()
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn switch_visible_apps_to_manual_persists_mode_and_apps() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let mut settings = crate::settings::get_settings();
+        settings.visible_apps = crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: false,
+            opencode: false,
+            hermes: false,
+            openclaw: false,
+        };
+        settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
+        settings.visible_apps_settings.auto_prompt_decided = true;
+        crate::settings::update_settings(settings).expect("save settings");
+
+        let next_visible_apps = crate::settings::VisibleApps {
+            claude: true,
+            codex: false,
+            gemini: false,
+            opencode: false,
+            hermes: false,
+            openclaw: false,
+        };
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+
+        run_action(
+            &mut app,
+            &mut data,
+            Action::SwitchVisibleAppsToManual {
+                apps: next_visible_apps.clone(),
+                selected: 1,
+            },
+        )
+        .expect("switch to manual");
+
+        let settings = crate::settings::get_settings();
+        assert_eq!(
+            settings.visible_apps_settings.mode,
+            crate::settings::VisibleAppsMode::Manual
+        );
+        assert!(settings.visible_apps_settings.auto_prompt_decided);
+        assert_eq!(settings.visible_apps, next_visible_apps);
+        assert!(matches!(
+            &app.overlay,
+            Overlay::VisibleAppsPicker { selected, apps }
+                if *selected == 1 && apps == &next_visible_apps
+        ));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == super::super::app::ToastKind::Success
+                    && toast.message == texts::tui_toast_visible_apps_saved()
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn switch_visible_apps_to_manual_keeps_state_when_replacement_preload_fails() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let initial_visible_apps = crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: false,
+            opencode: false,
+            hermes: false,
+            openclaw: true,
+        };
+        let mut settings = crate::settings::get_settings();
+        settings.visible_apps = initial_visible_apps.clone();
+        settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
+        settings.visible_apps_settings.auto_prompt_decided = true;
+        crate::settings::update_settings(settings).expect("save settings");
+        write_invalid_legacy_config(temp_home.path());
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.route_stack.push(Route::Config);
+        app.overlay = Overlay::None;
+        let mut data = UiData::default();
+        data.providers.current_id = "before".to_string();
+
+        let err = run_action(
+            &mut app,
+            &mut data,
+            Action::SwitchVisibleAppsToManual {
+                apps: crate::settings::VisibleApps {
+                    claude: true,
+                    codex: false,
+                    gemini: false,
+                    opencode: false,
+                    hermes: false,
+                    openclaw: false,
+                },
+                selected: 5,
+            },
+        )
+        .expect_err("replacement preload should fail");
+
+        assert!(
+            !err.to_string().is_empty(),
+            "error should explain the preload failure"
+        );
+        let settings = crate::settings::get_settings();
+        assert_eq!(settings.visible_apps, initial_visible_apps);
+        assert_eq!(
+            settings.visible_apps_settings.mode,
+            crate::settings::VisibleAppsMode::Auto
+        );
+        assert_eq!(app.app_type, AppType::OpenClaw);
+        assert_eq!(app.route, Route::ConfigOpenClawAgents);
+        assert_eq!(app.route_stack, vec![Route::Config]);
+        assert_eq!(data.providers.current_id, "before");
+        assert!(matches!(
+            &app.overlay,
+            Overlay::VisibleAppsPicker { selected, apps }
+                if *selected == 5 && apps == &initial_visible_apps
         ));
     }
 

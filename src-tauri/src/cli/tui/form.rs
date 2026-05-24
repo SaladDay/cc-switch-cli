@@ -37,6 +37,13 @@ pub const OPENCLAW_API_PROTOCOLS: [&str; 5] = [
     "google-generative-ai",
     "bedrock-converse-stream",
 ];
+pub const HERMES_DEFAULT_API_MODE: &str = "chat_completions";
+pub const HERMES_API_MODES: [&str; 4] = [
+    "chat_completions",
+    "anthropic_messages",
+    "codex_responses",
+    "bedrock_converse",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeminiAuthType {
@@ -184,6 +191,12 @@ pub enum ProviderAddField {
     OpenCodeModelName,
     OpenCodeModelContextLimit,
     OpenCodeModelOutputLimit,
+    HermesApiMode,
+    HermesApiKey,
+    HermesBaseUrl,
+    HermesModels,
+    HermesAdvancedDivider,
+    HermesRateLimitDelay,
     CommonConfigDivider,
     CommonSnippet,
     IncludeCommonConfig,
@@ -195,6 +208,13 @@ pub enum ProviderAddField {
 pub enum ProviderFormPage {
     Main,
     UsageQuery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HermesModelField {
+    Id(usize),
+    Name(usize),
+    ContextLength(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +254,7 @@ pub enum McpAddField {
     AppCodex,
     AppGemini,
     AppOpenCode,
+    AppHermes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,6 +346,14 @@ pub struct ProviderAddFormState {
     pub opencode_model_context_limit: TextInput,
     pub opencode_model_output_limit: TextInput,
     opencode_model_original_id: Option<String>,
+    pub hermes_api_mode: String,
+    pub hermes_api_key: TextInput,
+    pub hermes_base_url: TextInput,
+    pub hermes_models: Vec<Value>,
+    pub hermes_models_field_idx: usize,
+    pub hermes_models_editing: bool,
+    pub hermes_model_input: TextInput,
+    pub hermes_rate_limit_delay: TextInput,
     initial_snapshot: Value,
 }
 

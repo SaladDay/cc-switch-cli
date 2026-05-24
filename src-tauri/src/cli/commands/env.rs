@@ -11,7 +11,7 @@ pub enum EnvCommand {
     Check,
     /// List all relevant environment variables
     List,
-    /// Check whether Claude/Codex/Gemini/OpenCode CLIs are installed locally
+    /// Check whether supported app CLIs are installed locally
     Tools,
 }
 

@@ -140,6 +140,7 @@ fn render_content(
         }
         Route::Mcp => render_mcp(frame, app, data, content_area, theme),
         Route::Prompts => render_prompts(frame, app, data, content_area, theme),
+        Route::HermesMemory => render_hermes_memory(frame, app, data, content_area, theme),
         Route::Config => render_config(frame, app, data, content_area, theme),
         Route::ConfigOpenClawWorkspace | Route::ConfigOpenClawDailyMemory => {
             if matches!(app.app_type, AppType::OpenClaw) {

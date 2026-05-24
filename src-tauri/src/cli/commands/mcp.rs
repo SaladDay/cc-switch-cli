@@ -75,7 +75,9 @@ fn list_servers(app_type: AppType) -> Result<(), AppError> {
 
     // 创建表格
     let mut table = create_table();
-    table.set_header(vec!["ID", "Name", "Claude", "Codex", "Gemini", "Tags"]);
+    table.set_header(vec![
+        "ID", "Name", "Claude", "Codex", "Gemini", "OpenCode", "Hermes", "Tags",
+    ]);
 
     // 按 ID 排序
     let mut server_list: Vec<_> = servers.into_iter().collect();
@@ -85,6 +87,8 @@ fn list_servers(app_type: AppType) -> Result<(), AppError> {
         let claude_marker = if server.apps.claude { "✓" } else { " " };
         let codex_marker = if server.apps.codex { "✓" } else { " " };
         let gemini_marker = if server.apps.gemini { "✓" } else { " " };
+        let opencode_marker = if server.apps.opencode { "✓" } else { " " };
+        let hermes_marker = if server.apps.hermes { "✓" } else { " " };
         let tags = server.tags.join(", ");
 
         let row = vec![
@@ -93,6 +97,8 @@ fn list_servers(app_type: AppType) -> Result<(), AppError> {
             claude_marker.to_string(),
             codex_marker.to_string(),
             gemini_marker.to_string(),
+            opencode_marker.to_string(),
+            hermes_marker.to_string(),
             tags,
         ];
 
@@ -137,6 +143,16 @@ fn delete_server(id: &str) -> Result<(), AppError> {
         },
         if server.apps.gemini {
             Some("Gemini")
+        } else {
+            None
+        },
+        if server.apps.opencode {
+            Some("OpenCode")
+        } else {
+            None
+        },
+        if server.apps.hermes {
+            Some("Hermes")
         } else {
             None
         },
@@ -264,7 +280,8 @@ fn import_servers(app_type: AppType) -> Result<(), AppError> {
         AppType::Claude => McpService::import_from_claude(&state)?,
         AppType::Codex => McpService::import_from_codex(&state)?,
         AppType::Gemini => McpService::import_from_gemini(&state)?,
-        AppType::OpenCode => 0,
+        AppType::OpenCode => McpService::import_from_opencode(&state)?,
+        AppType::Hermes => McpService::import_from_hermes(&state)?,
         AppType::OpenClaw => 0,
     };
 

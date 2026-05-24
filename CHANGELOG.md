@@ -7,6 +7,71 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.6.0] - 2026-05-21
+
+### Added
+
+- **Proxy / Daemon**: Add a daemon-managed proxy process for CLI and TUI proxy workflows, including worker startup, status checks, restart handling, and shutdown commands.
+- **Proxy / Apps**: Add per-app proxy workers and default listen ports so Claude Code, Codex, and Gemini can run through separate local proxy endpoints.
+- **Usage Query / TUI**: Add the TUI Usage Query configuration page with upstream-aligned templates, field visibility, validation behavior, and result display.
+- **Prompts / CLI / TUI**: Move prompt management onto the SQLite prompt service, add prompt identity editing, and confirm before importing over existing prompt files.
+- **Codex / Config**: Add `CODEX_HOME` support for Codex installations outside the default config directory.
+- **TUI / Editing**: Add readline-style text editing and normalize vim-style navigation across forms and overlays.
+
+### Changed
+
+- **Proxy / Database Compatibility**: Keep the database schema at v10 and store CLI-only proxy preferences in the settings KV entry `proxy_preferences_cli_only`, preserving upstream/WebDAV database compatibility.
+- **Proxy / Process Safety**: Replace process-name matching with daemon-owned worker tracking and status proof before stopping existing proxy workers.
+- **Provider / Common Config**: Align common config snippets, editor reuse, confirmation flow, Codex extraction, and CLI commands across provider workflows.
+- **TUI / Providers**: Refine provider actions, provider empty states, failover proxy UX, Skills page layout, footer shortcuts, and space-toggle behavior.
+- **README / Release Metadata**: Refresh the README version badges for 5.6.0.
+
+### Fixed
+
+- **WebDAV / Sync**: Avoid upload readback checks that could fail in compatible WebDAV environments.
+- **Database / Compatibility**: Improve the future-schema error path so newer databases fail clearly instead of being modified by older binaries.
+- **Failover / Tests**: Stabilize failover proxy setup coverage around the updated proxy workflow.
+
+### Commits (since v5.5.0)
+
+- 23b81d47 refactor: add daemon-managed proxy process (#189)
+- 0b1304dd (chore) ignore local review skill
+- 26360ae3 feat(tui) normalize vim-style navigation across forms and overlays (#188)
+- 64cbca79 (docs) update RightCode rebate to 5%
+- 14856f68 feat(tui) add vim-style navigation in form handler (#183)
+- a1dd240a (tui)add usage query configuration
+- 73b7c3c1 fix(webdav): avoid upload readback checks
+- d3c240c5 feat: add CODEX_HOME support (#179)
+- d160b168 (tui)streamline common config snippets
+- 8e311ee4 (cli)align common config commands
+- fa96c245 (provider)persist common config notice confirmation
+- a5914cdd (provider)align codex common extraction
+- ee155e69 (provider)reuse editor for common config snippets
+- 65c4dc75 (provider)align common config handling
+- 4a292849 (tui)use space for app toggles
+- 564558a2 (test)fix failover e2e proxy setup
+- 3fa27235 (prompt)confirm before importing existing prompt
+- 50fcb8cd (prompt)toggle prompts with space
+- 371f4222 (prompt)stabilize prompt list order
+- d3810be2 (prompt)unify prompt add edit
+- 8afd9075 (prompts)edit prompt identity
+- 6ff4f888 (prompts)use sqlite prompt service
+- e3ff1689 (tui)align prompt shortcuts
+- 253ce370 (tui)align skills page with mcp style
+- d36070bf (tui)refine footer shortcuts
+- 83307151 Improve failover proxy UX
+- 0c6f9a65 Add provider empty state
+- f80a0695 Refine provider TUI actions
+- 92ab4425 fix(database): improve future schema error
+- e7725913 feat(tui): add readline text editing shortcuts
+
+### Thanks
+
+- Thanks to all developers and contributors who worked on this release, reviewed the proxy changes, tested the TUI flows, and kept the CLI fork aligned with upstream compatibility.
+- Special thanks to `@unive3sal` for the daemon-managed proxy process, `CODEX_HOME` support, and the careful follow-up work around multi-user proxy safety.
+- Thanks `@feiyehua` for the vim-style navigation work across TUI forms and overlays.
+- Thanks `@saladday` for Usage Query, prompt management, common config alignment, WebDAV/database fixes, TUI polish, and release integration across this cycle.
+
 ## [5.5.0] - 2026-05-10
 
 ### Added

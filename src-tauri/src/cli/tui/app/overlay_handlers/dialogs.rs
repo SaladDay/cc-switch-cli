@@ -30,6 +30,9 @@ impl App {
                     ConfirmAction::ProviderDelete { id } => {
                         Action::ProviderDelete { id: id.clone() }
                     }
+                    ConfirmAction::ProviderRemoveFromConfig { id } => {
+                        Action::ProviderRemoveFromConfig { id: id.clone() }
+                    }
                     ConfirmAction::McpDelete { id } => Action::McpDelete { id: id.clone() },
                     ConfirmAction::PromptDelete { id } => Action::PromptDelete { id: id.clone() },
                     ConfirmAction::SkillsUninstall { directory } => Action::SkillsUninstall {
@@ -51,6 +54,15 @@ impl App {
                     }
                     ConfirmAction::SettingsSetClaudePluginIntegration { enabled } => {
                         Action::SetClaudePluginIntegration { enabled: *enabled }
+                    }
+                    ConfirmAction::VisibleAppsAutoDetection => {
+                        Action::ConfirmVisibleAppsAutoDetection { use_auto: true }
+                    }
+                    ConfirmAction::VisibleAppsSwitchToManual { apps, selected } => {
+                        Action::SwitchVisibleAppsToManual {
+                            apps: apps.clone(),
+                            selected: *selected,
+                        }
                     }
                     ConfirmAction::ProviderApiFormatProxyNotice => Action::None,
                     ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
@@ -89,6 +101,17 @@ impl App {
                 action
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
+                if matches!(confirm.action, ConfirmAction::VisibleAppsAutoDetection) {
+                    self.close_overlay();
+                    return Some(Action::ConfirmVisibleAppsAutoDetection { use_auto: false });
+                }
+                if let ConfirmAction::VisibleAppsSwitchToManual { selected, .. } = &confirm.action {
+                    self.overlay = Overlay::VisibleAppsPicker {
+                        selected: *selected,
+                        apps: crate::settings::get_visible_apps(),
+                    };
+                    return Some(Action::None);
+                }
                 if matches!(
                     confirm.action,
                     ConfirmAction::CommonConfigNotice | ConfirmAction::UsageQueryNotice
@@ -114,6 +137,16 @@ impl App {
                 match confirm.action {
                     ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
                     ConfirmAction::UsageQueryNotice => Action::ConfirmUsageQueryNotice,
+                    ConfirmAction::VisibleAppsAutoDetection => {
+                        Action::ConfirmVisibleAppsAutoDetection { use_auto: false }
+                    }
+                    ConfirmAction::VisibleAppsSwitchToManual { selected, .. } => {
+                        self.overlay = Overlay::VisibleAppsPicker {
+                            selected,
+                            apps: crate::settings::get_visible_apps(),
+                        };
+                        Action::None
+                    }
                     _ => Action::None,
                 }
             }

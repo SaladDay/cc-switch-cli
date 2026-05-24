@@ -52,6 +52,12 @@ use terminal::{PanicRestoreHookGuard, TuiTerminal};
 pub(super) const TUI_TICK_RATE: Duration = Duration::from_millis(200);
 const QUOTA_REFRESH_INTERVAL_TICKS: u64 = 5 * 60 * 1000 / 200;
 
+fn apply_visible_apps_startup_policy(
+) -> Result<crate::services::visible_apps::VisibleAppsStartupOutcome, AppError> {
+    let detection = crate::services::visible_apps::detect_visible_app_installation();
+    crate::services::visible_apps::apply_startup_policy(&detection)
+}
+
 fn resolve_initial_app_type(app_override: Option<AppType>) -> AppType {
     let requested = app_override.unwrap_or(AppType::Claude);
     let visible_apps = crate::settings::get_visible_apps();
@@ -63,17 +69,30 @@ fn resolve_initial_app_type(app_override: Option<AppType>) -> AppType {
     crate::settings::next_visible_app(&visible_apps, &requested, 1).unwrap_or(requested)
 }
 
-fn initialize_app_state_with<F>(
+fn initialize_app_state_with<F, FVisibleApps>(
     app_override: Option<AppType>,
     load_data: F,
+    apply_visible_apps: FVisibleApps,
 ) -> Result<(App, data::UiData), AppError>
 where
     F: FnOnce(&AppType) -> Result<data::UiData, AppError>,
+    FVisibleApps:
+        FnOnce() -> Result<crate::services::visible_apps::VisibleAppsStartupOutcome, AppError>,
 {
+    let visible_apps_outcome = apply_visible_apps()?;
     let app_type = resolve_initial_app_type(app_override);
     let mut app = App::new(Some(app_type));
     app.common_config_notice_confirmed = crate::settings::get_common_config_confirmed();
     app.usage_query_notice_confirmed = crate::settings::get_usage_confirmed();
+    if visible_apps_outcome.should_prompt {
+        app.prompt_visible_apps_auto_detection();
+    }
+    for notice in &visible_apps_outcome.notices {
+        app.push_toast(
+            crate::services::visible_apps::notice_message(notice),
+            ToastKind::Info,
+        );
+    }
     let data = load_data(&app.app_type)?;
     Ok((app, data))
 }
@@ -86,7 +105,10 @@ fn initialize_app_state_for_test<F>(
 where
     F: FnOnce(&AppType) -> Result<data::UiData, AppError>,
 {
-    initialize_app_state_with(app_override, load_data)
+    let detection = crate::services::visible_apps::VisibleAppsDetection::default();
+    initialize_app_state_with(app_override, load_data, || {
+        crate::services::visible_apps::apply_startup_policy(&detection)
+    })
 }
 
 #[derive(Default)]
@@ -210,7 +232,11 @@ fn queue_provider_quota_refresh(
 pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let _panic_hook = PanicRestoreHookGuard::install();
     let mut terminal = TuiTerminal::new()?;
-    let (mut app, mut data) = initialize_app_state_with(app_override, data::UiData::load)?;
+    let (mut app, mut data) = initialize_app_state_with(
+        app_override,
+        data::UiData::load,
+        apply_visible_apps_startup_policy,
+    )?;
     let mut proxy_open_flash = ProxyOpenFlash::default();
     app.reset_proxy_activity(
         data.proxy.estimated_input_tokens_total,

@@ -11,7 +11,7 @@ pub(crate) fn render_overlay(
 
     match &app.overlay {
         Overlay::None => {}
-        Overlay::Help => super::basic::render_help_overlay(frame, content_area, theme),
+        Overlay::Help => super::basic::render_help_overlay(frame, app, content_area, theme),
         Overlay::Confirm(confirm) => {
             super::basic::render_confirm_overlay(frame, content_area, theme, confirm)
         }
@@ -85,6 +85,15 @@ pub(crate) fn render_overlay(
                 content_area,
                 theme,
                 *selected,
+            )
+        }
+        Overlay::HermesModelsPicker { editing } => {
+            super::pickers::render_hermes_models_picker_overlay(
+                frame,
+                app,
+                content_area,
+                theme,
+                *editing,
             )
         }
         Overlay::ModelFetchPicker {

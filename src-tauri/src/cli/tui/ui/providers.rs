@@ -25,6 +25,32 @@ fn opencode_status_label(row: &ProviderRow) -> &'static str {
     }
 }
 
+fn additive_status_label(app_type: &AppType, row: &ProviderRow) -> &'static str {
+    if matches!(app_type, AppType::Hermes) && row.is_default_model {
+        texts::tui_provider_status_in_use()
+    } else if row.is_default_model {
+        texts::tui_openclaw_status_default()
+    } else {
+        opencode_status_label(row)
+    }
+}
+
+fn provider_switch_key_label(app_type: &AppType) -> &'static str {
+    if app_type.is_additive_mode() {
+        texts::tui_key_add_remove()
+    } else {
+        texts::tui_key_switch()
+    }
+}
+
+fn provider_default_key_label(app_type: &AppType) -> &'static str {
+    if matches!(app_type, AppType::Hermes) {
+        texts::tui_key_enable()
+    } else {
+        texts::tui_key_set_default()
+    }
+}
+
 fn failover_queue_label(data: &UiData, provider_id: &str) -> String {
     failover_queue_position(data, provider_id)
         .map(|position| format!("#{position}"))
@@ -153,13 +179,15 @@ pub(super) fn render_providers(
             keys.push(("a", texts::tui_key_add()));
         } else {
             keys.push(("Enter", texts::tui_key_details()));
-            keys.push(("Space", texts::tui_key_switch()));
-            keys.extend([
-                ("a", texts::tui_key_add()),
-                ("e", texts::tui_key_edit()),
-                ("d", texts::tui_key_delete()),
-                ("t", texts::tui_key_test()),
-            ]);
+            keys.push(("Space", provider_switch_key_label(&app.app_type)));
+            keys.push(("a", texts::tui_key_add()));
+            if let Some(row) = visible.get(app.provider_idx) {
+                if !data::provider_is_read_only(&app.app_type, row) {
+                    keys.push(("e", texts::tui_key_edit()));
+                    keys.push(("d", texts::tui_key_delete()));
+                }
+            }
+            keys.push(("t", texts::tui_key_test()));
             if selected_supports_quota {
                 keys.push(("r", texts::tui_key_refresh()));
             }
@@ -170,9 +198,8 @@ pub(super) fn render_providers(
                 keys.push(("f", texts::tui_key_failover()));
             }
             if let Some(row) = visible.get(app.provider_idx) {
-                if matches!(app.app_type, crate::app_config::AppType::OpenClaw) && row.is_in_config
-                {
-                    keys.push(("x", texts::tui_key_set_default()));
+                if matches!(app.app_type, AppType::OpenClaw | AppType::Hermes) && row.is_in_config {
+                    keys.push(("x", provider_default_key_label(&app.app_type)));
                 }
             }
         }
@@ -195,7 +222,7 @@ pub(super) fn render_providers(
     let rows = visible.iter().enumerate().map(|(idx, row)| {
         let marker = if failover_supported && data.proxy.auto_failover_enabled {
             failover_queue_label(data, &row.id)
-        } else if matches!(app.app_type, crate::app_config::AppType::OpenClaw) {
+        } else if matches!(app.app_type, AppType::OpenClaw | AppType::Hermes) {
             if row.is_default_model {
                 "*".to_string()
             } else if row.is_in_config {
@@ -203,7 +230,7 @@ pub(super) fn render_providers(
             } else {
                 String::new()
             }
-        } else if matches!(app.app_type, crate::app_config::AppType::OpenCode) {
+        } else if matches!(app.app_type, AppType::OpenCode) {
             if row.is_in_config {
                 "+".to_string()
             } else {
@@ -281,16 +308,16 @@ pub(super) fn render_provider_detail(
         .split(inner);
 
     if app.focus == Focus::Content {
-        let mut keys = vec![
-            ("Space", texts::tui_key_switch()),
-            ("e", texts::tui_key_edit()),
-        ];
+        let mut keys = vec![("Space", provider_switch_key_label(&app.app_type))];
+        if !data::provider_is_read_only(&app.app_type, row) {
+            keys.push(("e", texts::tui_key_edit()));
+        }
         keys.push(("t", texts::tui_key_test()));
         if data::quota_target_for_provider(&app.app_type, row).is_some() {
             keys.push(("r", texts::tui_key_refresh()));
         }
-        if matches!(app.app_type, crate::app_config::AppType::OpenClaw) && row.is_in_config {
-            keys.push(("x", texts::tui_key_set_default()));
+        if matches!(app.app_type, AppType::OpenClaw | AppType::Hermes) && row.is_in_config {
+            keys.push(("x", provider_default_key_label(&app.app_type)));
         }
         if crate::cli::tui::app::supports_temporary_provider_launch(&app.app_type) {
             keys.push(("o", texts::tui_key_launch_temp()));
@@ -352,7 +379,7 @@ pub(super) fn render_provider_detail(
         }
     }
 
-    if matches!(app.app_type, crate::app_config::AppType::OpenCode) {
+    if matches!(app.app_type, AppType::OpenCode | AppType::Hermes) {
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![
             Span::styled(
@@ -360,7 +387,7 @@ pub(super) fn render_provider_detail(
                 Style::default().fg(theme.accent),
             ),
             Span::raw(": "),
-            Span::raw(opencode_status_label(row)),
+            Span::raw(additive_status_label(&app.app_type, row)),
         ]));
     }
 

@@ -173,6 +173,14 @@ pub enum Action {
     OpenClawOpenDirectory {
         subdir: String,
     },
+    HermesMemoryOpen {
+        kind: crate::hermes_config::MemoryKind,
+    },
+    HermesMemorySetEnabled {
+        kind: crate::hermes_config::MemoryKind,
+        enabled: bool,
+    },
+    HermesOpenMemoryDirectory,
     ConfigReset,
 
     EditorSubmit {
@@ -213,17 +221,23 @@ pub enum Action {
     SetOpenClawConfigDir {
         path: Option<String>,
     },
-    SetProxyTakeover {
-        app_type: AppType,
-        enabled: bool,
-    },
     SetManagedProxyForCurrentApp {
         app_type: AppType,
         enabled: bool,
     },
     SetLanguage(Language),
+    SetVisibleAppsMode {
+        mode: crate::settings::VisibleAppsMode,
+    },
     SetVisibleApps {
         apps: crate::settings::VisibleApps,
+    },
+    ConfirmVisibleAppsAutoDetection {
+        use_auto: bool,
+    },
+    SwitchVisibleAppsToManual {
+        apps: crate::settings::VisibleApps,
+        selected: usize,
     },
 
     CheckUpdate,
@@ -375,6 +389,7 @@ impl ConfigItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsItem {
     Language,
+    VisibleAppsMode,
     VisibleApps,
     OpenClawConfigDir,
     SkipClaudeOnboarding,
@@ -384,8 +399,9 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 7] = [
+    pub const ALL: [SettingsItem; 8] = [
         SettingsItem::Language,
+        SettingsItem::VisibleAppsMode,
         SettingsItem::VisibleApps,
         SettingsItem::OpenClawConfigDir,
         SettingsItem::SkipClaudeOnboarding,
@@ -505,6 +521,7 @@ pub struct App {
     pub config_idx: usize,
     pub workspace_idx: usize,
     pub daily_memory_idx: usize,
+    pub hermes_memory_idx: usize,
     pub openclaw_tools_form: Option<OpenClawToolsFormState>,
     pub openclaw_agents_form: Option<OpenClawAgentsFormState>,
     pub openclaw_daily_memory_search_query: String,

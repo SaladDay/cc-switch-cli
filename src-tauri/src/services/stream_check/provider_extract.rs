@@ -30,6 +30,28 @@ impl StreamCheckService {
                 .and_then(|value| value.as_object())
                 .and_then(|models| models.keys().next().cloned())
                 .unwrap_or_else(|| config.codex_model.clone()),
+            AppType::Hermes => provider
+                .settings_config
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    provider
+                        .settings_config
+                        .get("models")
+                        .and_then(|value| value.as_object())
+                        .and_then(|models| models.keys().next().cloned())
+                })
+                .or_else(|| {
+                    provider
+                        .settings_config
+                        .get("models")
+                        .and_then(|value| value.as_array())
+                        .and_then(|models| models.first())
+                        .and_then(|model| model.get("id").and_then(|value| value.as_str()))
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| config.codex_model.clone()),
             AppType::OpenClaw => provider
                 .settings_config
                 .get("models")
@@ -168,6 +190,16 @@ impl StreamCheckService {
                 .unwrap_or_default()
                 .trim_end_matches('/')
                 .to_string()),
+            AppType::Hermes => Ok(provider
+                .settings_config
+                .get("base_url")
+                .or_else(|| provider.settings_config.get("baseUrl"))
+                .or_else(|| provider.settings_config.get("baseURL"))
+                .or_else(|| provider.settings_config.get("endpoint"))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .trim_end_matches('/')
+                .to_string()),
             AppType::OpenClaw => Ok(provider
                 .settings_config
                 .get("baseUrl")
@@ -214,6 +246,19 @@ impl StreamCheckService {
                 .ok_or_else(|| {
                     AppError::localized(
                         "provider.opencode.api_key.missing",
+                        "缺少 API Key",
+                        "API key is missing",
+                    )
+                }),
+            AppType::Hermes => provider
+                .settings_config
+                .get("apiKey")
+                .or_else(|| provider.settings_config.get("api_key"))
+                .and_then(|value| value.as_str())
+                .map(|key| AuthInfo::new(key.to_string(), AuthStrategy::Bearer))
+                .ok_or_else(|| {
+                    AppError::localized(
+                        "provider.hermes.api_key.missing",
                         "缺少 API Key",
                         "API key is missing",
                     )

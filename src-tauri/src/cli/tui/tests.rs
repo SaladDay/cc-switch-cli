@@ -588,6 +588,10 @@ fn model_fetch_strategy_matches_provider_field() {
         model_fetch_strategy_for_field(ProviderAddField::ClaudeModelConfig),
         ModelFetchStrategy::Anthropic
     );
+    assert_eq!(
+        model_fetch_strategy_for_field(ProviderAddField::HermesModels),
+        ModelFetchStrategy::Bearer
+    );
 }
 
 #[test]
@@ -643,6 +647,7 @@ fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_
         codex: true,
         gemini: false,
         opencode: true,
+        hermes: false,
         openclaw: true,
     })
     .expect("save visible apps");

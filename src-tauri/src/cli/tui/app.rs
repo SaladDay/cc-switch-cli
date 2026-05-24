@@ -36,6 +36,7 @@ pub(crate) use app_state::{
     Action, App, ConfigItem, LocalProxySettingsItem, MoveDirection, ProxyVisualTransition,
     SettingsItem, WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
 };
+pub(crate) use content_config::HERMES_MEMORY_ROW_COUNT;
 pub use editor_state::{EditorKind, EditorMode, EditorState, EditorSubmit};
 pub(crate) use helpers::*;
 pub use types::{

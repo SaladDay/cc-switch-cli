@@ -272,7 +272,7 @@ pub(super) fn render_main(
             Constraint::Length(1),
             Constraint::Length(connection_card_height),
             Constraint::Length(4),
-            Constraint::Length(6),
+            Constraint::Length(8),
             Constraint::Min(0),
         ])
         .split(chunks[0]);
@@ -568,7 +568,7 @@ fn render_local_env_check_card(
     theme: &super::theme::Theme,
     card_border: Style,
 ) {
-    use crate::services::local_env_check::{LocalTool, ToolCheckStatus};
+    use crate::services::local_env_check::LocalTool;
 
     let outer = Block::default()
         .borders(Borders::ALL)
@@ -580,113 +580,134 @@ fn render_local_env_check_card(
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(2),
+        ])
         .split(inner);
 
-    let cols0 = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[0]);
-    let cols1 = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[1]);
+    let row_columns = rows
+        .iter()
+        .map(|row| {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(*row)
+        })
+        .collect::<Vec<_>>();
 
-    let cells = [
-        (LocalTool::Claude, "Claude", cols0[0]),
-        (LocalTool::Codex, "Codex", cols0[1]),
-        (LocalTool::Gemini, "Gemini", cols1[0]),
-        (LocalTool::OpenCode, "OpenCode", cols1[1]),
-    ];
+    let cell_areas = row_columns
+        .iter()
+        .flat_map(|columns| columns.iter().copied())
+        .collect::<Vec<_>>();
+
+    let cells = LocalTool::all()
+        .iter()
+        .zip(cell_areas)
+        .map(|(tool, cell_area)| (*tool, tool.display_name(), cell_area));
 
     for (tool, display_name, cell_area) in cells {
-        let status = if app.local_env_loading {
-            None
-        } else {
-            app.local_env_results
-                .iter()
-                .find(|r| r.tool == tool)
-                .map(|r| &r.status)
-        };
-
-        let (icon, icon_style) = if app.local_env_loading {
-            ("…", Style::default().fg(theme.surface))
-        } else {
-            match status {
-                Some(ToolCheckStatus::Ok { .. }) => (
-                    "✓",
-                    if theme.no_color {
-                        Style::default()
-                    } else {
-                        Style::default().fg(theme.ok)
-                    },
-                ),
-                Some(ToolCheckStatus::NotInstalledOrNotExecutable) | None => (
-                    "!",
-                    if theme.no_color {
-                        Style::default()
-                    } else {
-                        Style::default().fg(theme.warn)
-                    },
-                ),
-                Some(ToolCheckStatus::Error { .. }) => (
-                    "!",
-                    if theme.no_color {
-                        Style::default()
-                    } else {
-                        Style::default().fg(theme.warn)
-                    },
-                ),
-            }
-        };
-
-        let name_style = if theme.no_color {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        };
-
-        let detail_style = if theme.no_color {
-            Style::default()
-        } else {
-            Style::default().fg(theme.surface)
-        };
-
-        let value_style = Style::default().fg(theme.cyan);
-        let (detail_text, detail_line_style) = if app.local_env_loading {
-            ("".to_string(), detail_style)
-        } else {
-            match status {
-                Some(ToolCheckStatus::Ok { version }) => (version.clone(), value_style),
-                Some(ToolCheckStatus::NotInstalledOrNotExecutable) | None => (
-                    texts::tui_local_env_not_installed().to_string(),
-                    detail_style,
-                ),
-                Some(ToolCheckStatus::Error { message }) => (message.clone(), detail_style),
-            }
-        };
-
-        let detail_width = cell_area.width.saturating_sub(1);
-        let detail_text = truncate_to_display_width(&detail_text, detail_width);
-
-        let lines = vec![
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled(">_ ", Style::default().fg(theme.surface)),
-                Span::styled(display_name.to_string(), name_style),
-                Span::raw(" "),
-                Span::styled(icon.to_string(), icon_style),
-            ]),
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled(detail_text, detail_line_style),
-            ]),
-        ];
-
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), cell_area);
+        render_local_env_tool_cell(frame, app, theme, tool, display_name, cell_area);
     }
+}
+
+fn render_local_env_tool_cell(
+    frame: &mut Frame<'_>,
+    app: &App,
+    theme: &super::theme::Theme,
+    tool: crate::services::local_env_check::LocalTool,
+    display_name: &str,
+    cell_area: Rect,
+) {
+    use crate::services::local_env_check::ToolCheckStatus;
+
+    let status = if app.local_env_loading {
+        None
+    } else {
+        app.local_env_results
+            .iter()
+            .find(|r| r.tool == tool)
+            .map(|r| &r.status)
+    };
+
+    let (icon, icon_style) = if app.local_env_loading {
+        ("…", Style::default().fg(theme.surface))
+    } else {
+        match status {
+            Some(ToolCheckStatus::Ok { .. }) => (
+                "✓",
+                if theme.no_color {
+                    Style::default()
+                } else {
+                    Style::default().fg(theme.ok)
+                },
+            ),
+            Some(ToolCheckStatus::NotInstalledOrNotExecutable) | None => (
+                "!",
+                if theme.no_color {
+                    Style::default()
+                } else {
+                    Style::default().fg(theme.warn)
+                },
+            ),
+            Some(ToolCheckStatus::Error { .. }) => (
+                "!",
+                if theme.no_color {
+                    Style::default()
+                } else {
+                    Style::default().fg(theme.warn)
+                },
+            ),
+        }
+    };
+
+    let name_style = if theme.no_color {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let detail_style = if theme.no_color {
+        Style::default()
+    } else {
+        Style::default().fg(theme.surface)
+    };
+
+    let value_style = Style::default().fg(theme.cyan);
+    let (detail_text, detail_line_style) = if app.local_env_loading {
+        ("".to_string(), detail_style)
+    } else {
+        match status {
+            Some(ToolCheckStatus::Ok { version }) => (version.clone(), value_style),
+            Some(ToolCheckStatus::NotInstalledOrNotExecutable) | None => (
+                texts::tui_local_env_not_installed().to_string(),
+                detail_style,
+            ),
+            Some(ToolCheckStatus::Error { message }) => (message.clone(), detail_style),
+        }
+    };
+
+    let detail_width = cell_area.width.saturating_sub(1);
+    let detail_text = truncate_to_display_width(&detail_text, detail_width);
+
+    let lines = vec![
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(">_ ", Style::default().fg(theme.surface)),
+            Span::styled(display_name.to_string(), name_style),
+            Span::raw(" "),
+            Span::styled(icon.to_string(), icon_style),
+        ]),
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(detail_text, detail_line_style),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), cell_area);
 }
 
 #[cfg(test)]

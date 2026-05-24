@@ -315,14 +315,15 @@ pub fn tui_skills_installed_counts(
     codex: usize,
     gemini: usize,
     opencode: usize,
+    hermes: usize,
 ) -> String {
     if is_chinese() {
         format!(
-            "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+            "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
         )
     } else {
         format!(
-            "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+            "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
         )
     }
 }
@@ -332,14 +333,15 @@ pub fn tui_mcp_server_counts(
     codex: usize,
     gemini: usize,
     opencode: usize,
+    hermes: usize,
 ) -> String {
     if is_chinese() {
         format!(
-            "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+            "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
         )
     } else {
         format!(
-            "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+            "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
         )
     }
 }
@@ -704,6 +706,14 @@ pub fn tui_toast_provider_cannot_delete_current() -> &'static str {
     }
 }
 
+pub fn tui_toast_provider_managed_by_hermes() -> &'static str {
+    if is_chinese() {
+        "该供应商由 Hermes 管理，请在 Hermes Web UI 中编辑。"
+    } else {
+        "This provider is managed by Hermes. Edit it in the Hermes Web UI."
+    }
+}
+
 pub fn tui_confirm_delete_provider_title() -> &'static str {
     if is_chinese() {
         "删除供应商"
@@ -898,9 +908,7 @@ pub fn tui_confirm_import_prompt_title() -> &'static str {
 
 pub fn tui_confirm_import_prompt_message(filename: &str) -> String {
     if is_chinese() {
-        format!(
-            "当前提示词列表为空，检测到已有 {filename}。是否把它作为新提示词打开编辑？"
-        )
+        format!("当前提示词列表为空，检测到已有 {filename}。是否把它作为新提示词打开编辑？")
     } else {
         format!(
             "The prompt list is empty and {filename} already exists. Open it as a new editable prompt?"

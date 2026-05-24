@@ -10,6 +10,7 @@ mod app_config {
         Gemini,
         OpenCode,
         OpenClaw,
+        Hermes,
     }
 
     impl AppType {
@@ -20,6 +21,7 @@ mod app_config {
                 AppType::Gemini => "gemini",
                 AppType::OpenCode => "opencode",
                 AppType::OpenClaw => "openclaw",
+                AppType::Hermes => "hermes",
             }
         }
     }
@@ -314,5 +316,45 @@ fn settings_current_provider_openclaw_falls_back_to_db_when_cleanup_fails() {
             .expect("cleanup failure should still fall back to database current")
             .as_deref(),
         Some("db-openclaw")
+    );
+}
+
+#[test]
+#[serial]
+fn settings_current_provider_hermes_matches_upstream_placeholder_behavior() {
+    let _home = HomeGuard::new();
+
+    set_current_provider(&AppType::Hermes, Some("local-hermes"))
+        .expect("store local hermes provider placeholder");
+    assert_eq!(
+        get_current_provider(&AppType::Hermes).as_deref(),
+        Some("local-hermes")
+    );
+
+    let mut db = Database::default();
+    db.insert_provider("hermes", "local-hermes");
+    db.set_db_current("hermes", "db-hermes");
+
+    assert_eq!(
+        get_effective_current_provider(&db, &AppType::Hermes)
+            .expect("resolve effective hermes provider")
+            .as_deref(),
+        Some("local-hermes"),
+        "existing local placeholder should win while it still exists in the database"
+    );
+
+    set_current_provider(&AppType::Hermes, Some("missing-hermes"))
+        .expect("overwrite local hermes placeholder");
+    assert_eq!(
+        get_effective_current_provider(&db, &AppType::Hermes)
+            .expect("fallback to database current provider")
+            .as_deref(),
+        Some("db-hermes"),
+        "missing local placeholder should be cleared and fall back to database current"
+    );
+    assert_eq!(
+        get_current_provider(&AppType::Hermes),
+        None,
+        "invalid local placeholder should be removed after fallback"
     );
 }

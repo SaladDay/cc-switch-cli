@@ -1176,6 +1176,7 @@ fn mcp_add_form_builds_server_and_apps() {
     form.apps.claude = true;
     form.apps.codex = false;
     form.apps.gemini = true;
+    form.apps.hermes = true;
 
     let server = form.to_mcp_server_json_value();
     assert_eq!(server["id"], "m1");
@@ -1187,6 +1188,7 @@ fn mcp_add_form_builds_server_and_apps() {
     assert_eq!(server["apps"]["codex"], false);
     assert_eq!(server["apps"]["gemini"], true);
     assert_eq!(server["apps"]["opencode"], false);
+    assert_eq!(server["apps"]["hermes"], true);
 }
 
 #[test]
@@ -1358,6 +1360,7 @@ fn mcp_http_form_replaces_stdio_fields_with_url() {
     assert!(!fields.contains(&McpAddField::Args));
     assert!(!fields.contains(&McpAddField::Env));
     assert!(fields.contains(&McpAddField::AppOpenCode));
+    assert!(fields.contains(&McpAddField::AppHermes));
 }
 
 #[test]
@@ -1920,6 +1923,143 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
         !std::ptr::eq(openclaw_defs, opencode_defs),
         "OpenClaw should keep its own template mapping instead of aliasing OpenCode"
     );
+}
+
+#[test]
+fn provider_add_form_hermes_exposes_upstream_provider_fields_only() {
+    let form = ProviderAddFormState::new(AppType::Hermes);
+    let fields = form.fields();
+
+    assert_eq!(
+        fields,
+        vec![
+            ProviderAddField::Id,
+            ProviderAddField::Name,
+            ProviderAddField::WebsiteUrl,
+            ProviderAddField::Notes,
+            ProviderAddField::HermesApiMode,
+            ProviderAddField::HermesBaseUrl,
+            ProviderAddField::HermesApiKey,
+            ProviderAddField::HermesModels,
+            ProviderAddField::HermesAdvancedDivider,
+            ProviderAddField::HermesRateLimitDelay,
+            ProviderAddField::UsageQueryDivider,
+            ProviderAddField::UsageQuery,
+        ]
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::CommonSnippet),
+        "Hermes provider form should not expose common config controls"
+    );
+}
+
+#[test]
+fn provider_add_form_hermes_rate_limit_delay_is_editable() {
+    let mut form = ProviderAddFormState::new(AppType::Hermes);
+    let fields = form.fields();
+    assert!(fields.contains(&ProviderAddField::HermesRateLimitDelay));
+    assert!(form.input(ProviderAddField::HermesRateLimitDelay).is_some());
+    assert!(form
+        .input_mut(ProviderAddField::HermesRateLimitDelay)
+        .is_some());
+    assert!(
+        form.input(ProviderAddField::HermesAdvancedDivider)
+            .is_none(),
+        "Hermes advanced divider must not be editable"
+    );
+
+    form.hermes_rate_limit_delay.set("0.5");
+    assert_eq!(
+        form.input(ProviderAddField::HermesRateLimitDelay)
+            .map(|input| input.value.as_str()),
+        Some("0.5")
+    );
+}
+
+#[test]
+fn provider_add_form_hermes_builds_upstream_snake_case_settings() {
+    let mut form = ProviderAddFormState::new(AppType::Hermes);
+    form.id.set("openrouter");
+    form.name.set("OpenRouter");
+    form.hermes_api_mode = "anthropic_messages".to_string();
+    form.hermes_base_url
+        .set(" https://openrouter.ai/api/v1/// ");
+    form.hermes_api_key.set(" sk-or-test ");
+    form.hermes_models = vec![json!({
+        "id": "anthropic/claude-opus-4-7",
+        "name": "Claude Opus 4.7",
+        "context_length": 1000000,
+    })];
+    form.hermes_rate_limit_delay.set("0.5");
+
+    let provider = form.to_provider_json_value();
+    let settings = provider["settingsConfig"].as_object().unwrap();
+    assert_eq!(settings.get("api_mode"), Some(&json!("anthropic_messages")));
+    assert_eq!(
+        settings.get("base_url"),
+        Some(&json!("https://openrouter.ai/api/v1"))
+    );
+    assert_eq!(settings.get("api_key"), Some(&json!("sk-or-test")));
+    assert_eq!(settings.get("rate_limit_delay"), Some(&json!(0.5)));
+    assert_eq!(settings["models"][0]["id"], "anthropic/claude-opus-4-7");
+    for legacy_key in ["api", "apiKey", "apiMode", "baseUrl", "baseURL", "endpoint"] {
+        assert!(
+            !settings.contains_key(legacy_key),
+            "Hermes save should drop legacy alias {legacy_key}"
+        );
+    }
+}
+
+#[test]
+fn provider_add_form_hermes_omits_optional_blank_values_but_writes_default_mode() {
+    let mut form = ProviderAddFormState::new(AppType::Hermes);
+    form.id.set("custom");
+    form.name.set("Custom Hermes");
+
+    let provider = form.to_provider_json_value();
+    let settings = provider["settingsConfig"].as_object().unwrap();
+    assert_eq!(settings.get("api_mode"), Some(&json!("chat_completions")));
+    assert!(settings.get("base_url").is_none());
+    assert!(settings.get("api_key").is_none());
+    assert!(settings.get("models").is_none());
+    assert!(settings.get("rate_limit_delay").is_none());
+}
+
+#[test]
+fn provider_add_form_hermes_loads_legacy_aliases_and_saves_canonical_shape() {
+    let provider = Provider::with_id(
+        "legacy".to_string(),
+        "Legacy Hermes".to_string(),
+        json!({
+            "apiMode": "bedrock_converse",
+            "baseUrl": "https://legacy.example/v1",
+            "apiKey": "sk-legacy",
+            "api": "openai-completions",
+            "models": [
+                { "id": "legacy-model", "name": "Legacy Model" }
+            ],
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::Hermes, &provider);
+    assert_eq!(form.hermes_api_mode_value(), "bedrock_converse");
+    assert_eq!(form.hermes_base_url.value, "https://legacy.example/v1");
+    assert_eq!(form.hermes_api_key.value, "sk-legacy");
+    assert_eq!(form.hermes_models[0]["id"], "legacy-model");
+
+    let roundtrip = form.to_provider_json_value();
+    let settings = roundtrip["settingsConfig"].as_object().unwrap();
+    assert_eq!(settings.get("api_mode"), Some(&json!("bedrock_converse")));
+    assert_eq!(
+        settings.get("base_url"),
+        Some(&json!("https://legacy.example/v1"))
+    );
+    assert_eq!(settings.get("api_key"), Some(&json!("sk-legacy")));
+    assert!(settings.get("api").is_none());
+    assert!(settings.get("apiMode").is_none());
+    assert!(settings.get("baseUrl").is_none());
+    assert!(settings.get("apiKey").is_none());
 }
 
 #[test]

@@ -194,6 +194,7 @@ fn header_openclaw_sacrifices_tabs_before_losing_the_only_status_badge() {
         codex: true,
         gemini: true,
         opencode: true,
+        hermes: false,
         openclaw: true,
     });
     let _lang = use_test_language(Language::English);
@@ -233,6 +234,7 @@ fn header_openclaw_truncates_long_default_model_without_fake_proxy_gap() {
         codex: true,
         gemini: true,
         opencode: true,
+        hermes: false,
         openclaw: true,
     });
     let _lang = use_test_language(Language::English);

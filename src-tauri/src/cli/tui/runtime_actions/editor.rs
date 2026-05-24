@@ -269,11 +269,27 @@ pub(super) fn submit(
         EditorSubmit::OpenClawDailyMemoryFile { filename } => {
             submit_openclaw_daily_memory_file(ctx, filename, content)
         }
+        EditorSubmit::HermesMemory { kind } => submit_hermes_memory(ctx, kind, content),
         EditorSubmit::ConfigOpenClawEnv => submit_openclaw_env(ctx, content),
         EditorSubmit::ConfigOpenClawTools => submit_openclaw_tools(ctx, content),
         EditorSubmit::ConfigOpenClawAgents => submit_openclaw_agents(ctx, content),
         EditorSubmit::ConfigWebDavSettings => submit_webdav_settings(ctx, content),
     }
+}
+
+fn submit_hermes_memory(
+    ctx: &mut RuntimeActionContext<'_>,
+    kind: crate::hermes_config::MemoryKind,
+    content: String,
+) -> Result<(), AppError> {
+    crate::hermes_config::write_memory(kind, &content)?;
+    ctx.app.editor = None;
+    ctx.app.push_toast(
+        texts::tui_hermes_memory_saved(super::config::hermes_memory_kind_label(kind)),
+        ToastKind::Success,
+    );
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
 }
 
 fn submit_prompt_create(

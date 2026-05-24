@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::app_config::{AppType, CommonConfigSnippets, McpServer};
 use crate::commands::workspace::{self, DailyMemoryFileInfo, ALLOWED_FILES};
 use crate::error::AppError;
+use crate::hermes_config::{HermesMemoryLimits, MemoryKind};
 use crate::openclaw_config::{
     OpenClawAgentsDefaults, OpenClawEnvConfig, OpenClawHealthWarning, OpenClawToolsConfig,
 };
@@ -214,6 +215,7 @@ pub struct ConfigSnapshot {
     pub openclaw_agents_defaults: Option<OpenClawAgentsDefaults>,
     pub openclaw_warnings: Option<Vec<OpenClawHealthWarning>>,
     pub openclaw_workspace: OpenClawWorkspaceSnapshot,
+    pub hermes_memory: HermesMemorySnapshot,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -221,6 +223,37 @@ pub struct OpenClawWorkspaceSnapshot {
     pub directory_path: PathBuf,
     pub file_exists: HashMap<String, bool>,
     pub daily_memory_files: Vec<DailyMemoryFileInfo>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HermesMemorySnapshot {
+    pub directory_path: PathBuf,
+    pub memory_content: String,
+    pub user_content: String,
+    pub limits: HermesMemoryLimits,
+}
+
+impl HermesMemorySnapshot {
+    pub fn content(&self, kind: MemoryKind) -> &str {
+        match kind {
+            MemoryKind::Memory => &self.memory_content,
+            MemoryKind::User => &self.user_content,
+        }
+    }
+
+    pub fn limit(&self, kind: MemoryKind) -> usize {
+        match kind {
+            MemoryKind::Memory => self.limits.memory,
+            MemoryKind::User => self.limits.user,
+        }
+    }
+
+    pub fn enabled(&self, kind: MemoryKind) -> bool {
+        match kind {
+            MemoryKind::Memory => self.limits.memory_enabled,
+            MemoryKind::User => self.limits.user_enabled,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -266,6 +299,7 @@ impl ProxySnapshot {
             AppType::Codex => Some(self.codex_takeover),
             AppType::Gemini => Some(self.gemini_takeover),
             AppType::OpenCode => None,
+            AppType::Hermes => None,
             AppType::OpenClaw => None,
         }
     }
@@ -344,6 +378,16 @@ pub(crate) fn provider_display_name(app_type: &AppType, row: &ProviderRow) -> St
     }
 
     row.provider.name.clone()
+}
+
+pub(crate) fn provider_is_read_only(app_type: &AppType, row: &ProviderRow) -> bool {
+    matches!(app_type, AppType::Hermes)
+        && row
+            .provider
+            .settings_config
+            .get(crate::hermes_config::PROVIDER_SOURCE_FIELD)
+            .and_then(Value::as_str)
+            == Some(crate::hermes_config::PROVIDER_SOURCE_DICT)
 }
 
 pub(crate) fn quota_target_for_current_provider(
@@ -578,6 +622,19 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
     } else {
         HashSet::new()
     };
+    let hermes_live_ids = if matches!(app_type, AppType::Hermes) {
+        crate::hermes_config::get_providers()?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<HashSet<_>>()
+    } else {
+        HashSet::new()
+    };
+    let hermes_current_provider_id = if matches!(app_type, AppType::Hermes) {
+        crate::hermes_config::get_current_provider_id()?
+    } else {
+        None
+    };
     let openclaw_default_model = if matches!(app_type, AppType::OpenClaw) {
         crate::openclaw_config::get_default_model()?
     } else {
@@ -600,15 +657,21 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
 
             ProviderRow {
                 api_url: extract_api_url(&provider.settings_config, app_type),
-                is_current: id == current_id,
+                is_current: match app_type {
+                    AppType::Hermes => hermes_current_provider_id.as_deref() == Some(id.as_str()),
+                    _ => id == current_id,
+                },
                 is_in_config: match app_type {
                     AppType::OpenCode => opencode_live_ids.contains(&id),
+                    AppType::Hermes => hermes_live_ids.contains(&id),
                     AppType::OpenClaw => openclaw_live_ids.contains(&id),
                     _ => true,
                 },
                 is_saved: true,
-                is_default_model: openclaw_primary_default_provider_id.as_deref()
-                    == Some(id.as_str()),
+                is_default_model: match app_type {
+                    AppType::Hermes => hermes_current_provider_id.as_deref() == Some(id.as_str()),
+                    _ => openclaw_primary_default_provider_id.as_deref() == Some(id.as_str()),
+                },
                 primary_model_id: extract_primary_model_id(
                     &provider.settings_config,
                     app_type,
@@ -685,6 +748,13 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .get("baseURL")?
             .as_str()
             .map(|s| s.to_string()),
+        AppType::Hermes => settings_config
+            .get("base_url")
+            .or_else(|| settings_config.get("baseUrl"))
+            .or_else(|| settings_config.get("baseURL"))
+            .or_else(|| settings_config.get("endpoint"))?
+            .as_str()
+            .map(|s| s.to_string()),
         AppType::OpenClaw => settings_config
             .get("baseUrl")
             .or_else(|| settings_config.get("base_url"))?
@@ -699,12 +769,37 @@ fn extract_primary_model_id(
     openclaw_live_provider: Option<&Value>,
 ) -> Option<String> {
     match app_type {
+        AppType::Hermes => hermes_primary_model_id(settings_config),
         AppType::OpenClaw => match openclaw_live_provider {
             Some(live_provider) => openclaw_primary_model_id(live_provider),
             None => openclaw_primary_model_id(settings_config),
         },
         _ => None,
     }
+}
+
+fn hermes_primary_model_id(provider_value: &Value) -> Option<String> {
+    provider_value
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            provider_value
+                .get("models")
+                .and_then(Value::as_object)
+                .and_then(|models| models.keys().next().cloned())
+        })
+        .or_else(|| {
+            provider_value
+                .get("models")
+                .and_then(Value::as_array)
+                .and_then(|models| models.first())
+                .and_then(|model| model.get("id"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+        })
 }
 
 fn openclaw_provider_for_row(
@@ -832,6 +927,7 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
     let settings = crate::settings::get_settings();
     let openclaw_snapshot = load_openclaw_config_snapshot(app_type)?;
     let openclaw_workspace = load_openclaw_workspace_snapshot(app_type)?;
+    let hermes_memory = load_hermes_memory_snapshot(app_type)?;
 
     Ok(ConfigSnapshot {
         config_path,
@@ -857,6 +953,7 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
             .and_then(|snapshot| snapshot.agents_defaults.clone()),
         openclaw_warnings: openclaw_snapshot.map(|snapshot| snapshot.warnings),
         openclaw_workspace,
+        hermes_memory,
     })
 }
 
@@ -985,6 +1082,19 @@ fn load_openclaw_workspace_snapshot(
     })
 }
 
+fn load_hermes_memory_snapshot(app_type: &AppType) -> Result<HermesMemorySnapshot, AppError> {
+    if !matches!(app_type, AppType::Hermes) {
+        return Ok(HermesMemorySnapshot::default());
+    }
+
+    Ok(HermesMemorySnapshot {
+        directory_path: crate::hermes_config::get_hermes_dir().join("memories"),
+        memory_content: crate::hermes_config::read_memory(MemoryKind::Memory)?,
+        user_content: crate::hermes_config::read_memory(MemoryKind::User)?,
+        limits: crate::hermes_config::read_memory_limits()?,
+    })
+}
+
 pub(crate) fn load_proxy_config() -> Result<Option<crate::proxy::ProxyConfig>, AppError> {
     let state = load_state()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1006,6 +1116,7 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
     runtime.block_on(async {
         let config = state.proxy_service.get_global_config().await?;
         let app_proxy_config = state.db.get_proxy_config_for_app(app_type.as_str()).await?;
+        let configured_listen_port = state.db.get_app_proxy_preferred_port(app_type.as_str())?;
         let runtime_status = state.proxy_service.get_status().await;
         let takeover = state
             .proxy_service
@@ -1025,11 +1136,13 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
         } else {
             runtime_status.address.clone()
         };
-        let listen_port = if runtime_status.port == 0 {
-            config.listen_port
-        } else {
-            runtime_status.port
-        };
+        let listen_port = runtime_status
+            .active_workers
+            .iter()
+            .find(|worker| worker.app_type == current_app)
+            .map(|worker| worker.port)
+            .or_else(|| (runtime_status.port != 0).then_some(runtime_status.port))
+            .unwrap_or(configured_listen_port);
         let default_cost_multiplier = state
             .db
             .get_default_cost_multiplier(app_type.as_str())
@@ -1041,14 +1154,15 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
         Ok(ProxySnapshot {
             enabled: config.proxy_enabled,
             running: runtime_status.running,
-            managed_runtime: runtime_status.managed_session_token.is_some(),
+            managed_runtime: runtime_status.managed_session_token.is_some()
+                || !runtime_status.active_workers.is_empty(),
             auto_failover_enabled: app_proxy_config.auto_failover_enabled,
             claude_takeover: takeover.claude,
             codex_takeover: takeover.codex,
             gemini_takeover: takeover.gemini,
             default_cost_multiplier,
             configured_listen_address: config.listen_address.clone(),
-            configured_listen_port: config.listen_port,
+            configured_listen_port,
             listen_address,
             listen_port,
             uptime_seconds: runtime_status.uptime_seconds,

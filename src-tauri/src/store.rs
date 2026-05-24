@@ -127,6 +127,14 @@ impl AppState {
             Err(error) => log::warn!("✗ Failed to import OpenCode providers: {error}"),
         }
 
+        match crate::services::provider::ProviderService::import_hermes_providers_from_live(self) {
+            Ok(count) if count > 0 => {
+                log::info!("✓ Imported {count} Hermes provider(s) from live config");
+            }
+            Ok(_) => log::debug!("○ No new Hermes providers to import"),
+            Err(error) => log::warn!("✗ Failed to import Hermes providers: {error}"),
+        }
+
         match crate::services::provider::ProviderService::import_openclaw_providers_from_live(self)
         {
             Ok(count) if count > 0 => {
@@ -225,6 +233,7 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
         AppType::Codex,
         AppType::Gemini,
         AppType::OpenCode,
+        AppType::Hermes,
         AppType::OpenClaw,
     ] {
         let app_key = app.as_str();
@@ -240,6 +249,7 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
             AppType::Codex => config.prompts.codex.prompts = prompts.into_iter().collect(),
             AppType::Gemini => config.prompts.gemini.prompts = prompts.into_iter().collect(),
             AppType::OpenCode => config.prompts.opencode.prompts = prompts.into_iter().collect(),
+            AppType::Hermes => config.prompts.hermes.prompts = prompts.into_iter().collect(),
             AppType::OpenClaw => config.prompts.openclaw.prompts = prompts.into_iter().collect(),
         }
 
@@ -276,6 +286,7 @@ fn persist_multi_app_config_to_db_preserving_current_providers(
         AppType::Codex,
         AppType::Gemini,
         AppType::OpenCode,
+        AppType::Hermes,
         AppType::OpenClaw,
     ] {
         let app_key = app.as_str();

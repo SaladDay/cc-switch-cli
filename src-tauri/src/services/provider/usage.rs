@@ -404,6 +404,19 @@ impl ProviderService {
                     )
                 })
                 .map(|s| s.to_string()),
+            AppType::Hermes => provider
+                .settings_config
+                .get("apiKey")
+                .or_else(|| provider.settings_config.get("api_key"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    AppError::localized(
+                        "provider.hermes.api_key.missing",
+                        "缺少 API Key",
+                        "API key is missing",
+                    )
+                })
+                .map(|s| s.to_string()),
             AppType::OpenClaw => provider
                 .settings_config
                 .get("apiKey")
@@ -490,6 +503,14 @@ impl ProviderService {
                 .settings_config
                 .get("options")
                 .and_then(|v| v.get("baseURL"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()),
+            AppType::Hermes => Ok(provider
+                .settings_config
+                .get("baseUrl")
+                .or_else(|| provider.settings_config.get("baseURL"))
+                .or_else(|| provider.settings_config.get("endpoint"))
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string()),

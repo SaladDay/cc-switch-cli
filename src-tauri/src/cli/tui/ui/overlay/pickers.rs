@@ -1,5 +1,6 @@
 use super::super::theme;
 use super::super::*;
+use crate::cli::tui::form::{HermesModelField, ProviderAddFormState};
 use crate::cli::tui::text_edit::TextInput;
 
 pub(super) fn render_claude_model_picker_overlay(
@@ -352,6 +353,222 @@ pub(super) fn render_provider_test_menu_overlay(
         ),
     ));
     frame.render_stateful_widget(list, body_area, &mut state);
+}
+
+pub(super) fn render_hermes_models_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    editing: bool,
+) {
+    let area = centered_rect_fixed(86, 24, content_area);
+    frame.render_widget(Clear, area);
+
+    let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() else {
+        return;
+    };
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(texts::tui_hermes_models_title(provider.name.value.trim()));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(2),
+            Constraint::Length(3),
+        ])
+        .split(inner);
+
+    let key_items: Vec<(&str, &str)> = if editing {
+        vec![
+            ("←→/Home/End", texts::tui_key_move()),
+            ("Enter/Esc", texts::tui_key_exit_edit()),
+        ]
+    } else {
+        vec![
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_edit()),
+            ("f", texts::tui_key_fetch_model()),
+            ("a", texts::tui_key_add()),
+            ("d", texts::tui_key_delete()),
+            ("Esc", texts::tui_key_close()),
+        ]
+    };
+    render_key_bar_center(frame, chunks[0], theme, &key_items);
+
+    let fields = provider.hermes_model_fields();
+    if fields.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                texts::tui_hermes_models_no_models(),
+                Style::default().fg(theme.dim),
+            ))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+            inset_top(chunks[1], 1),
+        );
+    } else {
+        let rows_data = fields
+            .iter()
+            .map(|field| hermes_model_field_label_and_value(provider, *field))
+            .collect::<Vec<_>>();
+        let label_col_width = field_label_column_width(
+            rows_data
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .chain(std::iter::once(texts::tui_header_field())),
+            1,
+        );
+
+        let header = Row::new(vec![
+            Cell::from(cell_pad(texts::tui_header_field())),
+            Cell::from(texts::tui_header_value()),
+        ])
+        .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+        let mut rows = Vec::with_capacity(rows_data.len() + provider.hermes_models.len());
+        for (idx, (label, value)) in rows_data.iter().enumerate() {
+            if idx > 0 && idx % 3 == 0 {
+                rows.push(
+                    Row::new(vec![
+                        Cell::from(cell_pad(&"┄".repeat(40))),
+                        Cell::from("┄".repeat(200)),
+                    ])
+                    .style(Style::default().fg(theme.dim)),
+                );
+            }
+            rows.push(Row::new(vec![
+                Cell::from(cell_pad(label)),
+                Cell::from(value.clone()),
+            ]));
+        }
+        let table = Table::new(
+            rows,
+            [Constraint::Length(label_col_width), Constraint::Min(10)],
+        )
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .title(texts::tui_label_hermes_models()),
+        )
+        .row_highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+        let mut state = TableState::default();
+        state.select(Some(hermes_model_visual_row_index(
+            provider.hermes_models_field_idx.min(fields.len() - 1),
+        )));
+        frame.render_stateful_widget(table, chunks[1], &mut state);
+    }
+
+    let footer = if provider.hermes_models.is_empty() {
+        texts::tui_hermes_models_fetch_hint()
+    } else {
+        texts::tui_hermes_models_hint()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(footer, Style::default().fg(theme.dim)))
+            .wrap(Wrap { trim: true }),
+        chunks[2],
+    );
+
+    render_hermes_model_picker_input(frame, provider, chunks[3], theme, editing);
+}
+
+fn hermes_model_visual_row_index(field_idx: usize) -> usize {
+    field_idx + field_idx / 3
+}
+
+fn hermes_model_field_label_and_value(
+    provider: &ProviderAddFormState,
+    field: HermesModelField,
+) -> (String, String) {
+    match field {
+        HermesModelField::Id(index) => (
+            texts::tui_hermes_model_id_label(index + 1),
+            hermes_model_string(provider, index, "id"),
+        ),
+        HermesModelField::Name(index) => (
+            texts::tui_hermes_model_name_label(index + 1),
+            hermes_model_string(provider, index, "name"),
+        ),
+        HermesModelField::ContextLength(index) => (
+            texts::tui_hermes_model_context_length_label(index + 1),
+            hermes_model_string(provider, index, "context_length"),
+        ),
+    }
+}
+
+fn hermes_model_string(provider: &ProviderAddFormState, index: usize, key: &str) -> String {
+    provider
+        .hermes_models
+        .get(index)
+        .and_then(|model| model.get(key))
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.as_i64().map(|number| number.to_string()))
+                .or_else(|| value.as_u64().map(|number| number.to_string()))
+        })
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| texts::tui_na().to_string())
+}
+
+fn render_hermes_model_picker_input(
+    frame: &mut Frame<'_>,
+    provider: &ProviderAddFormState,
+    area: Rect,
+    theme: &theme::Theme,
+    editing: bool,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(if editing {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.dim)
+        })
+        .title(if editing {
+            texts::tui_form_editing_title()
+        } else {
+            texts::tui_form_input_title()
+        });
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+
+    if provider.selected_hermes_model_field().is_none() {
+        frame.render_widget(
+            Paragraph::new(Line::raw(texts::tui_hermes_models_add_hint()))
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+
+    let input = &provider.hermes_model_input;
+    let (visible, cursor_x) = visible_text_window(&input.value, input.cursor, inner.width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
+        inner,
+    );
+
+    if editing {
+        let x = inner.x + cursor_x.min(inner.width.saturating_sub(1));
+        frame.set_cursor_position((x, inner.y));
+    }
 }
 
 pub(super) fn render_model_fetch_picker_overlay(
@@ -774,6 +991,7 @@ pub(super) fn render_mcp_apps_picker_overlay(
             crate::app_config::AppType::Codex,
             crate::app_config::AppType::Gemini,
             crate::app_config::AppType::OpenCode,
+            crate::app_config::AppType::Hermes,
         ],
     );
 }
@@ -849,6 +1067,7 @@ pub(super) fn render_visible_apps_picker_overlay(
             crate::app_config::AppType::Codex,
             crate::app_config::AppType::Gemini,
             crate::app_config::AppType::OpenCode,
+            crate::app_config::AppType::Hermes,
             crate::app_config::AppType::OpenClaw,
         ],
     );
@@ -875,6 +1094,7 @@ pub(super) fn render_skills_apps_picker_overlay(
             crate::app_config::AppType::Codex,
             crate::app_config::AppType::Gemini,
             crate::app_config::AppType::OpenCode,
+            crate::app_config::AppType::Hermes,
         ],
     );
 }
@@ -1088,7 +1308,6 @@ fn render_apps_picker_overlay<A>(
         } else {
             texts::tui_marker_inactive()
         };
-
         ListItem::new(Line::from(Span::raw(format!(
             "{marker}  {}",
             app_type.as_str()

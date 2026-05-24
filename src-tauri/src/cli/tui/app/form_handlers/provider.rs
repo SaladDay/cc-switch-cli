@@ -1,4 +1,5 @@
 use super::*;
+use url::Url;
 
 impl App {
     pub(super) fn handle_provider_template_key(
@@ -70,6 +71,20 @@ impl App {
                 } else {
                     texts::tui_toast_provider_add_missing_fields()
                 })
+            } else if matches!(provider.app_type, crate::app_config::AppType::Hermes)
+                && provider.id.is_blank()
+            {
+                Some(texts::tui_toast_provider_add_missing_fields())
+            } else if matches!(provider.app_type, crate::app_config::AppType::Hermes)
+                && !is_valid_hermes_provider_key(provider.id.value.trim())
+            {
+                Some(texts::tui_hermes_provider_key_invalid())
+            } else if matches!(provider.app_type, crate::app_config::AppType::Hermes)
+                && !is_valid_hermes_rate_limit_delay(&provider.hermes_rate_limit_delay.value)
+            {
+                Some(texts::tui_hermes_rate_limit_delay_invalid())
+            } else if matches!(provider.app_type, crate::app_config::AppType::Hermes) {
+                validate_hermes_base_url(&provider.hermes_base_url.value)
             } else if matches!(provider.app_type, crate::app_config::AppType::Codex)
                 && !provider.is_codex_official_provider()
                 && provider.codex_base_url.is_blank()
@@ -145,6 +160,7 @@ impl App {
                 let policy = TextInputPolicy {
                     max_chars: (selected == ProviderAddField::Notes)
                         .then_some(PROVIDER_NOTES_MAX_CHARS),
+                    sanitize: provider_field_sanitize_fn(&provider.app_type, selected),
                 };
                 let changed = provider
                     .input_mut(selected)
@@ -269,6 +285,13 @@ impl App {
                 provider.openclaw_user_agent = !provider.openclaw_user_agent;
                 Action::None
             }
+            ProviderAddField::HermesApiMode => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.cycle_hermes_api_mode();
+                Action::None
+            }
             ProviderAddField::ClaudeModelConfig => {
                 self.overlay = Overlay::ClaudeModelPicker {
                     selected: 0,
@@ -297,6 +320,16 @@ impl App {
                     if let Some(editor) = self.editor.as_mut() {
                         editor.mode = EditorMode::Edit;
                     }
+                }
+                Action::None
+            }
+            ProviderAddField::HermesModels => {
+                if matches!(key.code, KeyCode::Enter) {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                        return Action::None;
+                    };
+                    provider.open_hermes_models_picker();
+                    self.overlay = Overlay::HermesModelsPicker { editing: false };
                 }
                 Action::None
             }
@@ -538,6 +571,31 @@ impl App {
         Action::None
     }
 
+    pub(crate) fn build_hermes_models_fetch_action(&mut self) -> Action {
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+            return Action::None;
+        };
+        let base_url = provider.hermes_base_url.value.trim();
+        let api_key = provider.hermes_api_key.value.trim();
+        let missing_message = match (base_url.is_empty(), api_key.is_empty()) {
+            (true, true) => Some(texts::tui_model_fetch_need_config()),
+            (true, false) => Some(texts::tui_model_fetch_need_endpoint()),
+            (false, true) => Some(texts::tui_model_fetch_need_api_key()),
+            (false, false) => None,
+        };
+        if let Some(message) = missing_message {
+            self.push_toast(message, ToastKind::Warning);
+            return Action::None;
+        }
+
+        Action::ProviderModelFetch {
+            base_url: provider.hermes_base_url.value.clone(),
+            api_key: Some(provider.hermes_api_key.value.clone()),
+            field: ProviderAddField::HermesModels,
+            claude_idx: None,
+        }
+    }
+
     fn handle_provider_model_field_activate(
         &mut self,
         selected: ProviderAddField,
@@ -557,12 +615,17 @@ impl App {
                     (!provider.opencode_api_key.value.trim().is_empty())
                         .then(|| provider.opencode_api_key.value.clone())
                 }
+                ProviderAddField::HermesModels => {
+                    (!provider.hermes_api_key.value.trim().is_empty())
+                        .then(|| provider.hermes_api_key.value.clone())
+                }
                 _ => None,
             };
             let base_url = match selected {
                 ProviderAddField::CodexModel => provider.codex_base_url.value.clone(),
                 ProviderAddField::GeminiModel => provider.gemini_base_url.value.clone(),
                 ProviderAddField::OpenCodeModelId => provider.opencode_base_url.value.clone(),
+                ProviderAddField::HermesModels => provider.hermes_base_url.value.clone(),
                 _ => String::new(),
             };
             Action::ProviderModelFetch {
@@ -829,15 +892,109 @@ fn usage_query_provider_credential_field(field: ProviderAddField) -> bool {
             | ProviderAddField::CodexBaseUrl
             | ProviderAddField::GeminiApiKey
             | ProviderAddField::GeminiBaseUrl
+            | ProviderAddField::HermesApiKey
+            | ProviderAddField::HermesBaseUrl
             | ProviderAddField::OpenCodeApiKey
             | ProviderAddField::OpenCodeBaseUrl
     )
 }
 
+fn sanitize_hermes_provider_key_char(ch: char) -> Option<char> {
+    let ch = ch.to_ascii_lowercase();
+    (ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-').then_some(ch)
+}
+
+fn sanitize_number_char(ch: char) -> Option<char> {
+    (ch.is_ascii_digit() || ch == '.').then_some(ch)
+}
+
+fn provider_field_sanitize_fn(
+    app_type: &AppType,
+    selected: ProviderAddField,
+) -> Option<fn(char) -> Option<char>> {
+    match (app_type, selected) {
+        (&AppType::Hermes, ProviderAddField::Id) => Some(sanitize_hermes_provider_key_char),
+        (&AppType::Hermes, ProviderAddField::HermesRateLimitDelay) => Some(sanitize_number_char),
+        _ => None,
+    }
+}
+
+fn is_valid_hermes_provider_key(value: &str) -> bool {
+    let mut previous_dash = false;
+    let mut saw_char = false;
+    for ch in value.chars() {
+        let valid = ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-';
+        if !valid {
+            return false;
+        }
+        if ch == '-' {
+            if !saw_char || previous_dash {
+                return false;
+            }
+            previous_dash = true;
+        } else {
+            saw_char = true;
+            previous_dash = false;
+        }
+    }
+    saw_char && !previous_dash
+}
+
+fn is_valid_hermes_rate_limit_delay(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    trimmed
+        .parse::<f64>()
+        .is_ok_and(|value| value.is_finite() && value >= 0.0)
+}
+
+fn validate_hermes_base_url(raw: &str) -> Option<&'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(texts::tui_hermes_base_url_required());
+    }
+
+    let candidate = replace_hermes_template_tokens(trimmed);
+    let Ok(url) = Url::parse(&candidate) else {
+        return Some(texts::tui_hermes_base_url_invalid());
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return Some(texts::tui_hermes_base_url_scheme());
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Some(texts::tui_hermes_base_url_invalid());
+    }
+    None
+}
+
+fn replace_hermes_template_tokens(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("${") {
+        let (before, after_start) = rest.split_at(start);
+        out.push_str(before);
+        if let Some(end) = after_start.find('}') {
+            out.push_str("placeholder");
+            rest = &after_start[end + 1..];
+        } else {
+            out.push_str(after_start);
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn is_provider_divider_field(field: Option<&ProviderAddField>) -> bool {
     matches!(
         field,
-        Some(ProviderAddField::CommonConfigDivider | ProviderAddField::UsageQueryDivider)
+        Some(
+            ProviderAddField::HermesAdvancedDivider
+                | ProviderAddField::CommonConfigDivider
+                | ProviderAddField::UsageQueryDivider
+        )
     )
 }
 

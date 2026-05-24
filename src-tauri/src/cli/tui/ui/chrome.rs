@@ -218,6 +218,7 @@ pub(super) fn nav_label(item: NavItem) -> &'static str {
         NavItem::Providers => texts::menu_manage_providers(),
         NavItem::Mcp => texts::menu_manage_mcp(),
         NavItem::Prompts => texts::menu_manage_prompts(),
+        NavItem::HermesMemory => texts::menu_hermes_memory(),
         NavItem::Config => texts::menu_manage_config(),
         NavItem::Skills => texts::menu_manage_skills(),
         NavItem::OpenClawWorkspace => texts::menu_openclaw_workspace(),
@@ -235,6 +236,7 @@ pub(super) fn nav_label_variants(item: NavItem) -> (&'static str, &'static str) 
         NavItem::Providers => texts::menu_manage_providers_variants(),
         NavItem::Mcp => texts::menu_manage_mcp_variants(),
         NavItem::Prompts => texts::menu_manage_prompts_variants(),
+        NavItem::HermesMemory => texts::menu_hermes_memory_variants(),
         NavItem::Config => texts::menu_manage_config_variants(),
         NavItem::Skills => texts::menu_manage_skills_variants(),
         NavItem::OpenClawWorkspace => texts::menu_openclaw_workspace_variants(),
@@ -257,6 +259,7 @@ pub(super) fn nav_pane_width(theme: &super::theme::Theme) -> u16 {
     let max_text_width = NavItem::ALL
         .iter()
         .chain(NavItem::OPENCLAW_ALL.iter())
+        .chain(NavItem::HERMES_ALL.iter())
         .flat_map(|item| {
             let (en, zh) = nav_label_variants(*item);
             [en, zh]

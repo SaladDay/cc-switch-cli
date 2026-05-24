@@ -56,6 +56,7 @@ impl App {
             config_idx: 0,
             workspace_idx: 0,
             daily_memory_idx: 0,
+            hermes_memory_idx: 0,
             openclaw_tools_form: None,
             openclaw_agents_form: None,
             openclaw_daily_memory_search_query: String::new(),
@@ -85,6 +86,7 @@ impl App {
             Route::Providers | Route::ProviderDetail { .. } => NavItem::Providers,
             Route::Mcp => NavItem::Mcp,
             Route::Prompts => NavItem::Prompts,
+            Route::HermesMemory => NavItem::HermesMemory,
             Route::Config => NavItem::Config,
             Route::ConfigOpenClawWorkspace | Route::ConfigOpenClawDailyMemory => {
                 if matches!(app_type, AppType::OpenClaw) {
@@ -286,6 +288,22 @@ impl App {
         self.toast = Some(Toast::new(message, kind));
     }
 
+    pub(crate) fn prompt_visible_apps_auto_detection(&mut self) {
+        if self.overlay.is_active() || self.pending_overlay.is_some() {
+            self.pending_overlay = Some(Overlay::Confirm(ConfirmOverlay {
+                title: texts::tui_visible_apps_auto_prompt_title().to_string(),
+                message: texts::tui_visible_apps_auto_prompt_message().to_string(),
+                action: ConfirmAction::VisibleAppsAutoDetection,
+            }));
+        } else {
+            self.overlay = Overlay::Confirm(ConfirmOverlay {
+                title: texts::tui_visible_apps_auto_prompt_title().to_string(),
+                message: texts::tui_visible_apps_auto_prompt_message().to_string(),
+                action: ConfirmAction::VisibleAppsAutoDetection,
+            });
+        }
+    }
+
     pub fn open_help(&mut self) {
         self.overlay = Overlay::Help;
     }
@@ -341,6 +359,15 @@ impl App {
             return Action::Quit;
         }
 
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char(','))
+            && !self.overlay.is_active()
+            && self.editor.is_none()
+            && self.form.is_none()
+        {
+            return self.push_route_and_switch(Route::Settings);
+        }
+
         let key = self.normalize_vim_navigation_key(key);
 
         if self.overlay.is_active() {
@@ -370,6 +397,10 @@ impl App {
                 return Action::None;
             }
             KeyCode::Char('/') => {
+                self.filter.active = true;
+                return Action::None;
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.filter.active = true;
                 return Action::None;
             }
@@ -496,6 +527,7 @@ impl App {
             Route::ProviderDetail { id } => self.on_provider_detail_key(key, data, &id),
             Route::Mcp => self.on_mcp_key(key, data),
             Route::Prompts => self.on_prompts_key(key, data),
+            Route::HermesMemory => self.on_hermes_memory_key(key, data),
             Route::Config => self.on_config_key(key, data),
             Route::ConfigOpenClawWorkspace => self.on_config_openclaw_workspace_key(key, data),
             Route::ConfigOpenClawDailyMemory => self.on_config_openclaw_daily_memory_key(key, data),
@@ -587,6 +619,13 @@ impl App {
             self.daily_memory_idx = 0;
         } else {
             self.daily_memory_idx = self.daily_memory_idx.min(daily_memory_len - 1);
+        }
+
+        let hermes_memory_len = crate::cli::tui::app::HERMES_MEMORY_ROW_COUNT;
+        if hermes_memory_len == 0 {
+            self.hermes_memory_idx = 0;
+        } else {
+            self.hermes_memory_idx = self.hermes_memory_idx.min(hermes_memory_len - 1);
         }
 
         let config_webdav_len = visible_webdav_config_items(&self.filter).len();

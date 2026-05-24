@@ -287,6 +287,37 @@ impl ProviderAddFormState {
                     settings_obj.insert("models".to_string(), models_value);
                 }
             }
+            AppType::Hermes => {
+                for legacy_key in ["api", "apiKey", "apiMode", "baseUrl", "baseURL", "endpoint"] {
+                    settings_obj.remove(legacy_key);
+                }
+
+                settings_obj.insert("api_mode".to_string(), json!(self.hermes_api_mode_value()));
+
+                let base_url = self
+                    .hermes_base_url
+                    .value
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_string();
+                set_or_remove_trimmed(settings_obj, "base_url", &base_url);
+                set_or_remove_trimmed(settings_obj, "api_key", &self.hermes_api_key.value);
+
+                if self.hermes_models.is_empty() {
+                    settings_obj.remove("models");
+                } else {
+                    settings_obj.insert(
+                        "models".to_string(),
+                        Value::Array(self.hermes_models.clone()),
+                    );
+                }
+
+                set_or_remove_f64(
+                    settings_obj,
+                    "rate_limit_delay",
+                    &self.hermes_rate_limit_delay.value,
+                );
+            }
             AppType::OpenClaw => {
                 settings_obj.remove("npm");
                 settings_obj.remove("options");
@@ -656,7 +687,7 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::OpenCode | AppType::OpenClaw => {}
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,
@@ -740,6 +771,21 @@ fn set_or_remove_u64(obj: &mut serde_json::Map<String, Value>, key: &str, raw: &
         obj.remove(key);
     } else if let Ok(value) = trimmed.parse::<u64>() {
         obj.insert(key.to_string(), json!(value));
+    } else {
+        obj.remove(key);
+    }
+}
+
+fn set_or_remove_f64(obj: &mut serde_json::Map<String, Value>, key: &str, raw: &str) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        obj.remove(key);
+    } else if let Ok(value) = trimmed.parse::<f64>() {
+        if value.is_finite() && value >= 0.0 {
+            obj.insert(key.to_string(), json!(value));
+        } else {
+            obj.remove(key);
+        }
     } else {
         obj.remove(key);
     }

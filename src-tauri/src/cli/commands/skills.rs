@@ -131,6 +131,7 @@ fn list_installed() -> Result<(), AppError> {
         "Codex",
         "Gemini",
         "OpenCode",
+        "Hermes",
     ]);
     for skill in skills {
         table.add_row(vec![
@@ -140,6 +141,7 @@ fn list_installed() -> Result<(), AppError> {
             if skill.apps.codex { "✓" } else { " " }.to_string(),
             if skill.apps.gemini { "✓" } else { " " }.to_string(),
             if skill.apps.opencode { "✓" } else { " " }.to_string(),
+            if skill.apps.hermes { "✓" } else { " " }.to_string(),
         ]);
     }
 
@@ -267,8 +269,12 @@ fn show_skill_info(spec: &str) -> Result<(), AppError> {
         println!("Desc:      {}", desc);
     }
     println!(
-        "Enabled:   claude={} codex={} gemini={} opencode={}",
-        record.apps.claude, record.apps.codex, record.apps.gemini, record.apps.opencode
+        "Enabled:   claude={} codex={} gemini={} opencode={} hermes={}",
+        record.apps.claude,
+        record.apps.codex,
+        record.apps.gemini,
+        record.apps.opencode,
+        record.apps.hermes
     );
 
     Ok(())
