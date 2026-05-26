@@ -19,7 +19,8 @@ use serde_json::Value;
 use super::{
     app,
     app::{
-        App, ConfigItem, ConfirmAction, Focus, LoadingKind, Overlay, ToastKind, WebDavConfigItem,
+        App, ConfigItem, ConfirmAction, Focus, LoadingKind, Overlay, SessionsPane, ToastKind,
+        WebDavConfigItem,
     },
     data::{McpRow, ProviderRow, UiData},
     form::{
@@ -41,6 +42,7 @@ mod overlay;
 mod prompts;
 mod providers;
 mod proxy_wave;
+mod sessions;
 mod shared;
 mod skills;
 
@@ -60,6 +62,7 @@ use overlay::*;
 use prompts::*;
 use providers::*;
 use proxy_wave::*;
+use sessions::*;
 use shared::*;
 use skills::*;
 
@@ -138,6 +141,7 @@ fn render_content(
         Route::ProviderDetail { id } => {
             render_provider_detail(frame, app, data, content_area, theme, id)
         }
+        Route::Sessions => render_sessions(frame, app, data, content_area, theme),
         Route::Mcp => render_mcp(frame, app, data, content_area, theme),
         Route::Prompts => render_prompts(frame, app, data, content_area, theme),
         Route::HermesMemory => render_hermes_memory(frame, app, data, content_area, theme),

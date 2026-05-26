@@ -62,6 +62,44 @@ pub(crate) enum LocalEnvMsg {
     },
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum SessionReq {
+    Refresh {
+        request_id: u64,
+        provider_id: String,
+    },
+    LoadMessages {
+        request_id: u64,
+        key: String,
+        provider_id: String,
+        source_path: String,
+    },
+    Delete {
+        request_id: u64,
+        key: String,
+        provider_id: String,
+        session_id: String,
+        source_path: String,
+    },
+}
+
+pub(crate) enum SessionMsg {
+    ScanFinished {
+        request_id: u64,
+        result: Result<Vec<crate::session_manager::SessionMeta>, String>,
+    },
+    MessagesLoaded {
+        request_id: u64,
+        key: String,
+        result: Result<Vec<crate::session_manager::SessionMessage>, String>,
+    },
+    DeleteFinished {
+        request_id: u64,
+        key: String,
+        result: Result<(), String>,
+    },
+}
+
 pub(crate) enum QuotaReq {
     Refresh { target: QuotaTarget },
 }
@@ -151,6 +189,12 @@ pub(crate) struct StreamCheckSystem {
 pub(crate) struct LocalEnvSystem {
     pub(crate) req_tx: mpsc::Sender<LocalEnvReq>,
     pub(crate) result_rx: mpsc::Receiver<LocalEnvMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct SessionSystem {
+    pub(crate) req_tx: mpsc::Sender<SessionReq>,
+    pub(crate) result_rx: mpsc::Receiver<SessionMsg>,
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 

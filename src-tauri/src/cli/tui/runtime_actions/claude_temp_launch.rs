@@ -162,6 +162,7 @@ mod tests {
                 proxy_req_tx: None,
                 proxy_loading: &mut self.proxy_loading,
                 local_env_req_tx: None,
+                session_req_tx: None,
                 webdav_req_tx: None,
                 webdav_loading: &mut self.webdav_loading,
                 update_req_tx: None,

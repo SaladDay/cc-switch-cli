@@ -6832,6 +6832,19 @@ pub mod texts {
         ("🔑 Providers", "🔑 供应商")
     }
 
+    pub fn menu_manage_sessions() -> &'static str {
+        let (en, zh) = menu_manage_sessions_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_manage_sessions_variants() -> (&'static str, &'static str) {
+        ("🕘 Sessions", "🕘 会话")
+    }
+
     pub fn menu_manage_mcp() -> &'static str {
         let (en, zh) = menu_manage_mcp_variants();
         if is_chinese() {
@@ -6973,6 +6986,360 @@ pub mod texts {
 
     pub fn menu_exit_variants() -> (&'static str, &'static str) {
         ("🚪 Exit", "🚪 退出")
+    }
+
+    pub fn tui_sessions_title() -> &'static str {
+        if is_chinese() {
+            "会话管理"
+        } else {
+            "Sessions"
+        }
+    }
+
+    pub fn tui_sessions_actions_title() -> &'static str {
+        if is_chinese() {
+            "操作"
+        } else {
+            "Actions"
+        }
+    }
+
+    pub fn tui_sessions_overview_title() -> &'static str {
+        if is_chinese() {
+            "概述"
+        } else {
+            "Overview"
+        }
+    }
+
+    pub fn tui_sessions_overview_time_label() -> &'static str {
+        if is_chinese() {
+            "时间"
+        } else {
+            "Time"
+        }
+    }
+
+    pub fn tui_sessions_overview_workdir_label() -> &'static str {
+        if is_chinese() {
+            "工作目录"
+        } else {
+            "Work Dir"
+        }
+    }
+
+    pub fn tui_sessions_overview_summary_label() -> &'static str {
+        if is_chinese() {
+            "标题"
+        } else {
+            "Title"
+        }
+    }
+
+    pub fn tui_sessions_messages_title() -> &'static str {
+        if is_chinese() {
+            "消息"
+        } else {
+            "Messages"
+        }
+    }
+
+    pub fn tui_sessions_empty_title() -> &'static str {
+        if is_chinese() {
+            "未找到本地会话"
+        } else {
+            "No local sessions found"
+        }
+    }
+
+    pub fn tui_sessions_empty_subtitle() -> &'static str {
+        if is_chinese() {
+            "进入此页会从本机会话文件扫描，不需要数据库。"
+        } else {
+            "This page scans local session files without using the database."
+        }
+    }
+
+    pub fn tui_sessions_error_title() -> &'static str {
+        if is_chinese() {
+            "会话扫描失败"
+        } else {
+            "Session scan failed"
+        }
+    }
+
+    pub fn tui_sessions_summary(total: usize, visible: usize) -> String {
+        if is_chinese() {
+            if total == visible {
+                format!("{total} 个会话")
+            } else {
+                format!("{visible} / {total} 个会话")
+            }
+        } else if total == visible {
+            format!("{total} sessions")
+        } else {
+            format!("{visible} / {total} sessions")
+        }
+    }
+
+    pub fn tui_sessions_loading_summary() -> &'static str {
+        if is_chinese() {
+            "正在扫描本地会话…"
+        } else {
+            "Scanning local sessions…"
+        }
+    }
+
+    pub fn tui_sessions_header_provider() -> &'static str {
+        if is_chinese() {
+            "来源"
+        } else {
+            "Provider"
+        }
+    }
+
+    pub fn tui_sessions_header_title() -> &'static str {
+        if is_chinese() {
+            "标题"
+        } else {
+            "Title"
+        }
+    }
+
+    pub fn tui_sessions_header_time() -> &'static str {
+        if is_chinese() {
+            "时间"
+        } else {
+            "Time"
+        }
+    }
+
+    pub fn tui_sessions_just_now() -> &'static str {
+        if is_chinese() {
+            "刚刚"
+        } else {
+            "Just now"
+        }
+    }
+
+    pub fn tui_sessions_minutes_ago(count: i64) -> String {
+        if is_chinese() {
+            format!("{count} 分钟前")
+        } else {
+            format!("{count} min ago")
+        }
+    }
+
+    pub fn tui_sessions_hours_ago(count: i64) -> String {
+        if is_chinese() {
+            format!("{count} 小时前")
+        } else {
+            format!("{count} hr ago")
+        }
+    }
+
+    pub fn tui_sessions_days_ago(count: i64) -> String {
+        if is_chinese() {
+            format!("{count} 天前")
+        } else if count == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{count} days ago")
+        }
+    }
+
+    pub fn tui_sessions_resume_command() -> &'static str {
+        if is_chinese() {
+            "恢复命令"
+        } else {
+            "Resume Command"
+        }
+    }
+
+    pub fn tui_sessions_project_directory() -> &'static str {
+        if is_chinese() {
+            "项目目录"
+        } else {
+            "Project Directory"
+        }
+    }
+
+    pub fn tui_sessions_action_open() -> &'static str {
+        if is_chinese() {
+            "打开"
+        } else {
+            "open"
+        }
+    }
+
+    pub fn tui_sessions_action_unavailable() -> &'static str {
+        if is_chinese() {
+            "不可用"
+        } else {
+            "unavailable"
+        }
+    }
+
+    pub fn tui_sessions_no_session_selected() -> &'static str {
+        if is_chinese() {
+            "选择左侧会话查看详情。"
+        } else {
+            "Select a session to view details."
+        }
+    }
+
+    pub fn tui_sessions_messages_loading() -> &'static str {
+        if is_chinese() {
+            "正在加载消息…"
+        } else {
+            "Loading messages…"
+        }
+    }
+
+    pub fn tui_sessions_messages_empty() -> &'static str {
+        if is_chinese() {
+            "此会话没有可显示的消息。"
+        } else {
+            "No messages available for this session."
+        }
+    }
+
+    pub fn tui_sessions_messages_not_loaded() -> &'static str {
+        if is_chinese() {
+            "在左侧选择会话后加载消息。"
+        } else {
+            "Select a session on the left to load messages."
+        }
+    }
+
+    pub fn tui_sessions_delete_confirm_title() -> &'static str {
+        if is_chinese() {
+            "删除会话"
+        } else {
+            "Delete Session"
+        }
+    }
+
+    pub fn tui_sessions_delete_confirm_message(title: &str) -> String {
+        if is_chinese() {
+            format!("确认删除本地会话“{title}”？此操作不可撤销。")
+        } else {
+            format!("Delete local session \"{title}\"? This cannot be undone.")
+        }
+    }
+
+    pub fn tui_sessions_message_detail_title(role: &str) -> String {
+        if is_chinese() {
+            format!("消息 · {}", tui_sessions_role_label(role))
+        } else {
+            format!("Message · {}", tui_sessions_role_label(role))
+        }
+    }
+
+    pub fn tui_sessions_role_label(role: &str) -> String {
+        match role.to_lowercase().as_str() {
+            "assistant" => {
+                if is_chinese() {
+                    "助手".to_string()
+                } else {
+                    "AI".to_string()
+                }
+            }
+            "user" => {
+                if is_chinese() {
+                    "用户".to_string()
+                } else {
+                    "User".to_string()
+                }
+            }
+            "system" => {
+                if is_chinese() {
+                    "系统".to_string()
+                } else {
+                    "System".to_string()
+                }
+            }
+            "tool" => {
+                if is_chinese() {
+                    "工具".to_string()
+                } else {
+                    "Tool".to_string()
+                }
+            }
+            other => other.to_string(),
+        }
+    }
+
+    pub fn tui_sessions_toast_worker_unavailable(err: &str) -> String {
+        if is_chinese() {
+            format!("会话后台任务不可用：{err}")
+        } else {
+            format!("Sessions worker unavailable: {err}")
+        }
+    }
+
+    pub fn tui_sessions_toast_refresh_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("会话扫描失败：{err}")
+        } else {
+            format!("Session scan failed: {err}")
+        }
+    }
+
+    pub fn tui_sessions_toast_messages_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("消息加载失败：{err}")
+        } else {
+            format!("Message load failed: {err}")
+        }
+    }
+
+    pub fn tui_sessions_toast_source_missing() -> &'static str {
+        if is_chinese() {
+            "此会话缺少来源路径。"
+        } else {
+            "This session has no source path."
+        }
+    }
+
+    pub fn tui_sessions_toast_action_unavailable() -> &'static str {
+        if is_chinese() {
+            "当前操作不可用。"
+        } else {
+            "This action is not available."
+        }
+    }
+
+    pub fn tui_sessions_toast_terminal_launched() -> &'static str {
+        if is_chinese() {
+            "已打开终端恢复会话。"
+        } else {
+            "Terminal launched for session resume."
+        }
+    }
+
+    pub fn tui_sessions_toast_resume_fallback(err: &str) -> String {
+        if is_chinese() {
+            format!("无法自动打开终端，已显示恢复命令：{err}")
+        } else {
+            format!("Could not open a terminal; showing the resume command instead: {err}")
+        }
+    }
+
+    pub fn tui_sessions_toast_delete_finished() -> &'static str {
+        if is_chinese() {
+            "会话已删除。"
+        } else {
+            "Session deleted."
+        }
+    }
+
+    pub fn tui_sessions_toast_delete_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("会话删除失败：{err}")
+        } else {
+            format!("Session delete failed: {err}")
+        }
     }
 
     // ============================================

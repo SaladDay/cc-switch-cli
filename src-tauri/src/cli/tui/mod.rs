@@ -42,10 +42,11 @@ use runtime_systems::{
 pub(crate) use runtime_systems::{fetch_provider_models_for_tui, ModelFetchStrategy};
 use runtime_systems::{
     handle_local_env_msg, handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg,
-    handle_skills_msg, handle_speedtest_msg, handle_stream_check_msg, handle_update_msg,
-    handle_webdav_msg, start_local_env_system, start_model_fetch_system, start_proxy_system,
-    start_quota_system, start_skills_system, start_speedtest_system, start_stream_check_system,
-    start_update_system, start_webdav_system, LocalEnvReq, QuotaReq, RequestTracker,
+    handle_session_msg, handle_skills_msg, handle_speedtest_msg, handle_stream_check_msg,
+    handle_update_msg, handle_webdav_msg, start_local_env_system, start_model_fetch_system,
+    start_proxy_system, start_quota_system, start_session_system, start_skills_system,
+    start_speedtest_system, start_stream_check_system, start_update_system, start_webdav_system,
+    LocalEnvReq, QuotaReq, RequestTracker,
 };
 use terminal::{PanicRestoreHookGuard, TuiTerminal};
 
@@ -229,6 +230,41 @@ fn queue_provider_quota_refresh(
     queue_quota_refresh(app, data, quota_req_tx, target, true);
 }
 
+fn queue_sessions_refresh_if_needed(
+    app: &mut App,
+    session_req_tx: Option<&mpsc::Sender<runtime_systems::SessionReq>>,
+) {
+    if !matches!(app.route, route::Route::Sessions) {
+        return;
+    }
+    let provider_id = app.app_type.as_str().to_string();
+    if app.sessions.loaded_for_provider(&provider_id) || app.sessions.loading {
+        return;
+    }
+
+    let Some(tx) = session_req_tx else {
+        app.sessions.loading = false;
+        app.sessions.loaded_once = true;
+        app.push_toast(
+            texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
+            ToastKind::Warning,
+        );
+        return;
+    };
+
+    let request_id = app.sessions.start_scan(provider_id.clone());
+    if let Err(err) = tx.send(runtime_systems::SessionReq::Refresh {
+        request_id,
+        provider_id,
+    }) {
+        app.sessions.fail_scan(request_id, err.to_string());
+        app.push_toast(
+            texts::tui_sessions_toast_refresh_failed(&err.to_string()),
+            ToastKind::Warning,
+        );
+    }
+}
+
 pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let _panic_hook = PanicRestoreHookGuard::install();
     let mut terminal = TuiTerminal::new()?;
@@ -305,6 +341,17 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         }
     };
 
+    let sessions = match start_session_system() {
+        Ok(system) => Some(system),
+        Err(err) => {
+            app.push_toast(
+                texts::tui_sessions_toast_worker_unavailable(&err.to_string()),
+                ToastKind::Warning,
+            );
+            None
+        }
+    };
+
     let proxy_system = match start_proxy_system() {
         Ok(system) => Some(system),
         Err(err) => {
@@ -373,6 +420,8 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             proxy_open_flash.process(frame_dt, f.buffer_mut(), area);
         })?;
 
+        queue_sessions_refresh_if_needed(&mut app, sessions.as_ref().map(|s| &s.req_tx));
+
         if let Some(speedtest) = speedtest.as_ref() {
             while let Ok(msg) = speedtest.result_rx.try_recv() {
                 handle_speedtest_msg(&mut app, msg);
@@ -388,6 +437,12 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         if let Some(local_env) = local_env.as_ref() {
             while let Ok(msg) = local_env.result_rx.try_recv() {
                 handle_local_env_msg(&mut app, msg);
+            }
+        }
+
+        if let Some(sessions) = sessions.as_ref() {
+            while let Ok(msg) = sessions.result_rx.try_recv() {
+                handle_session_msg(&mut app, msg);
             }
         }
 
@@ -456,6 +511,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         proxy_system.as_ref().map(|s| &s.req_tx),
                         &mut proxy_loading,
                         local_env.as_ref().map(|s| &s.req_tx),
+                        sessions.as_ref().map(|s| &s.req_tx),
                         webdav.as_ref().map(|s| &s.req_tx),
                         &mut webdav_loading,
                         update_system.as_ref().map(|s| &s.req_tx),
@@ -498,6 +554,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                             proxy_system.as_ref().map(|s| &s.req_tx),
                             &mut proxy_loading,
                             local_env.as_ref().map(|s| &s.req_tx),
+                            sessions.as_ref().map(|s| &s.req_tx),
                             webdav.as_ref().map(|s| &s.req_tx),
                             &mut webdav_loading,
                             update_system.as_ref().map(|s| &s.req_tx),

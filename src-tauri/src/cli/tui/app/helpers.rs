@@ -1,7 +1,8 @@
 use super::*;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
+use chrono::{Local, TimeZone};
 use serde_json::Value;
 
 pub(crate) enum OpenClawDailyMemoryListItem<'a> {
@@ -893,6 +894,7 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
         route,
         Route::Providers
             | Route::ProviderDetail { .. }
+            | Route::Sessions
             | Route::Mcp
             | Route::Prompts
             | Route::HermesMemory
@@ -910,6 +912,83 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
             | Route::Settings
             | Route::SettingsProxy
     )
+}
+
+pub(crate) fn session_key(session: &crate::session_manager::SessionMeta) -> String {
+    format!(
+        "{}:{}:{}",
+        session.provider_id,
+        session.session_id,
+        session.source_path.as_deref().unwrap_or_default()
+    )
+}
+
+pub(crate) fn visible_sessions<'a>(
+    filter: &FilterState,
+    app_type: &AppType,
+    rows: &'a [crate::session_manager::SessionMeta],
+) -> Vec<&'a crate::session_manager::SessionMeta> {
+    let query = filter.query_lower();
+    let provider_id = app_type.as_str();
+    rows.iter()
+        .filter(|row| row.provider_id == provider_id)
+        .filter(|row| match &query {
+            None => true,
+            Some(q) => session_matches_filter(row, q),
+        })
+        .collect()
+}
+
+fn session_matches_filter(session: &crate::session_manager::SessionMeta, query: &str) -> bool {
+    filter_text_matches(&session.provider_id, query)
+        || filter_text_matches(&session.session_id, query)
+        || filter_option_text_matches(session.title.as_deref(), query)
+        || filter_option_text_matches(session.summary.as_deref(), query)
+        || filter_option_path_matches(session.project_dir.as_deref(), query)
+        || filter_option_path_matches(session.source_path.as_deref(), query)
+        || filter_option_text_matches(session.resume_command.as_deref(), query)
+        || filter_timestamp_matches(session.last_active_at.or(session.created_at), query)
+}
+
+fn filter_option_text_matches(value: Option<&str>, query: &str) -> bool {
+    value.is_some_and(|value| filter_text_matches(value, query))
+}
+
+fn filter_option_path_matches(value: Option<&str>, query: &str) -> bool {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return false;
+    };
+    filter_text_matches(value, query) || filter_text_matches(&path_basename(value), query)
+}
+
+fn filter_text_matches(value: &str, query: &str) -> bool {
+    value.to_lowercase().contains(query)
+}
+
+fn filter_timestamp_matches(timestamp_ms: Option<i64>, query: &str) -> bool {
+    if !query.chars().any(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    let Some(timestamp_ms) = timestamp_ms else {
+        return false;
+    };
+    let Some(datetime) = Local.timestamp_millis_opt(timestamp_ms).single() else {
+        return false;
+    };
+    let slash_date = datetime.format("%Y/%m/%d").to_string();
+    slash_date.contains(query) || datetime.format("%Y-%m-%d").to_string().contains(query)
+}
+
+fn path_basename(path: &str) -> String {
+    let trimmed = path.trim().trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    Path::new(trimmed)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 pub(crate) fn route_default_focus(route: &Route) -> Focus {

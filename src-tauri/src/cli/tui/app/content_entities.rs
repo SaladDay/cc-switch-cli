@@ -419,6 +419,184 @@ impl App {
             _ => Action::None,
         }
     }
+
+    pub(crate) fn on_sessions_key(&mut self, key: KeyEvent) -> Action {
+        let visible = visible_sessions(&self.filter, &self.app_type, &self.sessions.rows);
+        match key.code {
+            KeyCode::Left => {
+                self.sessions.pane = match self.sessions.pane {
+                    SessionsPane::List => SessionsPane::List,
+                    SessionsPane::Detail => SessionsPane::List,
+                };
+                Action::None
+            }
+            KeyCode::Right => {
+                self.sessions.pane = match self.sessions.pane {
+                    SessionsPane::List => SessionsPane::Detail,
+                    SessionsPane::Detail => SessionsPane::Detail,
+                };
+                Action::None
+            }
+            KeyCode::Up => {
+                match self.sessions.pane {
+                    SessionsPane::List => {
+                        self.sessions.selected_idx = self.sessions.selected_idx.saturating_sub(1);
+                    }
+                    SessionsPane::Detail => {
+                        self.sessions.message_idx = self.sessions.message_idx.saturating_sub(1);
+                    }
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                match self.sessions.pane {
+                    SessionsPane::List => {
+                        if !visible.is_empty() {
+                            self.sessions.selected_idx =
+                                (self.sessions.selected_idx + 1).min(visible.len() - 1);
+                        }
+                    }
+                    SessionsPane::Detail => {
+                        if !self.sessions.messages.is_empty() {
+                            self.sessions.message_idx = (self.sessions.message_idx + 1)
+                                .min(self.sessions.messages.len() - 1);
+                        }
+                    }
+                }
+                Action::None
+            }
+            KeyCode::Enter => match self.sessions.pane {
+                SessionsPane::List => {
+                    let Some(session) = visible.get(self.sessions.selected_idx) else {
+                        return Action::None;
+                    };
+                    let key = session_key(session);
+                    let provider_id = session.provider_id.clone();
+                    let source_path = session.source_path.clone();
+                    self.sessions.open_detail(key.clone());
+                    self.sessions.pane = SessionsPane::Detail;
+                    match source_path {
+                        Some(source_path) => Action::SessionMessagesLoad {
+                            key,
+                            provider_id,
+                            source_path,
+                        },
+                        None => {
+                            self.push_toast(
+                                texts::tui_sessions_toast_source_missing(),
+                                ToastKind::Warning,
+                            );
+                            Action::None
+                        }
+                    }
+                }
+                SessionsPane::Detail => {
+                    let Some(message) = self.sessions.messages.get(self.sessions.message_idx)
+                    else {
+                        return Action::None;
+                    };
+                    self.overlay = Overlay::TextView(TextViewState {
+                        title: texts::tui_sessions_message_detail_title(&message.role),
+                        lines: message
+                            .content
+                            .lines()
+                            .map(|line| line.to_string())
+                            .collect(),
+                        scroll: 0,
+                        action: None,
+                    });
+                    Action::None
+                }
+            },
+            KeyCode::Char('R') => {
+                let Some(session) = self.selected_session_from_visible(&visible) else {
+                    return Action::None;
+                };
+                let Some(command) = session
+                    .resume_command
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                else {
+                    self.push_toast(
+                        texts::tui_sessions_toast_action_unavailable(),
+                        ToastKind::Info,
+                    );
+                    return Action::None;
+                };
+                Action::SessionResume {
+                    command,
+                    cwd: session.project_dir.clone(),
+                }
+            }
+            KeyCode::Char('d') => {
+                let Some(session) = self.selected_session_from_visible(&visible) else {
+                    return Action::None;
+                };
+                let Some(source_path) = session
+                    .source_path
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                else {
+                    self.push_toast(
+                        texts::tui_sessions_toast_source_missing(),
+                        ToastKind::Warning,
+                    );
+                    return Action::None;
+                };
+                let key = session_key(session);
+                self.overlay = Overlay::Confirm(ConfirmOverlay {
+                    title: texts::tui_sessions_delete_confirm_title().to_string(),
+                    message: texts::tui_sessions_delete_confirm_message(&session_title(session)),
+                    action: ConfirmAction::SessionDelete {
+                        key,
+                        provider_id: session.provider_id.clone(),
+                        session_id: session.session_id.clone(),
+                        source_path,
+                    },
+                });
+                Action::None
+            }
+            KeyCode::Char('r') => Action::SessionsRefresh,
+            _ => Action::None,
+        }
+    }
+
+    fn selected_session_from_visible<'a>(
+        &self,
+        visible: &'a [&'a crate::session_manager::SessionMeta],
+    ) -> Option<&'a crate::session_manager::SessionMeta> {
+        match self.sessions.pane {
+            SessionsPane::List => visible.get(self.sessions.selected_idx).copied(),
+            SessionsPane::Detail => self
+                .sessions
+                .detail_key
+                .as_deref()
+                .and_then(|key| {
+                    visible
+                        .iter()
+                        .copied()
+                        .find(|session| session_key(session) == key)
+                })
+                .or_else(|| visible.get(self.sessions.selected_idx).copied()),
+        }
+    }
+}
+
+fn session_title(session: &crate::session_manager::SessionMeta) -> String {
+    session
+        .title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            session.project_dir.as_deref().and_then(|path| {
+                std::path::Path::new(path.trim().trim_end_matches(['/', '\\']))
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_string)
+            })
+        })
+        .unwrap_or_else(|| session.session_id.chars().take(8).collect())
 }
 
 #[cfg(test)]

@@ -35,6 +35,17 @@ impl App {
                     }
                     ConfirmAction::McpDelete { id } => Action::McpDelete { id: id.clone() },
                     ConfirmAction::PromptDelete { id } => Action::PromptDelete { id: id.clone() },
+                    ConfirmAction::SessionDelete {
+                        key,
+                        provider_id,
+                        session_id,
+                        source_path,
+                    } => Action::SessionDelete {
+                        key: key.clone(),
+                        provider_id: provider_id.clone(),
+                        session_id: session_id.clone(),
+                        source_path: source_path.clone(),
+                    },
                     ConfirmAction::SkillsUninstall { directory } => Action::SkillsUninstall {
                         directory: directory.clone(),
                     },

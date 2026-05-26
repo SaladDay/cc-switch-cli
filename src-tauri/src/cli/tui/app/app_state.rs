@@ -9,6 +9,23 @@ pub enum Action {
     SetAppType(AppType),
     LocalEnvRefresh,
 
+    SessionsRefresh,
+    SessionMessagesLoad {
+        key: String,
+        provider_id: String,
+        source_path: String,
+    },
+    SessionResume {
+        command: String,
+        cwd: Option<String>,
+    },
+    SessionDelete {
+        key: String,
+        provider_id: String,
+        session_id: String,
+        source_path: String,
+    },
+
     SkillsToggle {
         directory: String,
         enabled: bool,
@@ -507,6 +524,7 @@ pub struct App {
     pub local_env_results: Vec<crate::services::local_env_check::ToolCheckResult>,
     pub local_env_loading: bool,
 
+    pub sessions: SessionsState,
     pub provider_idx: usize,
     pub mcp_idx: usize,
     pub prompt_idx: usize,

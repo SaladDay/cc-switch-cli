@@ -61,6 +61,169 @@ fn provider_form_shows_full_api_key_in_table_value() {
 }
 
 #[test]
+fn tui_sessions_empty_state_is_localized_and_mentions_runtime_scan() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+
+    let _lang = use_test_language(Language::English);
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+
+    assert!(all.contains("No local sessions found"), "{all}");
+    assert!(all.contains("local session files"), "{all}");
+    assert!(all.contains("database"), "{all}");
+}
+
+#[test]
+fn tui_sessions_renders_split_detail_and_message_preview() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "abcdef123456".to_string(),
+        title: Some("Refactor proxy routing".to_string()),
+        summary: Some("Tighten worker routing".to_string()),
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/session.jsonl".to_string()),
+        resume_command: Some("codex resume abcdef123456".to_string()),
+    });
+    app.sessions
+        .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.messages_loaded = true;
+    app.sessions
+        .messages
+        .push(crate::session_manager::SessionMessage {
+            role: "user".to_string(),
+            content: "Please review this module".to_string(),
+            ts: Some(1_735_689_900_000),
+        });
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+
+    assert!(all.contains("Overview"), "{all}");
+    assert!(all.contains("Time"), "{all}");
+    assert!(all.contains("Work Dir"), "{all}");
+    assert!(all.contains("Title"), "{all}");
+    assert!(all.contains("Resume Command"), "{all}");
+    assert!(all.contains("Refactor proxy routing"), "{all}");
+    assert!(!all.contains("Tighten worker routing"), "{all}");
+    assert!(all.contains("demo-project"), "{all}");
+    assert!(all.contains("codex resume abcdef123456"), "{all}");
+    assert!(all.contains("Please review"), "{all}");
+}
+
+#[test]
+fn tui_sessions_list_time_column_uses_relative_time_before_date() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.time_anchor_ms = 1_735_689_900_000;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "abcdef123456".to_string(),
+        title: Some("Recent session".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_600_000),
+        source_path: Some("/tmp/recent.jsonl".to_string()),
+        resume_command: Some("claude --resume abcdef123456".to_string()),
+    });
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "old-session".to_string(),
+        title: Some("Old session".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_084_800_000),
+        last_active_at: Some(1_735_084_800_000),
+        source_path: Some("/tmp/old.jsonl".to_string()),
+        resume_command: Some("claude --resume old-session".to_string()),
+    });
+
+    let content = content_text(
+        &app,
+        &render_with_size(&app, &minimal_data(&app.app_type), 160, 40),
+    );
+    let recent_row = line_with(&content, "Recent session");
+    assert!(recent_row.contains("5 min ago"), "{recent_row}");
+
+    let old_row = line_with(&content, "Old session");
+    let expected = chrono::DateTime::from_timestamp_millis(1_735_084_800_000)
+        .expect("timestamp should be valid")
+        .with_timezone(&chrono::Local);
+    assert!(
+        old_row.contains(&expected.format("%Y/%m/%d").to_string()),
+        "{old_row}"
+    );
+    assert!(
+        !old_row.contains(&expected.format("%Y/%m/%d %H:%M").to_string()),
+        "{old_row}"
+    );
+}
+
+#[test]
+fn tui_sessions_filters_rows_by_current_app() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "claude-session".to_string(),
+        title: Some("Claude visible".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/claude-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/claude.jsonl".to_string()),
+        resume_command: Some("claude --resume claude-session".to_string()),
+    });
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "codex".to_string(),
+        session_id: "codex-session".to_string(),
+        title: Some("Codex hidden".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/codex-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/codex.jsonl".to_string()),
+        resume_command: Some("codex resume codex-session".to_string()),
+    });
+
+    let claude = all_text(&render(&app, &minimal_data(&app.app_type)));
+    assert!(claude.contains("Claude visible"), "{claude}");
+    assert!(!claude.contains("Codex hidden"), "{claude}");
+
+    app.app_type = AppType::Codex;
+    let codex = all_text(&render(&app, &minimal_data(&app.app_type)));
+    assert!(!codex.contains("Claude visible"), "{codex}");
+    assert!(codex.contains("Codex hidden"), "{codex}");
+}
+
+#[test]
 fn openclaw_tui_form_masks_api_key_in_default_view() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -5358,6 +5521,7 @@ fn workspace_openclaw_nav_uses_app_specific_labels_and_hides_generic_entries() {
     let expected = [
         NavItem::Main,
         NavItem::Providers,
+        NavItem::Sessions,
         NavItem::OpenClawWorkspace,
         NavItem::OpenClawEnv,
         NavItem::OpenClawTools,
@@ -5388,16 +5552,22 @@ fn workspace_non_openclaw_nav_keeps_generic_labels() {
     let app = App::new(Some(AppType::Claude));
     let all = nav_text(&app, &render(&app, &minimal_data(&app.app_type)));
 
-    for item in [
+    let expected = [
         NavItem::Main,
         NavItem::Providers,
         NavItem::Mcp,
         NavItem::Skills,
+        NavItem::Sessions,
         NavItem::Prompts,
         NavItem::Config,
-    ] {
-        assert!(all.contains(&nav_label_text(item)), "{all}");
-    }
+    ]
+    .map(nav_label_text);
+    let positions = expected
+        .iter()
+        .map(|label| all.find(label).expect("generic nav label should render"))
+        .collect::<Vec<_>>();
+
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{all}");
     for item in [
         NavItem::OpenClawWorkspace,
         NavItem::OpenClawEnv,

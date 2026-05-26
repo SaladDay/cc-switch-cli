@@ -42,6 +42,7 @@ impl App {
             usage_query_notice_confirmed: true,
             local_env_results: Vec::new(),
             local_env_loading: true,
+            sessions: SessionsState::default(),
             provider_idx: 0,
             mcp_idx: 0,
             prompt_idx: 0,
@@ -84,6 +85,7 @@ impl App {
         match route {
             Route::Main => NavItem::Main,
             Route::Providers | Route::ProviderDetail { .. } => NavItem::Providers,
+            Route::Sessions => NavItem::Sessions,
             Route::Mcp => NavItem::Mcp,
             Route::Prompts => NavItem::Prompts,
             Route::HermesMemory => NavItem::HermesMemory,
@@ -140,6 +142,9 @@ impl App {
         }
         if !matches!(route, Route::ConfigOpenClawAgents) {
             self.openclaw_agents_form = None;
+        }
+        if matches!(route, Route::Sessions) {
+            self.sessions.reset_time_anchor();
         }
 
         self.route = route.clone();
@@ -383,7 +388,7 @@ impl App {
         }
 
         if self.filter.active {
-            return self.on_filter_key(key);
+            return self.on_filter_key(key, data);
         }
 
         if self.should_route_printable_content_input_before_globals(&key) {
@@ -398,10 +403,12 @@ impl App {
             }
             KeyCode::Char('/') => {
                 self.filter.active = true;
+                self.prepare_filter_focus();
                 return Action::None;
             }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.filter.active = true;
+                self.prepare_filter_focus();
                 return Action::None;
             }
             KeyCode::Char('[') => {
@@ -414,9 +421,19 @@ impl App {
                     .map(Action::SetAppType)
                     .unwrap_or(Action::None);
             }
+            KeyCode::Left
+                if matches!(self.route, Route::Sessions) && self.focus == Focus::Content =>
+            {
+                return self.on_content_key(key, data);
+            }
             KeyCode::Left => {
                 self.focus = Focus::Nav;
                 return Action::None;
+            }
+            KeyCode::Right
+                if matches!(self.route, Route::Sessions) && self.focus == Focus::Content =>
+            {
+                return self.on_content_key(key, data);
             }
             KeyCode::Right => {
                 if route_has_content_list(&self.route) {
@@ -459,40 +476,50 @@ impl App {
         }
     }
 
-    pub(crate) fn on_filter_key(&mut self, key: KeyEvent) -> Action {
+    pub(crate) fn on_filter_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         let is_daily_memory = matches!(self.route, Route::ConfigOpenClawDailyMemory);
-        match key.code {
+        let mut filter_changed = false;
+        let action = match key.code {
             KeyCode::Esc => {
+                filter_changed = !self.filter.input.value.is_empty();
                 self.filter.active = false;
                 self.filter.input.set("");
                 if is_daily_memory {
                     self.openclaw_daily_memory_search_results.clear();
                     self.daily_memory_idx = 0;
-                    return Action::OpenClawDailyMemorySearch {
+                    Action::OpenClawDailyMemorySearch {
                         query: String::new(),
-                    };
+                    }
+                } else {
+                    Action::None
                 }
             }
             KeyCode::Enter => {
                 self.filter.active = false;
                 if is_daily_memory {
-                    return Action::OpenClawDailyMemorySearch {
+                    Action::OpenClawDailyMemorySearch {
                         query: self.filter.input.value.clone(),
-                    };
+                    }
+                } else {
+                    Action::None
                 }
             }
             _ => {
                 let Some(edit) = self.filter.input.apply_key(key) else {
                     return Action::None;
                 };
+                filter_changed = edit.changed;
                 if is_daily_memory && edit.changed && self.filter.input.value.is_empty() {
-                    return Action::OpenClawDailyMemorySearch {
+                    Action::OpenClawDailyMemorySearch {
                         query: String::new(),
-                    };
+                    }
+                } else {
+                    Action::None
                 }
             }
-        }
-        Action::None
+        };
+        self.sync_after_filter_key(data, filter_changed);
+        action
     }
 
     pub(crate) fn on_nav_key(&mut self, key: KeyEvent) -> Action {
@@ -525,6 +552,7 @@ impl App {
         match self.route.clone() {
             Route::Providers => self.on_providers_key(key, data),
             Route::ProviderDetail { id } => self.on_provider_detail_key(key, data, &id),
+            Route::Sessions => self.on_sessions_key(key),
             Route::Mcp => self.on_mcp_key(key, data),
             Route::Prompts => self.on_prompts_key(key, data),
             Route::HermesMemory => self.on_hermes_memory_key(key, data),
@@ -548,6 +576,24 @@ impl App {
             },
         }
     }
+
+    fn prepare_filter_focus(&mut self) {
+        if matches!(self.route, Route::Sessions) {
+            self.sessions.pane = SessionsPane::List;
+        }
+    }
+
+    fn sync_after_filter_key(&mut self, data: &UiData, filter_changed: bool) {
+        if matches!(self.route, Route::Sessions) {
+            self.sessions.pane = SessionsPane::List;
+            if filter_changed {
+                self.sessions.selected_idx = 0;
+                self.sessions.clear_detail();
+            }
+        }
+        self.clamp_selections(data);
+    }
+
     pub(crate) fn clamp_selections(&mut self, data: &UiData) {
         let providers_len = visible_providers(&self.app_type, &self.filter, data).len();
         if providers_len == 0 {
@@ -568,6 +614,31 @@ impl App {
             self.prompt_idx = 0;
         } else {
             self.prompt_idx = self.prompt_idx.min(prompt_len - 1);
+        }
+
+        let visible_session_rows =
+            visible_sessions(&self.filter, &self.app_type, &self.sessions.rows);
+        let sessions_len = visible_session_rows.len();
+        if sessions_len == 0 {
+            self.sessions.selected_idx = 0;
+        } else {
+            self.sessions.selected_idx = self.sessions.selected_idx.min(sessions_len - 1);
+        }
+        let session_detail_missing = self.sessions.detail_key.as_deref().is_some_and(|key| {
+            !visible_session_rows
+                .iter()
+                .any(|session| session_key(session) == key)
+        });
+        if session_detail_missing {
+            self.sessions.clear_detail();
+        }
+        if self.sessions.messages.is_empty() {
+            self.sessions.message_idx = 0;
+        } else {
+            self.sessions.message_idx = self
+                .sessions
+                .message_idx
+                .min(self.sessions.messages.len() - 1);
         }
 
         let skills_len = visible_skills_installed(&self.filter, data).len();

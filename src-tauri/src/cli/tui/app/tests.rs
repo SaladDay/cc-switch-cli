@@ -401,6 +401,7 @@ mod tests {
             &mut proxy_loading,
             None,
             None,
+            None,
             &mut webdav_loading,
             None,
             &mut update_check,
@@ -12821,5 +12822,270 @@ mod tests {
                 if matches!(editor.kind, EditorKind::Plain)
                     && matches!(editor.submit, EditorSubmit::ProviderFormApplyUsageScriptCode)
         ));
+    }
+
+    fn session_meta(
+        provider_id: &str,
+        session_id: &str,
+        title: &str,
+        project_dir: &str,
+        source_path: &str,
+        resume_command: &str,
+    ) -> crate::session_manager::SessionMeta {
+        crate::session_manager::SessionMeta {
+            provider_id: provider_id.to_string(),
+            session_id: session_id.to_string(),
+            title: Some(title.to_string()),
+            summary: Some("Review routing".to_string()),
+            project_dir: Some(project_dir.to_string()),
+            created_at: Some(1_735_689_600_000),
+            last_active_at: Some(1_735_732_800_000),
+            source_path: Some(source_path.to_string()),
+            resume_command: Some(resume_command.to_string()),
+        }
+    }
+
+    fn session_meta_for_app(provider_id: &str) -> crate::session_manager::SessionMeta {
+        session_meta(
+            provider_id,
+            "session-1",
+            "Session One",
+            "/tmp/project",
+            "/tmp/session.jsonl",
+            &match provider_id {
+                "claude" => "claude --resume session-1".to_string(),
+                "codex" => "codex resume session-1".to_string(),
+                other => format!("{other} resume session-1"),
+            },
+        )
+    }
+
+    fn app_with_session_page() -> App {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Sessions;
+        app.focus = Focus::Content;
+        app.sessions.loaded_once = true;
+        app.sessions.provider_id = Some("claude".to_string());
+        app.sessions.rows.push(session_meta_for_app("claude"));
+        app
+    }
+
+    #[test]
+    fn sessions_left_right_switch_between_list_and_detail_without_tab() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+        app.on_key(key(KeyCode::Right), &data);
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(app.sessions.pane, SessionsPane::Detail);
+
+        app.on_key(key(KeyCode::Tab), &data);
+        assert_eq!(app.sessions.pane, SessionsPane::Detail);
+
+        app.on_key(key(KeyCode::Left), &data);
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+    }
+
+    #[test]
+    fn sessions_h_l_switch_between_list_and_detail() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+
+        app.on_key(key(KeyCode::Char('l')), &data);
+        assert_eq!(app.sessions.pane, SessionsPane::Detail);
+
+        app.on_key(key(KeyCode::Char('h')), &data);
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+    }
+
+    #[test]
+    fn sessions_resume_shortcut_returns_resume_action() {
+        let mut app = app_with_session_page();
+        let action = app.on_key(key(KeyCode::Char('R')), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SessionResume { command, cwd }
+                if command == "claude --resume session-1"
+                    && cwd.as_deref() == Some("/tmp/project")
+        ));
+    }
+
+    #[test]
+    fn sessions_delete_shortcut_opens_confirm_overlay() {
+        let mut app = app_with_session_page();
+        let action = app.on_key(key(KeyCode::Char('d')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::SessionDelete {
+                    ref provider_id,
+                    ref session_id,
+                    ref source_path,
+                    ..
+                },
+                ..
+            }) if provider_id == "claude"
+                && session_id == "session-1"
+                && source_path == "/tmp/session.jsonl"
+        ));
+    }
+
+    #[test]
+    fn sessions_list_shortcuts_follow_highlight_not_previous_detail() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+        let alpha = session_meta(
+            "claude",
+            "alpha",
+            "Alpha Plan",
+            "/tmp/alpha",
+            "/tmp/alpha.jsonl",
+            "claude --resume alpha",
+        );
+        let beta = session_meta(
+            "claude",
+            "beta",
+            "Beta Plan",
+            "/tmp/beta",
+            "/tmp/beta.jsonl",
+            "claude --resume beta",
+        );
+        app.sessions.rows = vec![alpha.clone(), beta];
+        app.sessions.open_detail(session_key(&alpha));
+        app.sessions.pane = SessionsPane::List;
+        app.sessions.selected_idx = 1;
+
+        let action = app.on_key(key(KeyCode::Char('R')), &data);
+
+        assert!(matches!(
+            action,
+            Action::SessionResume { command, cwd }
+                if command == "claude --resume beta"
+                    && cwd.as_deref() == Some("/tmp/beta")
+        ));
+    }
+
+    #[test]
+    fn sessions_filter_starts_on_list_pane_from_detail() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+        app.sessions.pane = SessionsPane::Detail;
+
+        app.on_key(key(KeyCode::Char('/')), &data);
+
+        assert!(app.filter.active);
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+    }
+
+    #[test]
+    fn sessions_filter_matches_resume_command_source_and_date() {
+        let mut app = app_with_session_page();
+
+        app.filter.input.set("claude --resume");
+        let visible = visible_sessions(&app.filter, &app.app_type, &app.sessions.rows);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].session_id, "session-1");
+
+        app.filter.input.set("session.jsonl");
+        let visible = visible_sessions(&app.filter, &app.app_type, &app.sessions.rows);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].session_id, "session-1");
+
+        app.filter.input.set("2025");
+        let visible = visible_sessions(&app.filter, &app.app_type, &app.sessions.rows);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].session_id, "session-1");
+    }
+
+    #[test]
+    fn sessions_filter_change_clamps_selection_and_clears_stale_detail() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+        let alpha = session_meta(
+            "claude",
+            "alpha",
+            "Alpha Plan",
+            "/tmp/alpha",
+            "/tmp/alpha.jsonl",
+            "claude --resume alpha",
+        );
+        let beta = session_meta(
+            "claude",
+            "beta",
+            "Beta Plan",
+            "/tmp/beta",
+            "/tmp/beta.jsonl",
+            "claude --resume beta",
+        );
+        app.sessions.rows = vec![alpha.clone(), beta];
+        app.sessions.selected_idx = 1;
+        app.sessions.open_detail(session_key(&alpha));
+        app.sessions.messages_loaded = true;
+        app.sessions.messages = vec![crate::session_manager::SessionMessage {
+            role: "assistant".to_string(),
+            content: "old detail".to_string(),
+            ts: Some(1_735_689_900_000),
+        }];
+        app.sessions.pane = SessionsPane::Detail;
+
+        app.on_key(key(KeyCode::Char('/')), &data);
+        app.on_key(key(KeyCode::Char('b')), &data);
+
+        assert_eq!(app.filter.input.value, "b");
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+        assert_eq!(app.sessions.selected_idx, 0);
+        assert!(app.sessions.detail_key.is_none());
+        assert!(app.sessions.messages.is_empty());
+        assert!(!app.sessions.messages_loaded);
+    }
+
+    #[test]
+    fn sessions_filter_change_preserves_inflight_delete() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+        let delete_request_id = app.sessions.start_delete();
+
+        app.on_key(key(KeyCode::Char('/')), &data);
+        app.on_key(key(KeyCode::Char('x')), &data);
+
+        assert!(app.sessions.delete_active.contains(&delete_request_id));
+    }
+
+    #[test]
+    fn sessions_delete_tracking_allows_out_of_order_completion() {
+        let mut app = app_with_session_page();
+        let alpha = session_meta(
+            "claude",
+            "alpha",
+            "Alpha Plan",
+            "/tmp/alpha",
+            "/tmp/alpha.jsonl",
+            "claude --resume alpha",
+        );
+        let beta = session_meta(
+            "claude",
+            "beta",
+            "Beta Plan",
+            "/tmp/beta",
+            "/tmp/beta.jsonl",
+            "claude --resume beta",
+        );
+        app.sessions.rows = vec![alpha.clone(), beta.clone()];
+        let alpha_key = session_key(&alpha);
+        let beta_key = session_key(&beta);
+        let alpha_request_id = app.sessions.start_delete();
+        let beta_request_id = app.sessions.start_delete();
+
+        assert!(app.sessions.finish_delete(beta_request_id, &beta_key));
+        assert_eq!(app.sessions.rows.len(), 1);
+        assert_eq!(app.sessions.rows[0].session_id, "alpha");
+        assert!(app.sessions.finish_delete(alpha_request_id, &alpha_key));
+        assert!(app.sessions.rows.is_empty());
+        assert!(app.sessions.delete_active.is_empty());
     }
 }

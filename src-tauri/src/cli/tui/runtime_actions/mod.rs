@@ -4,11 +4,11 @@ use crate::app_config::AppType;
 use crate::cli::i18n::{set_language, texts};
 use crate::error::AppError;
 
-use super::app::{Action, App, Focus, Overlay, ToastKind};
+use super::app::{Action, App, Focus, Overlay, TextViewState, ToastKind};
 use super::data::UiData;
 use super::runtime_systems::{
-    LocalEnvReq, ModelFetchReq, ProxyReq, RequestTracker, SkillsReq, StreamCheckReq, UpdateReq,
-    WebDavReq,
+    LocalEnvReq, ModelFetchReq, ProxyReq, RequestTracker, SessionReq, SkillsReq, StreamCheckReq,
+    UpdateReq, WebDavReq,
 };
 use super::terminal::TuiTerminal;
 
@@ -37,6 +37,7 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             super::route::Route::Main
             | super::route::Route::Providers
             | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Sessions
             | super::route::Route::ConfigOpenClawWorkspace
             | super::route::Route::ConfigOpenClawDailyMemory
             | super::route::Route::ConfigOpenClawEnv
@@ -50,6 +51,7 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             super::route::Route::Main
             | super::route::Route::Providers
             | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Sessions
             | super::route::Route::Mcp
             | super::route::Route::HermesMemory
             | super::route::Route::Skills
@@ -114,6 +116,7 @@ pub(super) struct RuntimeActionContext<'a> {
     proxy_req_tx: Option<&'a mpsc::Sender<ProxyReq>>,
     proxy_loading: &'a mut RequestTracker,
     local_env_req_tx: Option<&'a mpsc::Sender<LocalEnvReq>>,
+    session_req_tx: Option<&'a mpsc::Sender<SessionReq>>,
     webdav_req_tx: Option<&'a mpsc::Sender<WebDavReq>>,
     webdav_loading: &'a mut RequestTracker,
     update_req_tx: Option<&'a mpsc::Sender<UpdateReq>>,
@@ -131,6 +134,7 @@ pub(crate) fn handle_action(
     proxy_req_tx: Option<&mpsc::Sender<ProxyReq>>,
     proxy_loading: &mut RequestTracker,
     local_env_req_tx: Option<&mpsc::Sender<LocalEnvReq>>,
+    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
     webdav_req_tx: Option<&mpsc::Sender<WebDavReq>>,
     webdav_loading: &mut RequestTracker,
     update_req_tx: Option<&mpsc::Sender<UpdateReq>>,
@@ -148,6 +152,7 @@ pub(crate) fn handle_action(
         proxy_req_tx,
         proxy_loading,
         local_env_req_tx,
+        session_req_tx,
         webdav_req_tx,
         webdav_loading,
         update_req_tx,
@@ -183,6 +188,121 @@ pub(crate) fn handle_action(
                 ctx.app.local_env_loading = false;
                 ctx.app.push_toast(
                     texts::tui_toast_local_env_check_request_failed(&err.to_string()),
+                    ToastKind::Warning,
+                );
+            }
+            Ok(())
+        }
+        Action::SessionsRefresh => {
+            let Some(tx) = ctx.session_req_tx else {
+                ctx.app.sessions.loading = false;
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
+                    ToastKind::Warning,
+                );
+                return Ok(());
+            };
+            let provider_id = ctx.app.app_type.as_str().to_string();
+            let request_id = ctx.app.sessions.start_scan(provider_id.clone());
+            if let Err(err) = tx.send(SessionReq::Refresh {
+                request_id,
+                provider_id,
+            }) {
+                ctx.app.sessions.fail_scan(request_id, err.to_string());
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_refresh_failed(&err.to_string()),
+                    ToastKind::Warning,
+                );
+            }
+            Ok(())
+        }
+        Action::SessionResume { command, cwd } => {
+            let preferred_terminal = crate::settings::get_preferred_terminal();
+            let target = session_terminal_target(preferred_terminal.as_deref());
+            let launch_result = ctx.terminal.with_terminal_restored(|| {
+                crate::session_manager::terminal::launch_terminal(
+                    &target,
+                    &command,
+                    cwd.as_deref(),
+                    None,
+                )
+                .map_err(AppError::Message)
+            });
+            match launch_result {
+                Ok(()) => {
+                    ctx.app.push_toast(
+                        texts::tui_sessions_toast_terminal_launched(),
+                        ToastKind::Success,
+                    );
+                }
+                Err(err) => {
+                    ctx.app.overlay = Overlay::TextView(TextViewState {
+                        title: texts::tui_sessions_resume_command().to_string(),
+                        lines: command.lines().map(|line| line.to_string()).collect(),
+                        scroll: 0,
+                        action: None,
+                    });
+                    ctx.app.push_toast(
+                        texts::tui_sessions_toast_resume_fallback(&err.to_string()),
+                        ToastKind::Warning,
+                    );
+                }
+            }
+            Ok(())
+        }
+        Action::SessionDelete {
+            key,
+            provider_id,
+            session_id,
+            source_path,
+        } => {
+            let Some(tx) = ctx.session_req_tx else {
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
+                    ToastKind::Warning,
+                );
+                return Ok(());
+            };
+            let request_id = ctx.app.sessions.start_delete();
+            if let Err(err) = tx.send(SessionReq::Delete {
+                request_id,
+                key: key.clone(),
+                provider_id,
+                session_id,
+                source_path,
+            }) {
+                ctx.app.sessions.fail_delete(request_id);
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_delete_failed(&err.to_string()),
+                    ToastKind::Warning,
+                );
+            }
+            Ok(())
+        }
+        Action::SessionMessagesLoad {
+            key,
+            provider_id,
+            source_path,
+        } => {
+            let Some(tx) = ctx.session_req_tx else {
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
+                    ToastKind::Warning,
+                );
+                return Ok(());
+            };
+            let request_id = ctx.app.sessions.start_message_load(key.clone());
+            if let Err(err) = tx.send(SessionReq::LoadMessages {
+                request_id,
+                key: key.clone(),
+                provider_id,
+                source_path,
+            }) {
+                ctx.app
+                    .sessions
+                    .fail_message_load(request_id, &key, err.to_string());
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_messages_failed(&err.to_string()),
                     ToastKind::Warning,
                 );
             }
@@ -394,6 +514,17 @@ pub(crate) fn handle_action(
     }
 }
 
+fn session_terminal_target(preferred_terminal: Option<&str>) -> String {
+    match preferred_terminal
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some("iterm2") => "iterm".to_string(),
+        Some(target) => target.to_string(),
+        None => "terminal".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,12 +603,21 @@ mod tests {
             &mut proxy_loading,
             None,
             None,
+            None,
             &mut webdav_loading,
             None,
             &mut update_check,
             None,
             action,
         )
+    }
+
+    #[test]
+    fn session_terminal_target_matches_upstream_setting_names() {
+        assert_eq!(session_terminal_target(None), "terminal");
+        assert_eq!(session_terminal_target(Some("")), "terminal");
+        assert_eq!(session_terminal_target(Some("iterm2")), "iterm");
+        assert_eq!(session_terminal_target(Some("ghostty")), "ghostty");
     }
 
     fn write_invalid_legacy_config(home: &Path) {
@@ -564,6 +704,7 @@ mod tests {
             None,
             None,
             &mut proxy_loading,
+            None,
             None,
             None,
             &mut webdav_loading,

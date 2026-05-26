@@ -41,7 +41,8 @@ pub use editor_state::{EditorKind, EditorMode, EditorState, EditorSubmit};
 pub(crate) use helpers::*;
 pub use types::{
     CommonSnippetViewSource, ConfirmAction, ConfirmOverlay, FilterState, Focus, LoadingKind,
-    Overlay, TextInputState, TextSubmit, TextViewAction, TextViewState, Toast, ToastKind,
+    Overlay, SessionsPane, SessionsState, TextInputState, TextSubmit, TextViewAction,
+    TextViewState, Toast, ToastKind,
 };
 
 pub(crate) fn supports_failover_controls(app_type: &AppType) -> bool {
