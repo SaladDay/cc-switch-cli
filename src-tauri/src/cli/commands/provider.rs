@@ -10,7 +10,7 @@ use crate::cli::commands::provider_input::{
     supports_common_config, OptionalFields, ProviderAddMode,
 };
 use crate::cli::i18n::texts;
-use crate::cli::ui::{error, highlight, info, success, warning};
+use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use crate::services::ProviderService;
