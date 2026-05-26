@@ -2782,6 +2782,47 @@ pub mod texts {
         }
     }
 
+    pub fn tui_claude_model_label_for_index(idx: usize) -> &'static str {
+        match idx {
+            0 => tui_claude_model_main_label(),
+            1 => tui_claude_reasoning_model_label(),
+            2 => tui_claude_default_haiku_model_label(),
+            3 => tui_claude_default_sonnet_model_label(),
+            4 => tui_claude_default_opus_model_label(),
+            _ => "",
+        }
+    }
+
+    pub fn tui_claude_model_fill_all_title() -> &'static str {
+        if is_chinese() {
+            "填充全部模型"
+        } else {
+            "Fill All Models"
+        }
+    }
+
+    pub fn tui_claude_model_fill_all_message(source_label: &str) -> String {
+        if is_chinese() {
+            format!(
+                "将「{}」的值填充到所有 Claude 模型字段？\n现有值将被覆盖。",
+                source_label
+            )
+        } else {
+            format!(
+                "Fill all Claude model fields from \"{}\"?\nExisting values will be overwritten.",
+                source_label
+            )
+        }
+    }
+
+    pub fn tui_claude_model_fill_all_empty_source() -> &'static str {
+        if is_chinese() {
+            "当前字段为空，无法填充"
+        } else {
+            "Selected field is empty, nothing to fill"
+        }
+    }
+
     pub fn tui_hint_press() -> &'static str {
         if is_chinese() {
             "按 "

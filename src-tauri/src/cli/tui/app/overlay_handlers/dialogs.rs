@@ -96,11 +96,40 @@ impl App {
                         }
                     }
                     ConfirmAction::WebDavMigrateV1ToV2 => Action::ConfigWebDavMigrateV1ToV2,
+                    ConfirmAction::ClaudeModelFillAll { source_idx } => {
+                        let source_idx = *source_idx;
+                        if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                            let value = provider
+                                .claude_model_input(source_idx)
+                                .map(|input| input.value.clone())
+                                .unwrap_or_default();
+                            for idx in 0..5 {
+                                if idx != source_idx {
+                                    if let Some(input) = provider.claude_model_input_mut(idx) {
+                                        input.set(value.clone());
+                                    }
+                                }
+                            }
+                            provider.mark_claude_model_config_touched();
+                        }
+                        self.overlay = Overlay::ClaudeModelPicker {
+                            selected: source_idx,
+                            editing: false,
+                        };
+                        return Some(Action::None);
+                    }
                 };
                 self.close_overlay();
                 action
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
+                if let ConfirmAction::ClaudeModelFillAll { source_idx } = confirm.action {
+                    self.overlay = Overlay::ClaudeModelPicker {
+                        selected: source_idx,
+                        editing: false,
+                    };
+                    return Some(Action::None);
+                }
                 if matches!(confirm.action, ConfirmAction::VisibleAppsAutoDetection) {
                     self.close_overlay();
                     return Some(Action::ConfirmVisibleAppsAutoDetection { use_auto: false });
@@ -144,6 +173,13 @@ impl App {
                         self.overlay = Overlay::VisibleAppsPicker {
                             selected,
                             apps: crate::settings::get_visible_apps(),
+                        };
+                        Action::None
+                    }
+                    ConfirmAction::ClaudeModelFillAll { source_idx } => {
+                        self.overlay = Overlay::ClaudeModelPicker {
+                            selected: source_idx,
+                            editing: false,
                         };
                         Action::None
                     }

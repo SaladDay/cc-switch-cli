@@ -449,20 +449,30 @@ impl App {
                 Action::None
             }
             KeyCode::Char('a') => {
-                let selected = *selected;
-                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                    let value = provider
-                        .claude_model_input(selected)
-                        .map(|input| input.value.clone())
-                        .unwrap_or_default();
-                    for idx in 0..5 {
-                        if idx != selected {
-                            if let Some(input) = provider.claude_model_input_mut(idx) {
-                                input.set(value.clone());
-                            }
-                        }
-                    }
-                    provider.mark_claude_model_config_touched();
+                let source_idx = *selected;
+                let source_empty = self
+                    .form
+                    .as_ref()
+                    .and_then(|f| match f {
+                        FormState::ProviderAdd(p) => p.claude_model_input(source_idx),
+                        _ => None,
+                    })
+                    .map(|input| input.value.trim().is_empty())
+                    .unwrap_or(true);
+
+                if source_empty {
+                    self.push_toast(
+                        texts::tui_claude_model_fill_all_empty_source().to_string(),
+                        ToastKind::Warning,
+                    );
+                } else {
+                    let source_label =
+                        texts::tui_claude_model_label_for_index(source_idx).to_string();
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_claude_model_fill_all_title().to_string(),
+                        message: texts::tui_claude_model_fill_all_message(&source_label),
+                        action: ConfirmAction::ClaudeModelFillAll { source_idx },
+                    });
                 }
                 Action::None
             }
