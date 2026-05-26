@@ -214,6 +214,19 @@ mod tests {
         ));
     }
 
+    fn assert_provider_copy_confirm(app: &App, expected_id: &str, expected_name: &str) {
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                title,
+                message,
+                action: ConfirmAction::ProviderCopy { id },
+            }) if id == expected_id
+                && title == texts::tui_confirm_copy_provider_title()
+                && message == &texts::tui_confirm_copy_provider_message(expected_name, expected_id)
+        ));
+    }
+
     fn open_prompt_fields_form() -> App {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
@@ -1921,7 +1934,7 @@ mod tests {
     }
 
     #[test]
-    fn providers_c_key_is_noop() {
+    fn providers_c_key_opens_copy_confirm() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -1931,11 +1944,11 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Char('c')), &data);
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_provider_copy_confirm(&app, "p1", "Provider One");
     }
 
     #[test]
-    fn providers_c_key_is_noop_for_openclaw() {
+    fn providers_c_key_opens_copy_confirm_for_openclaw() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -1960,7 +1973,7 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Char('c')), &data);
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_provider_copy_confirm(&app, "p1", "Provider One");
     }
 
     #[test]
@@ -4323,6 +4336,47 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_copy_confirm_opens_form_without_notice_after_common_config_confirmed() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        app.on_key(key(KeyCode::Char('c')), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_copy_confirm_preserves_first_common_config_notice() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.common_config_notice_confirmed = false;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        app.on_key(key(KeyCode::Char('c')), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::CommonConfigNotice,
+                ..
+            })
+        ));
     }
 
     #[test]
