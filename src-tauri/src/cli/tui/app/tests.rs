@@ -12822,4 +12822,386 @@ mod tests {
                     && matches!(editor.submit, EditorSubmit::ProviderFormApplyUsageScriptCode)
         ));
     }
+
+    // ------------------------------------------------------------------
+    // Claude model fill-all confirmation tests
+    // ------------------------------------------------------------------
+
+    fn setup_claude_model_picker_with_models() -> App {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.claude_model.set("claude-sonnet-4-20250514");
+            form.claude_reasoning_model.set("claude-sonnet-4-20250514");
+            form.claude_haiku_model.set("");
+            form.claude_sonnet_model.set("");
+            form.claude_opus_model.set("");
+        }
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 0,
+            editing: false,
+        };
+        app
+    }
+
+    #[test]
+    fn claude_model_fill_all_a_opens_confirm_without_changing_values() {
+        let mut app = setup_claude_model_picker_with_models();
+
+        let action = app.on_key(key(KeyCode::Char('a')), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should show confirm dialog, not change any values
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ClaudeModelFillAll { source_idx: 0 },
+                ..
+            })
+        ));
+
+        // Values must be unchanged
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(
+            form.claude_reasoning_model.value,
+            "claude-sonnet-4-20250514",
+        );
+        assert_eq!(form.claude_haiku_model.value, "");
+        assert_eq!(form.claude_sonnet_model.value, "");
+        assert_eq!(form.claude_opus_model.value, "");
+    }
+
+    #[test]
+    fn claude_model_fill_all_confirm_fills_all_fields() {
+        let mut app = setup_claude_model_picker_with_models();
+
+        // Press 'a' to open confirm
+        app.on_key(key(KeyCode::Char('a')), &data());
+
+        // Confirm with Enter
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should return to ClaudeModelPicker
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+
+        // All fields should now have the source value
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(
+            form.claude_reasoning_model.value,
+            "claude-sonnet-4-20250514",
+        );
+        assert_eq!(form.claude_haiku_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(form.claude_sonnet_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(form.claude_opus_model.value, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn claude_model_fill_all_confirm_y_fills_all_fields() {
+        let mut app = setup_claude_model_picker_with_models();
+        app.on_key(key(KeyCode::Char('a')), &data());
+
+        let action = app.on_key(key(KeyCode::Char('y')), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_haiku_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(form.claude_opus_model.value, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn claude_model_fill_all_cancel_esc_leaves_values_unchanged() {
+        let mut app = setup_claude_model_picker_with_models();
+        app.on_key(key(KeyCode::Char('a')), &data());
+
+        let action = app.on_key(key(KeyCode::Esc), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should return to ClaudeModelPicker
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+
+        // Values must be unchanged
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(form.claude_haiku_model.value, "");
+        assert_eq!(form.claude_opus_model.value, "");
+    }
+
+    #[test]
+    fn claude_model_fill_all_cancel_n_leaves_values_unchanged() {
+        let mut app = setup_claude_model_picker_with_models();
+        app.on_key(key(KeyCode::Char('a')), &data());
+
+        let action = app.on_key(key(KeyCode::Char('n')), &data());
+        assert!(matches!(action, Action::None));
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(form.claude_haiku_model.value, "");
+        assert_eq!(form.claude_opus_model.value, "");
+    }
+
+    #[test]
+    fn claude_model_fill_all_empty_source_is_noop() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        // All fields are empty by default; selected=0 (Main Model) is empty
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 0,
+            editing: false,
+        };
+
+        let action = app.on_key(key(KeyCode::Char('a')), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should stay on ClaudeModelPicker (no confirm dialog)
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+    }
+
+    #[test]
+    fn claude_model_fill_all_from_non_first_field() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.claude_opus_model.set("claude-opus-4-20250514");
+        }
+        // Select the Opus field (index 4)
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 4,
+            editing: false,
+        };
+
+        app.on_key(key(KeyCode::Char('a')), &data());
+
+        // Confirm should reference source_idx=4
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ClaudeModelFillAll { source_idx: 4 },
+                ..
+            })
+        ));
+
+        app.on_key(key(KeyCode::Enter), &data());
+
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "claude-opus-4-20250514");
+        assert_eq!(form.claude_reasoning_model.value, "claude-opus-4-20250514");
+        assert_eq!(form.claude_haiku_model.value, "claude-opus-4-20250514");
+        assert_eq!(form.claude_sonnet_model.value, "claude-opus-4-20250514");
+        assert_eq!(form.claude_opus_model.value, "claude-opus-4-20250514");
+    }
+
+    // ------------------------------------------------------------------
+    // ModelFetchPicker restore tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn model_fetch_picker_claude_enter_restores_to_claude_model_picker() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(2),
+            input: TextInput::new("claude-haiku-4-20250514"),
+            query: String::new(),
+            fetching: false,
+            models: vec!["claude-haiku-4-20250514".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should restore to ClaudeModelPicker with the correct selected index
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 2,
+                editing: false
+            }
+        ));
+
+        // The model field should be set
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_haiku_model.value, "claude-haiku-4-20250514");
+    }
+
+    #[test]
+    fn model_fetch_picker_claude_esc_restores_to_claude_model_picker() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(3),
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: false,
+            models: vec!["model-a".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+
+        let action = app.on_key(key(KeyCode::Esc), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should restore to ClaudeModelPicker without setting any value
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 3,
+                editing: false
+            }
+        ));
+
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_sonnet_model.value, "");
+    }
+
+    #[test]
+    fn model_fetch_picker_claude_enter_empty_picks_first_model() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(0),
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: false,
+            models: vec!["model-a".to_string(), "model-b".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+
+        // Should have picked the first model from the list
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "model-a");
+    }
+
+    #[test]
+    fn model_fetch_picker_hermes_enter_restores_via_pending_overlay() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Hermes),
+        ));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_hermes_models_picker();
+            form.add_empty_hermes_model();
+        }
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::HermesModels,
+            claude_idx: None,
+            input: TextInput::new("gpt-5.4"),
+            query: "gpt-5.4".to_string(),
+            fetching: false,
+            models: vec!["gpt-5.4".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+        app.pending_overlay = Some(Overlay::HermesModelsPicker { editing: false });
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should restore to HermesModelsPicker via pending_overlay
+        assert!(matches!(
+            app.overlay,
+            Overlay::HermesModelsPicker { editing: false }
+        ));
+    }
 }

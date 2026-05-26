@@ -111,7 +111,9 @@ pub enum ConfirmAction {
     EditorDiscard,
     EditorSaveBeforeClose,
     WebDavMigrateV1ToV2,
-    ClaudeModelFillAll { source_idx: usize },
+    ClaudeModelFillAll {
+        source_idx: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
