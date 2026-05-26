@@ -515,7 +515,7 @@ impl App {
                         editing: false,
                     };
                 } else {
-                    self.overlay = Overlay::None;
+                    self.close_overlay();
                 }
                 Action::None
             }
@@ -549,7 +549,7 @@ impl App {
                     if let Some(first) = filtered.first() {
                         selected_model = first.to_string();
                     } else {
-                        self.overlay = Overlay::None;
+                        self.close_overlay();
                         return Some(Action::None);
                     }
                 }
@@ -563,7 +563,7 @@ impl App {
                         editing: false,
                     };
                 } else {
-                    self.overlay = Overlay::None;
+                    self.close_overlay();
                 }
 
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
