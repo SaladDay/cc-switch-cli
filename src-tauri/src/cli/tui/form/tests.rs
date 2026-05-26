@@ -2972,19 +2972,27 @@ fn provider_copy_form_uses_new_record_identity_without_queue_state() {
         AppType::Claude,
         &provider,
         "",
-        &["test-provider".to_string()],
+        &[
+            "test-provider".to_string(),
+            "test-provider-copy".to_string(),
+        ],
     );
     let copied = form.to_provider_json_value();
 
     assert!(matches!(form.mode, FormMode::Add));
-    assert_ne!(copied["id"], "test-provider");
+    assert_eq!(copied["id"], "test-provider-copy-1");
     assert_eq!(copied["name"], "Test Provider copy");
     assert!(copied.get("createdAt").is_none());
     assert!(copied.get("sortIndex").is_none());
     assert!(copied.get("inFailoverQueue").is_none());
+    assert_eq!(
+        copied["settingsConfig"]["env"]["ANTHROPIC_AUTH_TOKEN"],
+        "sk-test"
+    );
     assert_eq!(copied["notes"], "Keep visible notes");
     assert_eq!(copied["category"], "third_party");
     assert_eq!(copied["meta"]["endpointAutoSelect"], true);
+    assert_eq!(copied["meta"]["commonConfigEnabled"], true);
 }
 
 #[test]

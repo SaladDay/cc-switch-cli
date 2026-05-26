@@ -4356,6 +4356,38 @@ mod tests {
     }
 
     #[test]
+    fn provider_copy_confirm_save_submits_new_copy_with_collision_free_id() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.common_config_notice_confirmed = true;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+        data.providers
+            .rows
+            .push(claude_provider_row("provider-one-copy"));
+
+        app.on_key(key(KeyCode::Char('c')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("saving a copied provider should submit new provider content");
+        };
+        assert!(matches!(submit, EditorSubmit::ProviderAdd));
+
+        let copied: serde_json::Value =
+            serde_json::from_str(&content).expect("copy payload should be valid JSON");
+        assert_eq!(copied["id"], "provider-one-copy-1");
+        assert_eq!(copied["name"], "Provider One copy");
+        assert_eq!(
+            copied["settingsConfig"]["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "sk-demo"
+        );
+    }
+
+    #[test]
     fn provider_copy_confirm_preserves_first_common_config_notice() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;

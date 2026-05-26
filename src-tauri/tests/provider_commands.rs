@@ -5,7 +5,7 @@ use std::net::TcpListener;
 
 use cc_switch_lib::{
     get_claude_settings_path, get_codex_auth_path, get_codex_config_path, read_json_file,
-    write_codex_live_atomic, AppType, McpApps, McpServer, MultiAppConfig, Provider,
+    write_codex_live_atomic, AppType, McpApps, McpServer, MultiAppConfig, Provider, ProviderMeta,
     ProviderService,
 };
 
@@ -246,6 +246,118 @@ fn provider_export_rejects_non_claude_apps() {
         err.to_string().contains("supports only Claude"),
         "error should explain Claude-only support"
     );
+}
+
+#[test]
+#[serial]
+fn provider_duplicate_persists_distinct_copy_and_skips_transient_state() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "provider-one".to_string();
+
+        let mut original = Provider::with_id(
+            "provider-one".to_string(),
+            "Provider One".to_string(),
+            json!({"env": {"ANTHROPIC_AUTH_TOKEN": "sk-original"}}),
+            Some("https://example.com".to_string()),
+        );
+        original.created_at = Some(123);
+        original.sort_index = Some(7);
+        original.notes = Some("Retain this note".to_string());
+        original.in_failover_queue = true;
+        original.meta = Some(ProviderMeta {
+            endpoint_auto_select: Some(true),
+            ..Default::default()
+        });
+
+        manager.providers.insert(original.id.clone(), original);
+        manager.providers.insert(
+            "provider-one-copy".to_string(),
+            Provider::with_id(
+                "provider-one-copy".to_string(),
+                "Existing Copy".to_string(),
+                json!({}),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
+            id: "provider-one".to_string(),
+        },
+        Some(AppType::Claude),
+    )
+    .expect("duplicate command should succeed");
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    let config = refreshed.config.read().expect("lock provider state");
+    let manager = config
+        .get_manager(&AppType::Claude)
+        .expect("claude manager after duplicate");
+    let original = manager
+        .providers
+        .get("provider-one")
+        .expect("original provider remains");
+    let copied = manager
+        .providers
+        .get("provider-one-copy-1")
+        .expect("copy uses a collision-free id");
+
+    assert_eq!(original.name, "Provider One");
+    assert_eq!(copied.name, "Provider One copy");
+    assert_eq!(copied.settings_config, original.settings_config);
+    assert_eq!(copied.notes.as_deref(), Some("Retain this note"));
+    assert_eq!(
+        copied
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.endpoint_auto_select),
+        Some(true)
+    );
+    assert_eq!(copied.created_at, None);
+    assert_eq!(copied.sort_index, None);
+    assert!(!copied.in_failover_queue);
+}
+
+#[test]
+#[serial]
+fn provider_duplicate_missing_source_returns_error_without_creating_provider() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let state = state_from_config(MultiAppConfig::default());
+    state.save().expect("persist empty test state");
+    drop(state);
+
+    let err = cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
+            id: "missing-provider".to_string(),
+        },
+        Some(AppType::Claude),
+    )
+    .expect_err("duplicating a missing provider should fail");
+    assert!(err.to_string().contains("missing-provider"), "{err}");
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    let config = refreshed.config.read().expect("lock provider state");
+    assert!(config
+        .get_manager(&AppType::Claude)
+        .expect("claude manager after failed duplicate")
+        .providers
+        .is_empty());
 }
 
 #[test]

@@ -7437,6 +7437,7 @@ fn openclaw_provider_list_key_bar_uses_common_provider_actions() {
     }
 
     assert!(all.contains("Space add/remove"), "{all}");
+    assert!(all.contains("c copy"), "{all}");
     assert!(all.contains("t test"), "{all}");
     assert!(all.contains("x set default"), "{all}");
     assert!(!all.contains("s add/remove"), "{all}");
