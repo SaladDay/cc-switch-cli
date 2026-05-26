@@ -30,6 +30,13 @@ impl App {
                     ConfirmAction::ProviderDelete { id } => {
                         Action::ProviderDelete { id: id.clone() }
                     }
+                    ConfirmAction::ProviderCopy { id } => {
+                        if let Some(row) = data.providers.rows.iter().find(|r| &r.id == id) {
+                            self.open_provider_copy_form(row, data);
+                        }
+                        // No action as we open a new form immediately
+                        return Some(Action::None);
+                    }
                     ConfirmAction::ProviderRemoveFromConfig { id } => {
                         Action::ProviderRemoveFromConfig { id: id.clone() }
                     }

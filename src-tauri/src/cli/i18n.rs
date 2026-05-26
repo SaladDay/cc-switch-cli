@@ -5385,6 +5385,23 @@ pub mod texts {
         }
     }
 
+    pub fn tui_confirm_copy_provider_title() -> &'static str {
+        if is_chinese() {
+            "复制供应商"
+        } else {
+            // On the provider form we use "copy", however we use "duplicate" here to make it more clear.
+            "Duplicate(copy) Provider"
+        }
+    }
+
+    pub fn tui_confirm_copy_provider_message(name: &str, id: &str) -> String {
+        if is_chinese() {
+            format!("确定复制供应商 '{}' ({})？", name, id)
+        } else {
+            format!("Duplicate(copy) provider '{}' ({})?", name, id)
+        }
+    }
+
     pub fn tui_confirm_remove_provider_title() -> &'static str {
         if is_chinese() {
             "移除供应商"
