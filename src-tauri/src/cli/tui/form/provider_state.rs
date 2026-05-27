@@ -1105,6 +1105,7 @@ impl ProviderAddFormState {
         let previous_mode = self.mode.clone();
         let previous_focus = self.focus;
         let previous_page = self.page;
+        let previous_copy_source_id = self.copy_source_id.clone();
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
@@ -1137,6 +1138,7 @@ impl ProviderAddFormState {
         }
 
         next.mode = previous_mode.clone();
+        next.copy_source_id = previous_copy_source_id;
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;
@@ -1183,6 +1185,7 @@ impl ProviderAddFormState {
         let previous_mode = self.mode.clone();
         let previous_focus = self.focus;
         let previous_page = self.page;
+        let previous_copy_source_id = self.copy_source_id.clone();
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
@@ -1225,6 +1228,7 @@ impl ProviderAddFormState {
         }
 
         next.mode = previous_mode.clone();
+        next.copy_source_id = previous_copy_source_id;
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;
