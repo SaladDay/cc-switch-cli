@@ -2347,6 +2347,39 @@ fn provider_edit_form_openclaw_keeps_provider_key_visible_but_locked() {
 }
 
 #[test]
+fn provider_copy_form_additive_apps_hide_provider_key() {
+    for app_type in [AppType::OpenClaw, AppType::Hermes] {
+        let provider = Provider::with_id(
+            "source-provider".to_string(),
+            "Source Provider".to_string(),
+            json!({
+                "baseUrl": "https://api.example/v1",
+                "apiKey": "sk-demo",
+            }),
+            None,
+        );
+
+        let form = ProviderAddFormState::copy_from_provider_with_common_snippet(
+            app_type.clone(),
+            &provider,
+            "",
+            &[],
+        );
+        let fields = form.fields();
+
+        assert_eq!(form.copy_source_id.as_deref(), Some("source-provider"));
+        assert!(
+            !fields.contains(&ProviderAddField::Id),
+            "{app_type:?} copy form should not expose a provider key that is regenerated on save"
+        );
+        assert!(
+            !form.is_id_editable(),
+            "{app_type:?} copy form should not allow editing the regenerated provider key"
+        );
+    }
+}
+
+#[test]
 fn provider_add_form_openclaw_uses_upstream_default_api_protocol() {
     let mut form = ProviderAddFormState::new(AppType::OpenClaw);
     form.id.set("oclaw1");
@@ -2981,7 +3014,7 @@ fn provider_copy_form_uses_new_record_identity_without_queue_state() {
 
     assert!(matches!(form.mode, FormMode::Add));
     assert_eq!(form.copy_source_id.as_deref(), Some("test-provider"));
-    assert_eq!(copied["id"], "test-provider-copy-1");
+    assert_eq!(copied["id"], "test-provider-copy-2");
     assert_eq!(copied["name"], "Test Provider copy");
     assert!(copied.get("createdAt").is_none());
     assert_eq!(copied["sortIndex"], 7);

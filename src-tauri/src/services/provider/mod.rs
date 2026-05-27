@@ -156,6 +156,17 @@ impl ProviderService {
         duplicate
     }
 
+    fn normalize_duplicate_provider_snapshot(app_type: &AppType, provider: &mut Provider) {
+        if !matches!(app_type, AppType::Hermes) {
+            return;
+        }
+
+        if let Some(settings) = provider.settings_config.as_object_mut() {
+            settings.remove(crate::hermes_config::PROVIDER_SOURCE_FIELD);
+            settings.remove("provider_key");
+        }
+    }
+
     fn shift_sort_indices_for_duplicate(
         manager: &mut crate::provider::ProviderManager,
         source_id: &str,
@@ -212,6 +223,7 @@ impl ProviderService {
             existing_ids.extend(live_ids);
             let mut duplicate =
                 Self::duplicate_provider_with_overrides(&source, provider_override, &existing_ids);
+            Self::normalize_duplicate_provider_snapshot(&app_type_clone, &mut duplicate);
 
             Self::normalize_provider_if_claude(&app_type_clone, &mut duplicate);
             Self::inject_coding_plan_usage_script(&app_type_clone, &mut duplicate);

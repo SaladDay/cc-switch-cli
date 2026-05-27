@@ -4379,7 +4379,7 @@ mod tests {
 
         let copied: serde_json::Value =
             serde_json::from_str(&content).expect("copy payload should be valid JSON");
-        assert_eq!(copied["id"], "provider-one-copy-1");
+        assert_eq!(copied["id"], "p1-copy");
         assert_eq!(copied["name"], "Provider One copy");
         assert_eq!(
             copied["settingsConfig"]["env"]["ANTHROPIC_AUTH_TOKEN"],

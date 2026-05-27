@@ -15,6 +15,22 @@ use super::{
     OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
+fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
+    let base_id = format!("{}-copy", original_id.trim());
+    if !existing_ids.iter().any(|id| id == &base_id) {
+        return base_id;
+    }
+
+    let mut counter = 2;
+    loop {
+        let candidate = format!("{base_id}-{counter}");
+        if !existing_ids.iter().any(|id| id == &candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
 impl ProviderAddFormState {
     pub const USAGE_QUERY_GENERAL_PRESET: &'static str = r#"({
   request: {
@@ -234,11 +250,7 @@ impl ProviderAddFormState {
                 extra.remove(key);
             }
         }
-        form.id
-            .set(crate::cli::commands::provider_input::generate_provider_id(
-                form.name.value.trim(),
-                existing_ids,
-            ));
+        form.id.set(provider_copy_id(&provider.id, existing_ids));
         form
     }
 
@@ -294,7 +306,7 @@ impl ProviderAddFormState {
     }
 
     pub fn is_id_editable(&self) -> bool {
-        !self.mode.is_edit()
+        !self.mode.is_edit() && self.copy_source_id.is_none()
     }
 
     pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {
@@ -320,7 +332,9 @@ impl ProviderAddFormState {
             ProviderAddField::Notes,
         ];
 
-        if matches!(self.app_type, AppType::Hermes | AppType::OpenClaw) {
+        if matches!(self.app_type, AppType::Hermes | AppType::OpenClaw)
+            && self.copy_source_id.is_none()
+        {
             fields.insert(0, ProviderAddField::Id);
         }
 

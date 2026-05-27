@@ -453,6 +453,72 @@ fn provider_duplicate_opencode_skips_live_write_and_avoids_live_only_id() {
 
 #[test]
 #[serial]
+fn provider_duplicate_hermes_clears_read_only_source_marker() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Hermes)
+            .expect("hermes manager");
+        manager.providers.insert(
+            "remote-provider".to_string(),
+            Provider::with_id(
+                "remote-provider".to_string(),
+                "Remote Provider".to_string(),
+                json!({
+                    "api_mode": "chat_completions",
+                    "base_url": "https://remote.example/v1",
+                    "api_key": "sk-remote",
+                    cc_switch_lib::hermes_config::PROVIDER_SOURCE_FIELD:
+                        cc_switch_lib::hermes_config::PROVIDER_SOURCE_DICT,
+                    "provider_key": "remote-provider",
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
+            id: "remote-provider".to_string(),
+        },
+        Some(AppType::Hermes),
+    )
+    .expect("duplicate command should succeed");
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    let config = refreshed.config.read().expect("lock provider state");
+    let manager = config
+        .get_manager(&AppType::Hermes)
+        .expect("hermes manager after duplicate");
+    let copied = manager
+        .providers
+        .get("remote-provider-copy")
+        .expect("copy should use source id copy suffix");
+
+    assert!(copied
+        .settings_config
+        .get(cc_switch_lib::hermes_config::PROVIDER_SOURCE_FIELD)
+        .is_none());
+    assert!(copied.settings_config.get("provider_key").is_none());
+    assert_eq!(
+        copied
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.live_config_managed),
+        Some(false)
+    );
+}
+
+#[test]
+#[serial]
 fn provider_duplicate_missing_source_returns_error_without_creating_provider() {
     let _guard = lock_test_mutex();
     reset_test_fs();
