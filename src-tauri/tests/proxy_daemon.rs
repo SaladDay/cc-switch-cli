@@ -370,6 +370,38 @@ fn proxy_enable_and_disable_cli_manage_daemon_worker() {
 
 #[test]
 #[serial]
+fn normal_startup_keeps_existing_daemon_route_visible() {
+    let sandbox = TestSandbox::new();
+    seed_minimal_claude_provider(&sandbox);
+
+    let mut daemon = sandbox.spawn_daemon();
+    assert!(
+        sandbox.wait_for_socket(Duration::from_secs(10)),
+        "daemon socket should come up"
+    );
+
+    let enable = run_cc_switch(&["proxy", "enable"]);
+    assert_command_success(&enable, "proxy enable");
+
+    let show = run_cc_switch(&["proxy", "show"]);
+    assert_command_success(&show, "proxy show");
+    let show_stdout = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        show_stdout.contains("Claude=开启") || show_stdout.contains("Claude=on"),
+        "startup recovery should not clear active daemon takeover; got {show_stdout}"
+    );
+    assert!(
+        show_stdout.contains("运行 127.0.0.1:") || show_stdout.contains("running 127.0.0.1:"),
+        "proxy show should still see the daemon worker; got {show_stdout}"
+    );
+
+    let disable = run_cc_switch(&["proxy", "disable"]);
+    assert_command_success(&disable, "proxy disable");
+    let _ = wait_for_daemon_exit(&mut daemon, Duration::from_secs(5));
+}
+
+#[test]
+#[serial]
 fn set_global_enabled_false_clears_takeovers_and_stops_the_worker() {
     let sandbox = TestSandbox::new();
     seed_minimal_claude_provider(&sandbox);

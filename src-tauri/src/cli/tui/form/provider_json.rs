@@ -50,8 +50,25 @@ impl ProviderAddFormState {
                 let env_obj = env_value
                     .as_object_mut()
                     .expect("env must be a JSON object");
-                set_or_remove_trimmed(env_obj, "ANTHROPIC_AUTH_TOKEN", &self.claude_api_key.value);
-                set_or_remove_trimmed(env_obj, "ANTHROPIC_BASE_URL", &self.claude_base_url.value);
+                if self.is_claude_codex_oauth_provider() {
+                    env_obj.remove("ANTHROPIC_AUTH_TOKEN");
+                    env_obj.remove("ANTHROPIC_API_KEY");
+                    env_obj.insert(
+                        "ANTHROPIC_BASE_URL".to_string(),
+                        json!("https://chatgpt.com/backend-api/codex"),
+                    );
+                } else {
+                    set_or_remove_trimmed(
+                        env_obj,
+                        "ANTHROPIC_AUTH_TOKEN",
+                        &self.claude_api_key.value,
+                    );
+                    set_or_remove_trimmed(
+                        env_obj,
+                        "ANTHROPIC_BASE_URL",
+                        &self.claude_base_url.value,
+                    );
+                }
                 if self.claude_model_config_touched {
                     set_or_remove_trimmed(env_obj, "ANTHROPIC_MODEL", &self.claude_model.value);
                     set_or_remove_trimmed(
@@ -475,9 +492,11 @@ impl ProviderAddFormState {
             ClaudeApiFormat::OpenAiChat | ClaudeApiFormat::OpenAiResponses
         ) && matches!(self.app_type, AppType::Claude)
             && !self.is_claude_official_provider();
+        let is_codex_oauth = self.is_claude_codex_oauth_provider();
 
         if !should_write_common_config_meta
             && !should_write_claude_api_format
+            && !is_codex_oauth
             && !self.has_usage_script_meta()
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
@@ -507,8 +526,11 @@ impl ProviderAddFormState {
 
         if matches!(self.app_type, AppType::Claude) {
             match self.claude_api_format {
-                _ if self.is_claude_official_provider() => {
+                _ if self.is_claude_official_provider() && !is_codex_oauth => {
                     meta_obj.remove("apiFormat");
+                }
+                ClaudeApiFormat::Anthropic if is_codex_oauth => {
+                    meta_obj.insert("apiFormat".to_string(), json!("openai_responses"));
                 }
                 ClaudeApiFormat::Anthropic => {
                     meta_obj.remove("apiFormat");
@@ -520,6 +542,44 @@ impl ProviderAddFormState {
                     meta_obj.insert("apiFormat".to_string(), json!("openai_responses"));
                 }
             }
+        }
+
+        if is_codex_oauth {
+            meta_obj.insert("providerType".to_string(), json!("codex_oauth"));
+            meta_obj.insert(
+                "authBinding".to_string(),
+                json!({
+                    "source": "managed_account",
+                    "authProvider": "codex_oauth",
+                    "accountId": self.codex_oauth_account_id.as_deref(),
+                }),
+            );
+            if self.codex_oauth_account_id.is_none() {
+                if let Some(auth_binding) = meta_obj
+                    .get_mut("authBinding")
+                    .and_then(|value| value.as_object_mut())
+                {
+                    auth_binding.remove("accountId");
+                }
+            }
+            meta_obj.insert("codexFastMode".to_string(), json!(self.codex_fast_mode));
+        } else {
+            if meta_obj
+                .get("providerType")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "codex_oauth")
+            {
+                meta_obj.remove("providerType");
+            }
+            if meta_obj
+                .get("authBinding")
+                .and_then(|value| value.get("authProvider"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "codex_oauth")
+            {
+                meta_obj.remove("authBinding");
+            }
+            meta_obj.remove("codexFastMode");
         }
 
         self.update_usage_script_meta(meta_obj);

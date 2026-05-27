@@ -181,6 +181,10 @@ pub(super) fn render_providers(
             keys.push(("Enter", texts::tui_key_details()));
             keys.push(("Space", provider_switch_key_label(&app.app_type)));
             keys.push(("a", texts::tui_key_add()));
+            // Theoretically we should use "duplicate" here.
+            // However this word is too long to fit in the key hint area,
+            // and key "d" is already used for delete, so we use "copy" here to make it shorter and avoid confusion.
+            keys.push(("c", texts::tui_key_copy()));
             if let Some(row) = visible.get(app.provider_idx) {
                 if !data::provider_is_read_only(&app.app_type, row) {
                     keys.push(("e", texts::tui_key_edit()));

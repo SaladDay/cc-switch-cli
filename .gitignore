@@ -9,7 +9,6 @@ release/
 .env.local
 *.tsbuildinfo
 .npmrc
-CLAUDE.md
 AGENT.md
 AGENTS.md
 plan.md

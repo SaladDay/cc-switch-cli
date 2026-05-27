@@ -87,6 +87,32 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
+        Overlay::ManagedAccountPicker {
+            selected,
+            binding,
+            selected_account_id,
+            ..
+        } => super::pickers::render_managed_account_picker_overlay(
+            frame,
+            app,
+            content_area,
+            theme,
+            *selected,
+            *binding,
+            selected_account_id.as_deref(),
+        ),
+        Overlay::ManagedAccountActionPicker {
+            account_id,
+            selected,
+            ..
+        } => super::pickers::render_managed_account_action_picker_overlay(
+            frame,
+            app,
+            content_area,
+            theme,
+            account_id,
+            *selected,
+        ),
         Overlay::HermesModelsPicker { editing } => {
             super::pickers::render_hermes_models_picker_overlay(
                 frame,

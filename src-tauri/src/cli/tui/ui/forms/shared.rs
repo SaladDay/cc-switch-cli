@@ -40,6 +40,7 @@ pub(crate) fn add_form_key_items(
                     }
                     Some(
                         ProviderAddField::ClaudeModelConfig
+                        | ProviderAddField::CodexOAuthAccount
                         | ProviderAddField::CommonSnippet
                         | ProviderAddField::UsageQuery
                         | ProviderAddField::OpenClawModels
@@ -48,6 +49,7 @@ pub(crate) fn add_form_key_items(
                     Some(
                         ProviderAddField::GeminiAuthType
                         | ProviderAddField::ClaudeHideAttribution
+                        | ProviderAddField::CodexFastMode
                         | ProviderAddField::OpenClawApiProtocol
                         | ProviderAddField::OpenClawUserAgent
                         | ProviderAddField::HermesApiMode,

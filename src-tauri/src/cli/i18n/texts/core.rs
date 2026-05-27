@@ -56,6 +56,17 @@ pub fn entity_deleted_success(entity_type: &str, name: &str) -> String {
     }
 }
 
+pub fn provider_duplicated_success(source_id: &str, duplicate_id: &str) -> String {
+    if is_chinese() {
+        format!("✓ 已复制供应商 '{}' 为 '{}'", source_id, duplicate_id)
+    } else {
+        format!(
+            "✓ Duplicated provider '{}' as '{}'",
+            source_id, duplicate_id
+        )
+    }
+}
+
 pub fn entity_not_found(entity_type: &str, id: &str) -> String {
     if is_chinese() {
         format!("{}不存在: {}", entity_type, id)

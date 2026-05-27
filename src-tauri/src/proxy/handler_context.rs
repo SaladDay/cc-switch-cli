@@ -25,6 +25,7 @@ pub struct HandlerContext {
     pub optimizer_config: OptimizerConfig,
     pub request_model: String,
     pub session_id: String,
+    pub session_client_provided: bool,
     pub current_provider_id_at_start: String,
 }
 
@@ -64,7 +65,7 @@ impl HandlerContext {
             .and_then(|value| value.as_str())
             .unwrap_or("unknown")
             .to_string();
-        let session_id = extract_session_id(headers, body, app_type.as_str());
+        let session_result = extract_session_id(headers, body, app_type.as_str());
 
         Ok(Self {
             start_time,
@@ -76,7 +77,8 @@ impl HandlerContext {
             rectifier_config,
             optimizer_config,
             request_model,
-            session_id,
+            session_id: session_result.session_id,
+            session_client_provided: session_result.client_provided,
             current_provider_id_at_start,
         })
     }

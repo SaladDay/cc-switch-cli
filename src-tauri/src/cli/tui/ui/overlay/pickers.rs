@@ -299,6 +299,174 @@ pub(super) fn render_usage_query_template_picker_overlay(
     }
 }
 
+pub(super) fn render_managed_account_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+    binding: bool,
+    selected_account_id: Option<&str>,
+) {
+    let height = app
+        .managed_auth_status
+        .as_ref()
+        .map(|status| status.accounts.len())
+        .unwrap_or(0)
+        .saturating_add(if binding { 6 } else { 5 })
+        .min(18) as u16;
+    let area = centered_rect_fixed(62, height.max(8), content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(texts::tui_label_chatgpt_account());
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_close()),
+        ],
+    );
+
+    let body_area = inset_top(chunks[1], 1);
+    let Some(status) = app.managed_auth_status.as_ref() else {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                texts::tui_managed_accounts_not_loaded(),
+                Style::default().fg(theme.dim),
+            ))
+            .alignment(Alignment::Center),
+            body_area,
+        );
+        return;
+    };
+
+    if status.accounts.is_empty() && !binding {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                texts::tui_managed_accounts_not_authenticated(),
+                Style::default().fg(theme.dim),
+            ))
+            .alignment(Alignment::Center),
+            body_area,
+        );
+        return;
+    }
+
+    let mut items = Vec::new();
+    if binding {
+        let marker = if selected_account_id.is_none() {
+            texts::tui_marker_active()
+        } else {
+            texts::tui_marker_inactive()
+        };
+        items.push(ListItem::new(Line::raw(format!(
+            "{marker}  {}",
+            texts::tui_managed_accounts_follow_default()
+        ))));
+    }
+
+    for account in &status.accounts {
+        let marker = if selected_account_id == Some(account.id.as_str()) {
+            texts::tui_marker_active()
+        } else {
+            texts::tui_marker_inactive()
+        };
+        let suffix = if account.is_default {
+            format!(" ({})", texts::tui_managed_accounts_default())
+        } else {
+            String::new()
+        };
+        items.push(ListItem::new(Line::raw(format!(
+            "{marker}  {}{suffix}",
+            account.login
+        ))));
+    }
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+    let mut state = ListState::default();
+    let row_count = status.accounts.len() + usize::from(binding);
+    state.select(Some(selected.min(row_count.saturating_sub(1))));
+    frame.render_stateful_widget(list, body_area, &mut state);
+}
+
+pub(super) fn render_managed_account_action_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    account_id: &str,
+    selected: usize,
+) {
+    let area = centered_rect_fixed(48, 8, content_area);
+    frame.render_widget(Clear, area);
+
+    let account_label = app
+        .managed_auth_status
+        .as_ref()
+        .and_then(|status| {
+            status
+                .accounts
+                .iter()
+                .find(|account| account.id == account_id)
+                .map(|account| account.login.as_str())
+        })
+        .unwrap_or(account_id);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(account_label);
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_close()),
+        ],
+    );
+
+    let items = [
+        texts::tui_key_set_default().to_string(),
+        texts::tui_key_delete().to_string(),
+    ]
+    .into_iter()
+    .map(|label| ListItem::new(Line::raw(label)));
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+    let mut state = ListState::default();
+    state.select(Some(selected.min(1)));
+    frame.render_stateful_widget(list, inset_top(chunks[1], 1), &mut state);
+}
+
 pub(super) fn render_provider_test_menu_overlay(
     frame: &mut Frame<'_>,
     app: &App,

@@ -98,6 +98,155 @@ struct PostCommitAction {
 }
 
 impl ProviderService {
+    fn provider_copy_id(original_id: &str, existing_ids: &HashSet<String>) -> String {
+        let base_id = format!("{}-copy", original_id.trim());
+
+        if !existing_ids.contains(&base_id) {
+            return base_id;
+        }
+
+        let mut counter = 2;
+        loop {
+            let candidate = format!("{base_id}-{counter}");
+            if !existing_ids.contains(&candidate) {
+                return candidate;
+            }
+            counter += 1;
+        }
+    }
+
+    fn live_provider_ids(app_type: &AppType) -> Result<HashSet<String>, AppError> {
+        let ids = match app_type {
+            AppType::OpenCode => crate::opencode_config::get_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect(),
+            AppType::Hermes => crate::hermes_config::get_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect(),
+            AppType::OpenClaw => crate::openclaw_config::get_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect(),
+            _ => HashSet::new(),
+        };
+        Ok(ids)
+    }
+
+    fn duplicate_provider_with_overrides(
+        source: &Provider,
+        provider: Option<Provider>,
+        existing_ids: &HashSet<String>,
+    ) -> Provider {
+        let mut duplicate = provider.unwrap_or_else(|| {
+            let mut duplicate = source.clone();
+            duplicate.name = format!("{} copy", source.name.trim());
+            duplicate
+        });
+        duplicate.id = Self::provider_copy_id(&source.id, existing_ids);
+        duplicate.name = if duplicate.name.trim().is_empty() {
+            format!("{} copy", source.name.trim())
+        } else {
+            duplicate.name.trim().to_string()
+        };
+        duplicate.created_at = Some(current_timestamp());
+        duplicate.in_failover_queue = false;
+        duplicate.sort_index = source.sort_index.map(|idx| idx + 1);
+        duplicate
+    }
+
+    fn normalize_duplicate_provider_snapshot(app_type: &AppType, provider: &mut Provider) {
+        if !matches!(app_type, AppType::Hermes) {
+            return;
+        }
+
+        if let Some(settings) = provider.settings_config.as_object_mut() {
+            settings.remove(crate::hermes_config::PROVIDER_SOURCE_FIELD);
+            settings.remove("provider_key");
+        }
+    }
+
+    fn shift_sort_indices_for_duplicate(
+        manager: &mut crate::provider::ProviderManager,
+        source_id: &str,
+        insert_sort_index: Option<usize>,
+    ) {
+        let Some(insert_sort_index) = insert_sort_index else {
+            return;
+        };
+
+        for (id, provider) in manager.providers.iter_mut() {
+            if id != source_id
+                && provider
+                    .sort_index
+                    .is_some_and(|idx| idx >= insert_sort_index)
+            {
+                provider.sort_index = provider.sort_index.map(|idx| idx + 1);
+            }
+        }
+    }
+
+    pub fn duplicate(
+        state: &AppState,
+        app_type: AppType,
+        source_id: &str,
+        provider_override: Option<Provider>,
+    ) -> Result<Provider, AppError> {
+        let app_type_clone = app_type.clone();
+        let source_id = source_id.to_string();
+        let live_ids = if app_type.is_additive_mode() {
+            Self::live_provider_ids(&app_type)?
+        } else {
+            HashSet::new()
+        };
+
+        Self::run_transaction(state, move |config| {
+            let common_config_snippet = config.common_config_snippets.get(&app_type_clone).cloned();
+            config.ensure_app(&app_type_clone);
+            let manager = config
+                .get_manager_mut(&app_type_clone)
+                .ok_or_else(|| Self::app_not_found(&app_type_clone))?;
+            let source = manager
+                .providers
+                .get(&source_id)
+                .ok_or_else(|| {
+                    AppError::localized(
+                        "provider.not_found",
+                        format!("供应商不存在: {source_id}"),
+                        format!("Provider not found: {source_id}"),
+                    )
+                })?
+                .clone();
+
+            let mut existing_ids = manager.providers.keys().cloned().collect::<HashSet<_>>();
+            existing_ids.extend(live_ids);
+            let mut duplicate =
+                Self::duplicate_provider_with_overrides(&source, provider_override, &existing_ids);
+            Self::normalize_duplicate_provider_snapshot(&app_type_clone, &mut duplicate);
+
+            Self::normalize_provider_if_claude(&app_type_clone, &mut duplicate);
+            Self::inject_coding_plan_usage_script(&app_type_clone, &mut duplicate);
+            Self::validate_provider_settings(&app_type_clone, &duplicate)?;
+            Self::normalize_provider_for_storage(
+                &app_type_clone,
+                &mut duplicate,
+                common_config_snippet.as_deref(),
+            )?;
+
+            if app_type_clone.is_additive_mode() {
+                Self::set_provider_live_config_managed(&mut duplicate, false);
+            }
+
+            Self::shift_sort_indices_for_duplicate(manager, &source_id, duplicate.sort_index);
+            manager
+                .providers
+                .insert(duplicate.id.clone(), duplicate.clone());
+
+            Ok((duplicate, None))
+        })
+    }
+
     fn inject_coding_plan_usage_script(app_type: &AppType, provider: &mut Provider) {
         if !matches!(app_type, AppType::Claude) {
             return;

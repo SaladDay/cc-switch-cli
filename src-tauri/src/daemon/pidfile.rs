@@ -47,7 +47,7 @@ impl PidFile {
     pub fn acquire(path: impl AsRef<Path>) -> Result<Self, AcquireError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(AcquireError::Io)?;
+            crate::daemon::paths::ensure_private_runtime_dir(parent).map_err(AcquireError::Io)?;
         }
 
         let file = OpenOptions::new()

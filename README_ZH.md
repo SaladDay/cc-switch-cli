@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.6.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.6.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -492,6 +492,52 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
    - **Windows**：打开系统属性 → 环境变量，删除冲突的变量
 
 4. 重启终端使更改生效。
+
+</details>
+
+<details>
+<summary><b>代理启动时报 `Address already in use`，该怎么处理？</b></summary>
+
+<br>
+
+这表示代理监听端口已经被其他进程占用。常见场景是升级或调试后，旧版 `cc-switch daemon` / `cc-switch proxy serve` 仍在后台运行，但新版进程没有接管到它。
+
+先确认当前代理端口。默认可从 `cc-switch proxy show` 里查看，例如 `配置 15722`。
+
+**macOS / Linux：**
+
+```bash
+# 查看哪个进程占用了端口。把 15722 替换成你的代理端口。
+lsof -nP -iTCP:15722 -sTCP:LISTEN
+
+# 查看 cc-switch 相关进程，确认 daemon 和 proxy worker。
+ps -axo pid,ppid,stat,command | grep '[c]c-switch'
+
+# 如果 daemon 能连上，优先正常停止。
+cc-switch daemon stop
+
+# 如果 daemon 不可达，但端口仍被旧进程占用，手动结束对应 PID。
+kill <worker-pid> <daemon-pid>
+
+# 仍未退出时再强制结束。
+kill -9 <worker-pid> <daemon-pid>
+```
+
+只结束命令里明确显示为 `cc-switch daemon start` 或 `cc-switch proxy serve` 的进程。不要按端口号盲目结束其他应用。
+
+**Windows：**
+
+```powershell
+netstat -ano | findstr :15722
+taskkill /PID <pid> /F
+```
+
+清理后重新运行：
+
+```bash
+cc-switch proxy show
+cc-switch
+```
 
 </details>
 

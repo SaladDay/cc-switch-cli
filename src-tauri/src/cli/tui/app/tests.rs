@@ -13,7 +13,7 @@ mod tests {
 
     use crate::cli::i18n::{texts, use_test_language, Language};
     use crate::cli::tui::data::ProviderRow;
-    use crate::cli::tui::form::{McpEnvVarRow, McpTransport, TextInput};
+    use crate::cli::tui::form::{McpEnvVarRow, McpTransport, ProviderAddFormState, TextInput};
     use crate::cli::tui::runtime_actions::{
         handle_action, run_external_editor_for_prompt_form_content,
     };
@@ -114,6 +114,44 @@ mod tests {
         UiData::default()
     }
 
+    fn managed_auth_status() -> crate::services::ManagedAuthStatus {
+        crate::services::ManagedAuthStatus {
+            provider: "codex_oauth".to_string(),
+            authenticated: true,
+            default_account_id: Some("acc-default".to_string()),
+            migration_error: None,
+            accounts: vec![
+                crate::services::ManagedAuthAccount {
+                    id: "acc-default".to_string(),
+                    provider: "codex_oauth".to_string(),
+                    login: "default@example.com".to_string(),
+                    avatar_url: None,
+                    authenticated_at: 1,
+                    is_default: true,
+                },
+                crate::services::ManagedAuthAccount {
+                    id: "acc-alt".to_string(),
+                    provider: "codex_oauth".to_string(),
+                    login: "alt@example.com".to_string(),
+                    avatar_url: None,
+                    authenticated_at: 2,
+                    is_default: false,
+                },
+            ],
+        }
+    }
+
+    fn claude_codex_oauth_form() -> ProviderAddFormState {
+        let mut form = ProviderAddFormState::new(AppType::Claude);
+        let idx = form
+            .template_labels()
+            .iter()
+            .position(|label| *label == "Codex")
+            .expect("Codex template should exist");
+        form.apply_template(idx, &[]);
+        form
+    }
+
     #[test]
     fn overlay_is_editing_reflects_text_input_state_only() {
         assert!(!Overlay::None.is_editing());
@@ -211,6 +249,19 @@ mod tests {
             }) if id == expected_id
                 && title == texts::tui_confirm_remove_provider_title()
                 && message == &texts::tui_confirm_remove_provider_message(expected_name)
+        ));
+    }
+
+    fn assert_provider_copy_confirm(app: &App, expected_id: &str, expected_name: &str) {
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                title,
+                message,
+                action: ConfirmAction::ProviderCopy { id },
+            }) if id == expected_id
+                && title == texts::tui_confirm_copy_provider_title()
+                && message == &texts::tui_confirm_copy_provider_message(expected_name, expected_id)
         ));
     }
 
@@ -401,9 +452,11 @@ mod tests {
             &mut proxy_loading,
             None,
             None,
+            None,
             &mut webdav_loading,
             None,
             &mut update_check,
+            None,
             None,
             action,
         )
@@ -1480,6 +1533,8 @@ mod tests {
             Action::ProviderModelFetch {
                 base_url,
                 api_key: Some(api_key),
+                codex_oauth: false,
+                codex_oauth_account_id: None,
                 field: ProviderAddField::HermesModels,
                 claude_idx: None,
             } if base_url == "https://api.example.com/v1" && api_key == "sk-hermes"
@@ -1921,7 +1976,7 @@ mod tests {
     }
 
     #[test]
-    fn providers_c_key_is_noop() {
+    fn providers_c_key_opens_copy_confirm() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -1931,11 +1986,11 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Char('c')), &data);
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_provider_copy_confirm(&app, "p1", "Provider One");
     }
 
     #[test]
-    fn providers_c_key_is_noop_for_openclaw() {
+    fn providers_c_key_opens_copy_confirm_for_openclaw() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -1960,7 +2015,7 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Char('c')), &data);
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_provider_copy_confirm(&app, "p1", "Provider One");
     }
 
     #[test]
@@ -4323,6 +4378,155 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_copy_confirm_opens_form_without_notice_after_common_config_confirmed() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        app.on_key(key(KeyCode::Char('c')), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_copy_confirm_save_submits_new_copy_with_collision_free_id() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.common_config_notice_confirmed = true;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+        data.providers
+            .rows
+            .push(claude_provider_row("provider-one-copy"));
+
+        app.on_key(key(KeyCode::Char('c')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("saving a copied provider should submit new provider content");
+        };
+        assert!(matches!(submit, EditorSubmit::ProviderAdd));
+
+        let copied: serde_json::Value =
+            serde_json::from_str(&content).expect("copy payload should be valid JSON");
+        assert_eq!(copied["id"], "p1-copy");
+        assert_eq!(copied["name"], "Provider One copy");
+        assert_eq!(
+            copied["settingsConfig"]["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "sk-demo"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn provider_copy_confirm_save_persists_with_source_id_copy_semantics() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _home = EnvGuard::set_home(temp_home.path());
+
+        let state = crate::cli::tui::data::load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::Claude)
+                .expect("claude manager");
+
+            let mut original = Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://example.com",
+                        "ANTHROPIC_AUTH_TOKEN": "sk-demo"
+                    }
+                }),
+                None,
+            );
+            original.sort_index = Some(4);
+            manager.providers.insert(original.id.clone(), original);
+
+            let mut existing_copy = Provider::with_id(
+                "p1-copy".to_string(),
+                "Existing Copy".to_string(),
+                json!({"env": {"ANTHROPIC_BASE_URL": "https://copy.example"}}),
+                None,
+            );
+            existing_copy.sort_index = Some(5);
+            manager
+                .providers
+                .insert(existing_copy.id.clone(), existing_copy);
+        }
+        state.save().expect("persist providers");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.common_config_notice_confirmed = true;
+        let mut data = UiData::load(&AppType::Claude).expect("load data");
+
+        app.on_key(key(KeyCode::Char('c')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        run_runtime_action(&mut app, &mut data, action).expect("save copied provider");
+
+        let refreshed = UiData::load(&AppType::Claude).expect("reload data");
+        let copied = refreshed
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "p1-copy-2")
+            .expect("copy should use source id copy suffix");
+        assert_eq!(copied.provider.name, "Provider One copy");
+        assert_eq!(copied.provider.sort_index, Some(5));
+        assert!(copied.provider.created_at.is_some());
+        assert_eq!(
+            copied.provider.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "sk-demo"
+        );
+
+        let shifted = refreshed
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "p1-copy")
+            .expect("existing copy remains");
+        assert_eq!(shifted.provider.sort_index, Some(6));
+    }
+
+    #[test]
+    fn provider_copy_confirm_preserves_first_common_config_notice() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.common_config_notice_confirmed = false;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        app.on_key(key(KeyCode::Char('c')), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::CommonConfigNotice,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -9067,6 +9271,83 @@ mod tests {
     }
 
     #[test]
+    fn settings_menu_exposes_managed_accounts_item() {
+        assert!(
+            matches!(
+                SettingsItem::ALL.first(),
+                Some(SettingsItem::ManagedAccounts)
+            ),
+            "Managed Accounts should be the first Settings entry"
+        );
+        assert!(
+            SettingsItem::ALL
+                .iter()
+                .any(|item| matches!(item, SettingsItem::ManagedAccounts)),
+            "Settings should expose global managed accounts"
+        );
+    }
+
+    #[test]
+    fn settings_managed_accounts_item_opens_page_and_refreshes_when_status_missing() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::ManagedAccounts))
+            .expect("ManagedAccounts missing from SettingsItem::ALL");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(app.route, Route::SettingsManagedAccounts));
+        assert!(matches!(
+            action,
+            Action::ManagedAuthRefresh { auth_provider } if auth_provider == "codex_oauth"
+        ));
+    }
+
+    #[test]
+    fn settings_managed_accounts_page_uses_single_chatgpt_entry() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsManagedAccounts;
+        app.focus = Focus::Content;
+
+        app.settings_managed_accounts_idx = 0;
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::ManagedAuthRefresh { auth_provider } if auth_provider == "codex_oauth"
+        ));
+
+        app.managed_auth_status = Some(crate::services::ManagedAuthStatus {
+            accounts: vec![],
+            ..managed_auth_status()
+        });
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::ManagedAuthStartLogin { auth_provider } if auth_provider == "codex_oauth"
+        ));
+
+        app.managed_auth_status = Some(managed_auth_status());
+        app.settings_managed_accounts_idx = 0;
+        let action = app.on_key(key(KeyCode::Down), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert_eq!(app.settings_managed_accounts_idx, 0);
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::ManagedAccountActionPicker {
+                auth_provider,
+                account_id,
+                selected: 0,
+            } if auth_provider == "codex_oauth" && account_id == "acc-default"
+        ));
+    }
+
+    #[test]
     #[serial(home_settings)]
     fn settings_openclaw_config_dir_item_opens_text_input() {
         let temp_home = TempDir::new().expect("create temp home");
@@ -11750,6 +12031,102 @@ mod tests {
     }
 
     #[test]
+    fn provider_codex_oauth_model_fetch_uses_managed_auth_even_for_default_account() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(claude_codex_oauth_form()));
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 0,
+            editing: false,
+        };
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+
+        assert!(matches!(
+            action,
+            Action::ProviderModelFetch {
+                codex_oauth: true,
+                codex_oauth_account_id: None,
+                field: ProviderAddField::ClaudeModelConfig,
+                claude_idx: Some(0),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn managed_account_binding_picker_sets_and_clears_provider_account() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.managed_auth_status = Some(managed_auth_status());
+        app.form = Some(FormState::ProviderAdd(claude_codex_oauth_form()));
+
+        app.overlay = Overlay::ManagedAccountPicker {
+            auth_provider: "codex_oauth".to_string(),
+            selected: 2,
+            binding: true,
+            selected_account_id: None,
+        };
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        let account_id = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.codex_oauth_account_id.as_deref(),
+            other => panic!("expected ProviderAdd form, got: {other:?}"),
+        };
+        assert_eq!(account_id, Some("acc-alt"));
+
+        app.overlay = Overlay::ManagedAccountPicker {
+            auth_provider: "codex_oauth".to_string(),
+            selected: 0,
+            binding: true,
+            selected_account_id: Some("acc-alt".to_string()),
+        };
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+        let account_id = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form.codex_oauth_account_id.as_deref(),
+            other => panic!("expected ProviderAdd form, got: {other:?}"),
+        };
+        assert_eq!(account_id, None);
+    }
+
+    #[test]
+    fn managed_account_action_picker_emits_default_and_remove_actions() {
+        let mut app = App::new(Some(AppType::Claude));
+
+        app.overlay = Overlay::ManagedAccountActionPicker {
+            auth_provider: "codex_oauth".to_string(),
+            account_id: "acc-alt".to_string(),
+            selected: 0,
+        };
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(
+            action,
+            Action::ManagedAuthSetDefault {
+                auth_provider,
+                account_id,
+            } if auth_provider == "codex_oauth" && account_id == "acc-alt"
+        ));
+
+        app.overlay = Overlay::ManagedAccountActionPicker {
+            auth_provider: "codex_oauth".to_string(),
+            account_id: "acc-alt".to_string(),
+            selected: 1,
+        };
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(
+            action,
+            Action::ManagedAuthRemove {
+                auth_provider,
+                account_id,
+            } if auth_provider == "codex_oauth" && account_id == "acc-alt"
+        ));
+    }
+
+    #[test]
     fn provider_claude_api_format_warns_when_proxy_not_enabled() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
@@ -12848,6 +13225,52 @@ mod tests {
         app
     }
 
+    fn session_meta(
+        provider_id: &str,
+        session_id: &str,
+        title: &str,
+        project_dir: &str,
+        source_path: &str,
+        resume_command: &str,
+    ) -> crate::session_manager::SessionMeta {
+        crate::session_manager::SessionMeta {
+            provider_id: provider_id.to_string(),
+            session_id: session_id.to_string(),
+            title: Some(title.to_string()),
+            summary: Some("Review routing".to_string()),
+            project_dir: Some(project_dir.to_string()),
+            created_at: Some(1_735_689_600_000),
+            last_active_at: Some(1_735_732_800_000),
+            source_path: Some(source_path.to_string()),
+            resume_command: Some(resume_command.to_string()),
+        }
+    }
+
+    fn session_meta_for_app(provider_id: &str) -> crate::session_manager::SessionMeta {
+        session_meta(
+            provider_id,
+            "session-1",
+            "Session One",
+            "/tmp/project",
+            "/tmp/session.jsonl",
+            &match provider_id {
+                "claude" => "claude --resume session-1".to_string(),
+                "codex" => "codex resume session-1".to_string(),
+                other => format!("{other} resume session-1"),
+            },
+        )
+    }
+
+    fn app_with_session_page() -> App {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Sessions;
+        app.focus = Focus::Content;
+        app.sessions.loaded_once = true;
+        app.sessions.provider_id = Some("claude".to_string());
+        app.sessions.rows.push(session_meta_for_app("claude"));
+        app
+    }
+
     #[test]
     fn claude_model_fill_all_a_opens_confirm_without_changing_values() {
         let mut app = setup_claude_model_picker_with_models();
@@ -13203,5 +13626,224 @@ mod tests {
             app.overlay,
             Overlay::HermesModelsPicker { editing: false }
         ));
+    }
+
+    #[test]
+    fn sessions_left_right_switch_between_list_and_detail_without_tab() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+        app.on_key(key(KeyCode::Right), &data);
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(app.sessions.pane, SessionsPane::Detail);
+
+        app.on_key(key(KeyCode::Tab), &data);
+        assert_eq!(app.sessions.pane, SessionsPane::Detail);
+
+        app.on_key(key(KeyCode::Left), &data);
+        assert_eq!(app.focus, Focus::Content);
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+    }
+
+    #[test]
+    fn sessions_h_l_switch_between_list_and_detail() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+
+        app.on_key(key(KeyCode::Char('l')), &data);
+        assert_eq!(app.sessions.pane, SessionsPane::Detail);
+
+        app.on_key(key(KeyCode::Char('h')), &data);
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+    }
+
+    #[test]
+    fn sessions_resume_shortcut_returns_resume_action() {
+        let mut app = app_with_session_page();
+        let action = app.on_key(key(KeyCode::Char('R')), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SessionResume { command, cwd }
+                if command == "claude --resume session-1"
+                    && cwd.as_deref() == Some("/tmp/project")
+        ));
+    }
+
+    #[test]
+    fn sessions_delete_shortcut_opens_confirm_overlay() {
+        let mut app = app_with_session_page();
+        let action = app.on_key(key(KeyCode::Char('d')), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::SessionDelete {
+                    ref provider_id,
+                    ref session_id,
+                    ref source_path,
+                    ..
+                },
+                ..
+            }) if provider_id == "claude"
+                && session_id == "session-1"
+                && source_path == "/tmp/session.jsonl"
+        ));
+    }
+
+    #[test]
+    fn sessions_list_shortcuts_follow_highlight_not_previous_detail() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+        let alpha = session_meta(
+            "claude",
+            "alpha",
+            "Alpha Plan",
+            "/tmp/alpha",
+            "/tmp/alpha.jsonl",
+            "claude --resume alpha",
+        );
+        let beta = session_meta(
+            "claude",
+            "beta",
+            "Beta Plan",
+            "/tmp/beta",
+            "/tmp/beta.jsonl",
+            "claude --resume beta",
+        );
+        app.sessions.rows = vec![alpha.clone(), beta];
+        app.sessions.open_detail(session_key(&alpha));
+        app.sessions.pane = SessionsPane::List;
+        app.sessions.selected_idx = 1;
+
+        let action = app.on_key(key(KeyCode::Char('R')), &data);
+
+        assert!(matches!(
+            action,
+            Action::SessionResume { command, cwd }
+                if command == "claude --resume beta"
+                    && cwd.as_deref() == Some("/tmp/beta")
+        ));
+    }
+
+    #[test]
+    fn sessions_filter_starts_on_list_pane_from_detail() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+        app.sessions.pane = SessionsPane::Detail;
+
+        app.on_key(key(KeyCode::Char('/')), &data);
+
+        assert!(app.filter.active);
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+    }
+
+    #[test]
+    fn sessions_filter_matches_resume_command_source_and_date() {
+        let mut app = app_with_session_page();
+
+        app.filter.input.set("claude --resume");
+        let visible = visible_sessions(&app.filter, &app.app_type, &app.sessions.rows);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].session_id, "session-1");
+
+        app.filter.input.set("session.jsonl");
+        let visible = visible_sessions(&app.filter, &app.app_type, &app.sessions.rows);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].session_id, "session-1");
+
+        app.filter.input.set("2025");
+        let visible = visible_sessions(&app.filter, &app.app_type, &app.sessions.rows);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].session_id, "session-1");
+    }
+
+    #[test]
+    fn sessions_filter_change_clamps_selection_and_clears_stale_detail() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+        let alpha = session_meta(
+            "claude",
+            "alpha",
+            "Alpha Plan",
+            "/tmp/alpha",
+            "/tmp/alpha.jsonl",
+            "claude --resume alpha",
+        );
+        let beta = session_meta(
+            "claude",
+            "beta",
+            "Beta Plan",
+            "/tmp/beta",
+            "/tmp/beta.jsonl",
+            "claude --resume beta",
+        );
+        app.sessions.rows = vec![alpha.clone(), beta];
+        app.sessions.selected_idx = 1;
+        app.sessions.open_detail(session_key(&alpha));
+        app.sessions.messages_loaded = true;
+        app.sessions.messages = vec![crate::session_manager::SessionMessage {
+            role: "assistant".to_string(),
+            content: "old detail".to_string(),
+            ts: Some(1_735_689_900_000),
+        }];
+        app.sessions.pane = SessionsPane::Detail;
+
+        app.on_key(key(KeyCode::Char('/')), &data);
+        app.on_key(key(KeyCode::Char('b')), &data);
+
+        assert_eq!(app.filter.input.value, "b");
+        assert_eq!(app.sessions.pane, SessionsPane::List);
+        assert_eq!(app.sessions.selected_idx, 0);
+        assert!(app.sessions.detail_key.is_none());
+        assert!(app.sessions.messages.is_empty());
+        assert!(!app.sessions.messages_loaded);
+    }
+
+    #[test]
+    fn sessions_filter_change_preserves_inflight_delete() {
+        let mut app = app_with_session_page();
+        let data = UiData::default();
+        let delete_request_id = app.sessions.start_delete();
+
+        app.on_key(key(KeyCode::Char('/')), &data);
+        app.on_key(key(KeyCode::Char('x')), &data);
+
+        assert!(app.sessions.delete_active.contains(&delete_request_id));
+    }
+
+    #[test]
+    fn sessions_delete_tracking_allows_out_of_order_completion() {
+        let mut app = app_with_session_page();
+        let alpha = session_meta(
+            "claude",
+            "alpha",
+            "Alpha Plan",
+            "/tmp/alpha",
+            "/tmp/alpha.jsonl",
+            "claude --resume alpha",
+        );
+        let beta = session_meta(
+            "claude",
+            "beta",
+            "Beta Plan",
+            "/tmp/beta",
+            "/tmp/beta.jsonl",
+            "claude --resume beta",
+        );
+        app.sessions.rows = vec![alpha.clone(), beta.clone()];
+        let alpha_key = session_key(&alpha);
+        let beta_key = session_key(&beta);
+        let alpha_request_id = app.sessions.start_delete();
+        let beta_request_id = app.sessions.start_delete();
+
+        assert!(app.sessions.finish_delete(beta_request_id, &beta_key));
+        assert_eq!(app.sessions.rows.len(), 1);
+        assert_eq!(app.sessions.rows[0].session_id, "alpha");
+        assert!(app.sessions.finish_delete(alpha_request_id, &alpha_key));
+        assert!(app.sessions.rows.is_empty());
+        assert!(app.sessions.delete_active.is_empty());
     }
 }

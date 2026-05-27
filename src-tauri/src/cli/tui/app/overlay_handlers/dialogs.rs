@@ -30,11 +30,29 @@ impl App {
                     ConfirmAction::ProviderDelete { id } => {
                         Action::ProviderDelete { id: id.clone() }
                     }
+                    ConfirmAction::ProviderCopy { id } => {
+                        if let Some(row) = data.providers.rows.iter().find(|r| &r.id == id) {
+                            self.open_provider_copy_form(row, data);
+                        }
+                        // No action as we open a new form immediately
+                        return Some(Action::None);
+                    }
                     ConfirmAction::ProviderRemoveFromConfig { id } => {
                         Action::ProviderRemoveFromConfig { id: id.clone() }
                     }
                     ConfirmAction::McpDelete { id } => Action::McpDelete { id: id.clone() },
                     ConfirmAction::PromptDelete { id } => Action::PromptDelete { id: id.clone() },
+                    ConfirmAction::SessionDelete {
+                        key,
+                        provider_id,
+                        session_id,
+                        source_path,
+                    } => Action::SessionDelete {
+                        key: key.clone(),
+                        provider_id: provider_id.clone(),
+                        session_id: session_id.clone(),
+                        source_path: source_path.clone(),
+                    },
                     ConfirmAction::SkillsUninstall { directory } => Action::SkillsUninstall {
                         directory: directory.clone(),
                     },

@@ -171,6 +171,8 @@ pub enum ProviderAddField {
     ClaudeApiKey,
     ClaudeModelConfig,
     ClaudeHideAttribution,
+    CodexOAuthAccount,
+    CodexFastMode,
     CodexBaseUrl,
     CodexModel,
     CodexWireApi,
@@ -281,6 +283,7 @@ pub struct McpEnvVarRow {
 pub struct ProviderAddFormState {
     pub app_type: AppType,
     pub mode: FormMode,
+    pub copy_source_id: Option<String>,
     pub focus: FormFocus,
     pub page: ProviderFormPage,
     pub template_idx: usize,
@@ -313,6 +316,8 @@ pub struct ProviderAddFormState {
     pub claude_opus_model: TextInput,
     pub claude_hide_attribution: bool,
     claude_hide_attribution_touched: bool,
+    pub codex_oauth_account_id: Option<String>,
+    pub codex_fast_mode: bool,
 
     pub codex_base_url: TextInput,
     pub codex_model: TextInput,

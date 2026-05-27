@@ -5,7 +5,9 @@ use crate::cli::failover_policy::{
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 
+use super::super::app::ToastKind;
 use super::super::data::{load_state, UiData};
+use super::super::runtime_systems::ManagedAuthReq;
 use super::RuntimeActionContext;
 
 fn visible_apps_mode_label(mode: crate::settings::VisibleAppsMode) -> &'static str {
@@ -280,6 +282,119 @@ pub(super) fn switch_visible_apps_to_manual(
     Ok(())
 }
 
+pub(super) fn managed_auth_refresh(
+    ctx: &mut RuntimeActionContext<'_>,
+    auth_provider: String,
+) -> Result<(), AppError> {
+    let Some(tx) = ctx.managed_auth_req_tx else {
+        ctx.app.managed_auth_loading = false;
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_worker_unavailable(
+                texts::tui_error_managed_auth_worker_unavailable(),
+            ),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    };
+
+    ctx.app.managed_auth_loading = true;
+    if let Err(err) = tx.send(ManagedAuthReq::Refresh { auth_provider }) {
+        ctx.app.managed_auth_loading = false;
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_request_failed(&err.to_string()),
+            ToastKind::Warning,
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn managed_auth_start_login(
+    ctx: &mut RuntimeActionContext<'_>,
+    auth_provider: String,
+) -> Result<(), AppError> {
+    let Some(tx) = ctx.managed_auth_req_tx else {
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_worker_unavailable(
+                texts::tui_error_managed_auth_worker_unavailable(),
+            ),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    };
+
+    ctx.app.managed_auth_loading = true;
+    if let Err(err) = tx.send(ManagedAuthReq::StartLogin { auth_provider }) {
+        ctx.app.managed_auth_loading = false;
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_request_failed(&err.to_string()),
+            ToastKind::Warning,
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn managed_auth_set_default(
+    ctx: &mut RuntimeActionContext<'_>,
+    auth_provider: String,
+    account_id: String,
+) -> Result<(), AppError> {
+    let Some(tx) = ctx.managed_auth_req_tx else {
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_worker_unavailable(
+                texts::tui_error_managed_auth_worker_unavailable(),
+            ),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    };
+
+    ctx.app.managed_auth_loading = true;
+    if let Err(err) = tx.send(ManagedAuthReq::SetDefault {
+        auth_provider,
+        account_id,
+    }) {
+        ctx.app.managed_auth_loading = false;
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_request_failed(&err.to_string()),
+            ToastKind::Warning,
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn managed_auth_remove(
+    ctx: &mut RuntimeActionContext<'_>,
+    auth_provider: String,
+    account_id: String,
+) -> Result<(), AppError> {
+    let Some(tx) = ctx.managed_auth_req_tx else {
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_worker_unavailable(
+                texts::tui_error_managed_auth_worker_unavailable(),
+            ),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    };
+
+    ctx.app.managed_auth_loading = true;
+    if let Err(err) = tx.send(ManagedAuthReq::Remove {
+        auth_provider,
+        account_id,
+    }) {
+        ctx.app.managed_auth_loading = false;
+        ctx.app.push_toast(
+            texts::tui_toast_managed_auth_request_failed(&err.to_string()),
+            ToastKind::Warning,
+        );
+    }
+
+    Ok(())
+}
+
 pub(super) fn set_visible_apps_mode(
     ctx: &mut RuntimeActionContext<'_>,
     mode: crate::settings::VisibleAppsMode,
@@ -529,11 +644,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         set_openclaw_config_dir(&mut ctx, Some(target_dir.display().to_string()))
@@ -589,11 +706,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         set_openclaw_config_dir(&mut ctx, None).expect("clear openclaw config dir");

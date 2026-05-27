@@ -7,6 +7,7 @@ use super::{ClaudeApiFormat, CodexWireApi, FormMode, GeminiAuthType, ProviderAdd
 enum ProviderTemplateId {
     Custom,
     ClaudeOfficial,
+    CodexOAuth,
     OpenAiOfficial,
     GoogleOAuth,
 }
@@ -119,7 +120,7 @@ static SPONSOR_PROVIDER_PRESETS_OPENCODE: [SponsorProviderPreset; 1] =
 static SPONSOR_PROVIDER_PRESETS_OPENCLAW: [SponsorProviderPreset; 1] =
     [SPONSOR_PROVIDER_PRESETS[1]];
 
-static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 2] = [
+static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 3] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Custom,
         label: "Custom",
@@ -127,6 +128,10 @@ static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 2] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::ClaudeOfficial,
         label: "Claude Official",
+    },
+    ProviderTemplateDef {
+        id: ProviderTemplateId::CodexOAuth,
+        label: "Codex",
     },
 ];
 
@@ -253,6 +258,9 @@ impl ProviderAddFormState {
                     self.claude_haiku_model = defaults.claude_haiku_model;
                     self.claude_sonnet_model = defaults.claude_sonnet_model;
                     self.claude_opus_model = defaults.claude_opus_model;
+                    self.claude_hide_attribution = defaults.claude_hide_attribution;
+                    self.codex_oauth_account_id = defaults.codex_oauth_account_id;
+                    self.codex_fast_mode = defaults.codex_fast_mode;
                     self.codex_base_url = defaults.codex_base_url;
                     self.codex_model = defaults.codex_model;
                     self.codex_wire_api = defaults.codex_wire_api;
@@ -302,6 +310,37 @@ impl ProviderAddFormState {
                     self.claude_sonnet_model.set("");
                     self.claude_opus_model.set("");
                     self.claude_model_config_touched = false;
+                    self.codex_oauth_account_id = None;
+                    self.codex_fast_mode = false;
+                    self.claude_hide_attribution = false;
+                    self.claude_hide_attribution_touched = false;
+                }
+                ProviderTemplateId::CodexOAuth => {
+                    self.extra = json!({
+                        "meta": {
+                            "providerType": "codex_oauth",
+                            "authBinding": {
+                                "source": "managed_account",
+                                "authProvider": "codex_oauth",
+                            },
+                        }
+                    });
+                    self.name.set("Codex");
+                    self.website_url.set("https://openai.com/chatgpt/pricing");
+                    self.claude_api_key.set("");
+                    self.claude_base_url
+                        .set("https://chatgpt.com/backend-api/codex");
+                    self.claude_api_format = ClaudeApiFormat::OpenAiResponses;
+                    self.claude_model.set("gpt-5.4");
+                    self.claude_reasoning_model.set("gpt-5.4");
+                    self.claude_haiku_model.set("gpt-5.4-mini");
+                    self.claude_sonnet_model.set("gpt-5.4");
+                    self.claude_opus_model.set("gpt-5.4");
+                    self.claude_model_config_touched = true;
+                    self.codex_oauth_account_id = None;
+                    self.codex_fast_mode = false;
+                    self.claude_hide_attribution = true;
+                    self.claude_hide_attribution_touched = true;
                 }
                 ProviderTemplateId::OpenAiOfficial => {
                     self.extra = json!({

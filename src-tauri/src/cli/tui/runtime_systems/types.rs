@@ -62,6 +62,44 @@ pub(crate) enum LocalEnvMsg {
     },
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum SessionReq {
+    Refresh {
+        request_id: u64,
+        provider_id: String,
+    },
+    LoadMessages {
+        request_id: u64,
+        key: String,
+        provider_id: String,
+        source_path: String,
+    },
+    Delete {
+        request_id: u64,
+        key: String,
+        provider_id: String,
+        session_id: String,
+        source_path: String,
+    },
+}
+
+pub(crate) enum SessionMsg {
+    ScanFinished {
+        request_id: u64,
+        result: Result<Vec<crate::session_manager::SessionMeta>, String>,
+    },
+    MessagesLoaded {
+        request_id: u64,
+        key: String,
+        result: Result<Vec<crate::session_manager::SessionMessage>, String>,
+    },
+    DeleteFinished {
+        request_id: u64,
+        key: String,
+        result: Result<(), String>,
+    },
+}
+
 pub(crate) enum QuotaReq {
     Refresh { target: QuotaTarget },
 }
@@ -136,6 +174,53 @@ pub(crate) enum WebDavMsg {
     },
 }
 
+pub(crate) enum ManagedAuthReq {
+    Refresh {
+        auth_provider: String,
+    },
+    StartLogin {
+        auth_provider: String,
+    },
+    PollLogin {
+        auth_provider: String,
+        device_code: String,
+    },
+    SetDefault {
+        auth_provider: String,
+        account_id: String,
+    },
+    Remove {
+        auth_provider: String,
+        account_id: String,
+    },
+}
+
+pub(crate) enum ManagedAuthMsg {
+    Status {
+        auth_provider: String,
+        result: Result<crate::services::ManagedAuthStatus, String>,
+    },
+    LoginStarted {
+        auth_provider: String,
+        result: Result<crate::services::ManagedAuthDeviceCodeResponse, String>,
+    },
+    LoginPolled {
+        auth_provider: String,
+        device_code: String,
+        result: Result<Option<crate::services::ManagedAuthAccount>, String>,
+    },
+    DefaultSet {
+        auth_provider: String,
+        account_id: String,
+        result: Result<crate::services::ManagedAuthStatus, String>,
+    },
+    Removed {
+        auth_provider: String,
+        account_id: String,
+        result: Result<crate::services::ManagedAuthStatus, String>,
+    },
+}
+
 pub(crate) struct SpeedtestSystem {
     pub(crate) req_tx: mpsc::Sender<String>,
     pub(crate) result_rx: mpsc::Receiver<SpeedtestMsg>,
@@ -151,6 +236,12 @@ pub(crate) struct StreamCheckSystem {
 pub(crate) struct LocalEnvSystem {
     pub(crate) req_tx: mpsc::Sender<LocalEnvReq>,
     pub(crate) result_rx: mpsc::Receiver<LocalEnvMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct SessionSystem {
+    pub(crate) req_tx: mpsc::Sender<SessionReq>,
+    pub(crate) result_rx: mpsc::Receiver<SessionMsg>,
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 
@@ -196,6 +287,12 @@ pub(crate) struct WebDavSystem {
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 
+pub(crate) struct ManagedAuthSystem {
+    pub(crate) req_tx: mpsc::Sender<ManagedAuthReq>,
+    pub(crate) result_rx: mpsc::Receiver<ManagedAuthMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
 pub(crate) enum UpdateReq {
     Check { request_id: u64 },
     Download,
@@ -224,6 +321,8 @@ pub(crate) enum ModelFetchReq {
         request_id: u64,
         base_url: String,
         api_key: Option<String>,
+        codex_oauth: bool,
+        codex_oauth_account_id: Option<String>,
         field: ProviderAddField,
         claude_idx: Option<usize>,
     },

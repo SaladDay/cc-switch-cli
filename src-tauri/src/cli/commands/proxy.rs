@@ -664,12 +664,14 @@ mod tests {
                     address: "127.0.0.1".to_string(),
                     port: 15721,
                     pid: Some(1001),
+                    started_at: None,
                 },
                 ActiveWorker {
                     app_type: "gemini".to_string(),
                     address: "127.0.0.1".to_string(),
                     port: 15723,
                     pid: Some(1003),
+                    started_at: None,
                 },
             ],
             ..Default::default()

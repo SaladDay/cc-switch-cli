@@ -96,22 +96,22 @@ pub fn transform_claude_request_for_api_format(
     body: serde_json::Value,
     provider: &Provider,
     api_format: &str,
+    session_id: Option<&str>,
 ) -> Result<serde_json::Value, ProxyError> {
-    let cache_key = provider
+    let explicit_cache_key = provider
         .meta
         .as_ref()
-        .and_then(|meta| meta.prompt_cache_key.as_deref())
-        .unwrap_or(&provider.id);
+        .and_then(|meta| meta.prompt_cache_key.as_deref());
+    let session_cache_key = session_id
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty());
 
     match api_format {
         "openai_responses" => super::transform_responses::anthropic_to_responses(
             body,
-            Some(cache_key),
-            provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.provider_type.as_deref())
-                == Some("codex_oauth"),
+            explicit_cache_key.or(session_cache_key),
+            provider.is_codex_oauth(),
+            provider.codex_fast_mode_enabled(),
         ),
         "openai_chat" => {
             let preserve_reasoning_content =
@@ -119,11 +119,11 @@ pub fn transform_claude_request_for_api_format(
             if preserve_reasoning_content {
                 super::transform::anthropic_to_openai_with_reasoning_content(
                     body,
-                    Some(cache_key),
+                    explicit_cache_key,
                     true,
                 )
             } else {
-                super::transform::anthropic_to_openai(body, Some(cache_key))
+                super::transform::anthropic_to_openai(body, explicit_cache_key)
             }
         }
         _ => Ok(body),
@@ -387,7 +387,7 @@ impl ProviderAdapter for ClaudeAdapter {
         body: serde_json::Value,
         provider: &Provider,
     ) -> Result<serde_json::Value, ProxyError> {
-        transform_claude_request_for_api_format(body, provider, self.get_api_format(provider))
+        transform_claude_request_for_api_format(body, provider, self.get_api_format(provider), None)
     }
 
     fn transform_response(&self, body: serde_json::Value) -> Result<serde_json::Value, ProxyError> {
@@ -523,7 +523,7 @@ mod tests {
         });
 
         let result =
-            transform_claude_request_for_api_format(body, &provider, "openai_chat").unwrap();
+            transform_claude_request_for_api_format(body, &provider, "openai_chat", None).unwrap();
 
         assert_eq!(
             result["messages"][0]["reasoning_content"],
@@ -557,8 +557,116 @@ mod tests {
         });
 
         let result =
-            transform_claude_request_for_api_format(body, &provider, "openai_chat").unwrap();
+            transform_claude_request_for_api_format(body, &provider, "openai_chat", None).unwrap();
 
         assert!(result["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn openai_responses_uses_session_prompt_cache_key() {
+        let provider: Provider = serde_json::from_value(json!({
+            "id": "codex-oauth",
+            "name": "Codex OAuth",
+            "settingsConfig": {},
+            "meta": {
+                "providerType": "codex_oauth"
+            }
+        }))
+        .expect("provider should deserialize");
+        let body = json!({
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+
+        let result = transform_claude_request_for_api_format(
+            body,
+            &provider,
+            "openai_responses",
+            Some("codex_session-123"),
+        )
+        .unwrap();
+
+        assert_eq!(result["prompt_cache_key"], "codex_session-123");
+    }
+
+    #[test]
+    fn openai_responses_omits_prompt_cache_key_without_session_or_explicit_key() {
+        let provider: Provider = serde_json::from_value(json!({
+            "id": "codex-oauth",
+            "name": "Codex OAuth",
+            "settingsConfig": {},
+            "meta": {
+                "providerType": "codex_oauth"
+            }
+        }))
+        .expect("provider should deserialize");
+        let body = json!({
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+
+        let result =
+            transform_claude_request_for_api_format(body, &provider, "openai_responses", None)
+                .unwrap();
+
+        assert!(result.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn openai_responses_explicit_prompt_cache_key_wins_over_session() {
+        let provider: Provider = serde_json::from_value(json!({
+            "id": "codex-oauth",
+            "name": "Codex OAuth",
+            "settingsConfig": {},
+            "meta": {
+                "providerType": "codex_oauth",
+                "promptCacheKey": "explicit-key"
+            }
+        }))
+        .expect("provider should deserialize");
+        let body = json!({
+            "model": "gpt-5.4",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+
+        let result = transform_claude_request_for_api_format(
+            body,
+            &provider,
+            "openai_responses",
+            Some("codex_session-123"),
+        )
+        .unwrap();
+
+        assert_eq!(result["prompt_cache_key"], "explicit-key");
+    }
+
+    #[test]
+    fn openai_chat_omits_prompt_cache_key_without_explicit_key() {
+        let provider: Provider = serde_json::from_value(json!({
+            "id": "generic",
+            "name": "Generic",
+            "settingsConfig": {
+                "api_format": "openai_chat",
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.example.com",
+                    "ANTHROPIC_AUTH_TOKEN": "token-1"
+                }
+            }
+        }))
+        .expect("provider should deserialize");
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+
+        let result = transform_claude_request_for_api_format(
+            body,
+            &provider,
+            "openai_chat",
+            Some("session-ignored"),
+        )
+        .unwrap();
+
+        assert!(result.get("prompt_cache_key").is_none());
     }
 }

@@ -83,6 +83,23 @@ fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provide
 fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
     form.claude_api_format = parse_claude_api_format(provider);
     form.claude_hide_attribution = claude_hide_attribution_enabled(&provider.settings_config);
+    if provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        == Some("codex_oauth")
+    {
+        form.claude_api_format = ClaudeApiFormat::OpenAiResponses;
+        form.codex_oauth_account_id = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.managed_account_id_for("codex_oauth"));
+        form.codex_fast_mode = provider
+            .meta
+            .as_ref()
+            .map(|meta| meta.codex_fast_mode_enabled())
+            .unwrap_or(false);
+    }
     if let Some(env) = provider
         .settings_config
         .get("env")

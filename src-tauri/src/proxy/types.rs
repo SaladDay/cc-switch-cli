@@ -112,6 +112,8 @@ pub struct ActiveWorker {
     pub address: String,
     pub port: u16,
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub started_at: Option<String>,
 }
 
 /// 活跃的代理目标信息

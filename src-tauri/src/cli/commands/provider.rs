@@ -10,7 +10,7 @@ use crate::cli::commands::provider_input::{
     supports_common_config, OptionalFields, ProviderAddMode,
 };
 use crate::cli::i18n::texts;
-use crate::cli::ui::{error, highlight, info, success, warning};
+use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use crate::services::ProviderService;
@@ -446,9 +446,14 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn duplicate_provider(_app_type: AppType, id: &str) -> Result<(), AppError> {
-    println!("{}", info(&format!("Duplicating provider '{}'...", id)));
-    println!("{}", error("Provider duplication is not yet implemented."));
+fn duplicate_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
+    let state = AppState::try_new()?;
+    let duplicate = ProviderService::duplicate(&state, app_type, id, None)?;
+
+    println!(
+        "{}",
+        success(&texts::provider_duplicated_success(id, &duplicate.id))
+    );
     Ok(())
 }
 

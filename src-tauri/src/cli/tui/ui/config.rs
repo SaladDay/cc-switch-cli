@@ -2537,6 +2537,10 @@ pub(super) fn render_settings(
                     texts::tui_settings_openclaw_config_dir_default_value().to_string()
                 }),
             ),
+            super::app::SettingsItem::ManagedAccounts => (
+                texts::tui_settings_managed_accounts_title().to_string(),
+                managed_accounts_summary(app),
+            ),
             super::app::SettingsItem::SkipClaudeOnboarding => (
                 texts::skip_claude_onboarding_label().to_string(),
                 if skip_claude_onboarding {
@@ -2619,6 +2623,232 @@ pub(super) fn render_settings(
     let mut state = TableState::default();
     state.select(Some(app.settings_idx));
     frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+}
+
+fn managed_accounts_summary(app: &App) -> String {
+    if app.managed_auth_loading {
+        return texts::tui_loading().to_string();
+    }
+
+    let Some(status) = app.managed_auth_status.as_ref() else {
+        return texts::tui_managed_accounts_not_loaded().to_string();
+    };
+
+    primary_managed_account(status)
+        .map(|account| account.login.clone())
+        .unwrap_or_else(|| texts::tui_managed_accounts_not_authenticated().to_string())
+}
+
+pub(super) fn render_settings_managed_accounts(
+    frame: &mut Frame<'_>,
+    app: &App,
+    _data: &UiData,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(texts::tui_settings_managed_accounts_title());
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    if app.focus == Focus::Content {
+        let key_label = managed_account_enter_label(app);
+        render_key_bar_center(frame, chunks[0], theme, &[("Enter", key_label)]);
+    }
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(28), Constraint::Min(0)])
+        .split(chunks[1]);
+
+    render_managed_account_services(frame, inset_left(columns[0], CONTENT_INSET_LEFT), theme);
+    render_managed_account_details(frame, app, columns[1], theme);
+}
+
+fn managed_account_enter_label(app: &App) -> &'static str {
+    if app.managed_auth_loading || app.managed_auth_login.is_some() {
+        return texts::tui_loading();
+    }
+
+    let Some(status) = app.managed_auth_status.as_ref() else {
+        return texts::tui_key_refresh();
+    };
+
+    if primary_managed_account(status).is_some() {
+        texts::tui_key_open()
+    } else {
+        texts::tui_key_login()
+    }
+}
+
+fn render_managed_account_services(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
+    let header = Row::new(vec![Cell::from(
+        texts::tui_managed_accounts_provider_column(),
+    )])
+    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+
+    let rows = [Row::new(vec![Cell::from(
+        texts::tui_managed_accounts_chatgpt_provider(),
+    )])];
+
+    let table = Table::new(rows, [Constraint::Min(10)])
+        .header(header)
+        .block(Block::default().borders(Borders::NONE))
+        .row_highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = TableState::default();
+    state.select(Some(0));
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn render_managed_account_details(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    render_managed_account_detail_panel(frame, app, chunks[0], theme);
+    render_managed_auth_login_panel(frame, app, chunks[1], theme);
+}
+
+fn render_managed_account_detail_panel(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(theme.dim))
+        .title(texts::tui_managed_accounts_details_title());
+    frame.render_widget(block.clone(), area);
+    let inner = inset_left(block.inner(area), CONTENT_INSET_LEFT);
+
+    let rows_data = managed_account_detail_rows(app);
+    let label_col_width =
+        field_label_column_width(rows_data.iter().map(|(label, _value)| label.as_str()), 0);
+    let rows = rows_data
+        .iter()
+        .map(|(label, value)| Row::new(vec![Cell::from(label.clone()), Cell::from(value.clone())]));
+
+    let table = Table::new(
+        rows,
+        [Constraint::Length(label_col_width), Constraint::Min(10)],
+    )
+    .block(Block::default().borders(Borders::NONE));
+    frame.render_widget(table, inner);
+}
+
+fn managed_account_detail_rows(app: &App) -> Vec<(String, String)> {
+    let mut rows = vec![(
+        texts::tui_managed_accounts_provider_column().to_string(),
+        texts::tui_managed_accounts_chatgpt_provider().to_string(),
+    )];
+
+    if app.managed_auth_loading {
+        rows.push((
+            texts::tui_managed_accounts_auth_status_label().to_string(),
+            texts::tui_loading().to_string(),
+        ));
+        return rows;
+    }
+
+    let Some(status) = app.managed_auth_status.as_ref() else {
+        rows.push((
+            texts::tui_managed_accounts_auth_status_label().to_string(),
+            texts::tui_managed_accounts_not_loaded().to_string(),
+        ));
+        return rows;
+    };
+
+    let Some(account) = primary_managed_account(status) else {
+        rows.push((
+            texts::tui_managed_accounts_auth_status_label().to_string(),
+            texts::tui_managed_accounts_not_authenticated().to_string(),
+        ));
+        return rows;
+    };
+
+    rows.push((
+        texts::tui_managed_accounts_auth_status_label().to_string(),
+        texts::tui_managed_accounts_authenticated().to_string(),
+    ));
+    rows.push((
+        texts::tui_managed_accounts_account_label().to_string(),
+        account.login.clone(),
+    ));
+    rows.push((
+        texts::tui_managed_accounts_account_id_label().to_string(),
+        account.id.clone(),
+    ));
+    rows.push((
+        texts::tui_managed_accounts_default_account_label().to_string(),
+        if account.is_default {
+            texts::tui_managed_accounts_default().to_string()
+        } else {
+            texts::none().to_string()
+        },
+    ));
+    rows
+}
+
+fn primary_managed_account(
+    status: &crate::services::ManagedAuthStatus,
+) -> Option<&crate::services::ManagedAuthAccount> {
+    status
+        .accounts
+        .iter()
+        .find(|account| account.is_default)
+        .or_else(|| status.accounts.first())
+}
+
+fn render_managed_auth_login_panel(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(theme.dim))
+        .title(texts::tui_managed_accounts_login_status());
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+
+    let lines = if let Some(login) = app.managed_auth_login.as_ref() {
+        vec![
+            Line::raw(texts::tui_managed_accounts_login_waiting()),
+            Line::raw(texts::tui_managed_accounts_user_code(&login.user_code)),
+            Line::raw(texts::tui_managed_accounts_verification_url(
+                &login.verification_uri,
+            )),
+        ]
+    } else if app.managed_auth_loading {
+        vec![Line::raw(texts::tui_loading())]
+    } else {
+        vec![Line::styled(
+            texts::tui_managed_accounts_login_idle(),
+            Style::default().fg(theme.dim),
+        )]
+    };
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 pub(super) fn render_settings_proxy(

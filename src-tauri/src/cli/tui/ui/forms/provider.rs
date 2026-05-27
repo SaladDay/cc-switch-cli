@@ -846,6 +846,8 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::ClaudeHideAttribution => {
             texts::tui_label_claude_hide_attribution().to_string()
         }
+        ProviderAddField::CodexOAuthAccount => texts::tui_label_chatgpt_account().to_string(),
+        ProviderAddField::CodexFastMode => texts::tui_label_codex_fast_mode().to_string(),
         ProviderAddField::CodexBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::CodexModel => texts::model_label().to_string(),
         ProviderAddField::CodexWireApi => {
@@ -910,6 +912,14 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::ClaudeHideAttribution => {
             if provider.claude_hide_attribution {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        ProviderAddField::CodexOAuthAccount => provider.codex_oauth_account_display(),
+        ProviderAddField::CodexFastMode => {
+            if provider.codex_fast_mode {
                 format!("[{}]", texts::tui_marker_active())
             } else {
                 "[ ]".to_string()
@@ -1019,6 +1029,10 @@ pub(crate) fn provider_field_editor_line(
                         "<default>"
                     }
                 )
+            }
+            ProviderAddField::CodexOAuthAccount => texts::tui_key_open().to_string(),
+            ProviderAddField::CodexFastMode => {
+                format!("codex_fast_mode = {}", provider.codex_fast_mode)
             }
             ProviderAddField::CommonConfigDivider => String::new(),
             ProviderAddField::IncludeCommonConfig => {

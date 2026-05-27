@@ -25,6 +25,8 @@ mod request_builder;
 pub struct RequestForwarder {
     router: Arc<ProviderRouter>,
     optimizer_config: OptimizerConfig,
+    session_id: String,
+    session_client_provided: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,11 +108,19 @@ impl RequestForwarder {
         Ok(Self {
             router,
             optimizer_config: OptimizerConfig::default(),
+            session_id: String::new(),
+            session_client_provided: false,
         })
     }
 
     pub fn with_optimizer_config(mut self, optimizer_config: OptimizerConfig) -> Self {
         self.optimizer_config = optimizer_config;
+        self
+    }
+
+    pub fn with_session(mut self, session_id: String, client_provided: bool) -> Self {
+        self.session_id = session_id;
+        self.session_client_provided = client_provided;
         self
     }
 

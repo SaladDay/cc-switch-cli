@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex, Notify};
 
@@ -43,6 +44,8 @@ struct WorkerInfo {
     address: String,
     port: u16,
     session_token: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+    adopted: bool,
 }
 
 #[derive(Default)]
@@ -51,6 +54,7 @@ struct SupervisorInner {
     pending_hellos: HashMap<String, oneshot::Sender<WorkerInfo>>,
     pending_tokens: HashMap<String, String>,
     pending_worker_pids: HashMap<AppType, u32>,
+    pending_startup_failures: HashMap<AppType, String>,
     stopping_workers: HashSet<(AppType, u32)>,
     cancelled_apps: HashSet<AppType>,
     restart: RestartPolicy,
@@ -62,9 +66,16 @@ struct SupervisorInner {
 
 struct WorkerStopPlan {
     pids: Vec<u32>,
+    adopted_pids: Vec<u32>,
     should_shutdown: bool,
     previous_shutdown_requested: bool,
     cancelled_pending: Vec<CancelledPendingWorker>,
+    removed_adopted_workers: Vec<(AppType, WorkerInfo)>,
+}
+
+struct WorkerStopAllPlan {
+    pids: Vec<u32>,
+    adopted_pids: Vec<u32>,
 }
 
 struct CancelledPendingWorker {
@@ -110,7 +121,42 @@ impl Supervisor {
     }
 
     pub async fn recover_on_startup(&self) -> Result<(), String> {
+        self.adopt_persisted_workers_on_startup().await?;
         self.proxy.recover_takeovers_on_startup().await
+    }
+
+    async fn adopt_persisted_workers_on_startup(&self) -> Result<(), String> {
+        let sessions = self
+            .proxy
+            .load_live_managed_runtime_sessions_for_recovery()
+            .await;
+        for session in sessions {
+            let started_at = chrono::DateTime::parse_from_rfc3339(&session.started_at)
+                .map(|value| value.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+            let info = WorkerInfo {
+                app_type: session.app_type.clone(),
+                pid: session.pid,
+                address: session.address,
+                port: session.port,
+                session_token: session.session_token,
+                started_at,
+                adopted: true,
+            };
+            {
+                let mut inner = self.inner.lock().await;
+                inner.workers.insert(session.app_type.clone(), info);
+                inner.cancelled_apps.remove(&session.app_type);
+                inner.shutdown_requested = false;
+                inner.restart.on_worker_started(Instant::now());
+            }
+            log::info!(
+                "[daemon] adopted existing {} worker pid={}",
+                session.app_type.as_str(),
+                session.pid
+            );
+        }
+        self.persist_runtime_session().await
     }
 
     async fn ensure_worker_locked(&self, app: AppType) -> Result<WorkerInfo, String> {
@@ -140,6 +186,7 @@ impl Supervisor {
                 ));
             }
             inner.cancelled_apps.remove(&app);
+            inner.pending_startup_failures.remove(&app);
             let (tx, rx) = oneshot::channel();
             inner.pending_hellos.insert(app_key.clone(), tx);
             let token = uuid::Uuid::new_v4().to_string();
@@ -175,7 +222,7 @@ impl Supervisor {
             .env(RUNTIME_KIND_ENV, RUNTIME_KIND_MANAGED_EXTERNAL)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
 
         #[cfg(unix)]
@@ -188,13 +235,14 @@ impl Supervisor {
             });
         }
 
-        let spawned = match cmd.spawn() {
+        let mut spawned = match cmd.spawn() {
             Ok(child) => child,
             Err(err) => {
                 self.clear_pending_worker_registration(&app).await;
                 return Err(format!("spawn {app_key} proxy worker failed: {err}"));
             }
         };
+        let stderr = spawned.stderr.take();
         let pid = match spawned.id() {
             Some(pid) => pid,
             None => {
@@ -211,13 +259,18 @@ impl Supervisor {
         let supervisor = self.clone();
         let watch_app = app.clone();
         tokio::spawn(async move {
-            supervisor.watch_worker(spawned, watch_app, pid).await;
+            supervisor
+                .watch_worker(spawned, watch_app, pid, stderr)
+                .await;
         });
 
         let info = match tokio::time::timeout(WORKER_HELLO_TIMEOUT, hello_rx).await {
             Ok(Ok(info)) => info,
             Ok(Err(_)) => {
                 self.clear_pending_worker_registration(&app).await;
+                if let Some(reason) = self.take_pending_startup_failure(&app).await {
+                    return Err(format!("{app_key} worker exited before hello: {reason}"));
+                }
                 return Err(format!("{app_key} worker exited before hello"));
             }
             Err(_) => {
@@ -250,7 +303,11 @@ impl Supervisor {
         Ok(info)
     }
 
-    async fn handle_ensure_worker(&self, app_type: &str) -> Response {
+    async fn handle_ensure_worker(
+        &self,
+        app_type: &str,
+        fallback_provider_id: Option<&str>,
+    ) -> Response {
         let app = match parse_app_type(app_type) {
             Some(a) => a,
             None => {
@@ -260,7 +317,11 @@ impl Supervisor {
             }
         };
 
-        if let Err(err) = self.proxy.validate_app_proxy_activation(&app, None).await {
+        if let Err(err) = self
+            .proxy
+            .validate_app_proxy_activation(&app, fallback_provider_id)
+            .await
+        {
             return Response::Error { message: err };
         }
 
@@ -275,7 +336,9 @@ impl Supervisor {
                 .set_global_enabled(true)
                 .await
                 .map_err(|err| err.to_string())?;
-            self.proxy.set_takeover_for_app(app.as_str(), true).await
+            self.proxy
+                .enable_takeover_for_daemon_worker(app.as_str(), fallback_provider_id)
+                .await
         }
         .await;
 
@@ -293,6 +356,7 @@ impl Supervisor {
             port: info.port,
             session_token: info.session_token,
             pid: info.pid,
+            started_at: Some(info.started_at.to_rfc3339()),
         }
     }
 
@@ -304,6 +368,11 @@ impl Supervisor {
         inner.pending_worker_pids.remove(app);
     }
 
+    async fn take_pending_startup_failure(&self, app: &AppType) -> Option<String> {
+        let mut inner = self.inner.lock().await;
+        inner.pending_startup_failures.remove(app)
+    }
+
     async fn abandon_starting_worker(&self, app: &AppType, pid: Option<u32>) {
         let app_key = app.as_str().to_string();
         {
@@ -311,6 +380,7 @@ impl Supervisor {
             inner.pending_tokens.remove(&app_key);
             inner.pending_hellos.remove(&app_key);
             inner.pending_worker_pids.remove(app);
+            inner.pending_startup_failures.remove(app);
             if let Some(pid) = pid {
                 inner.stopping_workers.insert((app.clone(), pid));
             }
@@ -380,13 +450,22 @@ impl Supervisor {
         let app_key = app.as_str().to_string();
         let mut inner = self.inner.lock().await;
         let mut pids = Vec::new();
+        let mut adopted_pids = Vec::new();
         let previous_shutdown_requested = inner.shutdown_requested;
         let mut cancelled_pending = Vec::new();
+        let mut removed_adopted_workers = Vec::new();
         inner.cancelled_apps.insert(app.clone());
 
-        if let Some(pid) = inner.workers.get(&app).map(|info| info.pid) {
-            inner.stopping_workers.insert((app.clone(), pid));
+        if let Some(info) = inner.workers.get(&app).cloned() {
+            let pid = info.pid;
             pids.push(pid);
+            if info.adopted {
+                adopted_pids.push(pid);
+                inner.workers.remove(&app);
+                removed_adopted_workers.push((app.clone(), info));
+            } else {
+                inner.stopping_workers.insert((app.clone(), pid));
+            }
         }
         if let Some(pid) = inner.pending_worker_pids.remove(&app) {
             inner.stopping_workers.insert((app.clone(), pid));
@@ -410,9 +489,11 @@ impl Supervisor {
 
         WorkerStopPlan {
             pids,
+            adopted_pids,
             should_shutdown: target_had_worker && no_remaining_workers,
             previous_shutdown_requested,
             cancelled_pending,
+            removed_adopted_workers,
         }
     }
 
@@ -432,10 +513,13 @@ impl Supervisor {
                 inner.pending_hellos.insert(app_key, hello);
             }
         }
+        for (worker_app, worker) in plan.removed_adopted_workers.drain(..) {
+            inner.workers.insert(worker_app, worker);
+        }
         inner.shutdown_requested = plan.previous_shutdown_requested;
     }
 
-    async fn plan_stop_all_workers(&self, teardown_in_progress: bool) -> Vec<u32> {
+    async fn plan_stop_all_workers(&self, teardown_in_progress: bool) -> WorkerStopAllPlan {
         let mut inner = self.inner.lock().await;
         inner.shutdown_requested = true;
         if teardown_in_progress {
@@ -448,7 +532,7 @@ impl Supervisor {
         let workers = inner
             .workers
             .iter()
-            .map(|(app, worker)| (app.clone(), worker.pid))
+            .map(|(app, worker)| (app.clone(), worker.pid, worker.adopted))
             .collect::<Vec<_>>();
         let pending = inner
             .pending_worker_pids
@@ -457,7 +541,17 @@ impl Supervisor {
             .collect::<Vec<_>>();
 
         let mut pids = Vec::new();
-        for (app, pid) in workers.into_iter().chain(pending.into_iter()) {
+        let mut adopted_pids = Vec::new();
+        for (app, pid, adopted) in workers {
+            pids.push(pid);
+            if adopted {
+                adopted_pids.push(pid);
+                inner.workers.remove(&app);
+            } else {
+                inner.stopping_workers.insert((app, pid));
+            }
+        }
+        for (app, pid) in pending {
             inner.stopping_workers.insert((app, pid));
             pids.push(pid);
         }
@@ -478,7 +572,34 @@ impl Supervisor {
 
         pids.sort_unstable();
         pids.dedup();
-        pids
+        adopted_pids.sort_unstable();
+        adopted_pids.dedup();
+        WorkerStopAllPlan { pids, adopted_pids }
+    }
+
+    async fn stop_planned_workers(&self, pids: &[u32], adopted_pids: &[u32]) {
+        for pid in pids {
+            let _ = send_sigterm(Some(*pid));
+        }
+        if adopted_pids.is_empty() {
+            return;
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if adopted_pids
+                .iter()
+                .all(|pid| !is_process_alive_for_signal(*pid))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        for pid in adopted_pids {
+            if is_process_alive_for_signal(*pid) {
+                let _ = send_sigkill(Some(*pid));
+            }
+        }
     }
 
     async fn handle_drop_takeover(&self, app_type: &str) -> Response {
@@ -506,10 +627,16 @@ impl Supervisor {
             }
         }
 
-        for pid in &stop_plan.pids {
-            let _ = send_sigterm(Some(*pid));
+        self.stop_planned_workers(&stop_plan.pids, &stop_plan.adopted_pids)
+            .await;
+        if !stop_plan.adopted_pids.is_empty() {
+            let _ = self.persist_runtime_session().await;
         }
-        if !stop_plan.pids.is_empty() {
+        let has_spawned_worker = stop_plan
+            .pids
+            .iter()
+            .any(|pid| !stop_plan.adopted_pids.contains(pid));
+        if has_spawned_worker {
             tokio::time::sleep(Duration::from_millis(100)).await;
         } else if stop_plan.should_shutdown {
             self.shutdown_notify.notify_waiters();
@@ -566,6 +693,8 @@ impl Supervisor {
             address,
             port,
             session_token,
+            started_at: chrono::Utc::now(),
+            adopted: false,
         };
         if tx.send(info).is_err() {
             log::warn!("[daemon] worker hello dropped: ensure waiter cancelled");
@@ -616,11 +745,17 @@ impl Supervisor {
             }
         }
 
-        let stop_pids = self.plan_stop_all_workers(false).await;
-        for pid in &stop_pids {
-            let _ = send_sigterm(Some(*pid));
+        let stop_plan = self.plan_stop_all_workers(false).await;
+        self.stop_planned_workers(&stop_plan.pids, &stop_plan.adopted_pids)
+            .await;
+        if !stop_plan.adopted_pids.is_empty() {
+            let _ = self.persist_runtime_session().await;
         }
-        if !stop_pids.is_empty() {
+        let has_spawned_worker = stop_plan
+            .pids
+            .iter()
+            .any(|pid| !stop_plan.adopted_pids.contains(pid));
+        if has_spawned_worker {
             // Brief pause so the worker has a chance to exit and the watcher
             // task can clear the runtime session row before we ack. The
             // watcher then sees `active_takeovers.is_empty()` and signals
@@ -647,6 +782,7 @@ impl Supervisor {
                 address: info.address.clone(),
                 port: info.port,
                 pid: Some(info.pid),
+                started_at: Some(info.started_at.to_rfc3339()),
             })
             .collect::<Vec<_>>();
         workers.sort_by(|left, right| left.app_type.cmp(&right.app_type));
@@ -665,10 +801,9 @@ impl Supervisor {
 
     pub async fn shutdown(&self) {
         let _spawn_guard = self.spawn_lock.lock().await;
-        let stop_pids = self.plan_stop_all_workers(true).await;
-        for pid in stop_pids {
-            let _ = send_sigterm(Some(pid));
-        }
+        let stop_plan = self.plan_stop_all_workers(true).await;
+        self.stop_planned_workers(&stop_plan.pids, &stop_plan.adopted_pids)
+            .await;
         if let Err(err) = self.proxy.stop_with_restore().await {
             log::warn!("[daemon] shutdown: stop_with_restore failed: {err}");
         }
@@ -690,8 +825,23 @@ impl Supervisor {
         }
     }
 
-    async fn watch_worker(&self, mut child: Child, app: AppType, pid: u32) {
+    async fn watch_worker(
+        &self,
+        mut child: Child,
+        app: AppType,
+        pid: u32,
+        stderr: Option<tokio::process::ChildStderr>,
+    ) {
         let app_key = app.as_str().to_string();
+        let stderr_task = stderr.map(|mut stderr| {
+            tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                match stderr.read_to_end(&mut bytes).await {
+                    Ok(_) => Some(bytes),
+                    Err(err) => Some(format!("failed to read worker stderr: {err}").into_bytes()),
+                }
+            })
+        });
         let exit_status = match child.wait().await {
             Ok(status) => status,
             Err(err) => {
@@ -699,10 +849,18 @@ impl Supervisor {
                 return;
             }
         };
+        let stderr_output = match stderr_task {
+            Some(task) => task.await.ok().flatten().unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let startup_failure = worker_exit_message(&exit_status, &stderr_output);
         log::info!("[daemon] {app_key} worker pid={pid} exited: {exit_status}");
+        if let Some(message) = startup_failure.as_deref() {
+            log::warn!("[daemon] {app_key} worker pid={pid} stderr: {message}");
+        }
 
         let (intentional, has_remaining_workers, teardown_in_progress) =
-            self.record_worker_exit(&app, pid).await;
+            self.record_worker_exit(&app, pid, startup_failure).await;
 
         let _ = self.persist_runtime_session().await;
 
@@ -761,7 +919,12 @@ impl Supervisor {
         }
     }
 
-    async fn record_worker_exit(&self, app: &AppType, pid: u32) -> (bool, bool, bool) {
+    async fn record_worker_exit(
+        &self,
+        app: &AppType,
+        pid: u32,
+        startup_failure: Option<String>,
+    ) -> (bool, bool, bool) {
         let app_key = app.as_str().to_string();
         let mut inner = self.inner.lock().await;
 
@@ -776,6 +939,9 @@ impl Supervisor {
         if was_pending_startup {
             inner.pending_worker_pids.remove(app);
             inner.pending_tokens.remove(&app_key);
+            if let Some(message) = startup_failure {
+                inner.pending_startup_failures.insert(app.clone(), message);
+            }
             if let Some(tx) = inner.pending_hellos.remove(&app_key) {
                 drop(tx);
             }
@@ -849,7 +1015,7 @@ impl Supervisor {
                             "pid": info.pid,
                             "address": info.address,
                             "port": info.port,
-                            "started_at": chrono::Utc::now().to_rfc3339(),
+                            "started_at": info.started_at.to_rfc3339(),
                             "kind": "managed_external",
                             "session_token": info.session_token,
                             "app_type": app.as_str(),
@@ -879,7 +1045,13 @@ impl Supervisor {
 impl Handler for Supervisor {
     async fn handle(&self, request: Request) -> Response {
         match request {
-            Request::EnsureWorker { app_type } => self.handle_ensure_worker(&app_type).await,
+            Request::EnsureWorker {
+                app_type,
+                fallback_provider_id,
+            } => {
+                self.handle_ensure_worker(&app_type, fallback_provider_id.as_deref())
+                    .await
+            }
             Request::DropTakeover { app_type } => self.handle_drop_takeover(&app_type).await,
             Request::Status => self.handle_status().await,
             Request::WorkerHello {
@@ -906,6 +1078,26 @@ fn parse_app_type(s: &str) -> Option<AppType> {
     }
 }
 
+fn worker_exit_message(exit_status: &std::process::ExitStatus, stderr: &[u8]) -> Option<String> {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return Some(truncate_worker_stderr(&stderr));
+    }
+    (!exit_status.success()).then(|| exit_status.to_string())
+}
+
+fn truncate_worker_stderr(stderr: &str) -> String {
+    const LIMIT: usize = 4096;
+    let char_count = stderr.chars().count();
+    if char_count <= LIMIT {
+        return stderr.to_string();
+    }
+
+    let mut tail = stderr.chars().rev().take(LIMIT).collect::<Vec<_>>();
+    tail.reverse();
+    format!("...{}", tail.into_iter().collect::<String>())
+}
+
 fn send_sigterm(pid: Option<u32>) -> Result<(), String> {
     let Some(pid) = pid else {
         return Ok(());
@@ -913,16 +1105,40 @@ fn send_sigterm(pid: Option<u32>) -> Result<(), String> {
     if pid == 0 {
         return Ok(());
     }
+    send_signal(pid, libc::SIGTERM, "SIGTERM")
+}
+
+fn send_sigkill(pid: Option<u32>) -> Result<(), String> {
+    let Some(pid) = pid else {
+        return Ok(());
+    };
+    if pid == 0 {
+        return Ok(());
+    }
+    send_signal(pid, libc::SIGKILL, "SIGKILL")
+}
+
+fn send_signal(pid: u32, signal: libc::c_int, label: &str) -> Result<(), String> {
     unsafe {
-        let rc = libc::kill(pid as i32, libc::SIGTERM);
+        let rc = libc::kill(pid as i32, signal);
         if rc != 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() != Some(libc::ESRCH) {
-                return Err(format!("SIGTERM worker {pid}: {err}"));
+                return Err(format!("{label} worker {pid}: {err}"));
             }
         }
     }
     Ok(())
+}
+
+fn is_process_alive_for_signal(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    unsafe {
+        let rc = libc::kill(pid as i32, 0);
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
 }
 
 #[cfg(test)]
@@ -992,6 +1208,64 @@ mod tests {
         )
     }
 
+    fn worker_info_for_test(app_type: AppType, pid: u32) -> WorkerInfo {
+        WorkerInfo {
+            app_type,
+            pid,
+            address: "127.0.0.1".to_string(),
+            port: 18080,
+            session_token: "token".to_string(),
+            started_at: chrono::DateTime::parse_from_rfc3339("2026-03-10T00:00:00Z")
+                .expect("valid timestamp")
+                .with_timezone(&chrono::Utc),
+            adopted: false,
+        }
+    }
+
+    async fn spawn_status_server_for_test(
+        token: &'static str,
+    ) -> (tokio::task::JoinHandle<()>, u16) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake proxy status listener");
+        let port = listener
+            .local_addr()
+            .expect("read fake proxy listener addr")
+            .port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept status request");
+            let status = json!({
+                "running": true,
+                "address": "127.0.0.1",
+                "port": port,
+                "active_connections": 0,
+                "total_requests": 0,
+                "success_requests": 0,
+                "failed_requests": 0,
+                "success_rate": 0.0,
+                "uptime_seconds": 12,
+                "current_provider": null,
+                "current_provider_id": null,
+                "last_request_at": null,
+                "last_error": null,
+                "failover_count": 0,
+                "managed_session_token": token
+            });
+            let body = status.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            use tokio::io::AsyncWriteExt;
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write fake status response");
+        });
+        (server, port)
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn ensure_worker_validation_failure_does_not_start_worker_or_write_session() {
@@ -1000,10 +1274,45 @@ mod tests {
         let db = Arc::new(Database::memory().expect("create database"));
         let supervisor = supervisor_for_test(db.clone(), temp_home.path());
 
-        let response = supervisor.handle_ensure_worker("claude").await;
+        let response = supervisor.handle_ensure_worker("claude", None).await;
 
         assert!(
             matches!(response, Response::Error { message } if message.contains("no active provider"))
+        );
+        assert_eq!(
+            db.get_setting(PROXY_RUNTIME_SESSION_KEY)
+                .expect("read runtime session"),
+            None
+        );
+        let inner = supervisor.inner.lock().await;
+        assert!(inner.workers.is_empty());
+        assert!(inner.pending_hellos.is_empty());
+        assert!(inner.pending_tokens.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ensure_worker_accepts_fallback_provider_when_current_provider_is_missing() {
+        let temp_home = tempfile::tempdir().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        let db = Arc::new(Database::memory().expect("create database"));
+        let provider = Provider::with_id(
+            "p1".to_string(),
+            "Provider".to_string(),
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://example.com", "ANTHROPIC_AUTH_TOKEN": "token"}}),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save provider");
+        let supervisor = supervisor_for_test(db.clone(), temp_home.path());
+
+        let response = supervisor
+            .handle_ensure_worker("claude", Some(&provider.id))
+            .await;
+
+        assert!(
+            matches!(response, Response::Error { ref message } if message.contains("spawn claude proxy worker failed")),
+            "fallback provider should pass active-provider validation before spawn fails: {response:?}"
         );
         assert_eq!(
             db.get_setting(PROXY_RUNTIME_SESSION_KEY)
@@ -1034,7 +1343,7 @@ mod tests {
             .expect("set current provider");
         let supervisor = supervisor_for_test(db.clone(), temp_home.path());
 
-        let response = supervisor.handle_ensure_worker("claude").await;
+        let response = supervisor.handle_ensure_worker("claude", None).await;
 
         assert!(
             matches!(response, Response::Error { message } if message.contains("spawn claude proxy worker failed"))
@@ -1060,21 +1369,14 @@ mod tests {
 
         {
             let mut inner = supervisor.inner.lock().await;
-            inner.workers.insert(
-                app.clone(),
-                WorkerInfo {
-                    app_type: app.clone(),
-                    pid: new_pid,
-                    address: "127.0.0.1".to_string(),
-                    port: 18080,
-                    session_token: "new-token".to_string(),
-                },
-            );
+            inner
+                .workers
+                .insert(app.clone(), worker_info_for_test(app.clone(), new_pid));
             inner.stopping_workers.insert((app.clone(), old_pid));
         }
 
         let (intentional, has_remaining_workers, teardown_in_progress) =
-            supervisor.record_worker_exit(&app, old_pid).await;
+            supervisor.record_worker_exit(&app, old_pid, None).await;
 
         assert!(intentional);
         assert!(has_remaining_workers);
@@ -1082,6 +1384,135 @@ mod tests {
         let inner = supervisor.inner.lock().await;
         assert_eq!(inner.workers.get(&app).map(|info| info.pid), Some(new_pid));
         assert!(inner.stopping_workers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn status_and_runtime_session_preserve_worker_started_at() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db.clone(), Path::new("/tmp"));
+        let started_at = "2026-03-10T00:00:00+00:00";
+        let mut worker = worker_info_for_test(AppType::Claude, 1001);
+        worker.started_at = chrono::DateTime::parse_from_rfc3339(started_at)
+            .expect("valid timestamp")
+            .with_timezone(&chrono::Utc);
+
+        {
+            let mut inner = supervisor.inner.lock().await;
+            inner.workers.insert(AppType::Claude, worker);
+        }
+
+        match supervisor.handle_status().await {
+            Response::Status { workers, .. } => {
+                assert_eq!(workers.len(), 1);
+                assert_eq!(workers[0].started_at.as_deref(), Some(started_at));
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
+
+        supervisor
+            .persist_runtime_session()
+            .await
+            .expect("persist runtime session");
+        let first = db
+            .get_setting(PROXY_RUNTIME_SESSION_KEY)
+            .expect("read runtime session")
+            .expect("runtime session");
+        supervisor
+            .persist_runtime_session()
+            .await
+            .expect("persist runtime session again");
+        let second = db
+            .get_setting(PROXY_RUNTIME_SESSION_KEY)
+            .expect("read runtime session")
+            .expect("runtime session");
+
+        assert_eq!(first, second);
+        let payload: serde_json::Value = serde_json::from_str(&first).expect("parse session");
+        assert_eq!(
+            payload["workers"]["claude"]["started_at"].as_str(),
+            Some(started_at)
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_adopts_persisted_live_managed_workers() {
+        let (status_server, port) = spawn_status_server_for_test("daemon-token").await;
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db.clone(), Path::new("/tmp"));
+        let started_at = "2026-03-10T00:00:00+00:00";
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &json!({
+                "workers": {
+                    "claude": {
+                        "pid": std::process::id(),
+                        "address": "127.0.0.1",
+                        "port": port,
+                        "started_at": started_at,
+                        "kind": "managed_external",
+                        "session_token": "daemon-token"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write runtime session");
+
+        supervisor
+            .adopt_persisted_workers_on_startup()
+            .await
+            .expect("adopt persisted worker");
+
+        match supervisor.handle_status().await {
+            Response::Status {
+                running, workers, ..
+            } => {
+                assert!(running);
+                assert_eq!(workers.len(), 1);
+                assert_eq!(workers[0].app_type, "claude");
+                assert_eq!(workers[0].pid, Some(std::process::id()));
+                assert_eq!(workers[0].port, port);
+                assert_eq!(workers[0].started_at.as_deref(), Some(started_at));
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
+        status_server
+            .await
+            .expect("fake status server should finish");
+    }
+
+    #[tokio::test]
+    async fn pending_startup_exit_records_worker_stderr() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, Path::new("/tmp"));
+        let app = AppType::Claude;
+        let pid = 1001;
+        let (tx, _rx) = oneshot::channel();
+
+        {
+            let mut inner = supervisor.inner.lock().await;
+            inner.pending_hellos.insert(app.as_str().to_string(), tx);
+            inner
+                .pending_tokens
+                .insert(app.as_str().to_string(), "token".to_string());
+            inner.pending_worker_pids.insert(app.clone(), pid);
+        }
+
+        let (intentional, has_remaining_workers, teardown_in_progress) = supervisor
+            .record_worker_exit(
+                &app,
+                pid,
+                Some("Error: bind proxy listener failed".to_string()),
+            )
+            .await;
+
+        assert!(intentional);
+        assert!(!has_remaining_workers);
+        assert!(!teardown_in_progress);
+        assert_eq!(
+            supervisor.take_pending_startup_failure(&app).await,
+            Some("Error: bind proxy listener failed".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1093,16 +1524,9 @@ mod tests {
 
         {
             let mut inner = supervisor.inner.lock().await;
-            inner.workers.insert(
-                app.clone(),
-                WorkerInfo {
-                    app_type: app.clone(),
-                    pid,
-                    address: "127.0.0.1".to_string(),
-                    port: 18080,
-                    session_token: "token".to_string(),
-                },
-            );
+            inner
+                .workers
+                .insert(app.clone(), worker_info_for_test(app.clone(), pid));
             inner.stopping_workers.insert((app.clone(), pid));
         }
 
@@ -1139,16 +1563,9 @@ mod tests {
 
         {
             let mut inner = supervisor.inner.lock().await;
-            inner.workers.insert(
-                AppType::Claude,
-                WorkerInfo {
-                    app_type: AppType::Claude,
-                    pid: 1001,
-                    address: "127.0.0.1".to_string(),
-                    port: 18080,
-                    session_token: "token".to_string(),
-                },
-            );
+            inner
+                .workers
+                .insert(AppType::Claude, worker_info_for_test(AppType::Claude, 1001));
         }
 
         let plan = supervisor.plan_stop_for_app(AppType::Codex).await;
@@ -1164,6 +1581,47 @@ mod tests {
         assert_eq!(
             inner.workers.get(&AppType::Claude).map(|info| info.pid),
             Some(1001)
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_plan_removes_adopted_worker_without_waiting_for_watcher() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db.clone(), Path::new("/tmp"));
+        let app = AppType::Claude;
+        let mut worker = worker_info_for_test(app.clone(), 1001);
+        worker.adopted = true;
+
+        {
+            let mut inner = supervisor.inner.lock().await;
+            inner.workers.insert(app.clone(), worker);
+        }
+        supervisor
+            .persist_runtime_session()
+            .await
+            .expect("persist adopted session");
+
+        let plan = supervisor.plan_stop_for_app(app.clone()).await;
+        assert_eq!(plan.pids, vec![1001]);
+        assert_eq!(plan.adopted_pids, vec![1001]);
+        assert!(plan.should_shutdown);
+
+        let inner = supervisor.inner.lock().await;
+        assert!(inner.workers.is_empty());
+        assert!(
+            !inner.stopping_workers.contains(&(app, 1001)),
+            "adopted workers have no child watcher, so they should not wait in stopping state"
+        );
+        drop(inner);
+
+        supervisor
+            .persist_runtime_session()
+            .await
+            .expect("clear adopted session");
+        assert_eq!(
+            db.get_setting(PROXY_RUNTIME_SESSION_KEY)
+                .expect("read runtime session"),
+            None
         );
     }
 
@@ -1233,9 +1691,10 @@ mod tests {
             inner.pending_worker_pids.insert(app.clone(), pending_pid);
         }
 
-        let pids = supervisor.plan_stop_all_workers(false).await;
+        let plan = supervisor.plan_stop_all_workers(false).await;
 
-        assert_eq!(pids, vec![pending_pid]);
+        assert_eq!(plan.pids, vec![pending_pid]);
+        assert!(plan.adopted_pids.is_empty());
         let inner = supervisor.inner.lock().await;
         assert!(inner.shutdown_requested);
         assert!(!inner.teardown_in_progress);
@@ -1255,23 +1714,17 @@ mod tests {
 
         {
             let mut inner = supervisor.inner.lock().await;
-            inner.workers.insert(
-                app.clone(),
-                WorkerInfo {
-                    app_type: app.clone(),
-                    pid,
-                    address: "127.0.0.1".to_string(),
-                    port: 18080,
-                    session_token: "token".to_string(),
-                },
-            );
+            inner
+                .workers
+                .insert(app.clone(), worker_info_for_test(app.clone(), pid));
         }
 
-        let pids = supervisor.plan_stop_all_workers(true).await;
-        assert_eq!(pids, vec![pid]);
+        let plan = supervisor.plan_stop_all_workers(true).await;
+        assert_eq!(plan.pids, vec![pid]);
+        assert!(plan.adopted_pids.is_empty());
 
         let (intentional, has_remaining_workers, teardown_in_progress) =
-            supervisor.record_worker_exit(&app, pid).await;
+            supervisor.record_worker_exit(&app, pid, None).await;
 
         assert!(intentional);
         assert!(!has_remaining_workers);
@@ -1293,7 +1746,7 @@ mod tests {
         }
 
         let (intentional, has_remaining_workers, teardown_in_progress) =
-            supervisor.record_worker_exit(&app, old_pid).await;
+            supervisor.record_worker_exit(&app, old_pid, None).await;
 
         assert!(intentional);
         assert!(has_remaining_workers);

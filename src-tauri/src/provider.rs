@@ -65,6 +65,23 @@ impl Provider {
             in_failover_queue: false,
         }
     }
+
+    pub fn is_codex_oauth(&self) -> bool {
+        self.provider_type() == Some("codex_oauth")
+    }
+
+    fn provider_type(&self) -> Option<&str> {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.provider_type.as_deref())
+    }
+
+    pub fn codex_fast_mode_enabled(&self) -> bool {
+        self.meta
+            .as_ref()
+            .map(|meta| meta.codex_fast_mode_enabled())
+            .unwrap_or(false)
+    }
 }
 
 /// 供应商管理器
@@ -278,6 +295,9 @@ pub struct ProviderMeta {
     /// OpenAI 兼容端点使用的 prompt cache key。
     #[serde(rename = "promptCacheKey", skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+    /// Codex OAuth FAST mode: inject `service_tier = "priority"` for ChatGPT Codex requests.
+    #[serde(rename = "codexFastMode", skip_serializing_if = "Option::is_none")]
+    pub codex_fast_mode: Option<bool>,
     /// 通用认证绑定（provider_config / managed_account）
     #[serde(rename = "authBinding", skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<AuthBinding>,
@@ -299,6 +319,10 @@ pub struct ProviderMeta {
 }
 
 impl ProviderMeta {
+    pub fn codex_fast_mode_enabled(&self) -> bool {
+        self.codex_fast_mode.unwrap_or(false)
+    }
+
     pub fn managed_account_id_for(&self, auth_provider: &str) -> Option<String> {
         if let Some(binding) = self.auth_binding.as_ref() {
             if binding.source == AuthBindingSource::ManagedAccount
@@ -552,6 +576,7 @@ mod issue_71_tests {
                 },
                 "apiKeyField": "ANTHROPIC_AUTH_TOKEN",
                 "providerType": "github_copilot",
+                "codexFastMode": true,
                 "githubAccountId": "gh-123"
             }
         });
@@ -589,6 +614,10 @@ mod issue_71_tests {
         assert_eq!(
             meta.get("providerType").and_then(|value| value.as_str()),
             Some("github_copilot")
+        );
+        assert_eq!(
+            meta.get("codexFastMode").and_then(|value| value.as_bool()),
+            Some(true)
         );
         assert_eq!(
             meta.get("githubAccountId").and_then(|value| value.as_str()),

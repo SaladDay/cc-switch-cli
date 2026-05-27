@@ -274,6 +274,107 @@ async fn codex_oauth_prepare_request_injects_bound_account_headers() {
         Some("acc-bound")
     );
     assert_eq!(header_value(&request, "originator"), Some("cc-switch"));
+    assert_eq!(header_value(&request, "anthropic-beta"), None);
+    assert_eq!(header_value(&request, "anthropic-version"), None);
+}
+
+#[tokio::test]
+async fn codex_oauth_prepare_request_injects_client_session_headers() {
+    let _lock = lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
+    CodexOAuthService::reset_for_tests();
+    CodexOAuthService::seed_account_for_tests(
+        "acc-session",
+        "rt-session",
+        Some("session@example.com"),
+        Some("at-session"),
+        None,
+    )
+    .await
+    .expect("seed session account");
+
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router)
+        .expect("create forwarder")
+        .with_session("codex_session-123".to_string(), true);
+    let provider = codex_oauth_provider(Some("acc-session"));
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &claude_request_body(),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare request")
+        .build()
+        .expect("build request");
+
+    assert_eq!(
+        header_value(&request, "session_id"),
+        Some("codex_session-123")
+    );
+    assert_eq!(
+        header_value(&request, "x-client-request-id"),
+        Some("codex_session-123")
+    );
+    assert_eq!(
+        header_value(&request, "x-codex-window-id"),
+        Some("codex_session-123:0")
+    );
+    assert_eq!(header_value(&request, "anthropic-beta"), None);
+    assert_eq!(header_value(&request, "anthropic-version"), None);
+}
+
+#[tokio::test]
+async fn codex_oauth_prepare_request_skips_generated_session_headers() {
+    let _lock = lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
+    CodexOAuthService::reset_for_tests();
+    CodexOAuthService::seed_account_for_tests(
+        "acc-generated",
+        "rt-generated",
+        Some("generated@example.com"),
+        Some("at-generated"),
+        None,
+    )
+    .await
+    .expect("seed generated account");
+
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router)
+        .expect("create forwarder")
+        .with_session("generated-session".to_string(), false);
+    let provider = codex_oauth_provider(Some("acc-generated"));
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &claude_request_body(),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare request")
+        .build()
+        .expect("build request");
+
+    assert_eq!(header_value(&request, "session_id"), None);
+    assert_eq!(header_value(&request, "x-client-request-id"), None);
+    assert_eq!(header_value(&request, "x-codex-window-id"), None);
 }
 
 #[tokio::test]

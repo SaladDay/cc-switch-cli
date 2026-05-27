@@ -757,6 +757,15 @@ impl App {
                     });
                     Action::None
                 }
+                Some(SettingsItem::ManagedAccounts) => {
+                    let action = self.push_route_and_switch(Route::SettingsManagedAccounts);
+                    if self.managed_auth_status.is_none() {
+                        return Action::ManagedAuthRefresh {
+                            auth_provider: "codex_oauth".to_string(),
+                        };
+                    }
+                    action
+                }
                 Some(SettingsItem::SkipClaudeOnboarding) => {
                     let current = crate::settings::get_skip_claude_onboarding();
                     let next = !current;
@@ -903,6 +912,56 @@ impl App {
             _ => Action::None,
         }
     }
+
+    pub(crate) fn on_settings_managed_accounts_key(
+        &mut self,
+        key: KeyEvent,
+        _data: &UiData,
+    ) -> Action {
+        match key.code {
+            KeyCode::Up => {
+                self.settings_managed_accounts_idx = 0;
+                Action::None
+            }
+            KeyCode::Down => {
+                self.settings_managed_accounts_idx = 0;
+                Action::None
+            }
+            KeyCode::Enter => self.activate_managed_account_row(),
+            _ => Action::None,
+        }
+    }
+
+    fn activate_managed_account_row(&mut self) -> Action {
+        if self.managed_auth_loading || self.managed_auth_login.is_some() {
+            return Action::None;
+        }
+
+        let Some(status) = self.managed_auth_status.as_ref() else {
+            return Action::ManagedAuthRefresh {
+                auth_provider: "codex_oauth".to_string(),
+            };
+        };
+
+        if let Some(account) = status
+            .accounts
+            .iter()
+            .find(|account| account.is_default)
+            .or_else(|| status.accounts.first())
+        {
+            self.overlay = Overlay::ManagedAccountActionPicker {
+                auth_provider: "codex_oauth".to_string(),
+                account_id: account.id.clone(),
+                selected: 0,
+            };
+            return Action::None;
+        }
+
+        Action::ManagedAuthStartLogin {
+            auth_provider: "codex_oauth".to_string(),
+        }
+    }
+
     pub fn open_editor(
         &mut self,
         title: impl Into<String>,
@@ -1155,6 +1214,26 @@ impl App {
                 self.app_type.clone(),
                 &row.provider,
                 &data.config.common_snippet,
+            ),
+        ));
+        self.maybe_show_common_config_notice();
+    }
+
+    pub(crate) fn open_provider_copy_form(
+        &mut self,
+        row: &super::data::ProviderRow,
+        data: &UiData,
+    ) {
+        self.filter.active = false;
+        self.overlay = Overlay::None;
+        self.focus = Focus::Content;
+        self.editor = None;
+        self.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::copy_from_provider_with_common_snippet(
+                self.app_type.clone(),
+                &row.provider,
+                &data.config.common_snippet,
+                &data.existing_provider_ids(),
             ),
         ));
         self.maybe_show_common_config_notice();

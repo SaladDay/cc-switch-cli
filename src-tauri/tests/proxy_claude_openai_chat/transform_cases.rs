@@ -37,7 +37,7 @@ async fn cache_openai_chat_uses_meta_prompt_cache_key_override() {
 }
 
 #[tokio::test]
-async fn cache_openai_chat_falls_back_to_provider_id() {
+async fn cache_openai_chat_omits_prompt_cache_key_without_explicit_override() {
     let upstream_body = capture_openai_chat_upstream_body(
         "provider-fallback-id",
         provider_meta_from_json(json!({
@@ -54,12 +54,7 @@ async fn cache_openai_chat_falls_back_to_provider_id() {
     )
     .await;
 
-    assert_eq!(
-        upstream_body
-            .get("prompt_cache_key")
-            .and_then(|value| value.as_str()),
-        Some("provider-fallback-id")
-    );
+    assert!(upstream_body.get("prompt_cache_key").is_none());
 }
 
 #[tokio::test]
@@ -243,12 +238,9 @@ async fn proxy_claude_openai_chat_transforms_request_and_response() {
     );
     assert_eq!(
         upstream_state.anthropic_version.lock().await.as_deref(),
-        Some("2023-06-01")
+        None
     );
-    assert_eq!(
-        upstream_state.anthropic_beta.lock().await.as_deref(),
-        Some("claude-code-20250219,prompt-caching-2024-07-31")
-    );
+    assert_eq!(upstream_state.anthropic_beta.lock().await.as_deref(), None);
     assert_eq!(
         upstream_state.forwarded_for.lock().await.as_deref(),
         Some("203.0.113.9")
@@ -410,12 +402,9 @@ async fn proxy_claude_openai_responses_transforms_request_and_response() {
     );
     assert_eq!(
         upstream_state.anthropic_version.lock().await.as_deref(),
-        Some("2023-06-01")
+        None
     );
-    assert_eq!(
-        upstream_state.anthropic_beta.lock().await.as_deref(),
-        Some("claude-code-20250219,prompt-caching-2024-07-31")
-    );
+    assert_eq!(upstream_state.anthropic_beta.lock().await.as_deref(), None);
     assert_eq!(
         upstream_state.forwarded_for.lock().await.as_deref(),
         Some("203.0.113.10")

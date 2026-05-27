@@ -102,14 +102,15 @@ pub fn check_local_environment() -> Vec<ToolCheckResult> {
 
 pub fn check_tool_installed(app_type: &AppType) -> bool {
     let tool = LocalTool::from_app_type(app_type);
-    matches!(
-        check_tool_version(tool.binary_name(), tool.version_args()),
-        ToolCheckStatus::Ok { .. }
-    )
+    is_tool_installed(tool.binary_name())
+}
+
+fn is_tool_installed(bin: &str) -> bool {
+    which::which(bin).is_ok()
 }
 
 fn check_tool_version(bin: &str, version_args: &[&str]) -> ToolCheckStatus {
-    if which::which(bin).is_err() {
+    if !is_tool_installed(bin) {
         return ToolCheckStatus::NotInstalledOrNotExecutable;
     }
 
@@ -230,7 +231,9 @@ pub(crate) fn parse_version(output: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_version, run_tool_version_command, LocalTool, TOOL_VERSION_TIMEOUT};
+    use super::{
+        is_tool_installed, parse_version, run_tool_version_command, LocalTool, TOOL_VERSION_TIMEOUT,
+    };
     use std::time::Instant;
 
     #[test]
@@ -265,6 +268,37 @@ mod tests {
     #[test]
     fn parse_version_returns_none_for_garbage() {
         assert_eq!(parse_version("nonsense").as_deref(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_check_does_not_run_tool() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let tool_path = temp_dir.path().join("gemini");
+        let marker_path = temp_dir.path().join("executed");
+        let mut file = std::fs::File::create(&tool_path).expect("create fake tool");
+        writeln!(
+            file,
+            "#!/bin/sh\nprintf ran > '{}'\nexit 0",
+            marker_path.display()
+        )
+        .expect("write fake tool");
+        let mut permissions = std::fs::metadata(&tool_path)
+            .expect("read fake tool metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&tool_path, permissions).expect("make fake tool executable");
+
+        assert!(is_tool_installed(
+            tool_path.to_str().expect("fake tool path should be utf-8")
+        ));
+        assert!(
+            !marker_path.exists(),
+            "visibility detection must not execute version commands"
+        );
     }
 
     #[test]

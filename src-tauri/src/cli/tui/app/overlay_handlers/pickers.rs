@@ -15,6 +15,12 @@ impl App {
         if let Some(action) = self.handle_usage_query_template_picker_key(key) {
             return Some(action);
         }
+        if let Some(action) = self.handle_managed_account_picker_key(key) {
+            return Some(action);
+        }
+        if let Some(action) = self.handle_managed_account_action_picker_key(key) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_hermes_models_picker_key(key) {
             return Some(action);
         }
@@ -288,6 +294,116 @@ impl App {
         })
     }
 
+    fn handle_managed_account_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::ManagedAccountPicker {
+            auth_provider,
+            selected,
+            binding,
+            selected_account_id: _,
+        } = &mut self.overlay
+        else {
+            return None;
+        };
+
+        let auth_provider = auth_provider.clone();
+        let binding = *binding;
+        let accounts = self
+            .managed_auth_status
+            .as_ref()
+            .filter(|status| status.provider == auth_provider)
+            .map(|status| status.accounts.clone())
+            .unwrap_or_default();
+        let row_count = if binding {
+            accounts.len() + 1
+        } else {
+            accounts.len()
+        };
+
+        if row_count == 0 {
+            self.overlay = Overlay::None;
+            return Some(Action::None);
+        }
+
+        *selected = (*selected).min(row_count.saturating_sub(1));
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(row_count.saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Enter => {
+                let selected_account_id = if binding && *selected == 0 {
+                    None
+                } else {
+                    let account_idx = if binding { *selected - 1 } else { *selected };
+                    accounts.get(account_idx).map(|account| account.id.clone())
+                };
+
+                if binding {
+                    if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                        provider.set_codex_oauth_account_id(selected_account_id);
+                    }
+                }
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_managed_account_action_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::ManagedAccountActionPicker {
+            auth_provider,
+            account_id,
+            selected,
+        } = &mut self.overlay
+        else {
+            return None;
+        };
+
+        *selected = (*selected).min(1);
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(1);
+                Action::None
+            }
+            KeyCode::Enter => {
+                let auth_provider = auth_provider.clone();
+                let account_id = account_id.clone();
+                let action = match *selected {
+                    0 => Action::ManagedAuthSetDefault {
+                        auth_provider,
+                        account_id,
+                    },
+                    _ => Action::ManagedAuthRemove {
+                        auth_provider,
+                        account_id,
+                    },
+                };
+                self.overlay = Overlay::None;
+                action
+            }
+            _ => Action::None,
+        })
+    }
+
     fn handle_provider_test_menu_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
         let Overlay::ProviderTestMenu {
             provider_id,
@@ -431,10 +547,17 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() {
+                    let codex_oauth = provider.is_claude_codex_oauth_provider();
+                    let codex_oauth_account_id = provider
+                        .is_claude_codex_oauth_provider()
+                        .then(|| provider.codex_oauth_account_id.clone())
+                        .flatten();
                     Action::ProviderModelFetch {
                         base_url: provider.claude_base_url.value.clone(),
                         api_key: (!provider.claude_api_key.value.trim().is_empty())
                             .then(|| provider.claude_api_key.value.clone()),
+                        codex_oauth,
+                        codex_oauth_account_id,
                         field: ProviderAddField::ClaudeModelConfig,
                         claude_idx: Some(*selected),
                     }

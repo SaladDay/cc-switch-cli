@@ -494,6 +494,8 @@ pub(super) fn model_fetch(
     ctx: &mut RuntimeActionContext<'_>,
     base_url: String,
     api_key: Option<String>,
+    codex_oauth: bool,
+    codex_oauth_account_id: Option<String>,
     field: ProviderAddField,
     claude_idx: Option<usize>,
 ) -> Result<(), AppError> {
@@ -525,6 +527,8 @@ pub(super) fn model_fetch(
         request_id,
         base_url,
         api_key,
+        codex_oauth,
+        codex_oauth_account_id,
         field,
         claude_idx,
     }) {
@@ -792,11 +796,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         switch(&mut ctx, "new-provider".to_string())?;
@@ -859,11 +865,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         switch(&mut ctx, "proxy-provider".to_string())?;
@@ -921,11 +929,13 @@ mod tests {
                 proxy_req_tx: None,
                 proxy_loading: &mut self.proxy_loading,
                 local_env_req_tx: None,
+                session_req_tx: None,
                 webdav_req_tx: None,
                 webdav_loading: &mut self.webdav_loading,
                 update_req_tx: None,
                 update_check: &mut self.update_check,
                 model_fetch_req_tx: None,
+                managed_auth_req_tx: None,
             }
         }
     }
@@ -1176,11 +1186,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         set_failover_queue(&mut ctx, "p1".to_string(), true).expect("enable failover queue");
@@ -1250,11 +1262,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         move_failover_queue(
@@ -1387,11 +1401,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         switch(&mut ctx, "p1".to_string()).expect("add opencode provider to config");
@@ -1507,11 +1523,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         switch(&mut ctx, "p1".to_string()).expect("add and enable hermes provider");
@@ -1596,11 +1614,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         import_live_config(&mut ctx).expect("import live config should succeed");
@@ -1738,11 +1758,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         import_live_config(&mut ctx).expect("import live config should succeed");
@@ -1824,11 +1846,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         set_default_model(&mut ctx, "p1".to_string(), "model-primary".to_string())
@@ -1914,11 +1938,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         set_default_model(&mut ctx, "p1".to_string(), "snapshot-primary".to_string())
@@ -2002,11 +2028,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         set_default_model(&mut ctx, "p1".to_string(), "model-primary".to_string())
@@ -2059,11 +2087,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         let err = remove_from_config(&mut ctx, "p1".to_string())
@@ -2131,11 +2161,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         remove_from_config(&mut ctx, "p2".to_string())
@@ -2224,11 +2256,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         set_default_model(&mut ctx, "p1".to_string(), "model-primary".to_string())

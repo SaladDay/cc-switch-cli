@@ -11,7 +11,11 @@ use serde::{Deserialize, Serialize};
 pub enum Request {
     /// Foreground asks the daemon to bring the named app's worker up if it
     /// isn't already, and enable proxy takeover for that app.
-    EnsureWorker { app_type: String },
+    EnsureWorker {
+        app_type: String,
+        #[serde(default)]
+        fallback_provider_id: Option<String>,
+    },
     /// Foreground asks the daemon to disable takeover for the named app. The
     /// daemon stops that app's worker and may exit if no workers remain.
     DropTakeover { app_type: String },
@@ -45,6 +49,8 @@ pub enum Response {
         port: u16,
         session_token: String,
         pid: u32,
+        #[serde(default)]
+        started_at: Option<String>,
     },
     Status {
         running: bool,
@@ -76,6 +82,8 @@ pub struct WorkerState {
     pub address: String,
     pub port: u16,
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub started_at: Option<String>,
 }
 
 /// Encode a request as a single JSON line (no trailing newline).
@@ -108,7 +116,22 @@ mod tests {
     fn ensure_worker_roundtrips() {
         roundtrip_request(Request::EnsureWorker {
             app_type: "claude".to_string(),
+            fallback_provider_id: Some("provider-1".to_string()),
         });
+    }
+
+    #[test]
+    fn ensure_worker_decodes_legacy_request_without_fallback() {
+        let decoded: Request =
+            serde_json::from_str(r#"{"kind":"ensure_worker","app_type":"claude"}"#)
+                .expect("decode legacy EnsureWorker");
+        assert_eq!(
+            decoded,
+            Request::EnsureWorker {
+                app_type: "claude".to_string(),
+                fallback_provider_id: None,
+            }
+        );
     }
 
     #[test]
@@ -156,6 +179,7 @@ mod tests {
             port: 15721,
             session_token: "tok".to_string(),
             pid: 9999,
+            started_at: Some("2026-05-15T12:34:56Z".to_string()),
         });
     }
 
@@ -179,6 +203,7 @@ mod tests {
                 address: "127.0.0.1".to_string(),
                 port: 15721,
                 pid: Some(9999),
+                started_at: Some("2026-05-15T12:34:56Z".to_string()),
             }],
         });
     }

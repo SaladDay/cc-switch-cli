@@ -8,6 +8,7 @@ use super::super::{
     body_filter::filter_private_params_with_whitelist,
     error::ProxyError,
     http_client,
+    json_canonical::canonicalize_value,
     model_mapper::apply_model_mapping,
     providers::{get_adapter, AuthStrategy, ProviderAdapter},
 };
@@ -56,11 +57,21 @@ impl RequestForwarder {
         }
 
         let request_body = if adapter.needs_transform(provider) {
-            adapter.transform_request(mapped_body, provider)?
+            if is_claude_request {
+                super::super::providers::transform_claude_request_for_api_format(
+                    mapped_body,
+                    provider,
+                    super::super::providers::get_claude_api_format(provider),
+                    self.session_client_provided
+                        .then_some(self.session_id.as_str()),
+                )?
+            } else {
+                adapter.transform_request(mapped_body, provider)?
+            }
         } else {
             mapped_body
         };
-        let filtered_body = filter_private_params_with_whitelist(request_body, &[]);
+        let filtered_body = prepare_upstream_request_body(request_body);
         let client = self.client_for_provider(provider);
 
         build_request(
@@ -73,6 +84,8 @@ impl RequestForwarder {
             headers,
             options,
             is_claude_request,
+            self.session_client_provided
+                .then_some(self.session_id.as_str()),
         )
         .await
     }
@@ -87,6 +100,10 @@ impl RequestForwarder {
     }
 }
 
+fn prepare_upstream_request_body(request_body: Value) -> Value {
+    canonicalize_value(filter_private_params_with_whitelist(request_body, &[]))
+}
+
 async fn build_request(
     client: &reqwest::Client,
     adapter: &dyn ProviderAdapter,
@@ -97,6 +114,7 @@ async fn build_request(
     headers: &HeaderMap,
     _options: ForwardOptions,
     is_claude_request: bool,
+    client_session_id: Option<&str>,
 ) -> Result<reqwest::RequestBuilder, ProxyError> {
     let mut request = client.post(adapter.build_url(base_url, endpoint));
 
@@ -110,7 +128,10 @@ async fn build_request(
         request = request.header(key, value);
     }
 
-    if is_claude_request {
+    let send_anthropic_headers = is_claude_request
+        && super::super::providers::get_claude_api_format(provider) == "anthropic";
+
+    if send_anthropic_headers {
         const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
         let beta_value = headers
             .get("anthropic-beta")
@@ -157,6 +178,11 @@ async fn build_request(
                     if let Some(account_id) = resolved_account_id {
                         request = request.header("ChatGPT-Account-Id", account_id);
                     }
+                    if let Some(session_id) = client_session_id {
+                        for (name, value) in build_codex_oauth_session_headers(session_id) {
+                            request = request.header(name, value);
+                        }
+                    }
                 }
                 Err(error) => {
                     return Err(ProxyError::AuthError(format!(
@@ -169,7 +195,7 @@ async fn build_request(
         }
     }
 
-    if is_claude_request {
+    if send_anthropic_headers {
         let version = headers
             .get("anthropic-version")
             .and_then(|value| value.to_str().ok())
@@ -188,4 +214,80 @@ fn is_bedrock_provider(provider: &Provider) -> bool {
         .and_then(|value| value.as_str())
         .map(|value| value == "1")
         .unwrap_or(false)
+}
+
+fn build_codex_oauth_session_headers(
+    session_id: &str,
+) -> Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Vec::new();
+    }
+
+    let mut headers = Vec::new();
+    if let Ok(value) = reqwest::header::HeaderValue::from_str(session_id) {
+        headers.push((
+            reqwest::header::HeaderName::from_static("session_id"),
+            value.clone(),
+        ));
+        headers.push((
+            reqwest::header::HeaderName::from_static("x-client-request-id"),
+            value,
+        ));
+    }
+
+    let window_id = format!("{session_id}:0");
+    if let Ok(value) = reqwest::header::HeaderValue::from_str(&window_id) {
+        headers.push((
+            reqwest::header::HeaderName::from_static("x-codex-window-id"),
+            value,
+        ));
+    }
+
+    headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_upstream_request_body;
+    use serde_json::json;
+
+    #[test]
+    fn prepare_upstream_request_body_filters_private_fields_and_canonicalizes_order() {
+        let body = json!({
+            "z": 1,
+            "_internal": "drop",
+            "tools": [
+                {
+                    "name": "lookup",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "_id": {
+                                "_private_note": "drop",
+                                "type": "string"
+                            },
+                            "b": {"type": "number"},
+                            "a": {"type": "string"}
+                        }
+                    }
+                }
+            ],
+            "a": 2
+        });
+
+        let prepared = prepare_upstream_request_body(body);
+
+        assert!(prepared.get("_internal").is_none());
+        assert!(prepared["tools"][0]["parameters"]["properties"]
+            .get("_id")
+            .is_some());
+        assert!(prepared["tools"][0]["parameters"]["properties"]["_id"]
+            .get("_private_note")
+            .is_none());
+        assert_eq!(
+            serde_json::to_string(&prepared).expect("serialize prepared body"),
+            r#"{"a":2,"tools":[{"name":"lookup","parameters":{"properties":{"_id":{"type":"string"},"a":{"type":"string"},"b":{"type":"number"}},"type":"object"}}],"z":1}"#
+        );
+    }
 }

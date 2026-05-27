@@ -8,10 +8,12 @@ use crate::settings::{set_webdav_sync_settings, webdav_jianguoyun_preset};
 use super::super::data::load_state;
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, LocalEnvMsg, LocalEnvReq,
-    LocalEnvSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg, ProxyReq,
-    ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg,
-    SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq,
-    UpdateSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
+    LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg,
+    ModelFetchReq, ModelFetchSystem, ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq,
+    QuotaSystem, SessionMsg, SessionReq, SessionSystem, SkillsMsg, SkillsReq, SkillsSystem,
+    SpeedtestMsg, SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg,
+    UpdateReq, UpdateSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind,
+    WebDavSystem,
 };
 
 pub(crate) fn start_proxy_system() -> Result<ProxySystem, AppError> {
@@ -427,15 +429,24 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             request_id,
             base_url,
             api_key,
+            codex_oauth,
+            codex_oauth_account_id,
             field,
             claude_idx,
         } = req;
-        let strategy = model_fetch_strategy_for_field(field);
-        let result = rt
-            .block_on(async {
+        let result = if codex_oauth {
+            rt.block_on(async {
+                crate::services::CodexOAuthService::get_models(codex_oauth_account_id.as_deref())
+                    .await
+                    .map(|models| models.into_iter().map(|model| model.id).collect())
+            })
+        } else {
+            let strategy = model_fetch_strategy_for_field(field);
+            rt.block_on(async {
                 fetch_provider_models_for_tui(&base_url, api_key.as_deref(), strategy).await
             })
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())
+        };
 
         let _ = tx.send(ModelFetchMsg::Finished {
             request_id,
@@ -443,6 +454,138 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             claude_idx,
             result,
         });
+    }
+}
+
+pub(crate) fn start_managed_auth_system() -> Result<ManagedAuthSystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<ManagedAuthMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<ManagedAuthReq>();
+
+    let handle = std::thread::Builder::new()
+        .name("cc-switch-managed-auth".to_string())
+        .spawn(move || managed_auth_worker_loop(req_rx, result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn managed auth worker thread".to_string(),
+            source: e,
+        })?;
+
+    Ok(ManagedAuthSystem {
+        req_tx,
+        result_rx,
+        _handle: handle,
+    })
+}
+
+fn managed_auth_worker_loop(rx: mpsc::Receiver<ManagedAuthReq>, tx: mpsc::Sender<ManagedAuthMsg>) {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let err = e.to_string();
+            while let Ok(req) = rx.recv() {
+                let msg = match req {
+                    ManagedAuthReq::Refresh { auth_provider } => ManagedAuthMsg::Status {
+                        auth_provider,
+                        result: Err(err.clone()),
+                    },
+                    ManagedAuthReq::StartLogin { auth_provider } => ManagedAuthMsg::LoginStarted {
+                        auth_provider,
+                        result: Err(err.clone()),
+                    },
+                    ManagedAuthReq::PollLogin {
+                        auth_provider,
+                        device_code,
+                    } => ManagedAuthMsg::LoginPolled {
+                        auth_provider,
+                        device_code,
+                        result: Err(err.clone()),
+                    },
+                    ManagedAuthReq::SetDefault {
+                        auth_provider,
+                        account_id,
+                    } => ManagedAuthMsg::DefaultSet {
+                        auth_provider,
+                        account_id,
+                        result: Err(err.clone()),
+                    },
+                    ManagedAuthReq::Remove {
+                        auth_provider,
+                        account_id,
+                    } => ManagedAuthMsg::Removed {
+                        auth_provider,
+                        account_id,
+                        result: Err(err.clone()),
+                    },
+                };
+                let _ = tx.send(msg);
+            }
+            return;
+        }
+    };
+
+    while let Ok(req) = rx.recv() {
+        match req {
+            ManagedAuthReq::Refresh { auth_provider } => {
+                let result = rt.block_on(crate::services::AuthService::get_status(&auth_provider));
+                let _ = tx.send(ManagedAuthMsg::Status {
+                    auth_provider,
+                    result,
+                });
+            }
+            ManagedAuthReq::StartLogin { auth_provider } => {
+                let result = rt.block_on(crate::services::AuthService::start_login(&auth_provider));
+                let _ = tx.send(ManagedAuthMsg::LoginStarted {
+                    auth_provider,
+                    result,
+                });
+            }
+            ManagedAuthReq::PollLogin {
+                auth_provider,
+                device_code,
+            } => {
+                let result = rt.block_on(crate::services::AuthService::poll_for_account(
+                    &auth_provider,
+                    &device_code,
+                ));
+                let _ = tx.send(ManagedAuthMsg::LoginPolled {
+                    auth_provider,
+                    device_code,
+                    result,
+                });
+            }
+            ManagedAuthReq::SetDefault {
+                auth_provider,
+                account_id,
+            } => {
+                let result = rt.block_on(async {
+                    crate::services::AuthService::set_default_account(&auth_provider, &account_id)
+                        .await?;
+                    crate::services::AuthService::get_status(&auth_provider).await
+                });
+                let _ = tx.send(ManagedAuthMsg::DefaultSet {
+                    auth_provider,
+                    account_id,
+                    result,
+                });
+            }
+            ManagedAuthReq::Remove {
+                auth_provider,
+                account_id,
+            } => {
+                let result = rt.block_on(async {
+                    crate::services::AuthService::remove_account(&auth_provider, &account_id)
+                        .await?;
+                    crate::services::AuthService::get_status(&auth_provider).await
+                });
+                let _ = tx.send(ManagedAuthMsg::Removed {
+                    auth_provider,
+                    account_id,
+                    result,
+                });
+            }
+        }
     }
 }
 
@@ -463,6 +606,118 @@ pub(crate) fn start_local_env_system() -> Result<LocalEnvSystem, AppError> {
         result_rx,
         _handle: handle,
     })
+}
+
+pub(crate) fn start_session_system() -> Result<SessionSystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<SessionMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<SessionReq>();
+
+    let handle = std::thread::Builder::new()
+        .name("cc-switch-sessions".to_string())
+        .spawn(move || session_worker_loop(req_rx, result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn sessions worker thread".to_string(),
+            source: e,
+        })?;
+
+    Ok(SessionSystem {
+        req_tx,
+        result_rx,
+        _handle: handle,
+    })
+}
+
+fn session_worker_loop(rx: mpsc::Receiver<SessionReq>, tx: mpsc::Sender<SessionMsg>) {
+    while let Ok(mut req) = rx.recv() {
+        for next in rx.try_iter() {
+            match (&req, &next) {
+                (SessionReq::Refresh { .. }, SessionReq::Refresh { .. }) => req = next,
+                (SessionReq::LoadMessages { .. }, SessionReq::LoadMessages { .. }) => req = next,
+                _ => {
+                    let _ = handle_session_req(req, &tx);
+                    req = next;
+                }
+            }
+        }
+
+        let _ = handle_session_req(req, &tx);
+    }
+}
+
+fn handle_session_req(req: SessionReq, tx: &mpsc::Sender<SessionMsg>) -> Result<(), ()> {
+    match req {
+        SessionReq::Refresh {
+            request_id,
+            provider_id,
+        } => {
+            let result = std::panic::catch_unwind(|| {
+                crate::session_manager::scan_sessions_for_provider(&provider_id)
+            })
+            .map_err(|_| "session scan panicked".to_string());
+            let result = result;
+            tx.send(SessionMsg::ScanFinished { request_id, result })
+                .map_err(|_| ())
+        }
+        SessionReq::LoadMessages {
+            request_id,
+            key,
+            provider_id,
+            source_path,
+        } => {
+            let result = crate::session_manager::load_messages(&provider_id, &source_path);
+            tx.send(SessionMsg::MessagesLoaded {
+                request_id,
+                key,
+                result,
+            })
+            .map_err(|_| ())
+        }
+        SessionReq::Delete {
+            request_id,
+            key,
+            provider_id,
+            session_id,
+            source_path,
+        } => {
+            let result =
+                crate::session_manager::delete_session(&provider_id, &session_id, &source_path)
+                    .and_then(|deleted| {
+                        if deleted {
+                            Ok(())
+                        } else {
+                            Err("Session was not deleted".to_string())
+                        }
+                    });
+            tx.send(SessionMsg::DeleteFinished {
+                request_id,
+                key,
+                result,
+            })
+            .map_err(|_| ())
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn drain_session_reqs_for_test(
+    mut req: SessionReq,
+    rx: &mpsc::Receiver<SessionReq>,
+) -> Vec<SessionReq> {
+    let mut drained = Vec::new();
+    for next in rx.try_iter() {
+        match (&req, &next) {
+            (SessionReq::Refresh { .. }, SessionReq::Refresh { .. })
+            | (SessionReq::LoadMessages { .. }, SessionReq::LoadMessages { .. }) => {
+                req = next;
+            }
+            _ => {
+                drained.push(req);
+                req = next;
+            }
+        }
+    }
+    drained.push(req);
+    drained
 }
 
 fn local_env_worker_loop(rx: mpsc::Receiver<LocalEnvReq>, tx: mpsc::Sender<LocalEnvMsg>) {
@@ -654,5 +909,64 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
                 let _ = tx.send(SkillsMsg::InstallFinished { spec, result });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn delete_req(request_id: u64, key: &str) -> SessionReq {
+        SessionReq::Delete {
+            request_id,
+            key: key.to_string(),
+            provider_id: "claude".to_string(),
+            session_id: key.to_string(),
+            source_path: format!("/tmp/{key}.jsonl"),
+        }
+    }
+
+    #[test]
+    fn session_req_drain_never_coalesces_deletes() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(delete_req(2, "beta")).expect("queue beta delete");
+        tx.send(delete_req(3, "gamma")).expect("queue gamma delete");
+        drop(tx);
+
+        let drained = drain_session_reqs_for_test(delete_req(1, "alpha"), &rx);
+
+        let keys = drained
+            .into_iter()
+            .map(|req| match req {
+                SessionReq::Delete { key, .. } => key,
+                _ => panic!("expected delete request"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn session_req_drain_keeps_only_latest_refresh() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(SessionReq::Refresh {
+            request_id: 2,
+            provider_id: "claude".to_string(),
+        })
+        .expect("queue refresh");
+        drop(tx);
+
+        let drained = drain_session_reqs_for_test(
+            SessionReq::Refresh {
+                request_id: 1,
+                provider_id: "claude".to_string(),
+            },
+            &rx,
+        );
+
+        assert_eq!(drained.len(), 1);
+        assert!(matches!(
+            drained[0],
+            SessionReq::Refresh { request_id: 2, .. }
+        ));
     }
 }

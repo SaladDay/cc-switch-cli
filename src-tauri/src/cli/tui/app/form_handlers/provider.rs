@@ -30,7 +30,7 @@ impl App {
                 Some(Action::None)
             }
             KeyCode::Enter => {
-                let existing_ids = collect_existing_provider_ids(data);
+                let existing_ids = data.existing_provider_ids();
                 provider.apply_template(provider.template_idx, &existing_ids);
                 provider.focus = FormFocus::Fields;
                 Some(Action::None)
@@ -92,7 +92,7 @@ impl App {
                 Some(texts::base_url_empty_error())
             } else if let Some(message) = validate_usage_query_form(provider) {
                 Some(message)
-            } else if !provider.ensure_generated_id(&collect_existing_provider_ids(data)) {
+            } else if !provider.ensure_generated_id(&data.existing_provider_ids()) {
                 Some(if provider.mode.is_edit() {
                     texts::tui_toast_provider_missing_name()
                 } else {
@@ -304,6 +304,34 @@ impl App {
                     return Action::None;
                 };
                 provider.toggle_claude_hide_attribution();
+                Action::None
+            }
+            ProviderAddField::CodexOAuthAccount => {
+                if matches!(key.code, KeyCode::Enter) {
+                    let selected = self
+                        .form
+                        .as_ref()
+                        .and_then(|form| match form {
+                            FormState::ProviderAdd(provider) => {
+                                Some(provider.codex_oauth_account_id.clone())
+                            }
+                            _ => None,
+                        })
+                        .flatten();
+                    self.overlay = Overlay::ManagedAccountPicker {
+                        auth_provider: "codex_oauth".to_string(),
+                        selected: 0,
+                        binding: true,
+                        selected_account_id: selected,
+                    };
+                }
+                Action::None
+            }
+            ProviderAddField::CodexFastMode => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.toggle_codex_fast_mode();
                 Action::None
             }
             ProviderAddField::OpenClawModels => {
@@ -591,6 +619,8 @@ impl App {
         Action::ProviderModelFetch {
             base_url: provider.hermes_base_url.value.clone(),
             api_key: Some(provider.hermes_api_key.value.clone()),
+            codex_oauth: false,
+            codex_oauth_account_id: None,
             field: ProviderAddField::HermesModels,
             claude_idx: None,
         }
@@ -631,6 +661,8 @@ impl App {
             Action::ProviderModelFetch {
                 base_url,
                 api_key,
+                codex_oauth: false,
+                codex_oauth_account_id: None,
                 field: selected,
                 claude_idx: None,
             }
@@ -869,7 +901,7 @@ impl App {
             provider.id_is_manual = true;
         }
         if changed && selected == ProviderAddField::Name && !provider.id_is_manual {
-            let existing_ids = collect_existing_provider_ids(data);
+            let existing_ids = data.existing_provider_ids();
             provider
                 .id
                 .set(crate::cli::commands::provider_input::generate_provider_id(
@@ -888,6 +920,7 @@ fn usage_query_provider_credential_field(field: ProviderAddField) -> bool {
         field,
         ProviderAddField::ClaudeApiKey
             | ProviderAddField::ClaudeBaseUrl
+            | ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexApiKey
             | ProviderAddField::CodexBaseUrl
             | ProviderAddField::GeminiApiKey
@@ -996,14 +1029,6 @@ fn is_provider_divider_field(field: Option<&ProviderAddField>) -> bool {
                 | ProviderAddField::UsageQueryDivider
         )
     )
-}
-
-fn collect_existing_provider_ids(data: &UiData) -> Vec<String> {
-    data.providers
-        .rows
-        .iter()
-        .map(|row| row.id.clone())
-        .collect()
 }
 
 fn next_openclaw_api_protocol(current: &str) -> &'static str {

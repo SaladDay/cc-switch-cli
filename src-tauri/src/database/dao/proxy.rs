@@ -541,12 +541,20 @@ impl Database {
     }
 
     pub fn get_app_proxy_preferred_port(&self, app_type: &str) -> Result<u16, AppError> {
-        Ok(self
+        if let Some(port) = self
             .get_proxy_preferences()?
             .apps
             .get(app_type)
             .and_then(|preference| preference.preferred_port)
-            .unwrap_or_else(|| default_app_preferred_port(app_type)))
+        {
+            return Ok(port);
+        }
+
+        if let Some(port) = self.get_legacy_app_proxy_listen_port(app_type)? {
+            return Ok(port);
+        }
+
+        Ok(default_app_preferred_port(app_type))
     }
 
     pub fn set_app_proxy_preferred_port(&self, app_type: &str, port: u16) -> Result<(), AppError> {
@@ -554,6 +562,22 @@ impl Database {
         let entry = preferences.apps.entry(app_type.to_string()).or_default();
         entry.preferred_port = Some(port);
         self.update_proxy_preferences(&preferences)
+    }
+
+    fn get_legacy_app_proxy_listen_port(&self, app_type: &str) -> Result<Option<u16>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let result = conn.query_row(
+            "SELECT listen_port FROM proxy_config WHERE app_type = ?1",
+            [app_type],
+            |row| row.get::<_, i32>(0),
+        );
+
+        match result {
+            Ok(port) if (1..=u16::MAX as i32).contains(&port) => Ok(Some(port as u16)),
+            Ok(_) => Ok(None),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(AppError::Database(error.to_string())),
+        }
     }
 
     /// 设置 Live 接管状态（兼容旧版本，更新 enabled 字段）
@@ -1100,6 +1124,20 @@ mod tests {
             Some(17022)
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn app_preferred_port_falls_back_to_legacy_proxy_config() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let mut config = db.get_proxy_config().await?;
+        config.listen_port = 17021;
+        db.update_proxy_config(config).await?;
+
+        assert_eq!(db.get_app_proxy_preferred_port("claude")?, 17021);
+
+        db.set_app_proxy_preferred_port("claude", 17022)?;
+        assert_eq!(db.get_app_proxy_preferred_port("claude")?, 17022);
         Ok(())
     }
 

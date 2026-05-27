@@ -751,6 +751,10 @@ fn submit_provider_add(
             return Ok(());
         }
     };
+    let copy_source_id = match ctx.app.form.as_ref() {
+        Some(FormState::ProviderAdd(form)) => form.copy_source_id.clone(),
+        _ => None,
+    };
 
     if let Some(message) = validate_provider_submit(&ctx.app.app_type, &provider, false) {
         ctx.app.push_toast(message, ToastKind::Warning);
@@ -778,7 +782,19 @@ fn submit_provider_add(
     };
     provider.id = provider_id;
 
-    match ProviderService::add(&state, ctx.app.app_type.clone(), provider) {
+    let result = if let Some(copy_source_id) = copy_source_id {
+        ProviderService::duplicate(
+            &state,
+            ctx.app.app_type.clone(),
+            &copy_source_id,
+            Some(provider),
+        )
+        .map(|_| true)
+    } else {
+        ProviderService::add(&state, ctx.app.app_type.clone(), provider)
+    };
+
+    match result {
         Ok(true) => {
             ctx.app.editor = None;
             ctx.app.form = None;
@@ -1130,11 +1146,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(
@@ -1178,11 +1196,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::format_common_snippet(&mut ctx, AppType::Claude).expect("format common snippet");
@@ -1241,11 +1261,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::extract_common_snippet_into_editor(&mut ctx, AppType::Claude)
@@ -1276,11 +1298,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_prompt_create(
@@ -1327,11 +1351,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_add(
@@ -1367,11 +1393,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_add(
@@ -1410,11 +1438,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_add(
@@ -1473,11 +1503,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_add(
@@ -1508,6 +1540,153 @@ mod tests {
         assert!(
             refreshed_row.provider.created_at.is_some(),
             "adding an OpenClaw provider through the add flow should persist a user-touched marker"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_provider_copy_after_settings_json_apply_keeps_duplicate_semantics() {
+        let mut fixture = runtime_ctx(AppType::OpenCode);
+
+        crate::opencode_config::set_provider(
+            "source",
+            json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "baseURL": "https://live.example/v1",
+                    "apiKey": "sk-live"
+                },
+                "models": {
+                    "main": { "name": "Main" }
+                }
+            }),
+        )
+        .expect("seed live opencode provider");
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenCode)
+                .expect("opencode manager");
+            manager.providers.insert(
+                "source".to_string(),
+                Provider::with_id(
+                    "source".to_string(),
+                    "Source Provider".to_string(),
+                    json!({
+                        "npm": "@ai-sdk/openai-compatible",
+                        "options": {
+                            "baseURL": "https://source.example/v1",
+                            "apiKey": "sk-source"
+                        },
+                        "models": {
+                            "main": { "name": "Main" }
+                        }
+                    }),
+                    None,
+                ),
+            );
+        }
+        state.save().expect("persist source provider");
+        fixture.data = UiData::load(&AppType::OpenCode).expect("reload opencode ui data");
+
+        let source_provider = fixture
+            .data
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "source")
+            .expect("source provider row should exist")
+            .provider
+            .clone();
+        let copy_form =
+            crate::cli::tui::form::ProviderAddFormState::copy_from_provider_with_common_snippet(
+                AppType::OpenCode,
+                &source_provider,
+                "",
+                &fixture.data.existing_provider_ids(),
+            );
+        fixture.app.form = Some(FormState::ProviderAdd(copy_form));
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        submit_provider_form_apply_json(
+            &mut ctx,
+            r#"{
+  "npm": "@ai-sdk/openai-compatible",
+  "options": {
+    "baseURL": "https://edited.example/v1",
+    "apiKey": "sk-source"
+  },
+  "models": {
+    "main": { "name": "Main" }
+  }
+}"#
+            .to_string(),
+        )
+        .expect("settings JSON apply should succeed");
+
+        let copy_payload = {
+            let FormState::ProviderAdd(form) = ctx
+                .app
+                .form
+                .as_ref()
+                .expect("provider copy form should remain open")
+            else {
+                panic!("expected provider copy form");
+            };
+            assert_eq!(form.copy_source_id.as_deref(), Some("source"));
+            serde_json::to_string_pretty(&form.to_provider_json_value())
+                .expect("serialize copied provider")
+        };
+
+        submit_provider_add(&mut ctx, copy_payload).expect("copy submit should succeed");
+
+        let copied = ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "source-copy")
+            .expect("copied provider should be saved with source copy id");
+        assert_eq!(
+            copied.provider.settings_config["options"]["baseURL"],
+            "https://edited.example/v1"
+        );
+        assert_eq!(
+            copied
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.live_config_managed),
+            Some(false),
+            "copy submit must keep additive duplicate addToLive=false semantics"
+        );
+
+        let live_providers =
+            crate::opencode_config::get_providers().expect("read opencode live providers");
+        assert!(live_providers.contains_key("source"));
+        assert!(
+            !live_providers.contains_key("source-copy"),
+            "copy submit after editing settings JSON must not write the duplicate into live config"
         );
     }
 
@@ -1559,11 +1738,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_edit(
@@ -1640,11 +1821,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_edit(
@@ -1737,11 +1920,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_edit(
@@ -1915,11 +2100,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_edit(
@@ -2043,11 +2230,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, submit, content)?;
@@ -2090,11 +2279,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, EditorSubmit::ConfigOpenClawTools, content)?;
@@ -2135,11 +2326,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, EditorSubmit::ConfigOpenClawTools, content)?;
@@ -2181,11 +2374,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, EditorSubmit::ConfigOpenClawAgents, content)?;
@@ -2226,11 +2421,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, EditorSubmit::ConfigOpenClawAgents, content)?;
@@ -2587,11 +2784,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, EditorSubmit::ConfigOpenClawAgents, content)
@@ -2640,11 +2839,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_form_apply_json(
@@ -2732,11 +2933,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_form_apply_json(

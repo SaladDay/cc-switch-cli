@@ -45,6 +45,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         vec![
             "Custom",
             "Claude Official",
+            "Codex",
             "* PackyCode",
             "* AICodeMirror",
             "* RightCode",
@@ -89,6 +90,100 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
     assert!(
         !openclaw_labels.contains(&"* PackyCode") && !openclaw_labels.contains(&"* RightCode"),
         "OpenClaw should only expose the AICodeMirror sponsor preset"
+    );
+}
+
+#[test]
+fn provider_add_form_codex_oauth_template_matches_upstream_contract() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    let existing_ids = Vec::<String>::new();
+    let idx = template_index_by_label(AppType::Claude, "Codex");
+
+    form.apply_template(idx, &existing_ids);
+
+    assert!(form.is_claude_codex_oauth_provider());
+    assert_eq!(form.name.value, "Codex");
+    assert_eq!(form.website_url.value, "https://openai.com/chatgpt/pricing");
+    assert_eq!(
+        form.claude_base_url.value,
+        "https://chatgpt.com/backend-api/codex"
+    );
+    assert_eq!(
+        form.claude_api_format,
+        crate::cli::tui::form::ClaudeApiFormat::OpenAiResponses
+    );
+    assert_eq!(form.claude_model.value, "gpt-5.4");
+    assert_eq!(form.claude_haiku_model.value, "gpt-5.4-mini");
+    assert!(!form.codex_fast_mode);
+    assert!(form.claude_hide_attribution);
+
+    let fields = form.fields();
+    assert!(fields.contains(&ProviderAddField::CodexOAuthAccount));
+    assert!(fields.contains(&ProviderAddField::CodexFastMode));
+    assert!(fields.contains(&ProviderAddField::ClaudeModelConfig));
+    assert!(fields.contains(&ProviderAddField::ClaudeHideAttribution));
+    assert!(!fields.contains(&ProviderAddField::ClaudeBaseUrl));
+    assert!(!fields.contains(&ProviderAddField::ClaudeApiFormat));
+    assert!(!fields.contains(&ProviderAddField::ClaudeApiKey));
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["meta"]["providerType"], "codex_oauth");
+    assert_eq!(provider["meta"]["apiFormat"], "openai_responses");
+    assert_eq!(provider["meta"]["codexFastMode"], false);
+    assert_eq!(provider["meta"]["authBinding"]["source"], "managed_account");
+    assert_eq!(
+        provider["meta"]["authBinding"]["authProvider"],
+        "codex_oauth"
+    );
+    assert!(
+        provider["meta"]["authBinding"].get("accountId").is_none(),
+        "default-account binding should omit accountId"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
+        "https://chatgpt.com/backend-api/codex"
+    );
+    assert!(
+        provider["settingsConfig"]["env"]
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .is_none(),
+        "Codex OAuth providers must not persist provider API keys"
+    );
+}
+
+#[test]
+fn provider_edit_form_codex_oauth_loads_account_and_fast_mode() {
+    let provider_value = json!({
+        "id": "codex-oauth",
+        "name": "Codex",
+        "settingsConfig": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex",
+                "ANTHROPIC_MODEL": "gpt-5.4",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini"
+            }
+        },
+        "meta": {
+            "providerType": "codex_oauth",
+            "apiFormat": "openai_responses",
+            "codexFastMode": true,
+            "authBinding": {
+                "source": "managed_account",
+                "authProvider": "codex_oauth",
+                "accountId": "acc-123"
+            }
+        }
+    });
+    let provider: Provider = serde_json::from_value(provider_value).expect("provider json valid");
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+
+    assert!(form.is_claude_codex_oauth_provider());
+    assert_eq!(form.codex_oauth_account_id.as_deref(), Some("acc-123"));
+    assert!(form.codex_fast_mode);
+    assert_eq!(
+        form.claude_api_format,
+        crate::cli::tui::form::ClaudeApiFormat::OpenAiResponses
     );
 }
 
@@ -2347,6 +2442,39 @@ fn provider_edit_form_openclaw_keeps_provider_key_visible_but_locked() {
 }
 
 #[test]
+fn provider_copy_form_additive_apps_hide_provider_key() {
+    for app_type in [AppType::OpenClaw, AppType::Hermes] {
+        let provider = Provider::with_id(
+            "source-provider".to_string(),
+            "Source Provider".to_string(),
+            json!({
+                "baseUrl": "https://api.example/v1",
+                "apiKey": "sk-demo",
+            }),
+            None,
+        );
+
+        let form = ProviderAddFormState::copy_from_provider_with_common_snippet(
+            app_type.clone(),
+            &provider,
+            "",
+            &[],
+        );
+        let fields = form.fields();
+
+        assert_eq!(form.copy_source_id.as_deref(), Some("source-provider"));
+        assert!(
+            !fields.contains(&ProviderAddField::Id),
+            "{app_type:?} copy form should not expose a provider key that is regenerated on save"
+        );
+        assert!(
+            !form.is_id_editable(),
+            "{app_type:?} copy form should not allow editing the regenerated provider key"
+        );
+    }
+}
+
+#[test]
 fn provider_add_form_openclaw_uses_upstream_default_api_protocol() {
     let mut form = ProviderAddFormState::new(AppType::OpenClaw);
     form.id.set("oclaw1");
@@ -2939,6 +3067,61 @@ fn provider_edit_form_roundtrip_no_duplicate_common_config_key() {
         .expect("roundtrip deserialization should succeed without duplicate field error");
     assert_eq!(roundtrip.id, "test-provider");
     assert_eq!(roundtrip.name, "Test Provider");
+}
+
+#[test]
+fn provider_copy_form_uses_new_record_identity_without_queue_state() {
+    use crate::provider::ProviderMeta;
+
+    let mut provider = Provider {
+        id: "test-provider".to_string(),
+        name: "Test Provider".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-test"
+            }
+        }),
+        website_url: Some("https://example.com".to_string()),
+        category: Some("third_party".to_string()),
+        created_at: Some(123),
+        sort_index: Some(7),
+        notes: Some("Keep visible notes".to_string()),
+        meta: Some(ProviderMeta {
+            endpoint_auto_select: Some(true),
+            ..Default::default()
+        }),
+        icon: Some("anthropic".to_string()),
+        icon_color: Some("#111111".to_string()),
+        in_failover_queue: true,
+    };
+    provider.meta.as_mut().unwrap().apply_common_config = Some(true);
+
+    let form = ProviderAddFormState::copy_from_provider_with_common_snippet(
+        AppType::Claude,
+        &provider,
+        "",
+        &[
+            "test-provider".to_string(),
+            "test-provider-copy".to_string(),
+        ],
+    );
+    let copied = form.to_provider_json_value();
+
+    assert!(matches!(form.mode, FormMode::Add));
+    assert_eq!(form.copy_source_id.as_deref(), Some("test-provider"));
+    assert_eq!(copied["id"], "test-provider-copy-2");
+    assert_eq!(copied["name"], "Test Provider copy");
+    assert!(copied.get("createdAt").is_none());
+    assert_eq!(copied["sortIndex"], 7);
+    assert!(copied.get("inFailoverQueue").is_none());
+    assert_eq!(
+        copied["settingsConfig"]["env"]["ANTHROPIC_AUTH_TOKEN"],
+        "sk-test"
+    );
+    assert_eq!(copied["notes"], "Keep visible notes");
+    assert_eq!(copied["category"], "third_party");
+    assert_eq!(copied["meta"]["endpointAutoSelect"], true);
+    assert_eq!(copied["meta"]["commonConfigEnabled"], true);
 }
 
 #[test]

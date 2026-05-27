@@ -15,6 +15,22 @@ use super::{
     OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
+fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
+    let base_id = format!("{}-copy", original_id.trim());
+    if !existing_ids.iter().any(|id| id == &base_id) {
+        return base_id;
+    }
+
+    let mut counter = 2;
+    loop {
+        let candidate = format!("{base_id}-{counter}");
+        if !existing_ids.iter().any(|id| id == &candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
 impl ProviderAddFormState {
     pub const USAGE_QUERY_GENERAL_PRESET: &'static str = r#"({
   request: {
@@ -96,6 +112,7 @@ impl ProviderAddFormState {
         let mut form = Self {
             app_type,
             mode: FormMode::Add,
+            copy_source_id: None,
             focus: FormFocus::Templates,
             page: ProviderFormPage::Main,
             template_idx: 0,
@@ -127,6 +144,8 @@ impl ProviderAddFormState {
             claude_opus_model: TextInput::new(""),
             claude_hide_attribution: false,
             claude_hide_attribution_touched: false,
+            codex_oauth_account_id: None,
+            codex_fast_mode: false,
             codex_base_url: TextInput::new(codex_defaults.0),
             codex_model: TextInput::new(codex_defaults.1),
             codex_wire_api: codex_defaults.2,
@@ -216,6 +235,27 @@ impl ProviderAddFormState {
         form
     }
 
+    pub fn copy_from_provider_with_common_snippet(
+        app_type: AppType,
+        provider: &Provider,
+        common_snippet: &str,
+        existing_ids: &[String],
+    ) -> Self {
+        let mut form = Self::from_provider_with_common_snippet(app_type, provider, common_snippet);
+        form.mode = FormMode::Add;
+        form.copy_source_id = Some(provider.id.clone());
+        form.id_is_manual = false;
+        form.name.set(format!("{} copy", provider.name.trim()));
+        // Remove fields that should be unique or not copied over
+        if let Some(extra) = form.extra.as_object_mut() {
+            for key in ["id", "createdAt", "inFailoverQueue"] {
+                extra.remove(key);
+            }
+        }
+        form.id.set(provider_copy_id(&provider.id, existing_ids));
+        form
+    }
+
     pub fn supports_common_config(app_type: &AppType) -> bool {
         matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
     }
@@ -268,7 +308,7 @@ impl ProviderAddFormState {
     }
 
     pub fn is_id_editable(&self) -> bool {
-        !self.mode.is_edit()
+        !self.mode.is_edit() && self.copy_source_id.is_none()
     }
 
     pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {
@@ -294,13 +334,19 @@ impl ProviderAddFormState {
             ProviderAddField::Notes,
         ];
 
-        if matches!(self.app_type, AppType::Hermes | AppType::OpenClaw) {
+        if matches!(self.app_type, AppType::Hermes | AppType::OpenClaw)
+            && self.copy_source_id.is_none()
+        {
             fields.insert(0, ProviderAddField::Id);
         }
 
         match self.app_type {
             AppType::Claude => {
-                if !self.is_claude_official_provider() {
+                if self.is_claude_codex_oauth_provider() {
+                    fields.push(ProviderAddField::CodexOAuthAccount);
+                    fields.push(ProviderAddField::CodexFastMode);
+                    fields.push(ProviderAddField::ClaudeModelConfig);
+                } else if !self.is_claude_official_provider() {
                     fields.push(ProviderAddField::ClaudeBaseUrl);
                     fields.push(ProviderAddField::ClaudeApiFormat);
                     fields.push(ProviderAddField::ClaudeApiKey);
@@ -449,7 +495,9 @@ impl ProviderAddFormState {
             ProviderAddField::HermesApiKey => Some(&self.hermes_api_key),
             ProviderAddField::HermesBaseUrl => Some(&self.hermes_base_url),
             ProviderAddField::HermesRateLimitDelay => Some(&self.hermes_rate_limit_delay),
-            ProviderAddField::CodexWireApi
+            ProviderAddField::CodexOAuthAccount
+            | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
             | ProviderAddField::ClaudeModelConfig
@@ -498,7 +546,9 @@ impl ProviderAddFormState {
             ProviderAddField::HermesApiKey => Some(&mut self.hermes_api_key),
             ProviderAddField::HermesBaseUrl => Some(&mut self.hermes_base_url),
             ProviderAddField::HermesRateLimitDelay => Some(&mut self.hermes_rate_limit_delay),
-            ProviderAddField::CodexWireApi
+            ProviderAddField::CodexOAuthAccount
+            | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
             | ProviderAddField::ClaudeModelConfig
@@ -927,6 +977,10 @@ impl ProviderAddFormState {
     }
 
     pub fn current_provider_base_url(&self) -> String {
+        if self.is_claude_codex_oauth_provider() {
+            return "https://chatgpt.com/backend-api/codex".to_string();
+        }
+
         match self.app_type {
             AppType::Claude => self.claude_base_url.value.clone(),
             AppType::Codex => self.codex_base_url.value.clone(),
@@ -937,6 +991,13 @@ impl ProviderAddFormState {
     }
 
     fn usage_query_provider_credentials(&self) -> (String, String) {
+        if self.is_claude_codex_oauth_provider() {
+            return (
+                String::new(),
+                "https://chatgpt.com/backend-api/codex".to_string(),
+            );
+        }
+
         let (api_key, base_url) = match self.app_type {
             AppType::Claude => (&self.claude_api_key.value, &self.claude_base_url.value),
             AppType::Codex => (&self.codex_api_key.value, &self.codex_base_url.value),
@@ -1017,6 +1078,36 @@ impl ProviderAddFormState {
         self.claude_hide_attribution_touched = true;
     }
 
+    pub fn toggle_codex_fast_mode(&mut self) {
+        if self.is_claude_codex_oauth_provider() {
+            self.codex_fast_mode = !self.codex_fast_mode;
+        }
+    }
+
+    pub fn set_codex_oauth_account_id(&mut self, account_id: Option<String>) {
+        self.codex_oauth_account_id = account_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    }
+
+    pub fn codex_oauth_account_display(&self) -> String {
+        self.codex_oauth_account_id
+            .clone()
+            .unwrap_or_else(|| texts::tui_managed_accounts_follow_default().to_string())
+    }
+
+    pub fn is_claude_codex_oauth_provider(&self) -> bool {
+        if !matches!(self.app_type, AppType::Claude) {
+            return false;
+        }
+
+        self.extra
+            .get("meta")
+            .and_then(|meta| meta.get("providerType"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value == "codex_oauth")
+    }
+
     pub fn is_claude_official_provider(&self) -> bool {
         if !matches!(self.app_type, AppType::Claude) {
             return false;
@@ -1065,6 +1156,7 @@ impl ProviderAddFormState {
         let previous_mode = self.mode.clone();
         let previous_focus = self.focus;
         let previous_page = self.page;
+        let previous_copy_source_id = self.copy_source_id.clone();
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
@@ -1097,6 +1189,7 @@ impl ProviderAddFormState {
         }
 
         next.mode = previous_mode.clone();
+        next.copy_source_id = previous_copy_source_id;
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;
@@ -1143,6 +1236,7 @@ impl ProviderAddFormState {
         let previous_mode = self.mode.clone();
         let previous_focus = self.focus;
         let previous_page = self.page;
+        let previous_copy_source_id = self.copy_source_id.clone();
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
@@ -1185,6 +1279,7 @@ impl ProviderAddFormState {
         }
 
         next.mode = previous_mode.clone();
+        next.copy_source_id = previous_copy_source_id;
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;

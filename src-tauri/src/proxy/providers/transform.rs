@@ -50,31 +50,45 @@ pub fn resolve_reasoning_effort(body: &Value) -> Option<&'static str> {
     }
 }
 
-pub fn sanitize_system_text(text: &str) -> Option<Cow<'_, str>> {
-    let mut sanitized = String::new();
-    let mut removed = false;
-
-    for segment in text.split_inclusive('\n') {
-        let line = segment.strip_suffix('\n').unwrap_or(segment);
-        if line
-            .trim_start()
-            .starts_with(ANTHROPIC_BILLING_HEADER_PREFIX)
-        {
-            removed = true;
-            continue;
-        }
-        sanitized.push_str(segment);
+pub(crate) fn strip_leading_anthropic_billing_header(text: &str) -> &str {
+    if !text.starts_with(ANTHROPIC_BILLING_HEADER_PREFIX) {
+        return text;
     }
 
-    if !removed {
-        return Some(Cow::Borrowed(text));
+    let Some(line_end) = text
+        .as_bytes()
+        .iter()
+        .position(|byte| *byte == b'\n' || *byte == b'\r')
+    else {
+        return "";
+    };
+
+    let bytes = text.as_bytes();
+    let mut rest_start = line_end + 1;
+    if bytes[line_end] == b'\r' && bytes.get(line_end + 1) == Some(&b'\n') {
+        rest_start += 1;
     }
 
-    if sanitized.is_empty() {
-        None
+    let rest = &text[rest_start..];
+    if let Some(stripped) = rest.strip_prefix("\r\n") {
+        stripped
+    } else if let Some(stripped) = rest.strip_prefix('\n') {
+        stripped
+    } else if let Some(stripped) = rest.strip_prefix('\r') {
+        stripped
     } else {
-        Some(Cow::Owned(sanitized))
+        rest
     }
+}
+
+pub fn sanitize_system_text(text: &str) -> Option<Cow<'_, str>> {
+    let text = strip_leading_anthropic_billing_header(text);
+
+    if text.is_empty() {
+        return None;
+    }
+
+    Some(Cow::Borrowed(text))
 }
 
 pub fn anthropic_to_openai(body: Value, cache_key: Option<&str>) -> Result<Value, ProxyError> {
@@ -611,12 +625,21 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_system_text_preserves_remaining_content() {
+    fn sanitize_system_text_keeps_non_leading_billing_header_text() {
         let text = "First line\n  x-anthropic-billing-header: cc_version=2.1.120.cf9; cc_entrypoint=cli; cch=543cf;\n\nLast line\n";
 
         let result = sanitize_system_text(text).unwrap();
 
-        assert_eq!(result, "First line\n\nLast line\n");
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn sanitize_system_text_strips_leading_billing_header_with_crlf() {
+        let text = "x-anthropic-billing-header: cc_version=2.1.120.cf9; cc_entrypoint=cli; cch=543cf;\r\n\r\nYou are helpful.";
+
+        let result = sanitize_system_text(text).unwrap();
+
+        assert_eq!(result, "You are helpful.");
     }
 
     #[test]

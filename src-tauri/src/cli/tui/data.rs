@@ -169,6 +169,7 @@ impl QuotaSnapshot {
 pub struct ProvidersSnapshot {
     pub current_id: String,
     pub rows: Vec<ProviderRow>,
+    pub live_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -273,6 +274,7 @@ pub struct ProxySnapshot {
     pub enabled: bool,
     pub running: bool,
     pub managed_runtime: bool,
+    pub active_worker_apps: HashSet<String>,
     pub auto_failover_enabled: bool,
     pub claude_takeover: bool,
     pub codex_takeover: bool,
@@ -364,6 +366,22 @@ impl UiData {
     pub(crate) fn refresh_proxy_snapshot(&mut self, app_type: &AppType) -> Result<(), AppError> {
         self.proxy = load_proxy_snapshot(app_type)?;
         Ok(())
+    }
+
+    // This method is called repeatedly during editing.
+    // The ProvidersSnapshot in UiData never change, so it is safe to cache the existing_provider_ids.
+    // However, the tests relied on a mutable and ProvidersSnapshot in UiData,
+    // so keep it re-computed every time for simplicity.
+    // If performance becomes an issue, we can refactor the tests to allow caching the existing_provider_ids.
+    pub(crate) fn existing_provider_ids(&self) -> Vec<String> {
+        let mut ids = self
+            .providers
+            .rows
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<HashSet<_>>();
+        ids.extend(self.providers.live_ids.iter().cloned());
+        ids.into_iter().collect()
     }
 }
 
@@ -692,7 +710,18 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
         rows
     };
 
-    Ok(ProvidersSnapshot { current_id, rows })
+    let live_ids = match app_type {
+        AppType::OpenCode => opencode_live_ids,
+        AppType::Hermes => hermes_live_ids,
+        AppType::OpenClaw => openclaw_live_providers.keys().cloned().collect(),
+        _ => HashSet::new(),
+    };
+
+    Ok(ProvidersSnapshot {
+        current_id,
+        rows,
+        live_ids,
+    })
 }
 
 fn sort_providers(providers: &IndexMap<String, Provider>) -> Vec<(String, Provider)> {
@@ -1131,6 +1160,12 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
             .map(|target| ProxyTargetSnapshot {
                 provider_name: target.provider_name.clone(),
             });
+        let active_worker_apps = runtime_status
+            .active_workers
+            .iter()
+            .map(|worker| worker.app_type.trim().to_ascii_lowercase())
+            .filter(|app| !app.is_empty())
+            .collect::<HashSet<_>>();
         let listen_address = if runtime_status.address.trim().is_empty() {
             config.listen_address.clone()
         } else {
@@ -1139,7 +1174,7 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
         let listen_port = runtime_status
             .active_workers
             .iter()
-            .find(|worker| worker.app_type == current_app)
+            .find(|worker| worker.app_type.eq_ignore_ascii_case(&current_app))
             .map(|worker| worker.port)
             .or_else(|| (runtime_status.port != 0).then_some(runtime_status.port))
             .unwrap_or(configured_listen_port);
@@ -1156,6 +1191,7 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
             running: runtime_status.running,
             managed_runtime: runtime_status.managed_session_token.is_some()
                 || !runtime_status.active_workers.is_empty(),
+            active_worker_apps,
             auto_failover_enabled: app_proxy_config.auto_failover_enabled,
             claude_takeover: takeover.claude,
             codex_takeover: takeover.codex,
@@ -1631,6 +1667,59 @@ mod tests {
             saved_only.api_url.as_deref(),
             Some("https://saved.example.com/v1")
         );
+        assert!(snapshot.live_ids.contains("in-config"));
+    }
+
+    #[test]
+    #[serial]
+    fn existing_provider_ids_includes_opencode_live_only_ids() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let opencode_dir = temp.path().join("opencode");
+        std::fs::create_dir_all(&opencode_dir).expect("create opencode dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_opencode_dir(&opencode_dir);
+
+        crate::opencode_config::set_provider(
+            "live-only",
+            json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "baseURL": "https://live.example.com/v1"
+                },
+                "models": {
+                    "main": {"name": "Main"}
+                }
+            }),
+        )
+        .expect("seed live opencode provider");
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenCode)
+                .expect("opencode manager");
+            manager.providers.insert(
+                "saved-only".to_string(),
+                Provider::with_id(
+                    "saved-only".to_string(),
+                    "Saved Only".to_string(),
+                    json!({
+                        "options": {
+                            "baseURL": "https://saved.example.com/v1"
+                        }
+                    }),
+                    None,
+                ),
+            );
+        }
+        state.save().expect("persist opencode providers");
+
+        let data = UiData::load(&AppType::OpenCode).expect("load opencode data");
+        let ids = data.existing_provider_ids();
+        assert!(ids.iter().any(|id| id == "saved-only"));
+        assert!(ids.iter().any(|id| id == "live-only"));
     }
 
     #[test]
@@ -1661,10 +1750,39 @@ mod tests {
             Some(true)
         );
 
+        let managed_worker_active = ProxySnapshot {
+            running: true,
+            managed_runtime: true,
+            active_worker_apps: HashSet::from([AppType::Claude.as_str().to_string()]),
+            claude_takeover: false,
+            ..ProxySnapshot::default()
+        };
+        assert_eq!(
+            managed_worker_active.routes_current_app_through_proxy(&AppType::Claude),
+            Some(false)
+        );
+        assert_eq!(
+            managed_worker_active.routes_current_app_through_proxy(&AppType::Codex),
+            Some(false)
+        );
+
+        let worker_for_another_app = ProxySnapshot {
+            running: true,
+            managed_runtime: true,
+            active_worker_apps: HashSet::from([AppType::Codex.as_str().to_string()]),
+            claude_takeover: false,
+            ..ProxySnapshot::default()
+        };
+        assert_eq!(
+            worker_for_another_app.routes_current_app_through_proxy(&AppType::Claude),
+            Some(false)
+        );
+
         let stopped = ProxySnapshot {
             running: false,
             managed_runtime: true,
             claude_takeover: true,
+            active_worker_apps: HashSet::from([AppType::Claude.as_str().to_string()]),
             ..ProxySnapshot::default()
         };
         assert_eq!(

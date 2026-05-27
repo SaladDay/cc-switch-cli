@@ -30,7 +30,7 @@ pub trait Handler: Send + Sync + 'static {
 /// Bind a Unix domain socket at `path`, removing any stale entry first.
 pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        super::super::paths::ensure_private_runtime_dir(parent)?;
     }
     // Remove any leftover socket from a previous (now-dead) daemon. We only
     // reach this code path after pidfile acquisition has confirmed no other
@@ -38,7 +38,9 @@ pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
     if path.exists() {
         let _ = std::fs::remove_file(path);
     }
-    UnixListener::bind(path)
+    let listener = UnixListener::bind(path)?;
+    super::super::paths::set_private_runtime_socket_permissions(path)?;
+    Ok(listener)
 }
 
 /// Run the accept loop until `shutdown` resolves.
@@ -150,11 +152,12 @@ mod tests {
             match request {
                 Request::Status => Response::Ok,
                 Request::Shutdown => Response::Ok,
-                Request::EnsureWorker { app_type } => Response::Worker {
+                Request::EnsureWorker { app_type, .. } => Response::Worker {
                     address: format!("addr-for-{app_type}"),
                     port: 1,
                     session_token: "tok".into(),
                     pid: 42,
+                    started_at: None,
                 },
                 _ => Response::Error {
                     message: "unsupported in echo".into(),
@@ -182,6 +185,7 @@ mod tests {
         let mut stream = UnixStream::connect(&sock).await.expect("connect");
         let req = serde_json::to_string(&Request::EnsureWorker {
             app_type: "claude".into(),
+            fallback_provider_id: None,
         })
         .unwrap();
         stream
@@ -200,6 +204,33 @@ mod tests {
 
         let _ = shutdown_tx.send(());
         server.await.expect("server task join");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_creates_private_runtime_dir_and_socket() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let runtime = tmp.path().join("runtime");
+        let sock = runtime.join("daemon.sock");
+
+        let listener = bind(&sock).expect("bind");
+
+        let dir_mode = std::fs::metadata(&runtime)
+            .expect("read runtime dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let socket_mode = std::fs::metadata(&sock)
+            .expect("read socket metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(socket_mode, 0o600);
+        drop(listener);
     }
 
     #[tokio::test]

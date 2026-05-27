@@ -1,10 +1,44 @@
-use crate::proxy::error::ProxyError;
+use crate::proxy::{error::ProxyError, json_canonical::canonical_json_string};
 use serde_json::{json, Value};
+
+pub(crate) fn sanitize_anthropic_tool_use_input(name: &str, input: Value) -> Value {
+    if name != "Read" {
+        return input;
+    }
+
+    match input {
+        Value::Object(mut object) => {
+            if object
+                .get("pages")
+                .and_then(Value::as_str)
+                .is_some_and(|pages| pages.trim().is_empty())
+            {
+                object.remove("pages");
+            }
+            Value::Object(object)
+        }
+        other => other,
+    }
+}
+
+pub(crate) fn sanitize_anthropic_tool_use_input_json(name: &str, raw: &str) -> String {
+    if name != "Read" || raw.is_empty() {
+        return raw.to_string();
+    }
+
+    let Ok(input) = serde_json::from_str::<Value>(raw) else {
+        return raw.to_string();
+    };
+
+    serde_json::to_string(&sanitize_anthropic_tool_use_input(name, input))
+        .unwrap_or_else(|_| raw.to_string())
+}
 
 pub fn anthropic_to_responses(
     body: Value,
     cache_key: Option<&str>,
     is_codex_oauth: bool,
+    codex_fast_mode: bool,
 ) -> Result<Value, ProxyError> {
     let mut result = json!({});
 
@@ -14,17 +48,13 @@ pub fn anthropic_to_responses(
 
     if let Some(system) = body.get("system") {
         let instructions = if let Some(text) = system.as_str() {
-            super::transform::sanitize_system_text(text)
-                .map(|text| text.into_owned())
-                .unwrap_or_default()
+            super::transform::strip_leading_anthropic_billing_header(text).to_string()
         } else if let Some(arr) = system.as_array() {
             arr.iter()
-                .filter_map(|msg| {
-                    msg.get("text")
-                        .and_then(|t| t.as_str())
-                        .and_then(super::transform::sanitize_system_text)
-                        .map(|text| text.into_owned())
-                })
+                .filter_map(|msg| msg.get("text").and_then(|t| t.as_str()))
+                .map(super::transform::strip_leading_anthropic_billing_header)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
                 .collect::<Vec<_>>()
                 .join("\n\n")
         } else {
@@ -92,6 +122,9 @@ pub fn anthropic_to_responses(
 
     if is_codex_oauth {
         result["store"] = json!(false);
+        if codex_fast_mode {
+            result["service_tier"] = json!("priority");
+        }
 
         const REASONING_MARKER: &str = "reasoning.encrypted_content";
         let mut includes: Vec<Value> = body
@@ -181,8 +214,16 @@ pub(crate) fn build_anthropic_usage_from_responses(usage: Option<&Value>) -> Val
         }
     };
 
-    let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let input = u
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| u.get("prompt_tokens").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    let output = u
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| u.get("completion_tokens").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
 
     let mut result = json!({
         "input_tokens": input,
@@ -284,7 +325,7 @@ fn convert_messages_to_input(messages: &[Value]) -> Result<Vec<Value>, ProxyErro
                                 "type": "function_call",
                                 "call_id": id,
                                 "name": name,
-                                "arguments": serde_json::to_string(&arguments).unwrap_or_default()
+                                "arguments": canonical_json_string(&arguments)
                             }));
                         }
                         "tool_result" => {
@@ -302,7 +343,7 @@ fn convert_messages_to_input(messages: &[Value]) -> Result<Vec<Value>, ProxyErro
                                 .unwrap_or("");
                             let output = match block.get("content") {
                                 Some(Value::String(s)) => s.clone(),
-                                Some(v) => serde_json::to_string(v).unwrap_or_default(),
+                                Some(v) => canonical_json_string(v),
                                 None => String::new(),
                             };
 
@@ -374,6 +415,7 @@ pub fn responses_to_anthropic(body: Value) -> Result<Value, ProxyError> {
                     .and_then(|a| a.as_str())
                     .unwrap_or("{}");
                 let input: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
+                let input = sanitize_anthropic_tool_use_input(name, input);
 
                 content.push(json!({
                     "type": "tool_use",
@@ -438,7 +480,8 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}]
         });
 
-        let result = anthropic_to_responses(input, None, false).expect("transform responses");
+        let result =
+            anthropic_to_responses(input, None, false, false).expect("transform responses");
 
         assert_eq!(result["instructions"], json!("You are helpful."));
     }
@@ -454,7 +497,8 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}]
         });
 
-        let result = anthropic_to_responses(input, None, false).expect("transform responses");
+        let result =
+            anthropic_to_responses(input, None, false, false).expect("transform responses");
 
         assert_eq!(result["instructions"], json!("Project instructions"));
     }
@@ -470,9 +514,27 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}]
         });
 
-        let result = anthropic_to_responses(input, None, false).expect("transform responses");
+        let result =
+            anthropic_to_responses(input, None, false, false).expect("transform responses");
 
         assert!(result.get("instructions").is_none());
+    }
+
+    #[test]
+    fn anthropic_to_responses_keeps_non_leading_billing_header_text() {
+        let input = json!({
+            "model": "gpt-5",
+            "system": "Keep this literal:\nx-anthropic-billing-header: example",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result =
+            anthropic_to_responses(input, None, false, false).expect("transform responses");
+
+        assert_eq!(
+            result["instructions"],
+            json!("Keep this literal:\nx-anthropic-billing-header: example")
+        );
     }
 
     #[test]
@@ -483,9 +545,10 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}]
         });
 
-        let result = anthropic_to_responses(input, None, true).expect("transform responses");
+        let result = anthropic_to_responses(input, None, true, true).expect("transform responses");
 
         assert_eq!(result["store"], json!(false));
+        assert_eq!(result["service_tier"], json!("priority"));
         assert_eq!(result["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(result["instructions"], json!(""));
         assert_eq!(result["tools"], json!([]));
@@ -503,7 +566,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}]
         });
 
-        let result = anthropic_to_responses(input, None, true).expect("transform responses");
+        let result = anthropic_to_responses(input, None, true, true).expect("transform responses");
 
         assert!(result.get("max_output_tokens").is_none());
         assert!(result.get("temperature").is_none());
@@ -520,12 +583,14 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}]
         });
 
-        let result = anthropic_to_responses(input, None, false).expect("transform responses");
+        let result =
+            anthropic_to_responses(input, None, false, false).expect("transform responses");
 
         assert_eq!(result["max_output_tokens"], json!(1024));
         assert_eq!(result["temperature"], json!(0.7));
         assert_eq!(result["top_p"], json!(0.9));
         assert!(result.get("store").is_none());
+        assert!(result.get("service_tier").is_none());
     }
 
     #[test]
@@ -537,8 +602,131 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}]
         });
 
-        let result = anthropic_to_responses(input, None, false).expect("transform responses");
+        let result =
+            anthropic_to_responses(input, None, false, false).expect("transform responses");
 
         assert_eq!(result["reasoning"]["effort"], json!("xhigh"));
+    }
+
+    #[test]
+    fn anthropic_to_responses_codex_oauth_fast_mode_can_be_disabled() {
+        let input = json!({
+            "model": "gpt-5-codex",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_responses(input, None, true, false).expect("transform responses");
+
+        assert_eq!(result["store"], json!(false));
+        assert_eq!(result["include"], json!(["reasoning.encrypted_content"]));
+        assert!(result.get("service_tier").is_none());
+    }
+
+    #[test]
+    fn responses_to_anthropic_read_tool_drops_empty_pages() {
+        let input = json!({
+            "id": "resp_read",
+            "status": "completed",
+            "model": "gpt-5.4",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_read",
+                "name": "Read",
+                "arguments": "{\"file_path\":\"/tmp/demo.py\",\"limit\":2000,\"offset\":0,\"pages\":\"\"}"
+            }]
+        });
+
+        let result = responses_to_anthropic(input).expect("transform responses");
+
+        assert_eq!(result["content"][0]["type"], "tool_use");
+        assert_eq!(result["content"][0]["name"], "Read");
+        assert!(result["content"][0]["input"].get("pages").is_none());
+    }
+
+    #[test]
+    fn responses_to_anthropic_read_tool_preserves_non_empty_pages() {
+        let input = json!({
+            "id": "resp_read",
+            "status": "completed",
+            "model": "gpt-5.4",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_read",
+                "name": "Read",
+                "arguments": "{\"file_path\":\"/tmp/example.pdf\",\"pages\":\"1-3\"}"
+            }]
+        });
+
+        let result = responses_to_anthropic(input).expect("transform responses");
+
+        assert_eq!(
+            result["content"][0]["input"],
+            json!({"file_path": "/tmp/example.pdf", "pages": "1-3"})
+        );
+    }
+
+    #[test]
+    fn responses_to_anthropic_does_not_sanitize_non_read_tool_pages() {
+        let input = json!({
+            "id": "resp_1",
+            "status": "completed",
+            "model": "gpt-5.4",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_other",
+                "name": "OtherTool",
+                "arguments": "{\"pages\":\"\"}"
+            }]
+        });
+
+        let result = responses_to_anthropic(input).expect("transform responses");
+
+        assert_eq!(result["content"][0]["input"], json!({"pages": ""}));
+    }
+
+    #[test]
+    fn responses_usage_uses_openai_field_name_fallbacks() {
+        let result = build_anthropic_usage_from_responses(Some(&json!({
+            "prompt_tokens": 120,
+            "completion_tokens": 45
+        })));
+
+        assert_eq!(result["input_tokens"], json!(120));
+        assert_eq!(result["output_tokens"], json!(45));
+    }
+
+    #[test]
+    fn responses_usage_prefers_anthropic_field_names() {
+        let result = build_anthropic_usage_from_responses(Some(&json!({
+            "input_tokens": 100,
+            "prompt_tokens": 120,
+            "output_tokens": 50,
+            "completion_tokens": 45
+        })));
+
+        assert_eq!(result["input_tokens"], json!(100));
+        assert_eq!(result["output_tokens"], json!(50));
+    }
+
+    #[test]
+    fn anthropic_to_responses_tool_arguments_are_canonical() {
+        let input = json!({
+            "model": "gpt-5.4",
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "tool",
+                    "input": {"b": 2, "a": 1}
+                }]
+            }]
+        });
+
+        let result =
+            anthropic_to_responses(input, None, false, false).expect("transform responses");
+
+        assert_eq!(result["input"][0]["arguments"], "{\"a\":1,\"b\":2}");
     }
 }

@@ -114,6 +114,30 @@ impl CodexOAuthService {
         .await
     }
 
+    pub async fn get_models(
+        account_id: Option<&str>,
+    ) -> Result<Vec<crate::services::FetchedModel>, String> {
+        let manager = Self::manager();
+        let resolved_account_id = match account_id
+            .map(str::trim)
+            .filter(|account_id| !account_id.is_empty())
+        {
+            Some(account_id) => Some(account_id.to_string()),
+            None => manager.default_account_id().await,
+        };
+
+        let Some(account_id) = resolved_account_id else {
+            return Err("No ChatGPT account available".to_string());
+        };
+
+        let token = manager
+            .get_valid_token_for_account(&account_id)
+            .await
+            .map_err(|error| format!("Codex OAuth token unavailable: {error}"))?;
+
+        crate::services::codex_oauth_models::fetch_models_with_token(&token, &account_id).await
+    }
+
     #[cfg(test)]
     pub(crate) async fn seed_account_for_tests(
         account_id: &str,
