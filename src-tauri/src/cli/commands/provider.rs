@@ -452,10 +452,7 @@ fn duplicate_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
 
     println!(
         "{}",
-        success(&format!(
-            "✓ Duplicated provider '{}' as '{}'",
-            id, duplicate.id
-        ))
+        success(&texts::provider_duplicated_success(id, &duplicate.id))
     );
     Ok(())
 }

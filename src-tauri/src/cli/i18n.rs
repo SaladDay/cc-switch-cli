@@ -194,6 +194,17 @@ pub mod texts {
         }
     }
 
+    pub fn provider_duplicated_success(source_id: &str, duplicate_id: &str) -> String {
+        if is_chinese() {
+            format!("✓ 已复制供应商 '{}' 为 '{}'", source_id, duplicate_id)
+        } else {
+            format!(
+                "✓ Duplicated provider '{}' as '{}'",
+                source_id, duplicate_id
+            )
+        }
+    }
+
     pub fn entity_not_found(entity_type: &str, id: &str) -> String {
         if is_chinese() {
             format!("{}不存在: {}", entity_type, id)
@@ -9987,6 +9998,10 @@ mod tests {
     fn chinese_tui_copy_avoids_key_mixed_english_labels() {
         let _lang = use_test_language(Language::Chinese);
 
+        assert_eq!(
+            texts::provider_duplicated_success("source", "source-copy"),
+            "✓ 已复制供应商 'source' 为 'source-copy'"
+        );
         assert_eq!(texts::tui_home_section_connection(), "连接信息");
         assert_eq!(texts::tui_home_status_online(), "在线");
         assert_eq!(texts::tui_home_status_offline(), "离线");
