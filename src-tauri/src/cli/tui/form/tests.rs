@@ -2980,10 +2980,11 @@ fn provider_copy_form_uses_new_record_identity_without_queue_state() {
     let copied = form.to_provider_json_value();
 
     assert!(matches!(form.mode, FormMode::Add));
+    assert_eq!(form.copy_source_id.as_deref(), Some("test-provider"));
     assert_eq!(copied["id"], "test-provider-copy-1");
     assert_eq!(copied["name"], "Test Provider copy");
     assert!(copied.get("createdAt").is_none());
-    assert!(copied.get("sortIndex").is_none());
+    assert_eq!(copied["sortIndex"], 7);
     assert!(copied.get("inFailoverQueue").is_none());
     assert_eq!(
         copied["settingsConfig"]["env"]["ANTHROPIC_AUTH_TOKEN"],

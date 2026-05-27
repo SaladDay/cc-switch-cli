@@ -611,6 +611,7 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
     UiData {
         providers: ProvidersSnapshot {
             current_id: "p0".to_string(),
+            live_ids: Default::default(),
             rows: vec![ProviderRow {
                 id: "p1".to_string(),
                 provider,

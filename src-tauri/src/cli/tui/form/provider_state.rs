@@ -96,6 +96,7 @@ impl ProviderAddFormState {
         let mut form = Self {
             app_type,
             mode: FormMode::Add,
+            copy_source_id: None,
             focus: FormFocus::Templates,
             page: ProviderFormPage::Main,
             template_idx: 0,
@@ -224,11 +225,12 @@ impl ProviderAddFormState {
     ) -> Self {
         let mut form = Self::from_provider_with_common_snippet(app_type, provider, common_snippet);
         form.mode = FormMode::Add;
+        form.copy_source_id = Some(provider.id.clone());
         form.id_is_manual = false;
         form.name.set(format!("{} copy", provider.name.trim()));
         // Remove fields that should be unique or not copied over
         if let Some(extra) = form.extra.as_object_mut() {
-            for key in ["id", "createdAt", "sortIndex", "inFailoverQueue"] {
+            for key in ["id", "createdAt", "inFailoverQueue"] {
                 extra.remove(key);
             }
         }

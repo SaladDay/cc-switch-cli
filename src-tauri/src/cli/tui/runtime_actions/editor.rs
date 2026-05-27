@@ -751,6 +751,10 @@ fn submit_provider_add(
             return Ok(());
         }
     };
+    let copy_source_id = match ctx.app.form.as_ref() {
+        Some(FormState::ProviderAdd(form)) => form.copy_source_id.clone(),
+        _ => None,
+    };
 
     if let Some(message) = validate_provider_submit(&ctx.app.app_type, &provider, false) {
         ctx.app.push_toast(message, ToastKind::Warning);
@@ -778,7 +782,19 @@ fn submit_provider_add(
     };
     provider.id = provider_id;
 
-    match ProviderService::add(&state, ctx.app.app_type.clone(), provider) {
+    let result = if let Some(copy_source_id) = copy_source_id {
+        ProviderService::duplicate(
+            &state,
+            ctx.app.app_type.clone(),
+            &copy_source_id,
+            Some(provider),
+        )
+        .map(|_| true)
+    } else {
+        ProviderService::add(&state, ctx.app.app_type.clone(), provider)
+    };
+
+    match result {
         Ok(true) => {
             ctx.app.editor = None;
             ctx.app.form = None;

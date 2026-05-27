@@ -169,6 +169,7 @@ impl QuotaSnapshot {
 pub struct ProvidersSnapshot {
     pub current_id: String,
     pub rows: Vec<ProviderRow>,
+    pub live_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -372,11 +373,14 @@ impl UiData {
     // so keep it re-computed every time for simplicity.
     // If performance becomes an issue, we can refactor the tests to allow caching the existing_provider_ids.
     pub(crate) fn existing_provider_ids(&self) -> Vec<String> {
-        self.providers
+        let mut ids = self
+            .providers
             .rows
             .iter()
             .map(|row| row.id.clone())
-            .collect()
+            .collect::<HashSet<_>>();
+        ids.extend(self.providers.live_ids.iter().cloned());
+        ids.into_iter().collect()
     }
 }
 
@@ -705,7 +709,18 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
         rows
     };
 
-    Ok(ProvidersSnapshot { current_id, rows })
+    let live_ids = match app_type {
+        AppType::OpenCode => opencode_live_ids,
+        AppType::Hermes => hermes_live_ids,
+        AppType::OpenClaw => openclaw_live_providers.keys().cloned().collect(),
+        _ => HashSet::new(),
+    };
+
+    Ok(ProvidersSnapshot {
+        current_id,
+        rows,
+        live_ids,
+    })
 }
 
 fn sort_providers(providers: &IndexMap<String, Provider>) -> Vec<(String, Provider)> {
@@ -1644,6 +1659,59 @@ mod tests {
             saved_only.api_url.as_deref(),
             Some("https://saved.example.com/v1")
         );
+        assert!(snapshot.live_ids.contains("in-config"));
+    }
+
+    #[test]
+    #[serial]
+    fn existing_provider_ids_includes_opencode_live_only_ids() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let opencode_dir = temp.path().join("opencode");
+        std::fs::create_dir_all(&opencode_dir).expect("create opencode dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_opencode_dir(&opencode_dir);
+
+        crate::opencode_config::set_provider(
+            "live-only",
+            json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "baseURL": "https://live.example.com/v1"
+                },
+                "models": {
+                    "main": {"name": "Main"}
+                }
+            }),
+        )
+        .expect("seed live opencode provider");
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenCode)
+                .expect("opencode manager");
+            manager.providers.insert(
+                "saved-only".to_string(),
+                Provider::with_id(
+                    "saved-only".to_string(),
+                    "Saved Only".to_string(),
+                    json!({
+                        "options": {
+                            "baseURL": "https://saved.example.com/v1"
+                        }
+                    }),
+                    None,
+                ),
+            );
+        }
+        state.save().expect("persist opencode providers");
+
+        let data = UiData::load(&AppType::OpenCode).expect("load opencode data");
+        let ids = data.existing_provider_ids();
+        assert!(ids.iter().any(|id| id == "saved-only"));
+        assert!(ids.iter().any(|id| id == "live-only"));
     }
 
     #[test]

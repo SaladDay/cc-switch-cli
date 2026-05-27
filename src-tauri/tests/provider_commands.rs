@@ -278,15 +278,26 @@ fn provider_duplicate_persists_distinct_copy_and_skips_transient_state() {
         });
 
         manager.providers.insert(original.id.clone(), original);
-        manager.providers.insert(
-            "provider-one-copy".to_string(),
-            Provider::with_id(
+        manager.providers.insert("provider-one-copy".to_string(), {
+            let mut provider = Provider::with_id(
                 "provider-one-copy".to_string(),
                 "Existing Copy".to_string(),
                 json!({}),
                 None,
-            ),
-        );
+            );
+            provider.sort_index = Some(8);
+            provider
+        });
+        manager.providers.insert("later-provider".to_string(), {
+            let mut provider = Provider::with_id(
+                "later-provider".to_string(),
+                "Later Provider".to_string(),
+                json!({}),
+                None,
+            );
+            provider.sort_index = Some(9);
+            provider
+        });
     }
 
     let state = state_from_config(config);
@@ -312,7 +323,7 @@ fn provider_duplicate_persists_distinct_copy_and_skips_transient_state() {
         .expect("original provider remains");
     let copied = manager
         .providers
-        .get("provider-one-copy-1")
+        .get("provider-one-copy-2")
         .expect("copy uses a collision-free id");
 
     assert_eq!(original.name, "Provider One");
@@ -326,9 +337,118 @@ fn provider_duplicate_persists_distinct_copy_and_skips_transient_state() {
             .and_then(|meta| meta.endpoint_auto_select),
         Some(true)
     );
-    assert_eq!(copied.created_at, None);
-    assert_eq!(copied.sort_index, None);
+    assert!(copied.created_at.is_some());
+    assert_eq!(copied.sort_index, Some(8));
     assert!(!copied.in_failover_queue);
+    assert_eq!(
+        manager
+            .providers
+            .get("provider-one-copy")
+            .and_then(|provider| provider.sort_index),
+        Some(9)
+    );
+    assert_eq!(
+        manager
+            .providers
+            .get("later-provider")
+            .and_then(|provider| provider.sort_index),
+        Some(10)
+    );
+}
+
+#[test]
+#[serial]
+fn provider_duplicate_opencode_skips_live_write_and_avoids_live_only_id() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let live_path = home.join(".config").join("opencode").join("opencode.json");
+    std::fs::create_dir_all(live_path.parent().expect("live config parent"))
+        .expect("create opencode config dir");
+    std::fs::write(
+        &live_path,
+        serde_json::to_string_pretty(&json!({
+            "provider": {
+                "provider-one-copy": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {
+                        "baseURL": "https://live.example",
+                        "apiKey": "sk-live"
+                    },
+                    "models": {
+                        "live-model": { "name": "Live Model" }
+                    }
+                }
+            }
+        }))
+        .expect("serialize live opencode config"),
+    )
+    .expect("seed live opencode config");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenCode)
+            .expect("opencode manager");
+        manager.providers.insert(
+            "provider-one".to_string(),
+            Provider::with_id(
+                "provider-one".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {
+                        "baseURL": "https://one.example",
+                        "apiKey": "sk-one"
+                    },
+                    "models": {
+                        "model-one": { "name": "Model One" }
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
+            id: "provider-one".to_string(),
+        },
+        Some(AppType::OpenCode),
+    )
+    .expect("duplicate command should succeed");
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    let config = refreshed.config.read().expect("lock provider state");
+    let manager = config
+        .get_manager(&AppType::OpenCode)
+        .expect("opencode manager after duplicate");
+    let copied = manager
+        .providers
+        .get("provider-one-copy-2")
+        .expect("copy should avoid live-only id");
+
+    assert_eq!(
+        copied
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.live_config_managed),
+        Some(false)
+    );
+
+    let live_config: serde_json::Value =
+        read_json_file(&live_path).expect("read opencode live config");
+    let live_providers = live_config
+        .get("provider")
+        .and_then(|value| value.as_object())
+        .expect("live provider map");
+    assert!(live_providers.contains_key("provider-one-copy"));
+    assert!(!live_providers.contains_key("provider-one-copy-2"));
 }
 
 #[test]
