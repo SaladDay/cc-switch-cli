@@ -221,12 +221,36 @@ impl ProviderService {
         }
 
         let settings_path = get_claude_settings_path();
-        let content_to_write = Self::build_effective_live_snapshot(
+
+        // Build the provider's effective settings (env vars)
+        let provider_settings = Self::build_effective_live_snapshot(
             &AppType::Claude,
             provider,
             common_config_snippet,
             apply_common_config,
         )?;
+
+        // Merge provider fields into existing settings. Provider fields (env,
+        // workspace, etc.) replace their existing counterparts, while fields that
+        // the provider does NOT manage (permissions, hooks, plugin state) are
+        // preserved. This keeps Claude Code plugins working across provider switches.
+        let content_to_write = if settings_path.exists() {
+            match read_json_file::<Value>(&settings_path) {
+                Ok(mut existing) => {
+                    if let Some(provider_obj) = provider_settings.as_object() {
+                        if let Some(existing_obj) = existing.as_object_mut() {
+                            for (key, value) in provider_obj {
+                                existing_obj.insert(key.clone(), value.clone());
+                            }
+                        }
+                    }
+                    existing
+                }
+                Err(_) => provider_settings,
+            }
+        } else {
+            provider_settings
+        };
 
         write_json_file(&settings_path, &content_to_write)?;
         Ok(())

@@ -603,6 +603,107 @@ fn switch_provider_updates_claude_live_and_state() {
 }
 
 #[test]
+#[serial]
+fn switch_provider_preserves_non_env_settings_in_claude_live() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let settings_path = get_claude_settings_path();
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).expect("create claude settings dir");
+    }
+
+    // Seed settings.json with env + extra fields that plugins/Claude Code depend on
+    let legacy_live = json!({
+        "env": {
+            "ANTHROPIC_API_KEY": "legacy-key"
+        },
+        "permissions": {
+            "allow": ["Bash", "Read", "Write"]
+        },
+        "hooks": {
+            "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "echo ok"}]}]
+        },
+        "skipDangerousModePermissionPrompt": true
+    });
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&legacy_live).expect("serialize legacy live"),
+    )
+    .expect("seed claude live config");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Legacy".to_string(),
+                json!({ "env": { "ANTHROPIC_API_KEY": "stale-key" } }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "Fresh".to_string(),
+                json!({ "env": { "ANTHROPIC_API_KEY": "fresh-key" } }),
+                None,
+            ),
+        );
+    }
+    let app_state = state_from_config(config);
+
+    ProviderService::switch(&app_state, AppType::Claude, "new-provider")
+        .expect("switch provider should succeed");
+
+    let live_after: serde_json::Value =
+        read_json_file(&settings_path).expect("read claude live settings");
+
+    // env should reflect the new provider
+    assert_eq!(
+        live_after
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|key| key.as_str()),
+        Some("fresh-key"),
+        "live settings.json should reflect new provider auth"
+    );
+
+    // Non-env fields that the provider does NOT manage must be preserved
+    assert!(
+        live_after.get("permissions").is_some(),
+        "permissions must be preserved across provider switch"
+    );
+    assert_eq!(
+        live_after
+            .get("permissions")
+            .and_then(|p| p.get("allow"))
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+        Some(vec!["Bash", "Read", "Write"]),
+        "permissions content must be preserved"
+    );
+    assert!(
+        live_after.get("hooks").is_some(),
+        "hooks must be preserved across provider switch"
+    );
+    assert_eq!(
+        live_after
+            .get("skipDangerousModePermissionPrompt")
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "skipDangerousModePermissionPrompt must be preserved"
+    );
+}
+
+#[test]
 fn switch_provider_codex_rejects_missing_auth() {
     let _guard = lock_test_mutex();
     reset_test_fs();
