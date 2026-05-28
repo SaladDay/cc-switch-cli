@@ -86,6 +86,7 @@ impl PersistedProxyRuntimeSessionKind {
         }
     }
 
+    #[cfg(test)]
     fn as_env_value(&self) -> &'static str {
         match self {
             Self::Foreground => "foreground",
@@ -913,6 +914,7 @@ impl ProxyService {
         None
     }
 
+    #[cfg(unix)]
     fn proxy_status_from_daemon_response(
         response: crate::daemon::ipc::protocol::Response,
     ) -> Option<ProxyStatus> {
@@ -2624,6 +2626,7 @@ impl ProxyService {
         false
     }
 
+    #[cfg(test)]
     async fn managed_session_ready_info(
         &self,
         child_pid: u32,
@@ -2758,6 +2761,7 @@ impl ProxyService {
         }
     }
 
+    #[allow(dead_code)]
     fn spawn_managed_child_reaper(mut child: std::process::Child) {
         tokio::task::spawn_blocking(move || {
             let _ = child.wait();
@@ -2909,6 +2913,7 @@ mod tests {
             .expect("queue failover provider");
     }
 
+    #[cfg(unix)]
     #[test]
     fn daemon_status_snapshot_maps_workers_to_proxy_status() {
         let status = ProxyService::proxy_status_from_daemon_response(

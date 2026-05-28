@@ -9,6 +9,7 @@ use crate::error::AppError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct McpStatus {
     pub user_config_path: String,
     pub user_config_exists: bool,
@@ -79,6 +80,7 @@ fn write_json_value(path: &Path, value: &Value) -> Result<(), AppError> {
     atomic_write(path, json.as_bytes())
 }
 
+#[allow(dead_code)]
 pub fn get_mcp_status() -> Result<McpStatus, AppError> {
     let path = user_config_path();
     let (exists, count) = if path.exists() {
@@ -154,6 +156,7 @@ pub fn clear_has_completed_onboarding() -> Result<bool, AppError> {
     Ok(true)
 }
 
+#[allow(dead_code)]
 pub fn upsert_mcp_server(id: &str, spec: Value) -> Result<bool, AppError> {
     if id.trim().is_empty() {
         return Err(AppError::InvalidInput("MCP 服务器 ID 不能为空".into()));
@@ -226,6 +229,7 @@ pub fn upsert_mcp_server(id: &str, spec: Value) -> Result<bool, AppError> {
     Ok(true)
 }
 
+#[allow(dead_code)]
 pub fn delete_mcp_server(id: &str) -> Result<bool, AppError> {
     if id.trim().is_empty() {
         return Err(AppError::InvalidInput("MCP 服务器 ID 不能为空".into()));
@@ -246,6 +250,7 @@ pub fn delete_mcp_server(id: &str) -> Result<bool, AppError> {
     Ok(true)
 }
 
+#[allow(dead_code)]
 pub fn validate_command_in_path(cmd: &str) -> Result<bool, AppError> {
     if cmd.trim().is_empty() {
         return Ok(false);

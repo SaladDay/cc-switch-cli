@@ -5,7 +5,7 @@ use std::net::TcpListener;
 
 use cc_switch_lib::{
     get_claude_settings_path, get_codex_auth_path, get_codex_config_path, read_json_file,
-    write_codex_live_atomic, AppType, McpApps, McpServer, MultiAppConfig, Provider,
+    write_codex_live_atomic, AppType, McpApps, McpServer, MultiAppConfig, Provider, ProviderMeta,
     ProviderService,
 };
 
@@ -246,6 +246,304 @@ fn provider_export_rejects_non_claude_apps() {
         err.to_string().contains("supports only Claude"),
         "error should explain Claude-only support"
     );
+}
+
+#[test]
+#[serial]
+fn provider_duplicate_persists_distinct_copy_and_skips_transient_state() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "provider-one".to_string();
+
+        let mut original = Provider::with_id(
+            "provider-one".to_string(),
+            "Provider One".to_string(),
+            json!({"env": {"ANTHROPIC_AUTH_TOKEN": "sk-original"}}),
+            Some("https://example.com".to_string()),
+        );
+        original.created_at = Some(123);
+        original.sort_index = Some(7);
+        original.notes = Some("Retain this note".to_string());
+        original.in_failover_queue = true;
+        original.meta = Some(ProviderMeta {
+            endpoint_auto_select: Some(true),
+            ..Default::default()
+        });
+
+        manager.providers.insert(original.id.clone(), original);
+        manager.providers.insert("provider-one-copy".to_string(), {
+            let mut provider = Provider::with_id(
+                "provider-one-copy".to_string(),
+                "Existing Copy".to_string(),
+                json!({}),
+                None,
+            );
+            provider.sort_index = Some(8);
+            provider
+        });
+        manager.providers.insert("later-provider".to_string(), {
+            let mut provider = Provider::with_id(
+                "later-provider".to_string(),
+                "Later Provider".to_string(),
+                json!({}),
+                None,
+            );
+            provider.sort_index = Some(9);
+            provider
+        });
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
+            id: "provider-one".to_string(),
+        },
+        Some(AppType::Claude),
+    )
+    .expect("duplicate command should succeed");
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    let config = refreshed.config.read().expect("lock provider state");
+    let manager = config
+        .get_manager(&AppType::Claude)
+        .expect("claude manager after duplicate");
+    let original = manager
+        .providers
+        .get("provider-one")
+        .expect("original provider remains");
+    let copied = manager
+        .providers
+        .get("provider-one-copy-2")
+        .expect("copy uses a collision-free id");
+
+    assert_eq!(original.name, "Provider One");
+    assert_eq!(copied.name, "Provider One copy");
+    assert_eq!(copied.settings_config, original.settings_config);
+    assert_eq!(copied.notes.as_deref(), Some("Retain this note"));
+    assert_eq!(
+        copied
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.endpoint_auto_select),
+        Some(true)
+    );
+    assert!(copied.created_at.is_some());
+    assert_eq!(copied.sort_index, Some(8));
+    assert!(!copied.in_failover_queue);
+    assert_eq!(
+        manager
+            .providers
+            .get("provider-one-copy")
+            .and_then(|provider| provider.sort_index),
+        Some(9)
+    );
+    assert_eq!(
+        manager
+            .providers
+            .get("later-provider")
+            .and_then(|provider| provider.sort_index),
+        Some(10)
+    );
+}
+
+#[test]
+#[serial]
+fn provider_duplicate_opencode_skips_live_write_and_avoids_live_only_id() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let live_path = home.join(".config").join("opencode").join("opencode.json");
+    std::fs::create_dir_all(live_path.parent().expect("live config parent"))
+        .expect("create opencode config dir");
+    std::fs::write(
+        &live_path,
+        serde_json::to_string_pretty(&json!({
+            "provider": {
+                "provider-one-copy": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {
+                        "baseURL": "https://live.example",
+                        "apiKey": "sk-live"
+                    },
+                    "models": {
+                        "live-model": { "name": "Live Model" }
+                    }
+                }
+            }
+        }))
+        .expect("serialize live opencode config"),
+    )
+    .expect("seed live opencode config");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenCode)
+            .expect("opencode manager");
+        manager.providers.insert(
+            "provider-one".to_string(),
+            Provider::with_id(
+                "provider-one".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {
+                        "baseURL": "https://one.example",
+                        "apiKey": "sk-one"
+                    },
+                    "models": {
+                        "model-one": { "name": "Model One" }
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
+            id: "provider-one".to_string(),
+        },
+        Some(AppType::OpenCode),
+    )
+    .expect("duplicate command should succeed");
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    let config = refreshed.config.read().expect("lock provider state");
+    let manager = config
+        .get_manager(&AppType::OpenCode)
+        .expect("opencode manager after duplicate");
+    let copied = manager
+        .providers
+        .get("provider-one-copy-2")
+        .expect("copy should avoid live-only id");
+
+    assert_eq!(
+        copied
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.live_config_managed),
+        Some(false)
+    );
+
+    let live_config: serde_json::Value =
+        read_json_file(&live_path).expect("read opencode live config");
+    let live_providers = live_config
+        .get("provider")
+        .and_then(|value| value.as_object())
+        .expect("live provider map");
+    assert!(live_providers.contains_key("provider-one-copy"));
+    assert!(!live_providers.contains_key("provider-one-copy-2"));
+}
+
+#[test]
+#[serial]
+fn provider_duplicate_hermes_clears_read_only_source_marker() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Hermes)
+            .expect("hermes manager");
+        manager.providers.insert(
+            "remote-provider".to_string(),
+            Provider::with_id(
+                "remote-provider".to_string(),
+                "Remote Provider".to_string(),
+                json!({
+                    "api_mode": "chat_completions",
+                    "base_url": "https://remote.example/v1",
+                    "api_key": "sk-remote",
+                    cc_switch_lib::hermes_config::PROVIDER_SOURCE_FIELD:
+                        cc_switch_lib::hermes_config::PROVIDER_SOURCE_DICT,
+                    "provider_key": "remote-provider",
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
+            id: "remote-provider".to_string(),
+        },
+        Some(AppType::Hermes),
+    )
+    .expect("duplicate command should succeed");
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    let config = refreshed.config.read().expect("lock provider state");
+    let manager = config
+        .get_manager(&AppType::Hermes)
+        .expect("hermes manager after duplicate");
+    let copied = manager
+        .providers
+        .get("remote-provider-copy")
+        .expect("copy should use source id copy suffix");
+
+    assert!(copied
+        .settings_config
+        .get(cc_switch_lib::hermes_config::PROVIDER_SOURCE_FIELD)
+        .is_none());
+    assert!(copied.settings_config.get("provider_key").is_none());
+    assert_eq!(
+        copied
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.live_config_managed),
+        Some(false)
+    );
+}
+
+#[test]
+#[serial]
+fn provider_duplicate_missing_source_returns_error_without_creating_provider() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let state = state_from_config(MultiAppConfig::default());
+    state.save().expect("persist empty test state");
+    drop(state);
+
+    let err = cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Duplicate {
+            id: "missing-provider".to_string(),
+        },
+        Some(AppType::Claude),
+    )
+    .expect_err("duplicating a missing provider should fail");
+    assert!(err.to_string().contains("missing-provider"), "{err}");
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    let config = refreshed.config.read().expect("lock provider state");
+    assert!(config
+        .get_manager(&AppType::Claude)
+        .expect("claude manager after failed duplicate")
+        .providers
+        .is_empty());
 }
 
 #[test]

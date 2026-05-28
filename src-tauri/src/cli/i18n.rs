@@ -194,6 +194,17 @@ pub mod texts {
         }
     }
 
+    pub fn provider_duplicated_success(source_id: &str, duplicate_id: &str) -> String {
+        if is_chinese() {
+            format!("✓ 已复制供应商 '{}' 为 '{}'", source_id, duplicate_id)
+        } else {
+            format!(
+                "✓ Duplicated provider '{}' as '{}'",
+                source_id, duplicate_id
+            )
+        }
+    }
+
     pub fn entity_not_found(entity_type: &str, id: &str) -> String {
         if is_chinese() {
             format!("{}不存在: {}", entity_type, id)
@@ -2798,6 +2809,47 @@ pub mod texts {
         }
     }
 
+    pub fn tui_claude_model_label_for_index(idx: usize) -> &'static str {
+        match idx {
+            0 => tui_claude_model_main_label(),
+            1 => tui_claude_reasoning_model_label(),
+            2 => tui_claude_default_haiku_model_label(),
+            3 => tui_claude_default_sonnet_model_label(),
+            4 => tui_claude_default_opus_model_label(),
+            _ => "",
+        }
+    }
+
+    pub fn tui_claude_model_fill_all_title() -> &'static str {
+        if is_chinese() {
+            "填充全部模型"
+        } else {
+            "Fill All Models"
+        }
+    }
+
+    pub fn tui_claude_model_fill_all_message(source_label: &str) -> String {
+        if is_chinese() {
+            format!(
+                "将「{}」的值填充到所有 Claude 模型字段？\n现有值将被覆盖。",
+                source_label
+            )
+        } else {
+            format!(
+                "Fill all Claude model fields from \"{}\"?\nExisting values will be overwritten.",
+                source_label
+            )
+        }
+    }
+
+    pub fn tui_claude_model_fill_all_empty_source() -> &'static str {
+        if is_chinese() {
+            "当前字段为空，无法填充"
+        } else {
+            "Selected field is empty, nothing to fill"
+        }
+    }
+
     pub fn tui_hint_press() -> &'static str {
         if is_chinese() {
             "按 "
@@ -3083,6 +3135,14 @@ pub mod texts {
             "新增"
         } else {
             "add"
+        }
+    }
+
+    pub fn tui_key_copy() -> &'static str {
+        if is_chinese() {
+            "复制"
+        } else {
+            "copy"
         }
     }
 
@@ -3499,6 +3559,14 @@ pub mod texts {
             "获取模型"
         } else {
             "fetch model"
+        }
+    }
+
+    pub fn tui_key_fill_all() -> &'static str {
+        if is_chinese() {
+            "填充全部"
+        } else {
+            "fill all"
         }
     }
 
@@ -5560,6 +5628,23 @@ pub mod texts {
             format!("确定删除供应商 '{}' ({})？", name, id)
         } else {
             format!("Delete provider '{}' ({})?", name, id)
+        }
+    }
+
+    pub fn tui_confirm_copy_provider_title() -> &'static str {
+        if is_chinese() {
+            "复制供应商"
+        } else {
+            // On the provider form we use "copy", however we use "duplicate" here to make it more clear.
+            "Duplicate(copy) Provider"
+        }
+    }
+
+    pub fn tui_confirm_copy_provider_message(name: &str, id: &str) -> String {
+        if is_chinese() {
+            format!("确定复制供应商 '{}' ({})？", name, id)
+        } else {
+            format!("Duplicate(copy) provider '{}' ({})?", name, id)
         }
     }
 
@@ -10611,6 +10696,10 @@ mod tests {
     fn chinese_tui_copy_avoids_key_mixed_english_labels() {
         let _lang = use_test_language(Language::Chinese);
 
+        assert_eq!(
+            texts::provider_duplicated_success("source", "source-copy"),
+            "✓ 已复制供应商 'source' 为 'source-copy'"
+        );
         assert_eq!(texts::tui_home_section_connection(), "连接信息");
         assert_eq!(texts::tui_home_status_online(), "在线");
         assert_eq!(texts::tui_home_status_offline(), "离线");

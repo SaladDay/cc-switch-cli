@@ -18,8 +18,8 @@ fn aicodemirror_template_index(app_type: AppType) -> usize {
     template_index_by_label(app_type, "* AICodeMirror")
 }
 
-fn rightcode_template_index(app_type: AppType) -> usize {
-    template_index_by_label(app_type, "* RightCode")
+fn cubence_template_index(app_type: AppType) -> usize {
+    template_index_by_label(app_type, "* Cubence")
 }
 
 fn dds_template_index(app_type: AppType) -> usize {
@@ -48,7 +48,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Codex",
             "* PackyCode",
             "* AICodeMirror",
-            "* RightCode",
+            "* Cubence",
             "* DDS",
         ]
     );
@@ -61,7 +61,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "OpenAI Official",
             "* PackyCode",
             "* AICodeMirror",
-            "* RightCode",
+            "* Cubence",
             "* DDS",
         ]
     );
@@ -74,22 +74,31 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Google OAuth",
             "* PackyCode",
             "* AICodeMirror",
-            "* RightCode",
+            "* Cubence",
         ]
     );
 
     let opencode_labels = ProviderAddFormState::new(AppType::OpenCode).template_labels();
-    assert_eq!(opencode_labels, vec!["Custom", "* AICodeMirror"]);
+    assert_eq!(
+        opencode_labels,
+        vec!["Custom", "* AICodeMirror", "* Cubence"]
+    );
     assert!(
-        !opencode_labels.contains(&"* PackyCode") && !opencode_labels.contains(&"* RightCode"),
-        "OpenCode should only expose the AICodeMirror sponsor preset"
+        !opencode_labels.contains(&"* PackyCode"),
+        "OpenCode should expose only explicitly supported sponsor presets"
     );
 
+    let hermes_labels = ProviderAddFormState::new(AppType::Hermes).template_labels();
+    assert_eq!(hermes_labels, vec!["Custom", "* Cubence"]);
+
     let openclaw_labels = ProviderAddFormState::new(AppType::OpenClaw).template_labels();
-    assert_eq!(openclaw_labels, vec!["Custom", "* AICodeMirror"]);
+    assert_eq!(
+        openclaw_labels,
+        vec!["Custom", "* AICodeMirror", "* Cubence"]
+    );
     assert!(
-        !openclaw_labels.contains(&"* PackyCode") && !openclaw_labels.contains(&"* RightCode"),
-        "OpenClaw should only expose the AICodeMirror sponsor preset"
+        !openclaw_labels.contains(&"* PackyCode"),
+        "OpenClaw should expose only explicitly supported sponsor presets"
     );
 }
 
@@ -229,6 +238,20 @@ fn provider_add_form_dds_preset_keeps_affiliate_register_url_in_metadata() {
 }
 
 #[test]
+fn provider_add_form_cubence_preset_keeps_affiliate_register_url_in_metadata() {
+    let claude_presets = super::provider_templates::provider_sponsor_presets(&AppType::Claude);
+    let cubence = claude_presets
+        .iter()
+        .find(|preset| preset.id() == "cubence")
+        .expect("expected Cubence sponsor preset for Claude");
+
+    assert_eq!(
+        cubence.register_url(),
+        "https://cubence.com/signup?code=SC3M1CAH&source=ccscli"
+    );
+}
+
+#[test]
 fn provider_add_form_dds_template_claude_sets_base_url_and_partner_meta() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     let existing_ids = Vec::<String>::new();
@@ -294,19 +317,19 @@ fn provider_add_form_dds_template_codex_sets_base_url_and_partner_meta() {
 }
 
 #[test]
-fn provider_add_form_rightcode_template_claude_sets_base_url_and_partner_meta() {
+fn provider_add_form_cubence_template_claude_sets_base_url_and_partner_meta() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     let existing_ids = Vec::<String>::new();
 
-    let idx = rightcode_template_index(AppType::Claude);
+    let idx = cubence_template_index(AppType::Claude);
     form.apply_template(idx, &existing_ids);
 
     let provider = form.to_provider_json_value();
-    assert_eq!(provider["name"], "RightCode");
-    assert_eq!(provider["websiteUrl"], "https://right.codes");
+    assert_eq!(provider["name"], "Cubence");
+    assert_eq!(provider["websiteUrl"], "https://cubence.com");
     assert_eq!(
         provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
-        "https://www.right.codes/claude"
+        "https://api.cubence.com"
     );
     let meta = provider["meta"]
         .as_object()
@@ -314,45 +337,120 @@ fn provider_add_form_rightcode_template_claude_sets_base_url_and_partner_meta() 
     assert_eq!(
         meta.get("isPartner").and_then(|value| value.as_bool()),
         Some(true),
-        "expected RightCode sponsor to set meta.isPartner"
+        "expected Cubence sponsor to set meta.isPartner"
     );
     assert_eq!(
         meta.get("partnerPromotionKey")
             .and_then(|value| value.as_str()),
-        Some("rightcode"),
-        "expected RightCode sponsor to set meta.partnerPromotionKey"
+        Some("cubence"),
+        "expected Cubence sponsor to set meta.partnerPromotionKey"
     );
 }
 
 #[test]
-fn provider_add_form_rightcode_template_codex_sets_base_url_and_partner_meta() {
+fn provider_add_form_cubence_template_codex_sets_base_url_and_partner_meta() {
     let mut form = ProviderAddFormState::new(AppType::Codex);
     let existing_ids = Vec::<String>::new();
 
-    let idx = rightcode_template_index(AppType::Codex);
+    let idx = cubence_template_index(AppType::Codex);
     form.apply_template(idx, &existing_ids);
 
     let provider = form.to_provider_json_value();
-    assert_eq!(provider["name"], "RightCode");
-    assert_eq!(provider["websiteUrl"], "https://right.codes");
+    assert_eq!(provider["name"], "Cubence");
+    assert_eq!(provider["websiteUrl"], "https://cubence.com");
     let cfg = provider["settingsConfig"]["config"]
         .as_str()
         .expect("settingsConfig.config should be string");
-    assert!(cfg.contains("base_url = \"https://right.codes/codex/v1\""));
+    assert!(cfg.contains("base_url = \"https://api.cubence.com/v1\""));
     let meta = provider["meta"]
         .as_object()
         .expect("meta should be an object");
     assert_eq!(
         meta.get("isPartner").and_then(|value| value.as_bool()),
         Some(true),
-        "expected RightCode sponsor to set meta.isPartner"
+        "expected Cubence sponsor to set meta.isPartner"
     );
     assert_eq!(
         meta.get("partnerPromotionKey")
             .and_then(|value| value.as_str()),
-        Some("rightcode"),
-        "expected RightCode sponsor to set meta.partnerPromotionKey"
+        Some("cubence"),
+        "expected Cubence sponsor to set meta.partnerPromotionKey"
     );
+}
+
+#[test]
+fn provider_add_form_cubence_template_gemini_sets_base_url_and_partner_meta() {
+    let mut form = ProviderAddFormState::new(AppType::Gemini);
+
+    form.apply_template(cubence_template_index(AppType::Gemini), &[]);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "Cubence");
+    assert_eq!(provider["websiteUrl"], "https://cubence.com");
+    assert_eq!(
+        provider["settingsConfig"]["env"]["GOOGLE_GEMINI_BASE_URL"],
+        "https://api.cubence.com"
+    );
+    assert_eq!(provider["meta"]["isPartner"], true);
+    assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
+}
+
+#[test]
+fn provider_add_form_cubence_template_opencode_sets_base_url_and_partner_meta() {
+    let mut form = ProviderAddFormState::new(AppType::OpenCode);
+
+    form.apply_template(cubence_template_index(AppType::OpenCode), &[]);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "Cubence");
+    assert_eq!(provider["websiteUrl"], "https://cubence.com");
+    assert_eq!(
+        provider["settingsConfig"]["npm"],
+        "@ai-sdk/openai-compatible"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["options"]["baseURL"],
+        "https://api.cubence.com/v1"
+    );
+    assert_eq!(provider["meta"]["isPartner"], true);
+    assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
+}
+
+#[test]
+fn provider_add_form_cubence_template_hermes_sets_base_url_and_partner_meta() {
+    let mut form = ProviderAddFormState::new(AppType::Hermes);
+
+    form.apply_template(cubence_template_index(AppType::Hermes), &[]);
+
+    let provider = form.to_provider_json_value();
+    let settings = provider["settingsConfig"].as_object().unwrap();
+    assert_eq!(provider["name"], "Cubence");
+    assert_eq!(provider["websiteUrl"], "https://cubence.com");
+    assert_eq!(settings.get("api_mode"), Some(&json!("chat_completions")));
+    assert_eq!(
+        settings.get("base_url"),
+        Some(&json!("https://api.cubence.com"))
+    );
+    assert_eq!(provider["meta"]["isPartner"], true);
+    assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
+}
+
+#[test]
+fn provider_add_form_cubence_template_openclaw_sets_base_url_and_partner_meta() {
+    let mut form = ProviderAddFormState::new(AppType::OpenClaw);
+
+    form.apply_template(cubence_template_index(AppType::OpenClaw), &[]);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "Cubence");
+    assert_eq!(provider["websiteUrl"], "https://cubence.com");
+    assert_eq!(
+        provider["settingsConfig"]["baseUrl"],
+        "https://api.cubence.com"
+    );
+    assert_eq!(provider["settingsConfig"]["api"], "openai-completions");
+    assert_eq!(provider["meta"]["isPartner"], true);
+    assert_eq!(provider["meta"]["partnerPromotionKey"], "cubence");
 }
 
 #[test]
@@ -2442,6 +2540,39 @@ fn provider_edit_form_openclaw_keeps_provider_key_visible_but_locked() {
 }
 
 #[test]
+fn provider_copy_form_additive_apps_hide_provider_key() {
+    for app_type in [AppType::OpenClaw, AppType::Hermes] {
+        let provider = Provider::with_id(
+            "source-provider".to_string(),
+            "Source Provider".to_string(),
+            json!({
+                "baseUrl": "https://api.example/v1",
+                "apiKey": "sk-demo",
+            }),
+            None,
+        );
+
+        let form = ProviderAddFormState::copy_from_provider_with_common_snippet(
+            app_type.clone(),
+            &provider,
+            "",
+            &[],
+        );
+        let fields = form.fields();
+
+        assert_eq!(form.copy_source_id.as_deref(), Some("source-provider"));
+        assert!(
+            !fields.contains(&ProviderAddField::Id),
+            "{app_type:?} copy form should not expose a provider key that is regenerated on save"
+        );
+        assert!(
+            !form.is_id_editable(),
+            "{app_type:?} copy form should not allow editing the regenerated provider key"
+        );
+    }
+}
+
+#[test]
 fn provider_add_form_openclaw_uses_upstream_default_api_protocol() {
     let mut form = ProviderAddFormState::new(AppType::OpenClaw);
     form.id.set("oclaw1");
@@ -3034,6 +3165,61 @@ fn provider_edit_form_roundtrip_no_duplicate_common_config_key() {
         .expect("roundtrip deserialization should succeed without duplicate field error");
     assert_eq!(roundtrip.id, "test-provider");
     assert_eq!(roundtrip.name, "Test Provider");
+}
+
+#[test]
+fn provider_copy_form_uses_new_record_identity_without_queue_state() {
+    use crate::provider::ProviderMeta;
+
+    let mut provider = Provider {
+        id: "test-provider".to_string(),
+        name: "Test Provider".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-test"
+            }
+        }),
+        website_url: Some("https://example.com".to_string()),
+        category: Some("third_party".to_string()),
+        created_at: Some(123),
+        sort_index: Some(7),
+        notes: Some("Keep visible notes".to_string()),
+        meta: Some(ProviderMeta {
+            endpoint_auto_select: Some(true),
+            ..Default::default()
+        }),
+        icon: Some("anthropic".to_string()),
+        icon_color: Some("#111111".to_string()),
+        in_failover_queue: true,
+    };
+    provider.meta.as_mut().unwrap().apply_common_config = Some(true);
+
+    let form = ProviderAddFormState::copy_from_provider_with_common_snippet(
+        AppType::Claude,
+        &provider,
+        "",
+        &[
+            "test-provider".to_string(),
+            "test-provider-copy".to_string(),
+        ],
+    );
+    let copied = form.to_provider_json_value();
+
+    assert!(matches!(form.mode, FormMode::Add));
+    assert_eq!(form.copy_source_id.as_deref(), Some("test-provider"));
+    assert_eq!(copied["id"], "test-provider-copy-2");
+    assert_eq!(copied["name"], "Test Provider copy");
+    assert!(copied.get("createdAt").is_none());
+    assert_eq!(copied["sortIndex"], 7);
+    assert!(copied.get("inFailoverQueue").is_none());
+    assert_eq!(
+        copied["settingsConfig"]["env"]["ANTHROPIC_AUTH_TOKEN"],
+        "sk-test"
+    );
+    assert_eq!(copied["notes"], "Keep visible notes");
+    assert_eq!(copied["category"], "third_party");
+    assert_eq!(copied["meta"]["endpointAutoSelect"], true);
+    assert_eq!(copied["meta"]["commonConfigEnabled"], true);
 }
 
 #[test]

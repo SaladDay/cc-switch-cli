@@ -1,6 +1,7 @@
 use super::*;
 
 impl ProviderService {
+    #[allow(dead_code)]
     pub(super) fn parse_common_gemini_config_snippet(snippet: &str) -> Result<Value, AppError> {
         let value: Value = serde_json::from_str(snippet).map_err(|e| {
             AppError::localized(
@@ -47,6 +48,7 @@ impl ProviderService {
         Ok(provider)
     }
 
+    #[allow(dead_code)]
     pub(super) fn strip_common_gemini_config_from_provider(
         provider: &mut Provider,
         common_config_snippet: Option<&str>,

@@ -393,6 +393,7 @@ fn pad_display_width(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(width - used))
 }
 
+#[allow(dead_code)]
 fn compact_two_column_lines(lines: &[String], total_width: u16) -> Option<Vec<String>> {
     if lines.len() != 4 {
         return None;

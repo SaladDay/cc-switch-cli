@@ -280,8 +280,8 @@ fn validate_download_size_limit_rejects_oversized_asset() {
 fn select_manifest_asset_prefers_linux_glibc_variant_when_overridden() {
     let manifest = UpdateManifest {
         version: "v4.6.3".to_string(),
-        notes: None,
-        pub_date: None,
+        _notes: None,
+        _pub_date: None,
         platforms: BTreeMap::from([(
             "linux-x86_64".to_string(),
             UpdatePlatformEntry {
@@ -312,8 +312,8 @@ fn select_manifest_asset_prefers_linux_glibc_variant_when_overridden() {
 fn select_manifest_asset_accepts_glibc_primary_entry_without_variant() {
     let manifest = UpdateManifest {
         version: "v4.6.3".to_string(),
-        notes: None,
-        pub_date: None,
+        _notes: None,
+        _pub_date: None,
         platforms: BTreeMap::from([(
             "linux-x86_64".to_string(),
             UpdatePlatformEntry {
@@ -334,8 +334,8 @@ fn select_manifest_asset_accepts_glibc_primary_entry_without_variant() {
 fn manifest_linux_asset_candidates_keep_musl_strict_when_forced() {
     let manifest = UpdateManifest {
         version: "v4.6.3".to_string(),
-        notes: None,
-        pub_date: None,
+        _notes: None,
+        _pub_date: None,
         platforms: BTreeMap::from([(
             "linux-x86_64".to_string(),
             UpdatePlatformEntry {

@@ -700,6 +700,7 @@ pub(crate) fn handle_proxy_msg(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn apply_webdav_jianguoyun_quick_setup<FSave, FCheck>(
     username: &str,
     password: &str,

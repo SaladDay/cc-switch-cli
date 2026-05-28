@@ -38,6 +38,7 @@ pub struct SessionMessage {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct DeleteSessionRequest {
     pub provider_id: String,
     pub session_id: String,
@@ -46,6 +47,7 @@ pub struct DeleteSessionRequest {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct DeleteSessionOutcome {
     pub provider_id: String,
     pub session_id: String,
@@ -55,6 +57,7 @@ pub struct DeleteSessionOutcome {
     pub error: Option<String>,
 }
 
+#[allow(dead_code)]
 pub fn scan_sessions() -> Vec<SessionMeta> {
     let (r1, r2, r3, r4, r5, r6) = std::thread::scope(|s| {
         let h1 = s.spawn(codex::scan_sessions);
@@ -148,6 +151,7 @@ pub fn delete_session(
     delete_session_with_root(provider_id, session_id, Path::new(source_path), &root)
 }
 
+#[allow(dead_code)]
 pub fn delete_sessions(requests: &[DeleteSessionRequest]) -> Vec<DeleteSessionOutcome> {
     collect_delete_session_outcomes(requests, |request| {
         delete_session(
@@ -208,6 +212,7 @@ fn canonicalize_existing_path(path: &Path, label: &str) -> Result<PathBuf, Strin
         .map_err(|e| format!("Failed to resolve {label} {}: {e}", path.display()))
 }
 
+#[allow(dead_code)]
 fn collect_delete_session_outcomes<F>(
     requests: &[DeleteSessionRequest],
     mut deleter: F,

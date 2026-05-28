@@ -9,6 +9,7 @@ pub enum EditorKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditorSubmit {
+    #[allow(dead_code)]
     PromptCreate {
         id: String,
         name: String,

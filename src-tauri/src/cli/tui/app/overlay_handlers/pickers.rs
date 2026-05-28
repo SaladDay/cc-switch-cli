@@ -571,6 +571,34 @@ impl App {
                 }
                 Action::None
             }
+            KeyCode::Char('a') => {
+                let source_idx = *selected;
+                let source_empty = self
+                    .form
+                    .as_ref()
+                    .and_then(|f| match f {
+                        FormState::ProviderAdd(p) => p.claude_model_input(source_idx),
+                        _ => None,
+                    })
+                    .map(|input| input.value.trim().is_empty())
+                    .unwrap_or(true);
+
+                if source_empty {
+                    self.push_toast(
+                        texts::tui_claude_model_fill_all_empty_source().to_string(),
+                        ToastKind::Warning,
+                    );
+                } else {
+                    let source_label =
+                        texts::tui_claude_model_label_for_index(source_idx).to_string();
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_claude_model_fill_all_title().to_string(),
+                        message: texts::tui_claude_model_fill_all_message(&source_label),
+                        action: ConfirmAction::ClaudeModelFillAll { source_idx },
+                    });
+                }
+                Action::None
+            }
             _ => Action::None,
         }
     }
@@ -599,9 +627,19 @@ impl App {
                 .collect()
         };
 
+        let is_claude_model = *field == ProviderAddField::ClaudeModelConfig;
+        let restore_idx = claude_idx.unwrap_or(0);
+
         Some(match key.code {
             KeyCode::Esc => {
-                self.overlay = Overlay::None;
+                if is_claude_model {
+                    self.overlay = Overlay::ClaudeModelPicker {
+                        selected: restore_idx,
+                        editing: false,
+                    };
+                } else {
+                    self.close_overlay();
+                }
                 Action::None
             }
             KeyCode::Up => {
@@ -629,15 +667,27 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => {
-                let selected_model = input.value.trim().to_string();
+                let mut selected_model = input.value.trim().to_string();
                 if selected_model.is_empty() {
-                    self.overlay = Overlay::None;
-                    return Some(Action::None);
+                    if let Some(first) = filtered.first() {
+                        selected_model = first.to_string();
+                    } else {
+                        self.close_overlay();
+                        return Some(Action::None);
+                    }
                 }
 
                 let field = *field;
                 let claude_idx = *claude_idx;
-                self.close_overlay();
+
+                if field == ProviderAddField::ClaudeModelConfig {
+                    self.overlay = Overlay::ClaudeModelPicker {
+                        selected: claude_idx.unwrap_or(0),
+                        editing: false,
+                    };
+                } else {
+                    self.close_overlay();
+                }
 
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
                     if field == ProviderAddField::ClaudeModelConfig {

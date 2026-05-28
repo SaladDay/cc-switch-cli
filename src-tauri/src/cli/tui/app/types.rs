@@ -277,6 +277,9 @@ pub enum ConfirmAction {
     ProviderDelete {
         id: String,
     },
+    ProviderCopy {
+        id: String,
+    },
     ProviderRemoveFromConfig {
         id: String,
     },
@@ -331,9 +334,13 @@ pub enum ConfirmAction {
         filename: String,
     },
     FormSaveBeforeClose,
+    #[allow(dead_code)]
     EditorDiscard,
     EditorSaveBeforeClose,
     WebDavMigrateV1ToV2,
+    ClaudeModelFillAll {
+        source_idx: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -351,6 +358,7 @@ pub enum TextSubmit {
     SettingsProxyListenAddress,
     SettingsProxyListenPort,
     SettingsOpenClawConfigDir,
+    #[allow(dead_code)]
     SkillsInstallSpec,
     SkillsDiscoverQuery,
     SkillsRepoAdd,
@@ -458,6 +466,7 @@ pub enum Overlay {
         selected: usize,
     },
     TextView(TextViewState),
+    #[allow(dead_code)]
     CommonSnippetPicker {
         selected: usize,
     },
@@ -532,6 +541,7 @@ pub enum Overlay {
         selected_idx: usize,
         selected: HashSet<String>,
     },
+    #[allow(dead_code)]
     SkillsSyncMethodPicker {
         selected: usize,
     },

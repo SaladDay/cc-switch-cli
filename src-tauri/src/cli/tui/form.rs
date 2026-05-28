@@ -140,6 +140,7 @@ pub enum CodexPreviewSection {
 }
 
 impl CodexPreviewSection {
+    #[allow(dead_code)]
     pub fn toggle(self) -> Self {
         match self {
             Self::Auth => Self::Config,
@@ -175,8 +176,11 @@ pub enum ProviderAddField {
     CodexFastMode,
     CodexBaseUrl,
     CodexModel,
+    #[allow(dead_code)]
     CodexWireApi,
+    #[allow(dead_code)]
     CodexRequiresOpenaiAuth,
+    #[allow(dead_code)]
     CodexEnvKey,
     CodexApiKey,
     GeminiAuthType,
@@ -283,6 +287,7 @@ pub struct McpEnvVarRow {
 pub struct ProviderAddFormState {
     pub app_type: AppType,
     pub mode: FormMode,
+    pub copy_source_id: Option<String>,
     pub focus: FormFocus,
     pub page: ProviderFormPage,
     pub template_idx: usize,

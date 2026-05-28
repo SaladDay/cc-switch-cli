@@ -142,6 +142,7 @@ mod tests {
                     providers: ProvidersSnapshot {
                         current_id: current_id.to_string(),
                         rows,
+                        live_ids: Default::default(),
                     },
                     ..UiData::default()
                 },

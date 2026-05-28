@@ -3,6 +3,7 @@ use super::*;
 #[derive(Debug, Clone)]
 pub enum Action {
     None,
+    #[allow(dead_code)]
     ReloadData,
     SwitchRoute(Route),
     Quit,
@@ -62,6 +63,7 @@ pub enum Action {
         enabled: bool,
     },
     SkillsOpenImport,
+    #[allow(dead_code)]
     SkillsScanUnmanaged,
     SkillsImportFromApps {
         directories: Vec<String>,
@@ -144,6 +146,7 @@ pub enum Action {
     PromptDeactivate {
         id: String,
     },
+    #[allow(dead_code)]
     PromptUpdateMetadata {
         old_id: String,
         new_id: String,
@@ -236,6 +239,7 @@ pub enum Action {
     SetClaudePluginIntegration {
         enabled: bool,
     },
+    #[allow(dead_code)]
     SetProxyEnabled {
         enabled: bool,
     },
@@ -290,6 +294,7 @@ pub enum ConfigItem {
     Restore,
     Validate,
     CommonSnippet,
+    #[allow(dead_code)]
     Proxy,
     OpenClawWorkspace,
     OpenClawEnv,
@@ -566,6 +571,7 @@ pub struct App {
         Vec<crate::commands::workspace::DailyMemorySearchResult>,
     pub config_webdav_idx: usize,
     pub webdav_quick_setup_username: Option<String>,
+    #[allow(dead_code)]
     pub language_idx: usize,
     pub settings_idx: usize,
     pub settings_proxy_idx: usize,

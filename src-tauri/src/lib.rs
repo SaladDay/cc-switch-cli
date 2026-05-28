@@ -14,6 +14,7 @@ mod gemini_config;
 mod gemini_mcp;
 pub mod hermes_config;
 mod import_export;
+#[allow(dead_code)]
 mod init_status;
 mod mcp;
 mod openclaw_config;

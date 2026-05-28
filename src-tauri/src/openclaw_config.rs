@@ -699,6 +699,7 @@ pub fn get_providers() -> Result<Map<String, Value>, AppError> {
         .unwrap_or_default())
 }
 
+#[allow(dead_code)]
 pub fn get_provider(id: &str) -> Result<Option<Value>, AppError> {
     Ok(get_providers()?.get(id).cloned())
 }
@@ -807,6 +808,7 @@ pub fn set_typed_provider(
     set_provider(id, value)
 }
 
+#[allow(dead_code)]
 pub fn get_model_catalog() -> Result<Option<HashMap<String, OpenClawModelCatalogEntry>>, AppError> {
     let config = read_openclaw_config()?;
 
@@ -823,6 +825,7 @@ pub fn get_model_catalog() -> Result<Option<HashMap<String, OpenClawModelCatalog
     Ok(Some(catalog))
 }
 
+#[allow(dead_code)]
 pub fn set_model_catalog(
     catalog: &HashMap<String, OpenClawModelCatalogEntry>,
 ) -> Result<OpenClawWriteOutcome, AppError> {

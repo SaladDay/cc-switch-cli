@@ -881,6 +881,7 @@ impl<'a> OpenClawDailyMemoryListItem<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn preview(&self) -> &str {
         match self {
             Self::File(row) => &row.preview,
@@ -1205,6 +1206,7 @@ pub(crate) fn openclaw_workspace_entry_count() -> usize {
     OpenClawWorkspaceRow::all().len()
 }
 
+#[cfg(test)]
 pub(crate) fn openclaw_workspace_rows() -> Vec<OpenClawWorkspaceRow> {
     OpenClawWorkspaceRow::all()
 }
@@ -1286,6 +1288,7 @@ pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn snippet_picker_index_for_app_type(app_type: &AppType) -> usize {
     app_type_picker_index(app_type)
 }
@@ -1294,6 +1297,8 @@ pub(crate) fn snippet_picker_app_type(index: usize) -> AppType {
     app_type_for_picker_index(index)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn sync_method_picker_index(method: SyncMethod) -> usize {
     match method {
         SyncMethod::Auto => 0,

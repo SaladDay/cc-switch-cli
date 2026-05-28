@@ -153,6 +153,7 @@ pub(crate) enum WebDavDone {
         decision: SyncDecision,
         message: String,
     },
+    #[allow(dead_code)]
     V1Migrated {
         message: String,
     },
@@ -210,11 +211,14 @@ pub(crate) enum ManagedAuthMsg {
         result: Result<Option<crate::services::ManagedAuthAccount>, String>,
     },
     DefaultSet {
+        #[allow(dead_code)]
         auth_provider: String,
+        #[allow(dead_code)]
         account_id: String,
         result: Result<crate::services::ManagedAuthStatus, String>,
     },
     Removed {
+        #[allow(dead_code)]
         auth_provider: String,
         account_id: String,
         result: Result<crate::services::ManagedAuthStatus, String>,

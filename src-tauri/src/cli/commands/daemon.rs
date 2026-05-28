@@ -141,6 +141,7 @@ fn current_executable() -> Result<PathBuf, AppError> {
 fn detach_into_background() -> Result<(), AppError> {
     // Double-fork via libc::daemon. nochdir=1 keeps cwd, noclose=0 redirects
     // stdio to /dev/null so the daemon doesn't keep the parent terminal open.
+    #[allow(deprecated)]
     let rc = unsafe { libc::daemon(1, 0) };
     if rc != 0 {
         let err = std::io::Error::last_os_error();

@@ -40,6 +40,7 @@ pub(super) fn render_claude_model_picker_overlay(
         vec![
             ("↑↓", texts::tui_key_select()),
             ("Space", texts::tui_key_edit()),
+            ("a", texts::tui_key_fill_all()),
             ("Enter", texts::tui_key_fetch_model()),
             ("Esc", texts::tui_key_close()),
         ]

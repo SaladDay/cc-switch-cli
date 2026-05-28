@@ -191,6 +191,7 @@ pub(super) fn refresh_openclaw_daily_memory_search_results(app: &mut App) -> Res
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(super) fn text_view(title: String, content: String) -> Overlay {
     Overlay::TextView(TextViewState {
         title,

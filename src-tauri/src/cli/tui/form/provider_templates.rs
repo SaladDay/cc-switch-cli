@@ -1,7 +1,10 @@
 use crate::app_config::AppType;
 use serde_json::json;
 
-use super::{ClaudeApiFormat, CodexWireApi, FormMode, GeminiAuthType, ProviderAddFormState};
+use super::{
+    ClaudeApiFormat, CodexWireApi, FormMode, GeminiAuthType, ProviderAddFormState,
+    HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderTemplateId {
@@ -30,6 +33,9 @@ pub(super) struct SponsorProviderPreset {
     claude_base_url: &'static str,
     codex_base_url: &'static str,
     gemini_base_url: &'static str,
+    opencode_base_url: &'static str,
+    openclaw_base_url: &'static str,
+    hermes_base_url: &'static str,
 }
 
 #[cfg(test)]
@@ -55,6 +61,9 @@ static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 4] = [
         claude_base_url: "https://www.packyapi.com",
         codex_base_url: "https://www.packyapi.com/v1",
         gemini_base_url: "https://www.packyapi.com",
+        opencode_base_url: "https://www.packyapi.com/v1",
+        openclaw_base_url: "https://www.packyapi.com",
+        hermes_base_url: "https://www.packyapi.com",
     },
     SponsorProviderPreset {
         id: "aicodemirror",
@@ -67,18 +76,24 @@ static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 4] = [
         claude_base_url: "https://api.aicodemirror.com/api/claudecode",
         codex_base_url: "https://api.aicodemirror.com/api/codex/backend-api/codex",
         gemini_base_url: "https://api.aicodemirror.com/api/gemini",
+        opencode_base_url: "https://api.aicodemirror.com/api/claudecode",
+        openclaw_base_url: "https://api.aicodemirror.com/api/claudecode",
+        hermes_base_url: "",
     },
     SponsorProviderPreset {
-        id: "rightcode",
-        provider_name: "RightCode",
-        chip_label: "* RightCode",
-        website_url: "https://right.codes",
-        register_url: "https://www.right.codes/register?aff=ccswitch-cli",
-        promo_code: "",
-        partner_promotion_key: "rightcode",
-        claude_base_url: "https://www.right.codes/claude",
-        codex_base_url: "https://right.codes/codex/v1",
-        gemini_base_url: "https://www.right.codes",
+        id: "cubence",
+        provider_name: "Cubence",
+        chip_label: "* Cubence",
+        website_url: "https://cubence.com",
+        register_url: "https://cubence.com/signup?code=SC3M1CAH&source=ccscli",
+        promo_code: "CCSCLI",
+        partner_promotion_key: "cubence",
+        claude_base_url: "https://api.cubence.com",
+        codex_base_url: "https://api.cubence.com/v1",
+        gemini_base_url: "https://api.cubence.com",
+        opencode_base_url: "https://api.cubence.com/v1",
+        openclaw_base_url: "https://api.cubence.com",
+        hermes_base_url: "https://api.cubence.com",
     },
     SponsorProviderPreset {
         id: "dds",
@@ -91,6 +106,9 @@ static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 4] = [
         claude_base_url: "https://www.ddshub.cc",
         codex_base_url: "https://www.ddshub.cc",
         gemini_base_url: "",
+        opencode_base_url: "",
+        openclaw_base_url: "",
+        hermes_base_url: "",
     },
 ];
 
@@ -114,11 +132,13 @@ static SPONSOR_PROVIDER_PRESETS_GEMINI: [SponsorProviderPreset; 3] = [
     SPONSOR_PROVIDER_PRESETS[2],
 ];
 
-static SPONSOR_PROVIDER_PRESETS_OPENCODE: [SponsorProviderPreset; 1] =
-    [SPONSOR_PROVIDER_PRESETS[1]];
+static SPONSOR_PROVIDER_PRESETS_OPENCODE: [SponsorProviderPreset; 2] =
+    [SPONSOR_PROVIDER_PRESETS[1], SPONSOR_PROVIDER_PRESETS[2]];
 
-static SPONSOR_PROVIDER_PRESETS_OPENCLAW: [SponsorProviderPreset; 1] =
-    [SPONSOR_PROVIDER_PRESETS[1]];
+static SPONSOR_PROVIDER_PRESETS_HERMES: [SponsorProviderPreset; 1] = [SPONSOR_PROVIDER_PRESETS[2]];
+
+static SPONSOR_PROVIDER_PRESETS_OPENCLAW: [SponsorProviderPreset; 2] =
+    [SPONSOR_PROVIDER_PRESETS[1], SPONSOR_PROVIDER_PRESETS[2]];
 
 static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 3] = [
     ProviderTemplateDef {
@@ -189,7 +209,7 @@ pub(super) fn provider_sponsor_presets(app_type: &AppType) -> &'static [SponsorP
         AppType::Codex => &SPONSOR_PROVIDER_PRESETS_CODEX,
         AppType::Gemini => &SPONSOR_PROVIDER_PRESETS_GEMINI,
         AppType::OpenCode => &SPONSOR_PROVIDER_PRESETS_OPENCODE,
-        AppType::Hermes => &[],
+        AppType::Hermes => &SPONSOR_PROVIDER_PRESETS_HERMES,
         AppType::OpenClaw => &SPONSOR_PROVIDER_PRESETS_OPENCLAW,
     }
 }
@@ -430,9 +450,24 @@ impl ProviderAddFormState {
                     self.opencode_model_context_limit.set("");
                     self.opencode_model_output_limit.set("");
                     self.opencode_model_original_id = Some("claude-opus-4.6".to_string());
+                } else {
+                    self.opencode_npm_package.set("@ai-sdk/openai-compatible");
+                    self.opencode_api_key.set("");
+                    self.opencode_base_url.set(preset.opencode_base_url);
+                    self.opencode_model_id.set("");
+                    self.opencode_model_name.set("");
+                    self.opencode_model_context_limit.set("");
+                    self.opencode_model_output_limit.set("");
+                    self.opencode_model_original_id = None;
                 }
             }
-            AppType::Hermes => {}
+            AppType::Hermes => {
+                self.hermes_api_mode = HERMES_DEFAULT_API_MODE.to_string();
+                self.hermes_api_key.set("");
+                self.hermes_base_url.set(preset.hermes_base_url);
+                self.hermes_models = Vec::new();
+                self.hermes_rate_limit_delay.set("");
+            }
             AppType::OpenClaw => {
                 if preset.id == "aicodemirror" {
                     self.opencode_api_key.set("");
@@ -463,6 +498,17 @@ impl ProviderAddFormState {
                     self.opencode_model_name.set("Claude Opus 4.6");
                     self.opencode_model_context_limit.set("200000");
                     self.opencode_model_original_id = Some("claude-opus-4-6".to_string());
+                } else {
+                    self.opencode_api_key.set("");
+                    self.opencode_base_url.set(preset.openclaw_base_url);
+                    self.opencode_npm_package.set(OPENCLAW_DEFAULT_API_PROTOCOL);
+                    self.openclaw_user_agent = false;
+                    self.openclaw_models = Vec::new();
+                    self.opencode_model_id.set("");
+                    self.opencode_model_name.set("");
+                    self.opencode_model_context_limit.set("");
+                    self.opencode_model_output_limit.set("");
+                    self.opencode_model_original_id = None;
                 }
             }
         }

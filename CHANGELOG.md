@@ -7,6 +7,48 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.7.0] - 2026-05-28
+
+### Added
+
+- **Sessions / TUI**: Add session management to the TUI so saved sessions can be browsed and managed from the terminal interface. [#206](https://github.com/SaladDay/cc-switch-cli/pull/206)
+- **Providers / TUI**: Add provider duplication, including localized success feedback and copy-state handling through form rebuilds. [#202](https://github.com/SaladDay/cc-switch-cli/pull/202)
+- **Providers / Presets**: Add Cubence sponsor copy, logo, and provider presets across Claude Code, Codex, Gemini, OpenCode, Hermes, and OpenClaw. [#209](https://github.com/SaladDay/cc-switch-cli/pull/209)
+- **Proxy / Codex**: Add managed proxy support for Codex.
+
+### Changed
+
+- **Model Picker / TUI**: Improve model filling and restore overlay state after model picker interactions. [#195](https://github.com/SaladDay/cc-switch-cli/pull/195)
+- **Docs / Agents**: Add Claude Code agent documentation. [#203](https://github.com/SaladDay/cc-switch-cli/pull/203)
+- **Rust / Maintenance**: Clean up dead code warnings by removing unused helpers, trimming unused fields, and marking currently dormant paths explicitly. [#210](https://github.com/SaladDay/cc-switch-cli/pull/210)
+- **README / Release Metadata**: Refresh the README version badges for 5.7.0.
+
+### Fixed
+
+- **Proxy / GPT Compatibility**: Sanitize empty `Read` pages from GPT responses before forwarding them through the proxy. [#199](https://github.com/SaladDay/cc-switch-cli/pull/199)
+- **TUI / App Detection**: Avoid version checks during app detection, preventing detection from doing unnecessary release lookups.
+- **Windows / Build**: Keep Unix daemon-only proxy status mapping out of Windows builds while Windows proxy remains unsupported.
+
+### Commits (since v5.6.1)
+
+- 50f47bc0 chore(rust): clean up dead code warnings (#210)
+- 05685328 feat: add Cubence sponsor preset (#209)
+- 18ad9321 feat: improve model filling and overlay restore in model picker (#195)
+- 798977e9 feat: duplicate provider configuration (#202)
+- ec15936e fix(tui): avoid version checks during app detection
+- 1cd7eb55 feat(proxy): add codex managed proxy support
+- 459cc03d feat: add session management tui (#206)
+- 5e9f7164 fix(proxy): sanitize empty Read pages from GPT responses (#199)
+- b18615b5 docs: add agent doc for claude-code (#203)
+
+### Thanks
+
+- Thanks `@Paulkm2006` for improving model filling and overlay restore behavior in the TUI model picker.
+- Thanks `@feiyehua` for adding provider duplication and the follow-up localization/state fixes around that flow.
+- Thanks `@unive3sal` for the proxy compatibility fix and the Claude Code agent documentation.
+- Thanks `@SaladDay` for the session management TUI, Cubence preset integration, Codex managed proxy support, app-detection fix, Rust warning cleanup, and release integration.
+- Thanks to Cubence for sponsoring the project.
+
 ## [5.6.1] - 2026-05-24
 
 ### Fixed

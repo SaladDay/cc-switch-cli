@@ -39,6 +39,7 @@ pub fn read_claude_config() -> Result<Option<String>, AppError> {
     }
 }
 
+#[allow(dead_code)]
 fn is_managed_config(content: &str) -> bool {
     match serde_json::from_str::<serde_json::Value>(content) {
         Ok(value) => value
@@ -120,11 +121,13 @@ pub fn clear_claude_config() -> Result<bool, AppError> {
     Ok(true)
 }
 
+#[allow(dead_code)]
 pub fn claude_config_status() -> Result<(bool, PathBuf), AppError> {
     let path = claude_config_path()?;
     Ok((path.exists(), path))
 }
 
+#[allow(dead_code)]
 pub fn is_claude_config_applied() -> Result<bool, AppError> {
     match read_claude_config()? {
         Some(content) => Ok(is_managed_config(&content)),

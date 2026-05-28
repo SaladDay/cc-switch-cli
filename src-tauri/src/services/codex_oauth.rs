@@ -63,6 +63,7 @@ impl CodexOAuthService {
         Self::manager().default_account_id().await
     }
 
+    #[allow(dead_code)]
     pub async fn list_accounts() -> Vec<ManagedAuthAccount> {
         Self::manager().list_accounts().await
     }

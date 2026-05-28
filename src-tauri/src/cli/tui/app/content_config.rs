@@ -1219,6 +1219,26 @@ impl App {
         self.maybe_show_common_config_notice();
     }
 
+    pub(crate) fn open_provider_copy_form(
+        &mut self,
+        row: &super::data::ProviderRow,
+        data: &UiData,
+    ) {
+        self.filter.active = false;
+        self.overlay = Overlay::None;
+        self.focus = Focus::Content;
+        self.editor = None;
+        self.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::copy_from_provider_with_common_snippet(
+                self.app_type.clone(),
+                &row.provider,
+                &data.config.common_snippet,
+                &data.existing_provider_ids(),
+            ),
+        ));
+        self.maybe_show_common_config_notice();
+    }
+
     pub(crate) fn open_mcp_add_form(&mut self) {
         self.filter.active = false;
         self.overlay = Overlay::None;

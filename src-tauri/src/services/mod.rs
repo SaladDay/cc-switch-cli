@@ -5,6 +5,7 @@ pub mod codex_oauth_models;
 pub mod coding_plan;
 pub mod config;
 pub mod env_checker;
+#[allow(dead_code)]
 pub mod env_manager;
 pub mod local_env_check;
 pub mod mcp;

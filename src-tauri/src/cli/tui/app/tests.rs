@@ -252,6 +252,19 @@ mod tests {
         ));
     }
 
+    fn assert_provider_copy_confirm(app: &App, expected_id: &str, expected_name: &str) {
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                title,
+                message,
+                action: ConfirmAction::ProviderCopy { id },
+            }) if id == expected_id
+                && title == texts::tui_confirm_copy_provider_title()
+                && message == &texts::tui_confirm_copy_provider_message(expected_name, expected_id)
+        ));
+    }
+
     fn open_prompt_fields_form() -> App {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Prompts;
@@ -1963,7 +1976,7 @@ mod tests {
     }
 
     #[test]
-    fn providers_c_key_is_noop() {
+    fn providers_c_key_opens_copy_confirm() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -1973,11 +1986,11 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Char('c')), &data);
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_provider_copy_confirm(&app, "p1", "Provider One");
     }
 
     #[test]
-    fn providers_c_key_is_noop_for_openclaw() {
+    fn providers_c_key_opens_copy_confirm_for_openclaw() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -2002,7 +2015,7 @@ mod tests {
 
         let action = app.on_key(key(KeyCode::Char('c')), &data);
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_provider_copy_confirm(&app, "p1", "Provider One");
     }
 
     #[test]
@@ -4365,6 +4378,155 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_copy_confirm_opens_form_without_notice_after_common_config_confirmed() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        app.on_key(key(KeyCode::Char('c')), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_copy_confirm_save_submits_new_copy_with_collision_free_id() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.common_config_notice_confirmed = true;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+        data.providers
+            .rows
+            .push(claude_provider_row("provider-one-copy"));
+
+        app.on_key(key(KeyCode::Char('c')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        let Action::EditorSubmit { submit, content } = action else {
+            panic!("saving a copied provider should submit new provider content");
+        };
+        assert!(matches!(submit, EditorSubmit::ProviderAdd));
+
+        let copied: serde_json::Value =
+            serde_json::from_str(&content).expect("copy payload should be valid JSON");
+        assert_eq!(copied["id"], "p1-copy");
+        assert_eq!(copied["name"], "Provider One copy");
+        assert_eq!(
+            copied["settingsConfig"]["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "sk-demo"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn provider_copy_confirm_save_persists_with_source_id_copy_semantics() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _home = EnvGuard::set_home(temp_home.path());
+
+        let state = crate::cli::tui::data::load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::Claude)
+                .expect("claude manager");
+
+            let mut original = Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://example.com",
+                        "ANTHROPIC_AUTH_TOKEN": "sk-demo"
+                    }
+                }),
+                None,
+            );
+            original.sort_index = Some(4);
+            manager.providers.insert(original.id.clone(), original);
+
+            let mut existing_copy = Provider::with_id(
+                "p1-copy".to_string(),
+                "Existing Copy".to_string(),
+                json!({"env": {"ANTHROPIC_BASE_URL": "https://copy.example"}}),
+                None,
+            );
+            existing_copy.sort_index = Some(5);
+            manager
+                .providers
+                .insert(existing_copy.id.clone(), existing_copy);
+        }
+        state.save().expect("persist providers");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.common_config_notice_confirmed = true;
+        let mut data = UiData::load(&AppType::Claude).expect("load data");
+
+        app.on_key(key(KeyCode::Char('c')), &data);
+        app.on_key(key(KeyCode::Enter), &data);
+        let action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+
+        run_runtime_action(&mut app, &mut data, action).expect("save copied provider");
+
+        let refreshed = UiData::load(&AppType::Claude).expect("reload data");
+        let copied = refreshed
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "p1-copy-2")
+            .expect("copy should use source id copy suffix");
+        assert_eq!(copied.provider.name, "Provider One copy");
+        assert_eq!(copied.provider.sort_index, Some(5));
+        assert!(copied.provider.created_at.is_some());
+        assert_eq!(
+            copied.provider.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "sk-demo"
+        );
+
+        let shifted = refreshed
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "p1-copy")
+            .expect("existing copy remains");
+        assert_eq!(shifted.provider.sort_index, Some(6));
+    }
+
+    #[test]
+    fn provider_copy_confirm_preserves_first_common_config_notice() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.common_config_notice_confirmed = false;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(claude_provider_row("p1"));
+
+        app.on_key(key(KeyCode::Char('c')), &data);
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.form, Some(FormState::ProviderAdd(_))));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::CommonConfigNotice,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -13038,6 +13200,31 @@ mod tests {
         ));
     }
 
+    // ------------------------------------------------------------------
+    // Claude model fill-all confirmation tests
+    // ------------------------------------------------------------------
+
+    fn setup_claude_model_picker_with_models() -> App {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.claude_model.set("claude-sonnet-4-20250514");
+            form.claude_reasoning_model.set("claude-sonnet-4-20250514");
+            form.claude_haiku_model.set("");
+            form.claude_sonnet_model.set("");
+            form.claude_opus_model.set("");
+        }
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 0,
+            editing: false,
+        };
+        app
+    }
+
     fn session_meta(
         provider_id: &str,
         session_id: &str,
@@ -13082,6 +13269,363 @@ mod tests {
         app.sessions.provider_id = Some("claude".to_string());
         app.sessions.rows.push(session_meta_for_app("claude"));
         app
+    }
+
+    #[test]
+    fn claude_model_fill_all_a_opens_confirm_without_changing_values() {
+        let mut app = setup_claude_model_picker_with_models();
+
+        let action = app.on_key(key(KeyCode::Char('a')), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should show confirm dialog, not change any values
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ClaudeModelFillAll { source_idx: 0 },
+                ..
+            })
+        ));
+
+        // Values must be unchanged
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(
+            form.claude_reasoning_model.value,
+            "claude-sonnet-4-20250514",
+        );
+        assert_eq!(form.claude_haiku_model.value, "");
+        assert_eq!(form.claude_sonnet_model.value, "");
+        assert_eq!(form.claude_opus_model.value, "");
+    }
+
+    #[test]
+    fn claude_model_fill_all_confirm_fills_all_fields() {
+        let mut app = setup_claude_model_picker_with_models();
+
+        // Press 'a' to open confirm
+        app.on_key(key(KeyCode::Char('a')), &data());
+
+        // Confirm with Enter
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should return to ClaudeModelPicker
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+
+        // All fields should now have the source value
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(
+            form.claude_reasoning_model.value,
+            "claude-sonnet-4-20250514",
+        );
+        assert_eq!(form.claude_haiku_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(form.claude_sonnet_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(form.claude_opus_model.value, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn claude_model_fill_all_confirm_y_fills_all_fields() {
+        let mut app = setup_claude_model_picker_with_models();
+        app.on_key(key(KeyCode::Char('a')), &data());
+
+        let action = app.on_key(key(KeyCode::Char('y')), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_haiku_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(form.claude_opus_model.value, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn claude_model_fill_all_cancel_esc_leaves_values_unchanged() {
+        let mut app = setup_claude_model_picker_with_models();
+        app.on_key(key(KeyCode::Char('a')), &data());
+
+        let action = app.on_key(key(KeyCode::Esc), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should return to ClaudeModelPicker
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+
+        // Values must be unchanged
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(form.claude_haiku_model.value, "");
+        assert_eq!(form.claude_opus_model.value, "");
+    }
+
+    #[test]
+    fn claude_model_fill_all_cancel_n_leaves_values_unchanged() {
+        let mut app = setup_claude_model_picker_with_models();
+        app.on_key(key(KeyCode::Char('a')), &data());
+
+        let action = app.on_key(key(KeyCode::Char('n')), &data());
+        assert!(matches!(action, Action::None));
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "claude-sonnet-4-20250514");
+        assert_eq!(form.claude_haiku_model.value, "");
+        assert_eq!(form.claude_opus_model.value, "");
+    }
+
+    #[test]
+    fn claude_model_fill_all_empty_source_is_noop() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        // All fields are empty by default; selected=0 (Main Model) is empty
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 0,
+            editing: false,
+        };
+
+        let action = app.on_key(key(KeyCode::Char('a')), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should stay on ClaudeModelPicker (no confirm dialog)
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+    }
+
+    #[test]
+    fn claude_model_fill_all_from_non_first_field() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.claude_opus_model.set("claude-opus-4-20250514");
+        }
+        // Select the Opus field (index 4)
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 4,
+            editing: false,
+        };
+
+        app.on_key(key(KeyCode::Char('a')), &data());
+
+        // Confirm should reference source_idx=4
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ClaudeModelFillAll { source_idx: 4 },
+                ..
+            })
+        ));
+
+        app.on_key(key(KeyCode::Enter), &data());
+
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "claude-opus-4-20250514");
+        assert_eq!(form.claude_reasoning_model.value, "claude-opus-4-20250514");
+        assert_eq!(form.claude_haiku_model.value, "claude-opus-4-20250514");
+        assert_eq!(form.claude_sonnet_model.value, "claude-opus-4-20250514");
+        assert_eq!(form.claude_opus_model.value, "claude-opus-4-20250514");
+    }
+
+    // ------------------------------------------------------------------
+    // ModelFetchPicker restore tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn model_fetch_picker_claude_enter_restores_to_claude_model_picker() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(2),
+            input: TextInput::new("claude-haiku-4-20250514"),
+            query: String::new(),
+            fetching: false,
+            models: vec!["claude-haiku-4-20250514".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should restore to ClaudeModelPicker with the correct selected index
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 2,
+                editing: false
+            }
+        ));
+
+        // The model field should be set
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_haiku_model.value, "claude-haiku-4-20250514");
+    }
+
+    #[test]
+    fn model_fetch_picker_claude_esc_restores_to_claude_model_picker() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(3),
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: false,
+            models: vec!["model-a".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+
+        let action = app.on_key(key(KeyCode::Esc), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should restore to ClaudeModelPicker without setting any value
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 3,
+                editing: false
+            }
+        ));
+
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_sonnet_model.value, "");
+    }
+
+    #[test]
+    fn model_fetch_picker_claude_enter_empty_picks_first_model() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::ClaudeModelConfig,
+            claude_idx: Some(0),
+            input: TextInput::new(""),
+            query: String::new(),
+            fetching: false,
+            models: vec!["model-a".to_string(), "model-b".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 0,
+                editing: false
+            }
+        ));
+
+        // Should have picked the first model from the list
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(f)) => f,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_model.value, "model-a");
+    }
+
+    #[test]
+    fn model_fetch_picker_hermes_enter_restores_via_pending_overlay() {
+        let mut app = App::new(Some(AppType::Hermes));
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Hermes),
+        ));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.open_hermes_models_picker();
+            form.add_empty_hermes_model();
+        }
+        app.overlay = Overlay::ModelFetchPicker {
+            request_id: 1,
+            field: ProviderAddField::HermesModels,
+            claude_idx: None,
+            input: TextInput::new("gpt-5.4"),
+            query: "gpt-5.4".to_string(),
+            fetching: false,
+            models: vec!["gpt-5.4".to_string()],
+            error: None,
+            selected_idx: 0,
+        };
+        app.pending_overlay = Some(Overlay::HermesModelsPicker { editing: false });
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(action, Action::None));
+
+        // Should restore to HermesModelsPicker via pending_overlay
+        assert!(matches!(
+            app.overlay,
+            Overlay::HermesModelsPicker { editing: false }
+        ));
     }
 
     #[test]

@@ -37,6 +37,17 @@ impl App {
         });
     }
 
+    fn open_provider_copy_confirm(&mut self, row: &super::data::ProviderRow) {
+        self.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_confirm_copy_provider_title().to_string(),
+            message: texts::tui_confirm_copy_provider_message(
+                &super::data::provider_display_name(&self.app_type, row),
+                &row.id,
+            ),
+            action: ConfirmAction::ProviderCopy { id: row.id.clone() },
+        });
+    }
+
     fn provider_switch_action(&mut self, row: &super::data::ProviderRow) -> Action {
         if self.app_type.is_additive_mode() {
             if row.is_in_config {
@@ -141,6 +152,13 @@ impl App {
             }
             KeyCode::Char('a') => {
                 self.open_provider_add_form(data);
+                Action::None
+            }
+            KeyCode::Char('c') => {
+                let Some(row) = visible.get(self.provider_idx) else {
+                    return Action::None;
+                };
+                self.open_provider_copy_confirm(row);
                 Action::None
             }
             KeyCode::Char('e') => {

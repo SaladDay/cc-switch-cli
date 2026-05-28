@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.6.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.7.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -58,14 +58,12 @@
   </tr>
   <tr>
     <td width="180">
-      <a href="https://www.right.codes/register?aff=ccswitch-cli">
-        <img src="assets/partners/logos/rightcode.jpg" alt="RightCode" width="150">
+      <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
+        <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
       </a>
     </td>
     <td>
-      感谢 <b>RightCode</b> 赞助本项目！<br/>
-      RightCode 为 Claude Code、Codex、Gemini 等模型提供稳定的路由服务，拥有高性价比的 Codex 月付方案，且<b>支持额度滚存——当天未用完的额度可顺延至次日使用。</b><br/>
-      RightCode 为 CC-Switch CLI 用户提供了特别优惠：通过<a href="https://www.right.codes/register?aff=ccswitch-cli">此链接</a>注册，每次充值均可获得实付金额 <b>5%</b> 的按量额度！
+      感谢 <b>Cubence</b> 赞助本项目！Cubence 是一家致力为客户提供稳定、高效的API中转服务商。从25年9月运营至今，提供了Claude code、Codex、Gemini等多种模型支持。通过<a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">此链接</a>注册，并在充值时使用 <code>CCSCLI</code> 优惠码享受9折优惠。
     </td>
   </tr>
   <tr>

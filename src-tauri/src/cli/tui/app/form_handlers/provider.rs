@@ -30,7 +30,7 @@ impl App {
                 Some(Action::None)
             }
             KeyCode::Enter => {
-                let existing_ids = collect_existing_provider_ids(data);
+                let existing_ids = data.existing_provider_ids();
                 provider.apply_template(provider.template_idx, &existing_ids);
                 provider.focus = FormFocus::Fields;
                 Some(Action::None)
@@ -92,7 +92,7 @@ impl App {
                 Some(texts::base_url_empty_error())
             } else if let Some(message) = validate_usage_query_form(provider) {
                 Some(message)
-            } else if !provider.ensure_generated_id(&collect_existing_provider_ids(data)) {
+            } else if !provider.ensure_generated_id(&data.existing_provider_ids()) {
                 Some(if provider.mode.is_edit() {
                     texts::tui_toast_provider_missing_name()
                 } else {
@@ -901,7 +901,7 @@ impl App {
             provider.id_is_manual = true;
         }
         if changed && selected == ProviderAddField::Name && !provider.id_is_manual {
-            let existing_ids = collect_existing_provider_ids(data);
+            let existing_ids = data.existing_provider_ids();
             provider
                 .id
                 .set(crate::cli::commands::provider_input::generate_provider_id(
@@ -1029,14 +1029,6 @@ fn is_provider_divider_field(field: Option<&ProviderAddField>) -> bool {
                 | ProviderAddField::UsageQueryDivider
         )
     )
-}
-
-fn collect_existing_provider_ids(data: &UiData) -> Vec<String> {
-    data.providers
-        .rows
-        .iter()
-        .map(|row| row.id.clone())
-        .collect()
 }
 
 fn next_openclaw_api_protocol(current: &str) -> &'static str {

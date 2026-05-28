@@ -160,6 +160,7 @@ pub fn path_segments(raw: &str) -> impl Iterator<Item = &str> {
         .filter(|segment| !segment.is_empty())
 }
 
+#[cfg(test)]
 pub fn is_jianguoyun(base_url: &str) -> bool {
     matches!(
         detect_service_from_base_url(base_url),

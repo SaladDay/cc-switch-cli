@@ -166,6 +166,7 @@ impl ProviderService {
         Ok(doc.to_string())
     }
 
+    #[allow(dead_code)]
     pub(super) fn merge_toml_tables(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
         for (key, src_item) in src.iter() {
             match (dst.get_mut(key), src_item.as_table()) {
@@ -186,6 +187,7 @@ impl ProviderService {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn strip_toml_tables(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
         let mut keys_to_remove = Vec::new();
 
@@ -214,6 +216,7 @@ impl ProviderService {
         }
     }
 
+    #[cfg(test)]
     fn toml_items_equal(left: &toml_edit::Item, right: &toml_edit::Item) -> bool {
         match (left.as_value(), right.as_value()) {
             (Some(left_value), Some(right_value)) => {
@@ -223,6 +226,7 @@ impl ProviderService {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn strip_common_codex_config_from_provider(
         provider: &mut Provider,
         common_config_snippet: Option<&str>,

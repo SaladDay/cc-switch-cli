@@ -1,4 +1,5 @@
 use clap::Args;
+#[cfg(not(windows))]
 use flate2::read::GzDecoder;
 use minisign_verify::{PublicKey, Signature};
 use semver::Version;
@@ -8,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use tar::Archive;
 use tempfile::TempDir;
 use url::Url;
@@ -44,10 +46,10 @@ struct DownloadedAsset {
 #[derive(Debug, Deserialize, Clone)]
 struct UpdateManifest {
     version: String,
-    #[serde(default)]
-    notes: Option<String>,
-    #[serde(default)]
-    pub_date: Option<String>,
+    #[serde(default, rename = "notes")]
+    _notes: Option<String>,
+    #[serde(default, rename = "pub_date")]
+    _pub_date: Option<String>,
     platforms: BTreeMap<String, UpdatePlatformEntry>,
 }
 
@@ -655,18 +657,6 @@ async fn resolve_target_release(
         target_tag: target_tag.clone(),
         release: fetch_release_by_tag(client, repo_url, &target_tag).await?,
     })
-}
-
-async fn resolve_target_tag(
-    client: &reqwest::Client,
-    version: Option<&str>,
-) -> Result<String, AppError> {
-    let tag = match version.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(version) => normalize_tag(version),
-        None => fetch_latest_release_tag(client, REPO_URL).await?,
-    };
-    validate_target_tag(&tag)?;
-    Ok(tag)
 }
 
 fn validate_target_tag(tag: &str) -> Result<(), AppError> {

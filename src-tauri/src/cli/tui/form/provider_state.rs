@@ -15,6 +15,22 @@ use super::{
     OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
+fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
+    let base_id = format!("{}-copy", original_id.trim());
+    if !existing_ids.iter().any(|id| id == &base_id) {
+        return base_id;
+    }
+
+    let mut counter = 2;
+    loop {
+        let candidate = format!("{base_id}-{counter}");
+        if !existing_ids.iter().any(|id| id == &candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
 impl ProviderAddFormState {
     pub const USAGE_QUERY_GENERAL_PRESET: &'static str = r#"({
   request: {
@@ -96,6 +112,7 @@ impl ProviderAddFormState {
         let mut form = Self {
             app_type,
             mode: FormMode::Add,
+            copy_source_id: None,
             focus: FormFocus::Templates,
             page: ProviderFormPage::Main,
             template_idx: 0,
@@ -218,6 +235,27 @@ impl ProviderAddFormState {
         form
     }
 
+    pub fn copy_from_provider_with_common_snippet(
+        app_type: AppType,
+        provider: &Provider,
+        common_snippet: &str,
+        existing_ids: &[String],
+    ) -> Self {
+        let mut form = Self::from_provider_with_common_snippet(app_type, provider, common_snippet);
+        form.mode = FormMode::Add;
+        form.copy_source_id = Some(provider.id.clone());
+        form.id_is_manual = false;
+        form.name.set(format!("{} copy", provider.name.trim()));
+        // Remove fields that should be unique or not copied over
+        if let Some(extra) = form.extra.as_object_mut() {
+            for key in ["id", "createdAt", "inFailoverQueue"] {
+                extra.remove(key);
+            }
+        }
+        form.id.set(provider_copy_id(&provider.id, existing_ids));
+        form
+    }
+
     pub fn supports_common_config(app_type: &AppType) -> bool {
         matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
     }
@@ -270,7 +308,7 @@ impl ProviderAddFormState {
     }
 
     pub fn is_id_editable(&self) -> bool {
-        !self.mode.is_edit()
+        !self.mode.is_edit() && self.copy_source_id.is_none()
     }
 
     pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {
@@ -296,7 +334,9 @@ impl ProviderAddFormState {
             ProviderAddField::Notes,
         ];
 
-        if matches!(self.app_type, AppType::Hermes | AppType::OpenClaw) {
+        if matches!(self.app_type, AppType::Hermes | AppType::OpenClaw)
+            && self.copy_source_id.is_none()
+        {
             fields.insert(0, ProviderAddField::Id);
         }
 
@@ -1116,6 +1156,7 @@ impl ProviderAddFormState {
         let previous_mode = self.mode.clone();
         let previous_focus = self.focus;
         let previous_page = self.page;
+        let previous_copy_source_id = self.copy_source_id.clone();
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
@@ -1148,6 +1189,7 @@ impl ProviderAddFormState {
         }
 
         next.mode = previous_mode.clone();
+        next.copy_source_id = previous_copy_source_id;
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;
@@ -1194,6 +1236,7 @@ impl ProviderAddFormState {
         let previous_mode = self.mode.clone();
         let previous_focus = self.focus;
         let previous_page = self.page;
+        let previous_copy_source_id = self.copy_source_id.clone();
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
@@ -1236,6 +1279,7 @@ impl ProviderAddFormState {
         }
 
         next.mode = previous_mode.clone();
+        next.copy_source_id = previous_copy_source_id;
         next.focus = previous_focus;
         next.page = previous_page;
         next.template_idx = previous_template_idx;
