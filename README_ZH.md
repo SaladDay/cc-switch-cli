@@ -212,7 +212,23 @@ move cc-switch.exe C:\Windows\System32\
 
 </details>
 
-### 方法 2：从源码构建
+### 方法 2：使用 Homebrew 安装
+
+如果你在使用 Homebrew，可以直接通过 Homebrew 安装 cc-switch。
+
+```bash
+brew install cc-switch-cli
+```
+
+更新：
+
+```bash
+brew upgrade cc-switch-cli
+```
+
+请注意，如果你通过 Homebrew 安装了 cc-switch，请避免使用 cc-switch 内置的更新功能，因为这会影响 Homebrew 自身的升级功能。
+
+### 方法 3：从源码构建
 
 **前提条件：**
 - Rust 1.85+（[通过 rustup 安装](https://rustup.rs/)）
