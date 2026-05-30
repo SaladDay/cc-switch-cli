@@ -1,7 +1,7 @@
 use std::{env, ffi::OsString, sync::atomic::Ordering, time::Duration};
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::{
     bedrock_claude_provider, claude_provider, claude_request_body, spawn_scripted_upstream,
@@ -439,6 +439,196 @@ async fn codex_oauth_prepare_request_errors_without_available_account() {
     );
 }
 
+#[tokio::test]
+async fn codex_chat_prepare_request_rewrites_responses_to_chat_completions() {
+    let provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello",
+        "stream": true
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/v1/responses",
+            &request_body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Codex Chat bridge request")
+        .build()
+        .expect("build Codex Chat bridge request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://example.com/v1/chat/completions"
+    );
+    assert_eq!(
+        header_value(&request, "authorization"),
+        Some("Bearer codex-key")
+    );
+
+    let body = request_body_json(&request);
+    assert_eq!(body["model"], "deepseek-chat");
+    assert!(body.get("input").is_none());
+    assert!(body["messages"].is_array());
+    assert_eq!(body["messages"][0]["role"], "user");
+    assert_eq!(body["messages"][0]["content"], "hello");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["stream_options"]["include_usage"], true);
+}
+
+#[tokio::test]
+async fn codex_chat_prepare_request_preserves_responses_query() {
+    let provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello"
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/v1/responses?foo=bar&api-version=2025-01-01",
+            &request_body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Codex Chat bridge request")
+        .build()
+        .expect("build Codex Chat bridge request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://example.com/v1/chat/completions?foo=bar&api-version=2025-01-01"
+    );
+}
+
+#[tokio::test]
+async fn codex_chat_prepare_request_preserves_responses_compact_query() {
+    let provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello"
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/v1/responses/compact?foo=bar",
+            &request_body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Codex Chat compact bridge request")
+        .build()
+        .expect("build Codex Chat compact bridge request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://example.com/v1/chat/completions?foo=bar"
+    );
+}
+
+#[tokio::test]
+async fn codex_chat_prepare_request_preserves_full_chat_endpoint_base_url() {
+    let provider = codex_chat_provider(
+        "https://example.com/openai/v1/chat/completions",
+        "deepseek-chat",
+    );
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello"
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/responses",
+            &request_body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Codex Chat bridge request")
+        .build()
+        .expect("build Codex Chat bridge request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://example.com/openai/v1/chat/completions"
+    );
+}
+
+#[tokio::test]
+async fn codex_chat_prepare_request_preserves_query_with_full_chat_endpoint_base_url() {
+    let provider = codex_chat_provider(
+        "https://example.com/openai/v1/chat/completions",
+        "deepseek-chat",
+    );
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello"
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/responses?foo=bar",
+            &request_body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Codex Chat bridge request")
+        .build()
+        .expect("build Codex Chat bridge request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://example.com/openai/v1/chat/completions?foo=bar"
+    );
+}
+
 async fn build_request(
     app_type: &AppType,
     provider: &Provider,
@@ -478,6 +668,24 @@ fn codex_provider(base_url: &str) -> Provider {
     )
 }
 
+fn codex_chat_provider(base_url: &str, model: &str) -> Provider {
+    let mut provider = Provider::with_id(
+        "codex-chat".to_string(),
+        "Codex Chat Provider".to_string(),
+        json!({
+            "base_url": base_url,
+            "apiKey": "codex-key",
+            "model": model,
+        }),
+        None,
+    );
+    provider.meta = Some(ProviderMeta {
+        api_format: Some("openai_chat".to_string()),
+        ..Default::default()
+    });
+    provider
+}
+
 fn codex_oauth_provider(account_id: Option<&str>) -> Provider {
     Provider {
         id: "codex-oauth".to_string(),
@@ -511,4 +719,12 @@ fn header_value<'a>(request: &'a reqwest::Request, name: &str) -> Option<&'a str
         .headers()
         .get(name)
         .and_then(|value| value.to_str().ok())
+}
+
+fn request_body_json(request: &reqwest::Request) -> Value {
+    let bytes = request
+        .body()
+        .and_then(|body| body.as_bytes())
+        .expect("request should have JSON body bytes");
+    serde_json::from_slice(bytes).expect("parse request JSON body")
 }

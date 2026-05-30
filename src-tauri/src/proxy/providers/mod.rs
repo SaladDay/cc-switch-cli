@@ -2,13 +2,17 @@ mod adapter;
 mod auth;
 mod claude;
 mod codex;
+pub(crate) mod codex_chat_common;
+pub mod codex_chat_history;
 pub mod codex_oauth_auth;
 #[allow(dead_code)]
 pub mod copilot_auth;
 mod gemini;
 pub mod streaming;
+pub mod streaming_codex_chat;
 pub mod streaming_responses;
 pub mod transform;
+pub mod transform_codex_chat;
 pub mod transform_responses;
 
 use crate::app_config::AppType;
@@ -23,6 +27,12 @@ pub use claude::{
     transform_claude_request_for_api_format, ClaudeAdapter,
 };
 pub use codex::CodexAdapter;
+#[allow(unused_imports)]
+pub use codex::{
+    apply_codex_chat_upstream_model, codex_provider_upstream_model,
+    codex_provider_uses_chat_completions, is_origin_only_url, resolve_codex_chat_reasoning_config,
+    should_convert_codex_responses_to_chat,
+};
 pub use gemini::GeminiAdapter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

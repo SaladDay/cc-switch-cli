@@ -326,22 +326,35 @@ impl ConfigService {
         }
         let cfg_text = settings.get("config").and_then(Value::as_str);
 
-        crate::codex_config::write_codex_live_atomic_with_stable_provider(auth, cfg_text)?;
+        crate::codex_config::write_codex_provider_live_with_catalog(
+            &provider.settings_config,
+            ProviderService::codex_live_write_category(provider),
+            auth,
+            cfg_text,
+        )?;
         crate::mcp::sync_enabled_to_codex(config)?;
 
         let cfg_text_after = crate::codex_config::read_and_validate_codex_config_text()?;
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
-                let mut raw_settings = serde_json::Map::new();
-                raw_settings.insert("auth".to_string(), auth.clone());
-                raw_settings.insert(
-                    "config".to_string(),
-                    serde_json::Value::String(cfg_text_after),
-                );
+                let mut restored = serde_json::json!({
+                    "auth": auth.clone(),
+                    "config": cfg_text_after,
+                });
+                let restore_provider_token =
+                    crate::codex_config::should_restore_codex_provider_token_for_backfill(
+                        ProviderService::codex_live_write_category(provider),
+                        &provider.settings_config,
+                    );
+                crate::codex_config::restore_codex_settings_for_backfill(
+                    &mut restored,
+                    &provider.settings_config,
+                    restore_provider_token,
+                )?;
                 target.settings_config = ProviderService::normalize_settings_config_for_storage(
                     &AppType::Codex,
                     provider,
-                    serde_json::Value::Object(raw_settings),
+                    restored,
                     common_config_snippet.as_deref(),
                 )?;
             }

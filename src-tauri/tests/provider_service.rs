@@ -185,8 +185,8 @@ command = "echo"
         read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
     assert_eq!(
         auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
-        Some("fresh-key"),
-        "live auth.json should reflect new provider"
+        Some("legacy-key"),
+        "third-party Codex switches should preserve the user's auth.json login cache"
     );
 
     let config_text =
@@ -194,6 +194,16 @@ command = "echo"
     assert!(
         config_text.contains("mcp_servers.echo-server"),
         "config.toml should contain synced MCP servers"
+    );
+    let parsed_config: toml::Value = toml::from_str(&config_text).expect("parse config.toml");
+    assert_eq!(
+        parsed_config
+            .get("model_providers")
+            .and_then(|value| value.get("latest"))
+            .and_then(|value| value.get("experimental_bearer_token"))
+            .and_then(|value| value.as_str()),
+        Some("fresh-key"),
+        "third-party provider token should be written into the active model provider table"
     );
 
     let guard = state.config.read().expect("read config after switch");
@@ -237,7 +247,7 @@ command = "echo"
 }
 
 #[test]
-fn provider_service_switch_codex_preserves_live_model_provider_id_for_history() {
+fn provider_service_switch_codex_preserves_provider_model_provider_after_history_migration() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -306,25 +316,21 @@ requires_openai_auth = true
 
     assert_eq!(
         parsed.get("model_provider").and_then(|v| v.as_str()),
-        Some("rightcode"),
-        "live Codex model_provider should stay stable so resume history remains visible"
+        Some("aihubmix"),
+        "live Codex model_provider should preserve the selected provider template"
     );
 
     let model_providers = parsed
         .get("model_providers")
         .and_then(|v| v.as_table())
         .expect("model_providers table exists");
-    assert!(
-        model_providers.get("aihubmix").is_none(),
-        "target provider-specific id should be rewritten in live config"
-    );
     assert_eq!(
         model_providers
-            .get("rightcode")
+            .get("aihubmix")
             .and_then(|v| v.get("base_url"))
             .and_then(|v| v.as_str()),
         Some("https://aihubmix.example/v1"),
-        "stable provider id should point at the newly selected supplier endpoint"
+        "selected provider id should point at the newly selected supplier endpoint"
     );
 
     let guard = state.config.read().expect("read config after switch");
@@ -3718,18 +3724,17 @@ fn provider_service_switch_codex_openai_official_writes_auth_json_from_provider_
             .expect("codex manager");
         manager.current = "p2".to_string();
 
-        manager.providers.insert(
+        let mut official = Provider::with_id(
             "p1".to_string(),
-            Provider::with_id(
-                "p1".to_string(),
-                "OpenAI Official".to_string(),
-                json!({
-                    "auth": { "OPENAI_API_KEY": "sk-official" },
-                    "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-                }),
-                None,
-            ),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-official" },
+                "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+            }),
+            None,
         );
+        official.category = Some("official".to_string());
+        manager.providers.insert("p1".to_string(), official);
 
         manager.providers.insert(
             "p2".to_string(),

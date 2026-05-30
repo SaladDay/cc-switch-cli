@@ -2,6 +2,7 @@ use axum::{body::to_bytes, http::StatusCode};
 use bytes::Bytes;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde_json::json;
+use std::sync::Arc;
 
 use super::*;
 
@@ -168,4 +169,60 @@ async fn non_success_standard_json_errors_can_still_transform() {
             br#"{"error":{"message":"upstream rejected the request","type":"invalid_request_error"},"type":"error"}"#,
         )
     );
+}
+
+#[tokio::test]
+async fn codex_chat_buffered_success_converts_to_responses_shape() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+    let prepared = build_buffered_codex_chat_response(
+        reqwest::StatusCode::OK,
+        &headers,
+        Bytes::from_static(
+            br#"{"id":"chatcmpl_123","object":"chat.completion","created":1710000000,"model":"deepseek-chat","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}"#,
+        ),
+        Arc::new(Default::default()),
+    )
+    .await
+    .expect("convert Chat success response");
+
+    assert_eq!(prepared.response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&buffered_body(prepared.response).await).expect("response json");
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["model"], "deepseek-chat");
+    assert_eq!(body["output"][0]["type"], "message");
+    assert_eq!(body["output"][0]["content"][0]["text"], "hello");
+    assert_eq!(body["usage"]["input_tokens"], 3);
+    assert_eq!(body["usage"]["output_tokens"], 2);
+}
+
+#[tokio::test]
+async fn codex_chat_buffered_error_converts_non_json_body_to_responses_error() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+
+    let prepared = build_buffered_codex_chat_response(
+        reqwest::StatusCode::BAD_GATEWAY,
+        &headers,
+        Bytes::from_static(b"upstream unavailable"),
+        Arc::new(Default::default()),
+    )
+    .await
+    .expect("convert Chat error response");
+
+    assert_eq!(prepared.response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        prepared
+            .response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&buffered_body(prepared.response).await).expect("response json");
+    assert_eq!(body["error"]["message"], "upstream unavailable");
+    assert_eq!(body["error"]["type"], "upstream_error");
 }

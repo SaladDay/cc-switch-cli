@@ -3,6 +3,7 @@ mod app_config;
 mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
+mod codex_history_migration;
 pub mod commands;
 mod config;
 #[cfg(unix)]

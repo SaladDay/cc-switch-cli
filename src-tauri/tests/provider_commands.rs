@@ -629,14 +629,24 @@ command = "echo"
             .get("OPENAI_API_KEY")
             .and_then(|v| v.as_str())
             .unwrap_or(""),
-        "fresh-key",
-        "live auth.json should reflect new provider"
+        "legacy-key",
+        "third-party Codex switches should preserve the user's auth.json login cache"
     );
 
     let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert!(
         config_text.contains("mcp_servers.echo-server"),
         "config.toml should contain synced MCP servers"
+    );
+    let parsed_config: toml::Value = toml::from_str(&config_text).expect("parse config.toml");
+    assert_eq!(
+        parsed_config
+            .get("model_providers")
+            .and_then(|value| value.get("latest"))
+            .and_then(|value| value.get("experimental_bearer_token"))
+            .and_then(|value| value.as_str()),
+        Some("fresh-key"),
+        "third-party provider token should be written into the active model provider table"
     );
 
     let locked = app_state.config.read().expect("lock config after switch");

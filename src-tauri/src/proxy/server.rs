@@ -20,6 +20,7 @@ use super::{
     error::ProxyError,
     handlers,
     provider_router::ProviderRouter,
+    providers::codex_chat_history::CodexChatHistoryStore,
     types::{ActiveTarget, ProxyConfig, ProxyServerInfo, ProxyStatus},
 };
 
@@ -33,6 +34,7 @@ pub struct ProxyServerState {
     pub start_time: Arc<RwLock<Option<Instant>>>,
     pub current_providers: Arc<RwLock<HashMap<String, (String, String)>>>,
     pub provider_router: Arc<ProviderRouter>,
+    pub codex_chat_history: Arc<CodexChatHistoryStore>,
 }
 
 impl ProxyServerState {
@@ -276,6 +278,7 @@ mod tests {
             start_time: Arc::new(RwLock::new(None)),
             current_providers: Arc::new(RwLock::new(HashMap::new())),
             provider_router: Arc::new(ProviderRouter::new(db)),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
         }
     }
 
@@ -501,6 +504,7 @@ impl ProxyServer {
                 start_time: Arc::new(RwLock::new(None)),
                 current_providers: Arc::new(RwLock::new(HashMap::new())),
                 provider_router,
+                codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             },
             shutdown_tx: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),

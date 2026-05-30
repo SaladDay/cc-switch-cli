@@ -11,6 +11,7 @@ use crate::{app_config::AppType, provider::Provider};
 use super::{
     error::ProxyError,
     provider_router::ProviderRouter,
+    providers::codex_chat_history::CodexChatHistoryStore,
     providers::get_adapter,
     thinking_budget_rectifier::{rectify_thinking_budget, should_rectify_thinking_budget},
     thinking_rectifier::{
@@ -27,6 +28,7 @@ pub struct RequestForwarder {
     optimizer_config: OptimizerConfig,
     session_id: String,
     session_client_provided: bool,
+    codex_chat_history: Option<Arc<CodexChatHistoryStore>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +112,7 @@ impl RequestForwarder {
             optimizer_config: OptimizerConfig::default(),
             session_id: String::new(),
             session_client_provided: false,
+            codex_chat_history: None,
         })
     }
 
@@ -121,6 +124,11 @@ impl RequestForwarder {
     pub fn with_session(mut self, session_id: String, client_provided: bool) -> Self {
         self.session_id = session_id;
         self.session_client_provided = client_provided;
+        self
+    }
+
+    pub fn with_codex_chat_history(mut self, history: Arc<CodexChatHistoryStore>) -> Self {
+        self.codex_chat_history = Some(history);
         self
     }
 

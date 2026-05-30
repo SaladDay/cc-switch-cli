@@ -10,7 +10,11 @@ use super::super::{
     http_client,
     json_canonical::canonicalize_value,
     model_mapper::apply_model_mapping,
-    providers::{get_adapter, AuthStrategy, ProviderAdapter},
+    providers::{
+        apply_codex_chat_upstream_model, get_adapter, resolve_codex_chat_reasoning_config,
+        should_convert_codex_responses_to_chat, transform_codex_chat, AuthStrategy,
+        ProviderAdapter,
+    },
 };
 use super::{ForwardOptions, RequestForwarder};
 
@@ -40,7 +44,7 @@ impl RequestForwarder {
     ) -> Result<reqwest::RequestBuilder, ProxyError> {
         let adapter = get_adapter(app_type);
         let is_claude_request = matches!(app_type, AppType::Claude);
-        let upstream_endpoint = self.router.upstream_endpoint(app_type, provider, endpoint);
+        let mut upstream_endpoint = self.router.upstream_endpoint(app_type, provider, endpoint);
         let base_url = adapter.extract_base_url(provider)?;
         let (mut mapped_body, _, _) = apply_model_mapping(body.clone(), provider);
 
@@ -56,7 +60,20 @@ impl RequestForwarder {
             }
         }
 
-        let request_body = if adapter.needs_transform(provider) {
+        let request_body = if should_convert_codex_responses_to_chat(provider, endpoint)
+            && matches!(app_type, AppType::Codex)
+        {
+            upstream_endpoint = rewrite_codex_responses_endpoint_to_chat(endpoint);
+            if let Some(history) = self.codex_chat_history.as_ref() {
+                history.enrich_request(&mut mapped_body).await;
+            }
+            apply_codex_chat_upstream_model(provider, &mut mapped_body);
+            let reasoning_config = resolve_codex_chat_reasoning_config(provider, &mapped_body);
+            transform_codex_chat::responses_to_chat_completions_with_reasoning(
+                mapped_body,
+                reasoning_config.as_ref(),
+            )?
+        } else if adapter.needs_transform(provider) {
             if is_claude_request {
                 super::super::providers::transform_claude_request_for_api_format(
                     mapped_body,
@@ -116,7 +133,18 @@ async fn build_request(
     is_claude_request: bool,
     client_session_id: Option<&str>,
 ) -> Result<reqwest::RequestBuilder, ProxyError> {
-    let mut request = client.post(adapter.build_url(base_url, endpoint));
+    let (endpoint_path, endpoint_query) = split_endpoint_and_query(endpoint);
+    let url = if base_url
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+        .ends_with("/chat/completions")
+        && endpoint_path.trim_matches('/') == "chat/completions"
+    {
+        append_query_to_url(base_url.trim_end_matches('/'), endpoint_query)
+    } else {
+        adapter.build_url(base_url, endpoint)
+    };
+    let mut request = client.post(url);
 
     for (key, value) in headers {
         if HEADER_BLACKLIST
@@ -204,6 +232,33 @@ async fn build_request(
     }
 
     Ok(request.json(request_body))
+}
+
+fn split_endpoint_and_query(endpoint: &str) -> (&str, Option<&str>) {
+    endpoint
+        .split_once('?')
+        .map_or((endpoint, None), |(path, query)| (path, Some(query)))
+}
+
+fn rewrite_codex_responses_endpoint_to_chat(endpoint: &str) -> String {
+    match split_endpoint_and_query(endpoint).1 {
+        Some(query) if !query.is_empty() => format!("/chat/completions?{query}"),
+        _ => "/chat/completions".to_string(),
+    }
+}
+
+fn append_query_to_url(url: &str, query: Option<&str>) -> String {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return url.to_string();
+    };
+
+    if url.ends_with('?') || url.ends_with('&') {
+        format!("{url}{query}")
+    } else if url.contains('?') {
+        format!("{url}&{query}")
+    } else {
+        format!("{url}?{query}")
+    }
 }
 
 fn is_bedrock_provider(provider: &Provider) -> bool {

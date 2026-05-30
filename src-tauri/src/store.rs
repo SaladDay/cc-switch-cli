@@ -107,8 +107,52 @@ impl AppState {
         }
 
         state.import_live_current_provider_configs_on_startup()?;
+        state.migrate_codex_provider_buckets_on_startup();
 
         Ok(state)
+    }
+
+    fn migrate_codex_provider_buckets_on_startup(&self) {
+        match crate::codex_history_migration::maybe_migrate_codex_third_party_history_provider_bucket(
+            &self.db,
+        ) {
+            Ok(outcome) => {
+                if let Some(reason) = outcome.skipped_reason {
+                    log::debug!("○ Codex history provider bucket migration skipped: {reason}");
+                } else {
+                    log::info!(
+                        "✓ Codex history provider bucket migration completed: sources={}, jsonl_files={}, state_rows={}",
+                        outcome.source_provider_ids.len(),
+                        outcome.migrated_jsonl_files,
+                        outcome.migrated_state_rows
+                    );
+                }
+            }
+            Err(error) => {
+                log::warn!("✗ Codex history provider bucket migration failed: {error}");
+            }
+        }
+
+        match crate::codex_history_migration::maybe_migrate_codex_provider_template_bucket(&self.db)
+        {
+            Ok(outcome) => {
+                if let Some(reason) = outcome.skipped_reason {
+                    log::debug!("○ Codex provider template bucket migration skipped: {reason}");
+                } else if !outcome.migrated_provider_ids.is_empty() {
+                    log::info!(
+                        "✓ Codex provider template bucket migration completed: providers={}",
+                        outcome.migrated_provider_ids.len()
+                    );
+                }
+            }
+            Err(error) => {
+                log::warn!("✗ Codex provider template bucket migration failed: {error}");
+            }
+        }
+
+        if let Err(error) = self.refresh_config_from_db() {
+            log::warn!("✗ Failed to refresh config after Codex provider bucket migration: {error}");
+        }
     }
 
     fn import_live_provider_configs_on_startup(&self) -> Result<(), AppError> {
@@ -638,6 +682,67 @@ wire_api = "responses"
         assert_eq!(manager.current, "default");
         assert!(manager.providers.contains_key("default"));
         assert!(manager.providers.contains_key("codex-official"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn startup_migrates_imported_codex_live_provider_after_import() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        write_json(
+            crate::codex_config::get_codex_auth_path(),
+            json!({ "OPENAI_API_KEY": "live-codex-key" }),
+        );
+        write_text(
+            crate::codex_config::get_codex_config_path(),
+            r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+        );
+
+        let state = AppState::try_new_with_startup_recovery().expect("create startup state");
+        let provider = state
+            .db
+            .get_provider_by_id("default", "codex")
+            .expect("read provider")
+            .expect("default provider should be imported before migration");
+        let config_text = provider
+            .settings_config
+            .get("config")
+            .and_then(|value| value.as_str())
+            .expect("codex provider config");
+        assert!(
+            config_text.contains("model_provider = \"custom\""),
+            "imported live provider should be migrated to the unified custom bucket"
+        );
+        assert!(
+            config_text.contains("[model_providers.custom]"),
+            "provider table should be migrated to custom"
+        );
+        assert!(
+            !config_text.contains("[model_providers.rightcode]"),
+            "legacy provider table should not remain after migration"
+        );
+
+        let migration = crate::settings::get_settings()
+            .local_migrations
+            .and_then(|migrations| migrations.codex_third_party_history_provider_bucket_v1)
+            .expect("history migration should be marked after imported provider is visible");
+        assert_eq!(migration.target_provider_id, "custom");
+        assert!(
+            migration
+                .source_provider_ids
+                .iter()
+                .any(|provider_id| provider_id == "rightcode"),
+            "startup migration should collect source ids from the imported live provider"
+        );
     }
 
     #[test]

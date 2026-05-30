@@ -99,6 +99,7 @@ fn test_state_with_db(db: Arc<Database>) -> ProxyServerState {
         start_time: Arc::new(RwLock::new(None)),
         current_providers: Arc::new(RwLock::new(HashMap::new())),
         provider_router: Arc::new(ProviderRouter::new(db)),
+        codex_chat_history: Arc::new(Default::default()),
     }
 }
 

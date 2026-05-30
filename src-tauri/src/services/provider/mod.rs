@@ -300,6 +300,14 @@ impl ProviderService {
                 .is_some_and(|value| value.eq_ignore_ascii_case("official"))
     }
 
+    pub(crate) fn codex_live_write_category(provider: &Provider) -> Option<&str> {
+        if Self::is_codex_official_provider(provider) {
+            Some("official")
+        } else {
+            provider.category.as_deref()
+        }
+    }
+
     fn codex_config_has_base_url(config_text: &str) -> bool {
         let Ok(table) = toml::from_str::<toml::Table>(config_text.trim()) else {
             return false;
@@ -731,8 +739,24 @@ impl ProviderService {
                     raw_settings.insert("auth".to_string(), auth);
                 }
                 raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
+                let mut settings_for_storage = Value::Object(raw_settings);
+                let restore_provider_token =
+                    crate::codex_config::should_restore_codex_provider_token_for_backfill(
+                        Self::codex_live_write_category(&provider),
+                        &provider.settings_config,
+                    );
+                if let Err(err) = crate::codex_config::restore_codex_settings_for_backfill(
+                    &mut settings_for_storage,
+                    &provider.settings_config,
+                    restore_provider_token,
+                ) {
+                    log::warn!(
+                        "Failed to restore Codex settings while refreshing '{}': {err}",
+                        provider.id
+                    );
+                }
                 let mut snapshot_provider = provider.clone();
-                snapshot_provider.settings_config = Value::Object(raw_settings);
+                snapshot_provider.settings_config = settings_for_storage;
 
                 {
                     let mut guard = state.config.write().map_err(AppError::from)?;
@@ -766,11 +790,6 @@ impl ProviderService {
                             effective_common_snippet.as_deref(),
                         )?;
                     }
-                    Self::restore_codex_model_provider_for_storage_best_effort(
-                        &provider,
-                        &mut snapshot_provider.settings_config,
-                    );
-
                     if let Some(manager) = guard.get_manager_mut(app_type) {
                         if let Some(target) = manager.providers.get_mut(provider_id) {
                             *target = snapshot_provider;
@@ -1152,23 +1171,6 @@ impl ProviderService {
             common_config_snippet,
         )?;
         Ok(snapshot_provider)
-    }
-
-    fn restore_codex_model_provider_for_storage_best_effort(
-        provider: &Provider,
-        settings_config: &mut Value,
-    ) {
-        if let Err(err) =
-            crate::codex_config::restore_codex_settings_config_model_provider_for_backfill(
-                settings_config,
-                &provider.settings_config,
-            )
-        {
-            log::warn!(
-                "Failed to restore Codex provider id while storing snapshot for '{}': {err}",
-                provider.id
-            );
-        }
     }
 
     pub(crate) fn remove_common_config_from_settings_for_preview(
@@ -1835,19 +1837,7 @@ impl ProviderService {
         }
 
         let settings_config = match app_type {
-            AppType::Codex => {
-                let auth_path = get_codex_auth_path();
-                if !auth_path.exists() {
-                    return Err(AppError::localized(
-                        "codex.live.missing",
-                        "Codex 配置文件不存在",
-                        "Codex configuration file is missing",
-                    ));
-                }
-                let auth: Value = read_json_file(&auth_path)?;
-                let config_str = crate::codex_config::read_and_validate_codex_config_text()?;
-                json!({ "auth": auth, "config": config_str })
-            }
+            AppType::Codex => crate::codex_config::read_codex_live_settings_with_model_catalog()?,
             AppType::Claude => {
                 let settings_path = get_claude_settings_path();
                 if !settings_path.exists() {
@@ -1905,7 +1895,32 @@ impl ProviderService {
             settings_config,
             None,
         );
-        provider.category = Some("custom".to_string());
+        provider.category = Some(
+            if matches!(app_type, AppType::Codex) {
+                let config_text = provider
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str);
+                let has_provider_key = crate::codex_config::extract_codex_api_key(
+                    provider.settings_config.get("auth"),
+                    config_text,
+                )
+                .is_some();
+                let has_login_material = provider
+                    .settings_config
+                    .get("auth")
+                    .is_some_and(crate::codex_config::codex_auth_has_login_material);
+
+                if has_login_material && !has_provider_key {
+                    "official"
+                } else {
+                    "custom"
+                }
+            } else {
+                "custom"
+            }
+            .to_string(),
+        );
 
         state.db.save_provider(app_type.as_str(), &provider)?;
         state
@@ -1928,28 +1943,7 @@ impl ProviderService {
     /// 读取当前 live 配置
     pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
         match app_type {
-            AppType::Codex => {
-                let auth_path = get_codex_auth_path();
-                let config_path = get_codex_config_path();
-                if !config_path.exists() {
-                    return Err(AppError::localized(
-                        "codex.live.missing",
-                        "Codex 配置文件不存在",
-                        "Codex configuration is missing",
-                    ));
-                }
-
-                let mut live_settings = serde_json::Map::new();
-                if auth_path.exists() {
-                    live_settings.insert("auth".to_string(), read_json_file(&auth_path)?);
-                }
-                if config_path.exists() {
-                    let cfg_text = crate::codex_config::read_and_validate_codex_config_text()?;
-                    live_settings.insert("config".to_string(), Value::String(cfg_text));
-                }
-
-                Ok(Value::Object(live_settings))
-            }
+            AppType::Codex => crate::codex_config::read_codex_live_settings_with_model_catalog(),
             AppType::Claude => {
                 let path = get_claude_settings_path();
                 if !path.exists() {

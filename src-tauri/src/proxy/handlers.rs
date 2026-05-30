@@ -17,9 +17,10 @@ use super::{
     metrics::estimate_tokens_from_value,
     providers::{ClaudeAdapter, ProviderAdapter},
     response::{
-        build_anthropic_stream_response, build_buffered_json_response,
-        build_buffered_passthrough_response, build_json_response, build_passthrough_response,
-        is_sse_response, PreparedResponse,
+        build_anthropic_stream_response, build_buffered_codex_chat_response,
+        build_buffered_json_response, build_buffered_passthrough_response,
+        build_codex_chat_error_response, build_codex_chat_stream_response, build_json_response,
+        build_passthrough_response, is_sse_response, PreparedResponse,
     },
     response_handler::{proxy_error_response, ResponseHandler, SuccessSyncInfo},
     server::ProxyServerState,
@@ -46,6 +47,7 @@ pub async fn handle_messages(
 
 pub async fn handle_chat_completions(
     State(state): State<ProxyServerState>,
+    uri: Uri,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -54,13 +56,14 @@ pub async fn handle_chat_completions(
         headers,
         body,
         AppType::Codex,
-        "/chat/completions".to_string(),
+        endpoint_with_query(&uri, "/chat/completions"),
     )
     .await
 }
 
 pub async fn handle_responses(
     State(state): State<ProxyServerState>,
+    uri: Uri,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -69,13 +72,14 @@ pub async fn handle_responses(
         headers,
         body,
         AppType::Codex,
-        "/responses".to_string(),
+        endpoint_with_query(&uri, "/responses"),
     )
     .await
 }
 
 pub async fn handle_responses_compact(
     State(state): State<ProxyServerState>,
+    uri: Uri,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
@@ -84,9 +88,16 @@ pub async fn handle_responses_compact(
         headers,
         body,
         AppType::Codex,
-        "/responses/compact".to_string(),
+        endpoint_with_query(&uri, "/responses/compact"),
     )
     .await
+}
+
+fn endpoint_with_query(uri: &Uri, endpoint: &str) -> String {
+    match uri.query() {
+        Some(query) => format!("{endpoint}?{query}"),
+        None => endpoint.to_string(),
+    }
 }
 
 pub async fn handle_gemini(
@@ -436,7 +447,8 @@ async fn handle_passthrough_request(
     let forwarder = match RequestForwarder::new(context.provider_router.clone()) {
         Ok(forwarder) => forwarder
             .with_optimizer_config(context.optimizer_config.clone())
-            .with_session(context.session_id.clone(), context.session_client_provided),
+            .with_session(context.session_id.clone(), context.session_client_provided)
+            .with_codex_chat_history(context.state.codex_chat_history.clone()),
         Err(error) => {
             context.state.record_request_error(&error).await;
             return proxy_error_response(error);
@@ -482,12 +494,34 @@ async fn handle_passthrough_request(
 
         let response = forward_result.response;
         let status = response.status();
+        let converts_codex_chat = super::providers::should_convert_codex_responses_to_chat(
+            &forward_result.provider,
+            &endpoint,
+        );
         let success_sync = status.is_success().then(|| SuccessSyncInfo {
             app_type: context.app_type.clone(),
             provider: forward_result.provider.clone(),
             current_provider_id_at_start: context.current_provider_id_at_start.clone(),
         });
         let response_result = match response {
+            super::forwarder::StreamingResponse::Live(response)
+                if converts_codex_chat && status.is_success() =>
+            {
+                build_codex_chat_stream_response(
+                    response,
+                    remaining_timeout(first_byte_timeout, request_started_at),
+                    context.streaming_idle_timeout(),
+                    context.state.codex_chat_history.clone(),
+                )
+            }
+            super::forwarder::StreamingResponse::Live(response) if converts_codex_chat => {
+                build_codex_chat_error_response(
+                    response,
+                    remaining_timeout(first_byte_timeout, request_started_at),
+                    context.state.codex_chat_history.clone(),
+                )
+                .await
+            }
             super::forwarder::StreamingResponse::Live(response) => {
                 build_passthrough_response(
                     response,
@@ -496,16 +530,33 @@ async fn handle_passthrough_request(
                 )
                 .await
             }
+            super::forwarder::StreamingResponse::Buffered(response) if converts_codex_chat => {
+                build_buffered_codex_chat_response(
+                    status,
+                    &response.headers,
+                    response.body,
+                    context.state.codex_chat_history.clone(),
+                )
+                .await
+            }
             super::forwarder::StreamingResponse::Buffered(response) => {
                 build_buffered_passthrough_response(status, &response.headers, response.body)
             }
         };
+        let request_log = converts_codex_chat.then(|| {
+            RequestLogContext::from_handler(
+                &context,
+                forward_result.provider.clone(),
+                true,
+                UsageLogPolicy::Transformed,
+            )
+        });
         return ResponseHandler::finish_streaming(
             &context.state,
             response_result,
             status,
             success_sync,
-            None,
+            request_log,
         )
         .await;
     }
@@ -530,17 +581,41 @@ async fn handle_passthrough_request(
     };
 
     let response = forward_result.response;
+    let converts_codex_chat = super::providers::should_convert_codex_responses_to_chat(
+        &forward_result.provider,
+        &endpoint,
+    );
     let success_sync = response.status.is_success().then(|| SuccessSyncInfo {
         app_type: context.app_type.clone(),
         provider: forward_result.provider.clone(),
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
     });
+    let request_log = converts_codex_chat.then(|| {
+        RequestLogContext::from_handler(
+            &context,
+            forward_result.provider.clone(),
+            false,
+            UsageLogPolicy::Transformed,
+        )
+    });
+    let status = response.status;
+    let response_result = if converts_codex_chat {
+        build_buffered_codex_chat_response(
+            response.status,
+            &response.headers,
+            response.body,
+            context.state.codex_chat_history.clone(),
+        )
+        .await
+    } else {
+        build_buffered_passthrough_response(response.status, &response.headers, response.body)
+    };
     ResponseHandler::finish_buffered(
         &context.state,
-        build_buffered_passthrough_response(response.status, &response.headers, response.body),
-        response.status,
+        response_result,
+        status,
         success_sync,
-        None,
+        request_log,
     )
     .await
 }
@@ -565,12 +640,35 @@ fn remaining_timeout(timeout: Option<Duration>, started_at: Instant) -> Option<D
 #[cfg(test)]
 mod tests {
     use super::{
-        build_buffered_claude_transform_response, responses_sse_to_response_value,
-        should_use_claude_transform_streaming,
+        build_buffered_claude_transform_response, endpoint_with_query,
+        responses_sse_to_response_value, should_use_claude_transform_streaming,
     };
     use crate::proxy::error::ProxyError;
+    use axum::http::Uri;
     use bytes::Bytes;
     use serde_json::Value;
+
+    #[test]
+    fn codex_endpoint_with_query_preserves_responses_query() {
+        let uri: Uri = "/v1/responses?foo=bar&api-version=2025-01-01"
+            .parse()
+            .unwrap();
+
+        assert_eq!(
+            endpoint_with_query(&uri, "/responses"),
+            "/responses?foo=bar&api-version=2025-01-01"
+        );
+    }
+
+    #[test]
+    fn codex_endpoint_with_query_preserves_responses_compact_query() {
+        let uri: Uri = "/v1/responses/compact?foo=bar".parse().unwrap();
+
+        assert_eq!(
+            endpoint_with_query(&uri, "/responses/compact"),
+            "/responses/compact?foo=bar"
+        );
+    }
 
     #[test]
     fn codex_oauth_buffered_transform_aggregates_sse_before_json_parse() {

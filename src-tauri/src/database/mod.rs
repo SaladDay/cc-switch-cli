@@ -32,6 +32,7 @@ mod schema;
 mod tests;
 
 // DAO 类型导出供外部使用
+pub(crate) use dao::providers_seed::is_official_seed_id;
 pub use dao::FailoverQueueItem;
 
 use crate::config::get_app_config_dir;

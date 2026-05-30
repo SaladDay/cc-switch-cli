@@ -4538,6 +4538,97 @@ fn import_default_config_preserves_codex_common_snippet_in_db_snapshot() {
 }
 
 #[test]
+#[serial]
+fn import_default_config_preserves_codex_model_catalog_projection() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+
+    write_json_file(
+        &get_codex_auth_path(),
+        &json!({ "OPENAI_API_KEY": "sk-test" }),
+    )
+    .expect("write auth.json");
+
+    let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+    std::fs::write(
+        get_codex_config_path(),
+        format!(
+            "model_catalog_json = \"{}\"\nmodel_context_window = 128000\nmodel_provider = \"default\"\nmodel = \"gpt-4\"\n\n[model_providers.default]\nbase_url = \"https://api.example/v1\"\n",
+            catalog_path.to_string_lossy()
+        ),
+    )
+    .expect("write config.toml");
+    write_json_file(
+        &catalog_path,
+        &json!({
+            "models": [
+                {
+                    "slug": "deepseek-v4-flash",
+                    "display_name": "DeepSeek V4 Flash",
+                    "context_window": 64000
+                },
+                {
+                    "slug": "kimi-k2",
+                    "display_name": "kimi-k2",
+                    "context_window": 128000
+                }
+            ]
+        }),
+    )
+    .expect("write generated Codex model catalog");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    let state = state_from_config(config);
+
+    ProviderService::import_default_config(&state, AppType::Codex)
+        .expect("import default codex config");
+
+    let provider = state
+        .db
+        .get_provider_by_id("default", AppType::Codex.as_str())
+        .expect("read imported codex provider")
+        .expect("default provider exists");
+    assert_eq!(
+        provider
+            .settings_config
+            .pointer("/modelCatalog/models/0/model")
+            .and_then(Value::as_str),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(
+        provider
+            .settings_config
+            .pointer("/modelCatalog/models/0/displayName")
+            .and_then(Value::as_str),
+        Some("DeepSeek V4 Flash")
+    );
+    assert_eq!(
+        provider
+            .settings_config
+            .pointer("/modelCatalog/models/0/contextWindow")
+            .and_then(Value::as_u64),
+        Some(64_000)
+    );
+    assert!(
+        provider
+            .settings_config
+            .pointer("/modelCatalog/models/1/displayName")
+            .is_none(),
+        "display names matching the slug should round-trip as blank"
+    );
+    assert!(
+        provider
+            .settings_config
+            .pointer("/modelCatalog/models/1/contextWindow")
+            .is_none(),
+        "context windows matching model_context_window should round-trip as blank"
+    );
+}
+
+#[test]
 fn extract_credentials_returns_expected_values() {
     let provider = Provider::with_id(
         "claude".into(),

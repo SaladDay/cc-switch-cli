@@ -335,6 +335,42 @@ fn sanitize_path_segment(raw: &str) -> String {
         .join("/")
 }
 
+/// 本机自动迁移状态。
+///
+/// 这里记录的是本机启动时执行过的一次性迁移；标记不随数据库同步。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalMigrations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_third_party_history_provider_bucket_v1:
+        Option<CodexThirdPartyHistoryProviderBucketMigration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_provider_template_v1: Option<CodexProviderTemplateMigration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexThirdPartyHistoryProviderBucketMigration {
+    pub completed_at: String,
+    pub target_provider_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_provider_ids: Vec<String>,
+    #[serde(default)]
+    pub migrated_jsonl_files: usize,
+    #[serde(default)]
+    pub migrated_state_rows: usize,
+    #[serde(default)]
+    pub scanned_history_files: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProviderTemplateMigration {
+    pub completed_at: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migrated_provider_ids: Vec<String>,
+}
+
 /// 应用设置结构，允许覆盖默认配置目录
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -400,6 +436,8 @@ pub struct AppSettings {
     /// 首选终端应用，用于会话恢复。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_terminal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_migrations: Option<LocalMigrations>,
     /// Claude 自定义端点列表
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub custom_endpoints_claude: HashMap<String, CustomEndpoint>,
@@ -446,6 +484,7 @@ impl Default for AppSettings {
             webdav_sync: None,
             backup_retain_count: None,
             preferred_terminal: None,
+            local_migrations: None,
             custom_endpoints_claude: HashMap::new(),
             custom_endpoints_codex: HashMap::new(),
         }
@@ -610,6 +649,27 @@ pub fn get_settings() -> AppSettings {
 }
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
+    let existing_migrations = settings_store()
+        .read()
+        .ok()
+        .and_then(|settings| settings.local_migrations.clone());
+    if new_settings.local_migrations.is_none() {
+        new_settings.local_migrations = existing_migrations;
+    } else if let (Some(incoming_migrations), Some(existing_migrations)) =
+        (&mut new_settings.local_migrations, existing_migrations)
+    {
+        if incoming_migrations
+            .codex_third_party_history_provider_bucket_v1
+            .is_none()
+        {
+            incoming_migrations.codex_third_party_history_provider_bucket_v1 =
+                existing_migrations.codex_third_party_history_provider_bucket_v1;
+        }
+        if incoming_migrations.codex_provider_template_v1.is_none() {
+            incoming_migrations.codex_provider_template_v1 =
+                existing_migrations.codex_provider_template_v1;
+        }
+    }
     new_settings.normalize_common();
     new_settings.validate()?;
     new_settings.save()?;
@@ -617,6 +677,65 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     let mut guard = settings_store().write().expect("写入设置锁失败");
     *guard = new_settings;
     Ok(())
+}
+
+fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
+where
+    F: FnOnce(&mut AppSettings),
+{
+    let mut guard = settings_store().write().unwrap_or_else(|error| {
+        log::warn!("设置锁已毒化，使用恢复值: {error}");
+        error.into_inner()
+    });
+    let mut next = guard.clone();
+    mutator(&mut next);
+    next.normalize_common();
+    next.validate()?;
+    next.save()?;
+    *guard = next;
+    Ok(())
+}
+
+pub fn is_codex_third_party_history_provider_bucket_migrated() -> bool {
+    get_settings()
+        .local_migrations
+        .as_ref()
+        .and_then(|migrations| {
+            migrations
+                .codex_third_party_history_provider_bucket_v1
+                .as_ref()
+        })
+        .is_some_and(|migration| migration.scanned_history_files)
+}
+
+pub fn mark_codex_third_party_history_provider_bucket_migrated(
+    migration: CodexThirdPartyHistoryProviderBucketMigration,
+) -> Result<(), AppError> {
+    mutate_settings(|settings| {
+        let migrations = settings
+            .local_migrations
+            .get_or_insert_with(Default::default);
+        migrations.codex_third_party_history_provider_bucket_v1 = Some(migration);
+    })
+}
+
+pub fn is_codex_provider_template_migrated() -> bool {
+    get_settings()
+        .local_migrations
+        .as_ref()
+        .and_then(|migrations| migrations.codex_provider_template_v1.as_ref())
+        .is_some()
+}
+
+pub fn mark_codex_provider_template_migrated(
+    migration: CodexProviderTemplateMigration,
+) -> Result<(), AppError> {
+    mutate_settings(|settings| {
+        let migrations = settings
+            .local_migrations
+            .get_or_insert_with(Default::default);
+        migrations.codex_provider_template_v1 = Some(migration);
+    })
 }
 
 pub fn get_preferred_terminal() -> Option<String> {
