@@ -135,10 +135,7 @@ pub fn execute(cmd: UpdateCommand) -> Result<(), AppError> {
 async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
     let current_version = env!("CARGO_PKG_VERSION");
     let explicit_version = cmd.version.as_deref().is_some_and(|v| !v.trim().is_empty());
-    #[cfg(not(windows))]
     let is_homebrew_managed = is_homebrew_install();
-    #[cfg(windows)]
-    let is_homebrew_managed = false;
 
     // If the user explicitly requested a specific version, and we're on a Homebrew-managed installation,
     // block the update process since we should not replace the binary in-place.
@@ -1253,6 +1250,7 @@ fn replace_current_binary(new_binary_path: &Path) -> Result<(), AppError> {
 }
 
 /// Returns `true` if the running binary lives inside the Homebrew prefix.
+/// Returns false on windows.
 ///
 /// Prefers the `HOMEBREW_PREFIX` environment variable that Homebrew sets in
 /// its shell environment.  Falls back to the two well-known default prefixes
@@ -1261,21 +1259,28 @@ fn replace_current_binary(new_binary_path: &Path) -> Result<(), AppError> {
 /// launched the binary from a non-Homebrew shell).
 /// Here we ignore the default homebrew prefix on Intel Mac, as Intel homebrew
 /// is retiring in 2026.
-#[cfg(not(windows))]
 fn is_homebrew_install() -> bool {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    if let Ok(prefix) = std::env::var("HOMEBREW_PREFIX") {
-        if exe.starts_with(&prefix) {
-            return true;
-        }
+    #[cfg(windows)]
+    {
+        false
     }
-    const DEFAULT_PREFIXES: &[&str] = &["/opt/homebrew", "/home/linuxbrew/.linuxbrew"];
-    DEFAULT_PREFIXES
-        .iter()
-        .any(|prefix| exe.starts_with(prefix))
+
+    #[cfg(not(windows))]
+    {
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        if let Ok(prefix) = std::env::var("HOMEBREW_PREFIX") {
+            if exe.starts_with(&prefix) {
+                return true;
+            }
+        }
+        const DEFAULT_PREFIXES: &[&str] = &["/opt/homebrew", "/home/linuxbrew/.linuxbrew"];
+        DEFAULT_PREFIXES
+            .iter()
+            .any(|prefix| exe.starts_with(prefix))
+    }
 }
 
 fn remove_file_if_present(path: &Path) -> Result<(), AppError> {
@@ -1311,11 +1316,6 @@ pub(crate) async fn check_for_update() -> Result<UpdateCheckInfo, AppError> {
 /// Accepts an explicit `repo_url` so tests can point at a local mock server
 /// instead of hitting the real GitHub API.
 async fn check_for_update_from_repo(repo_url: &str) -> Result<UpdateCheckInfo, AppError> {
-    #[cfg(not(windows))]
-    let is_homebrew_managed = is_homebrew_install();
-    #[cfg(windows)]
-    let is_homebrew_managed = false;
-
     let current_version = env!("CARGO_PKG_VERSION");
     let client = create_http_client()?;
     let target_tag = resolve_target_release(&client, repo_url, None)
@@ -1325,7 +1325,7 @@ async fn check_for_update_from_repo(repo_url: &str) -> Result<UpdateCheckInfo, A
     Ok(build_update_check_info(
         current_version,
         target_tag,
-        is_homebrew_managed,
+        is_homebrew_install(),
     ))
 }
 
@@ -1353,7 +1353,6 @@ pub(crate) async fn download_and_apply(
     on_progress: impl Fn(u64, Option<u64>),
 ) -> Result<(), AppError> {
     // Same brew-prefix guard as the CLI path (see execute_async).
-    #[cfg(not(windows))]
     if is_homebrew_install() {
         return Err(AppError::Message(
             "cc-switch was installed via Homebrew. Please upgrade with: brew upgrade cc-switch"
