@@ -222,7 +222,7 @@ Update:
 ```
 brew upgrade cc-switch-cli
 ```
-If you installed cc-switch via Homebrew, please use brew upgrade cc-switch instead of the built-in update feature, as this breaks Homebrew formulae’s own upgrade functionality.
+If you installed cc-switch via Homebrew, please use Homebrew to upgrade cc-switch, instead of the built-in update feature, as this breaks Homebrew formulae’s own upgrade functionality.
 
 ### Method 3: Build from Source
 
