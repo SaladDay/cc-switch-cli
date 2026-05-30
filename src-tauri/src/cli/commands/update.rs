@@ -133,22 +133,28 @@ pub fn execute(cmd: UpdateCommand) -> Result<(), AppError> {
 }
 
 async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
-    // Block self-update when running from a Homebrew-managed prefix so we
-    // don't silently replace the brew-owned binary (which would break
-    // `brew upgrade` / `brew reinstall`).
+    let current_version = env!("CARGO_PKG_VERSION");
+    let explicit_version = cmd.version.as_deref().is_some_and(|v| !v.trim().is_empty());
     #[cfg(not(windows))]
-    if is_homebrew_install() {
+    let is_homebrew_managed = is_homebrew_install();
+    #[cfg(windows)]
+    let is_homebrew_managed = false;
+
+    // If the user explicitly requested a specific version, and we're on a Homebrew-managed installation,
+    // block the update process since we should not replace the binary in-place.
+    // For non-Homebrew installations, allow updating to a specific version and replace the binary.
+    // For Homebrew-managed installations without an explicit version (i.e. just checking for updates),
+    // allow the check to proceed and show the user that an update is available, but they will still need to use Homebrew to perform the actual update.
+    if should_block_homebrew_before_update_check(is_homebrew_managed, explicit_version) {
         println!(
             "{}",
             warning(
-                "cc-switch was installed via Homebrew.\nPlease upgrade with: brew upgrade cc-switch",
+                "cc-switch was installed via Homebrew. Self-update to a specific version is not supported.\nPlease use: brew upgrade cc-switch",
             )
         );
         return Ok(());
     }
 
-    let current_version = env!("CARGO_PKG_VERSION");
-    let explicit_version = cmd.version.as_deref().is_some_and(|v| !v.trim().is_empty());
     let client = create_http_client()?;
     let release = resolve_target_release(&client, REPO_URL, cmd.version.as_deref()).await?;
     let target_tag = release.target_tag().to_string();
@@ -167,6 +173,16 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
             "{}",
             info(&format!(
                 "Current version v{current_version} is newer than target {target_tag}; skipping automatic downgrade. Use `cc-switch update --version {target_tag}` to force."
+            ))
+        );
+        return Ok(());
+    }
+
+    if is_homebrew_managed {
+        println!(
+            "{}",
+            warning(&format!(
+                "Update {target_tag} is available (current v{current_version}).\nPlease update with: brew upgrade cc-switch"
             ))
         );
         return Ok(());
@@ -243,6 +259,13 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
         )
     );
     Ok(())
+}
+
+fn should_block_homebrew_before_update_check(
+    is_homebrew_managed: bool,
+    explicit_version: bool,
+) -> bool {
+    is_homebrew_managed && explicit_version
 }
 
 fn create_runtime() -> Result<tokio::runtime::Runtime, AppError> {
@@ -1236,7 +1259,7 @@ fn replace_current_binary(new_binary_path: &Path) -> Result<(), AppError> {
 /// (`/opt/homebrew` on Apple Silicon, `/home/linuxbrew/.linuxbrew` on Linux)
 /// so that detection still works when the variable is absent (e.g. the user
 /// launched the binary from a non-Homebrew shell).
-/// Here we ignore the default homebrew prefix on Intel Mac, as Intel homebrew 
+/// Here we ignore the default homebrew prefix on Intel Mac, as Intel homebrew
 /// is retiring in 2026.
 #[cfg(not(windows))]
 fn is_homebrew_install() -> bool {
@@ -1278,26 +1301,51 @@ pub(crate) struct UpdateCheckInfo {
     pub target_tag: String,
     pub is_already_latest: bool,
     pub is_downgrade: bool,
+    pub is_homebrew_managed: bool,
 }
 
 pub(crate) async fn check_for_update() -> Result<UpdateCheckInfo, AppError> {
+    check_for_update_from_repo(REPO_URL).await
+}
+
+/// Accepts an explicit `repo_url` so tests can point at a local mock server
+/// instead of hitting the real GitHub API.
+async fn check_for_update_from_repo(repo_url: &str) -> Result<UpdateCheckInfo, AppError> {
+    #[cfg(not(windows))]
+    let is_homebrew_managed = is_homebrew_install();
+    #[cfg(windows)]
+    let is_homebrew_managed = false;
+
     let current_version = env!("CARGO_PKG_VERSION");
     let client = create_http_client()?;
-    let target_tag = resolve_target_release(&client, REPO_URL, None)
+    let target_tag = resolve_target_release(&client, repo_url, None)
         .await?
         .target_tag()
         .to_string();
+    Ok(build_update_check_info(
+        current_version,
+        target_tag,
+        is_homebrew_managed,
+    ))
+}
+
+fn build_update_check_info(
+    current_version: &str,
+    target_tag: String,
+    is_homebrew_managed: bool,
+) -> UpdateCheckInfo {
     let target_version = target_tag.trim_start_matches('v');
 
     let is_already_latest = target_version == current_version;
     let is_downgrade = should_skip_implicit_downgrade(current_version, target_version, false);
 
-    Ok(UpdateCheckInfo {
+    UpdateCheckInfo {
         current_version: current_version.to_string(),
         target_tag,
         is_already_latest,
         is_downgrade,
-    })
+        is_homebrew_managed,
+    }
 }
 
 pub(crate) async fn download_and_apply(

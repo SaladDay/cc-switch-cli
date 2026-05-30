@@ -121,6 +121,16 @@ pub fn tui_toast_update_downgrade(current: &str, target: &str) -> String {
     }
 }
 
+pub fn tui_toast_update_homebrew_required(current: &str, target: &str) -> String {
+    if is_chinese() {
+        format!("发现新版本 {target}（当前 v{current}）。请使用 brew upgrade cc-switch 更新")
+    } else {
+        format!(
+            "Update {target} is available (current v{current}). Please update with: brew upgrade cc-switch"
+        )
+    }
+}
+
 pub fn tui_toast_update_check_failed(err: &str) -> String {
     if is_chinese() {
         format!("检查更新失败: {err}")

@@ -1,9 +1,83 @@
 use super::*;
 use axum::{response::Redirect, routing::get, Router};
 use minisign::KeyPair;
+use serial_test::serial;
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use tokio::net::TcpListener;
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn force_homebrew_install_for_test() -> EnvVarGuard {
+    let exe = std::env::current_exe().expect("current test executable should resolve");
+    let prefix = exe
+        .parent()
+        .expect("executable must have a parent directory");
+    EnvVarGuard::set("HOMEBREW_PREFIX", prefix.as_os_str())
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+#[serial(homebrew_update)]
+async fn cli_explicit_update_exits_early_for_homebrew_install() {
+    let _homebrew = force_homebrew_install_for_test();
+
+    execute_async(UpdateCommand {
+        version: Some("v999.0.0".to_string()),
+    })
+    .await
+    .expect("homebrew-managed explicit CLI update should exit without querying releases");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn cli_default_homebrew_update_is_not_blocked_before_checking_latest() {
+    assert!(!should_block_homebrew_before_update_check(true, false));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn cli_explicit_homebrew_update_is_blocked_before_release_lookup() {
+    assert!(should_block_homebrew_before_update_check(true, true));
+}
+
+#[cfg(not(windows))]
+#[test]
+#[serial(homebrew_update)]
+fn tui_update_check_marks_homebrew_package_manager_update() {
+    let _homebrew = force_homebrew_install_for_test();
+
+    let info = build_update_check_info(
+        env!("CARGO_PKG_VERSION"),
+        "v999.0.0".to_string(),
+        is_homebrew_install(),
+    );
+
+    assert_eq!(info.target_tag, "v999.0.0");
+    assert!(!info.is_already_latest);
+    assert!(info.is_homebrew_managed);
+}
 
 #[test]
 fn normalize_tag_adds_prefix_when_missing() {
