@@ -132,8 +132,8 @@ fn is_system_dir(path: &Path) -> bool {
     #[cfg(unix)]
     {
         const SYSTEM_DIRS: &[&str] = &[
-            "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64", "/opt",
-            "/proc", "/root", "/run", "/sbin", "/sys", "/tmp", "/usr", "/var",
+            "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64", "/opt", "/proc",
+            "/root", "/run", "/sbin", "/sys", "/tmp", "/usr", "/var",
         ];
         if SYSTEM_DIRS.iter().any(|&sys| path == Path::new(sys)) {
             return true;
@@ -153,10 +153,7 @@ fn is_system_dir(path: &Path) -> bool {
             "/private/tmp",
             "/private/var",
         ];
-        if MACOS_SYSTEM_DIRS
-            .iter()
-            .any(|&sys| path == Path::new(sys))
-        {
+        if MACOS_SYSTEM_DIRS.iter().any(|&sys| path == Path::new(sys)) {
             return true;
         }
     }
