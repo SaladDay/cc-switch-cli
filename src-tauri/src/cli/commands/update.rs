@@ -14,7 +14,7 @@ use tar::Archive;
 use tempfile::TempDir;
 use url::Url;
 
-use crate::cli::ui::{highlight, info, success};
+use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
 
 const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
@@ -133,6 +133,20 @@ pub fn execute(cmd: UpdateCommand) -> Result<(), AppError> {
 }
 
 async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
+    // Block self-update when running from a Homebrew-managed prefix so we
+    // don't silently replace the brew-owned binary (which would break
+    // `brew upgrade` / `brew reinstall`).
+    #[cfg(not(windows))]
+    if is_homebrew_install() {
+        println!(
+            "{}",
+            warning(
+                "cc-switch was installed via Homebrew.\nPlease upgrade with: brew upgrade cc-switch",
+            )
+        );
+        return Ok(());
+    }
+
     let current_version = env!("CARGO_PKG_VERSION");
     let explicit_version = cmd.version.as_deref().is_some_and(|v| !v.trim().is_empty());
     let client = create_http_client()?;
@@ -1215,6 +1229,32 @@ fn replace_current_binary(new_binary_path: &Path) -> Result<(), AppError> {
     }
 }
 
+/// Returns `true` if the running binary lives inside the Homebrew prefix.
+///
+/// Prefers the `HOMEBREW_PREFIX` environment variable that Homebrew sets in
+/// its shell environment.  Falls back to the two well-known default prefixes
+/// (`/opt/homebrew` on Apple Silicon, `/home/linuxbrew/.linuxbrew` on Linux)
+/// so that detection still works when the variable is absent (e.g. the user
+/// launched the binary from a non-Homebrew shell).
+/// Here we ignore the default homebrew prefix on Intel Mac, as Intel homebrew 
+/// is retiring in 2026.
+#[cfg(not(windows))]
+fn is_homebrew_install() -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    if let Ok(prefix) = std::env::var("HOMEBREW_PREFIX") {
+        if exe.starts_with(&prefix) {
+            return true;
+        }
+    }
+    const DEFAULT_PREFIXES: &[&str] = &["/opt/homebrew", "/home/linuxbrew/.linuxbrew"];
+    DEFAULT_PREFIXES
+        .iter()
+        .any(|prefix| exe.starts_with(prefix))
+}
+
 fn remove_file_if_present(path: &Path) -> Result<(), AppError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -1264,6 +1304,15 @@ pub(crate) async fn download_and_apply(
     target_tag: &str,
     on_progress: impl Fn(u64, Option<u64>),
 ) -> Result<(), AppError> {
+    // Same brew-prefix guard as the CLI path (see execute_async).
+    #[cfg(not(windows))]
+    if is_homebrew_install() {
+        return Err(AppError::Message(
+            "cc-switch was installed via Homebrew. Please upgrade with: brew upgrade cc-switch"
+                .to_string(),
+        ));
+    }
+
     let client = create_http_client()?;
     let release = resolve_target_release(&client, REPO_URL, Some(target_tag)).await?;
     let downloaded_asset = match release {
