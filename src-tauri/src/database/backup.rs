@@ -481,6 +481,8 @@ impl Database {
             .join("backups");
 
         fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+        crate::config::restrict_dir_permissions(&backup_dir)
+            .map_err(|e| AppError::io(&backup_dir, e))?;
 
         let base_id = format!("db_backup_{}", Utc::now().format("%Y%m%d_%H%M%S"));
         let mut backup_id = base_id.clone();
@@ -490,6 +492,22 @@ impl Database {
             backup_id = format!("{base_id}_{counter}");
             backup_path = backup_dir.join(format!("{backup_id}.db"));
             counter += 1;
+        }
+
+        // 在打开连接前确保文件权限正确：以 0o600 原子创建
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .mode(0o600)
+                .open(&backup_path)
+                .map_err(|e| AppError::io(&backup_path, e))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::File::create(&backup_path).map_err(|e| AppError::io(&backup_path, e))?;
         }
 
         {

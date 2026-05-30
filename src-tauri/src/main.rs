@@ -41,6 +41,7 @@ fn command_uses_own_logger(command: &Option<Commands>) -> bool {
 }
 
 fn run(cli: Cli) -> Result<(), AppError> {
+    cc_switch_lib::validate_config_dir()?;
     initialize_startup_state_if_needed(&cli.command)?;
 
     match cli.command {

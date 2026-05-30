@@ -94,9 +94,135 @@ pub fn get_app_config_dir() -> PathBuf {
     home_dir().expect("无法获取用户主目录").join(".cc-switch")
 }
 
+/// 校验 CC_SWITCH_CONFIG_DIR 是否为安全的应用专属目录
+///
+/// 拒绝系统关键目录（如 `/`、`/etc`、`/usr` 等），防止下游权限操作破坏系统。
+/// 未设置环境变量时默认路径 `~/.cc-switch` 始终安全，直接放行。
+pub fn validate_config_dir() -> Result<(), AppError> {
+    let Some(raw) = env::var_os("CC_SWITCH_CONFIG_DIR") else {
+        return Ok(());
+    };
+    let path = PathBuf::from(&raw);
+    if path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty() {
+        return Ok(());
+    }
+
+    // 检查原始路径和 canonicalize 后的路径（macOS 下 /etc -> /private/etc）
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
+
+    if is_system_dir(&path) || is_system_dir(&resolved) {
+        return Err(AppError::InvalidInput(format!(
+            "CC_SWITCH_CONFIG_DIR 不能设置为系统目录: {}（解析后: {}）",
+            path.display(),
+            resolved.display()
+        )));
+    }
+
+    Ok(())
+}
+
+/// 判断路径是否为系统关键目录（不应被应用修改权限）
+fn is_system_dir(path: &Path) -> bool {
+    // 根目录
+    if path == Path::new("/") {
+        return true;
+    }
+
+    // 一级系统目录
+    #[cfg(unix)]
+    {
+        const SYSTEM_DIRS: &[&str] = &[
+            "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64", "/opt",
+            "/proc", "/root", "/run", "/sbin", "/sys", "/tmp", "/usr", "/var",
+        ];
+        if SYSTEM_DIRS.iter().any(|&sys| path == Path::new(sys)) {
+            return true;
+        }
+    }
+
+    // macOS 特有（含 /private/* 变体，/etc、/tmp、/var 在 macOS 上是这些的符号链接）
+    #[cfg(target_os = "macos")]
+    {
+        const MACOS_SYSTEM_DIRS: &[&str] = &[
+            "/Applications",
+            "/Library",
+            "/System",
+            "/Volumes",
+            "/private",
+            "/private/etc",
+            "/private/tmp",
+            "/private/var",
+        ];
+        if MACOS_SYSTEM_DIRS
+            .iter()
+            .any(|&sys| path == Path::new(sys))
+        {
+            return true;
+        }
+    }
+
+    // Windows: 盘符根目录（如 C:\）
+    #[cfg(windows)]
+    {
+        if path.parent().is_none() && path.drive().is_some() {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// 获取应用配置文件路径
 pub fn get_app_config_path() -> PathBuf {
     get_app_config_dir().join("config.json")
+}
+
+/// 将目录权限收紧为仅所有者可访问（Unix: 0o700）
+#[cfg(unix)]
+pub fn restrict_dir_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::metadata(path)?;
+    if !meta.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path is not a directory",
+        ));
+    }
+    let mut perms = meta.permissions();
+    if perms.mode() & 0o777 != 0o700 {
+        perms.set_mode(0o700);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn restrict_dir_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// 将文件权限收紧为仅所有者可读写（Unix: 0o600）
+#[cfg(unix)]
+pub fn restrict_file_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::metadata(path)?;
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        ));
+    }
+    let mut perms = meta.permissions();
+    if perms.mode() & 0o777 != 0o600 {
+        perms.set_mode(0o600);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn restrict_file_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// 清理供应商名称，确保文件名安全
@@ -404,6 +530,51 @@ mod tests {
         );
 
         set_test_home_override(None);
+    }
+
+    #[test]
+    fn validate_config_dir_ok_when_not_set() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", None);
+        assert!(validate_config_dir().is_ok());
+    }
+
+    #[test]
+    fn validate_config_dir_ok_for_normal_path() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::new(
+            "CC_SWITCH_CONFIG_DIR",
+            Some("/tmp/cc-switch-config-override"),
+        );
+        assert!(validate_config_dir().is_ok());
+    }
+
+    #[test]
+    fn validate_config_dir_rejects_root() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("/"));
+        assert!(validate_config_dir().is_err());
+    }
+
+    #[test]
+    fn validate_config_dir_rejects_etc() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("/etc"));
+        assert!(validate_config_dir().is_err());
+    }
+
+    #[test]
+    fn validate_config_dir_rejects_usr() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("/usr"));
+        assert!(validate_config_dir().is_err());
+    }
+
+    #[test]
+    fn validate_config_dir_rejects_tmp() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("/tmp"));
+        assert!(validate_config_dir().is_err());
     }
 }
 
