@@ -17,6 +17,12 @@ impl EnvVarGuard {
         std::env::set_var(key, value);
         Self { key, previous }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -77,6 +83,87 @@ fn tui_update_check_marks_homebrew_package_manager_update() {
     assert_eq!(info.target_tag, "v999.0.0");
     assert!(!info.is_already_latest);
     assert!(info.is_homebrew_managed);
+}
+
+#[tokio::test]
+#[serial(homebrew_update)]
+async fn check_for_update_from_repo_uses_supplied_repo_url() {
+    let _homebrew = EnvVarGuard::remove("HOMEBREW_PREFIX");
+    let (repo_url, server) = spawn_update_manifest_server("v999.0.0").await;
+
+    let info = check_for_update_from_repo(&repo_url)
+        .await
+        .expect("update check should use supplied repo url");
+
+    assert_eq!(info.current_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.target_tag, "v999.0.0");
+    assert!(!info.is_already_latest);
+    assert!(!info.is_downgrade);
+    assert!(!info.is_homebrew_managed);
+
+    server.abort();
+}
+
+#[test]
+fn non_homebrew_update_check_marks_newer_version_as_regular_update() {
+    let info = build_update_check_info(env!("CARGO_PKG_VERSION"), "v999.0.0".to_string(), false);
+
+    assert_eq!(info.target_tag, "v999.0.0");
+    assert!(!info.is_already_latest);
+    assert!(!info.is_downgrade);
+    assert!(!info.is_homebrew_managed);
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+#[serial(homebrew_update)]
+async fn check_for_update_from_repo_marks_homebrew_managed_install() {
+    let _homebrew = force_homebrew_install_for_test();
+    let (repo_url, server) = spawn_update_manifest_server("v999.0.1").await;
+
+    let info = check_for_update_from_repo(&repo_url)
+        .await
+        .expect("homebrew-managed check should still query supplied repo url");
+
+    assert_eq!(info.current_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.target_tag, "v999.0.1");
+    assert!(!info.is_already_latest);
+    assert!(info.is_homebrew_managed);
+
+    server.abort();
+}
+
+async fn spawn_update_manifest_server(
+    version: &'static str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let platform_key = current_platform_key().expect("platform key should resolve");
+    let manifest = serde_json::json!({
+        "version": version,
+        "platforms": {
+            platform_key: {
+                "url": "https://example.com/cc-switch.tar.gz",
+                "signature": "fake-signature"
+            }
+        }
+    });
+    let app = Router::new().route(
+        "/team/cc-switch-cli/releases/latest/download/latest.json",
+        get(move || {
+            let manifest = manifest.clone();
+            async move { axum::Json(manifest) }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let addr = listener.local_addr().expect("local addr should resolve");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("server should run");
+    });
+
+    let repo_url = format!("http://{addr}/team/cc-switch-cli");
+    (repo_url, server)
 }
 
 #[test]
