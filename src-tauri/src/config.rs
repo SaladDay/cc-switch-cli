@@ -161,9 +161,8 @@ fn is_system_dir(path: &Path) -> bool {
     // Windows: 盘符根目录（如 C:\）
     #[cfg(windows)]
     {
-        if path.parent().is_none() && path.drive().is_some() {
-            return true;
-        }
+        // Should do some more verifications here
+        false
     }
 
     false
