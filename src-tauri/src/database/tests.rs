@@ -1478,3 +1478,30 @@ fn schema_model_pricing_is_seeded_on_init() {
         "新建数据库也应使用修正后的 DeepSeek 定价"
     );
 }
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_sets_restrictive_permissions_on_db_and_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+
+    let _db = Database::init().expect("init db");
+
+    let dir_perms = std::fs::metadata(temp.path())
+        .expect("metadata dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(dir_perms, 0o700, "config dir should be 0o700");
+
+    let db_perms = std::fs::metadata(temp.path().join("cc-switch.db"))
+        .expect("metadata db")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(db_perms, 0o600, "db file should be 0o600");
+}

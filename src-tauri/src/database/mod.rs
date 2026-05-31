@@ -88,6 +88,30 @@ impl Database {
         // 确保父目录存在
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+            crate::config::restrict_dir_permissions(parent).map_err(|e| AppError::io(parent, e))?;
+        }
+
+        // 在打开连接前确保文件权限正确：不存在则以 0o600 原子创建，存在则修正权限
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            if !db_path.exists() {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .mode(0o600)
+                    .open(&db_path)
+                    .map_err(|e| AppError::io(&db_path, e))?;
+            } else {
+                crate::config::restrict_file_permissions(&db_path)
+                    .map_err(|e| AppError::io(&db_path, e))?;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if !db_path.exists() {
+                std::fs::File::create(&db_path).map_err(|e| AppError::io(&db_path, e))?;
+            }
         }
 
         let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
