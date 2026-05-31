@@ -100,13 +100,7 @@ pub fn get_app_config_dir() -> PathBuf {
 /// 拒绝系统关键目录（如 `/`、`/etc`、`/usr` 等），防止下游权限操作破坏系统。
 /// 未设置环境变量时默认路径 `~/.cc-switch` 始终安全，直接放行。
 pub fn validate_config_dir() -> Result<(), AppError> {
-    let Some(raw) = env::var_os("CC_SWITCH_CONFIG_DIR") else {
-        return Ok(());
-    };
-    let path = PathBuf::from(&raw);
-    if path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty() {
-        return Ok(());
-    }
+    let path = get_app_config_dir();
 
     // 检查原始路径和 canonicalize 后的路径（macOS 下 /etc -> /private/etc）
     let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
