@@ -2,7 +2,7 @@
 //!
 //! 提供 SQL 导出/导入和二进制快照备份功能。
 
-use super::{lock_conn, Database, DB_BACKUP_RETAIN};
+use super::{create_secure_dir_all, lock_conn, Database, DB_BACKUP_RETAIN};
 use crate::config::get_app_config_dir;
 use crate::error::AppError;
 use chrono::Utc;
@@ -123,7 +123,7 @@ impl Database {
         let dump = self.export_sql_string()?;
 
         if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+            create_secure_dir_all(parent)?;
         }
 
         crate::config::atomic_write(target_path, dump.as_bytes())
@@ -480,9 +480,7 @@ impl Database {
             .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
             .join("backups");
 
-        fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
-        crate::config::restrict_dir_permissions(&backup_dir)
-            .map_err(|e| AppError::io(&backup_dir, e))?;
+        create_secure_dir_all(&backup_dir)?;
 
         let base_id = format!("db_backup_{}", Utc::now().format("%Y%m%d_%H%M%S"));
         let mut backup_id = base_id.clone();
@@ -494,7 +492,7 @@ impl Database {
             counter += 1;
         }
 
-        // 在打开连接前确保文件权限正确：以 0o600 原子创建
+        // 新建备份文件时以 0o600 原子创建
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;

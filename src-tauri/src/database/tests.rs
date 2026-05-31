@@ -1482,7 +1482,7 @@ fn schema_model_pricing_is_seeded_on_init() {
 #[test]
 #[serial_test::serial]
 #[cfg(unix)]
-fn init_sets_restrictive_permissions_on_db_and_dir() {
+fn init_creates_db_file_with_restrictive_permissions() {
     use std::os::unix::fs::PermissionsExt;
 
     let _lock = crate::test_support::lock_test_home_and_settings();
@@ -1491,17 +1491,58 @@ fn init_sets_restrictive_permissions_on_db_and_dir() {
 
     let _db = Database::init().expect("init db");
 
-    let dir_perms = std::fs::metadata(temp.path())
-        .expect("metadata dir")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(dir_perms, 0o700, "config dir should be 0o700");
-
     let db_perms = std::fs::metadata(temp.path().join("cc-switch.db"))
         .expect("metadata db")
         .permissions()
         .mode()
         & 0o777;
-    assert_eq!(db_perms, 0o600, "db file should be 0o600");
+    assert_eq!(db_perms, 0o600, "new db file should be created with 0o600");
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_creates_config_dir_with_restrictive_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let config_dir = temp.path().join("new-config-dir");
+    let _guard = ConfigDirEnvGuard::set(&config_dir);
+
+    let _db = Database::init().expect("init db");
+
+    let dir_perms = std::fs::metadata(&config_dir)
+        .expect("metadata dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(dir_perms, 0o700, "new config dir should be 0o700");
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_does_not_silently_fix_existing_dir_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+
+    // Set dir to a permissive mode before init
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("set dir perms");
+
+    let _db = Database::init().expect("init db");
+
+    let dir_perms = std::fs::metadata(temp.path())
+        .expect("metadata dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        dir_perms, 0o755,
+        "init should not silently change existing dir permissions"
+    );
 }

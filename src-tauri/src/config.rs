@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::cli::i18n::texts;
 use crate::error::AppError;
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
@@ -111,10 +112,9 @@ pub fn validate_config_dir() -> Result<(), AppError> {
     let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
 
     if is_system_dir(&path) || is_system_dir(&resolved) {
-        return Err(AppError::InvalidInput(format!(
-            "CC_SWITCH_CONFIG_DIR 不能设置为系统目录: {}（解析后: {}）",
-            path.display(),
-            resolved.display()
+        return Err(AppError::InvalidInput(texts::config_dir_is_system_dir(
+            &path.display().to_string(),
+            &resolved.display().to_string(),
         )));
     }
 
@@ -176,7 +176,7 @@ pub fn get_app_config_path() -> PathBuf {
 
 /// 将目录权限收紧为仅所有者可访问（Unix: 0o700）
 #[cfg(unix)]
-pub fn restrict_dir_permissions(path: &Path) -> std::io::Result<()> {
+pub(crate) fn restrict_dir_permissions(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let meta = fs::metadata(path)?;
     if !meta.is_dir() {
@@ -194,13 +194,13 @@ pub fn restrict_dir_permissions(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-pub fn restrict_dir_permissions(_path: &Path) -> std::io::Result<()> {
+pub(crate) fn restrict_dir_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
 /// 将文件权限收紧为仅所有者可读写（Unix: 0o600）
 #[cfg(unix)]
-pub fn restrict_file_permissions(path: &Path) -> std::io::Result<()> {
+pub(crate) fn restrict_file_permissions(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let meta = fs::metadata(path)?;
     if !meta.is_file() {
@@ -218,7 +218,129 @@ pub fn restrict_file_permissions(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-pub fn restrict_file_permissions(_path: &Path) -> std::io::Result<()> {
+pub(crate) fn restrict_file_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// 检查配置目录、数据库文件和备份目录的权限是否安全（Unix only）
+///
+/// 返回不安全的路径列表：`(路径, 当前权限, 期望权限)`
+#[cfg(unix)]
+pub fn check_permissions() -> Vec<(PathBuf, u32, u32)> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut issues = Vec::new();
+    let config_dir = get_app_config_dir();
+    let db_path = config_dir.join("cc-switch.db");
+    let backup_dir = config_dir.join("backups");
+
+    if config_dir.exists() {
+        if let Ok(meta) = fs::metadata(&config_dir) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o700 {
+                issues.push((config_dir.clone(), mode, 0o700));
+            }
+        }
+    }
+
+    if db_path.exists() {
+        if let Ok(meta) = fs::metadata(&db_path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o600 {
+                issues.push((db_path, mode, 0o600));
+            }
+        }
+    }
+
+    if backup_dir.exists() {
+        if let Ok(meta) = fs::metadata(&backup_dir) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o700 {
+                issues.push((backup_dir, mode, 0o700));
+            }
+        }
+    }
+
+    issues
+}
+
+#[cfg(not(unix))]
+pub fn check_permissions() -> Vec<(PathBuf, u32, u32)> {
+    Vec::new()
+}
+
+/// 访问数据库前检查权限，若不安全则提示用户是否修复
+///
+/// - 交互终端：使用 inquire 提示用户，确认后修复，拒绝则警告
+/// - 非交互终端（Docker/管道）：仅打印警告到 stderr
+pub fn prompt_fix_permissions() -> Result<(), AppError> {
+    let issues = check_permissions();
+    if issues.is_empty() {
+        return Ok(());
+    }
+
+    // In test builds, skip the interactive prompt to avoid blocking on stdin.
+    if cfg!(test) {
+        return Ok(());
+    }
+
+    let is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr());
+
+    if is_terminal {
+        eprintln!("{}", texts::config_permissions_insecure_header());
+        for (path, current, expected) in &issues {
+            eprintln!(
+                "{}",
+                texts::config_permissions_detail(&path.display().to_string(), *current, *expected,)
+            );
+        }
+
+        if let Some(custom) = env::var_os("CC_SWITCH_CONFIG_DIR") {
+            let custom_path = PathBuf::from(&custom);
+            if !custom_path.as_os_str().is_empty() {
+                eprintln!(
+                    "{}",
+                    texts::config_permissions_custom_dir_notice(&custom_path.display().to_string())
+                );
+                let dir_ok = inquire::Confirm::new(texts::config_permissions_confirm_custom_dir())
+                    .with_default(false)
+                    .prompt()
+                    .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
+                if !dir_ok {
+                    eprintln!("{}", texts::config_permissions_custom_dir_skipped());
+                    return Ok(());
+                }
+            }
+        }
+
+        let confirm = inquire::Confirm::new(texts::config_permissions_fix_prompt())
+            .with_default(true)
+            .prompt()
+            .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
+
+        if confirm {
+            for (path, _, _) in &issues {
+                if path.is_dir() {
+                    restrict_dir_permissions(path).map_err(|e| AppError::io(path, e))?;
+                } else {
+                    restrict_file_permissions(path).map_err(|e| AppError::io(path, e))?;
+                }
+            }
+            eprintln!("{}", texts::config_permissions_fixed());
+        } else {
+            eprintln!("{}", texts::config_permissions_fix_warn_interactive());
+        }
+    } else {
+        eprintln!("{}", texts::config_permissions_fix_warn_noninteractive());
+        for (path, current, expected) in &issues {
+            eprintln!(
+                "{}",
+                texts::config_permissions_detail(&path.display().to_string(), *current, *expected,)
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -572,6 +694,135 @@ mod tests {
         let _guard = lock_test_home_and_settings();
         let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("/tmp"));
         assert!(validate_config_dir().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_permissions_returns_empty_for_secure_permissions() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let _guard = lock_test_home_and_settings();
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env =
+            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
+
+        // Ensure dir has 0o700
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("set dir perms");
+
+        // Create a db file with 0o600
+        let db_path = temp.path().join("cc-switch.db");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .open(&db_path)
+            .expect("create db file");
+
+        let issues = check_permissions();
+        assert!(issues.is_empty(), "expected no issues, got: {:?}", issues);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_permissions_detects_insecure_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = lock_test_home_and_settings();
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env =
+            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
+
+        // Set dir to permissive
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
+            .expect("set dir perms");
+
+        let issues = check_permissions();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].0, temp.path());
+        assert_eq!(issues[0].1, 0o755);
+        assert_eq!(issues[0].2, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_permissions_detects_insecure_db_file() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let _guard = lock_test_home_and_settings();
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env =
+            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
+
+        // Ensure dir has 0o700 so only the db file is flagged
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("set dir perms");
+
+        // Create db file with permissive mode
+        let db_path = temp.path().join("cc-switch.db");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o644)
+            .open(&db_path)
+            .expect("create db file");
+
+        let issues = check_permissions();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].0, db_path);
+        assert_eq!(issues[0].1, 0o644);
+        assert_eq!(issues[0].2, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_permissions_detects_both_insecure() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let _guard = lock_test_home_and_settings();
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env =
+            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
+
+        // Set dir to permissive
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
+            .expect("set dir perms");
+
+        // Create db file with permissive mode
+        let db_path = temp.path().join("cc-switch.db");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o644)
+            .open(&db_path)
+            .expect("create db file");
+
+        let issues = check_permissions();
+        assert_eq!(issues.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_permissions_detects_insecure_backup_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = lock_test_home_and_settings();
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env =
+            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
+
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("set config dir perms");
+        let backup_dir = temp.path().join("backups");
+        std::fs::create_dir(&backup_dir).expect("create backup dir");
+        std::fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o755))
+            .expect("set backup dir perms");
+
+        let issues = check_permissions();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].0, backup_dir);
+        assert_eq!(issues[0].1, 0o755);
+        assert_eq!(issues[0].2, 0o700);
     }
 }
 

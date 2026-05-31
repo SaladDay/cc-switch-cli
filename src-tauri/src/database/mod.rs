@@ -35,10 +35,11 @@ mod tests;
 pub(crate) use dao::providers_seed::is_official_seed_id;
 pub use dao::FailoverQueueItem;
 
-use crate::config::get_app_config_dir;
+use crate::config::{get_app_config_dir, restrict_dir_permissions};
 use crate::error::AppError;
 use rusqlite::Connection;
 use serde::Serialize;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -55,6 +56,41 @@ pub(crate) const SCHEMA_VERSION: i32 = 10;
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
     serde_json::to_string(value)
         .map_err(|e| AppError::Config(format!("JSON serialization failed: {e}")))
+}
+
+pub(crate) fn create_secure_dir_all(path: &Path) -> Result<bool, AppError> {
+    if path.as_os_str().is_empty() || path.is_dir() {
+        return Ok(false);
+    }
+
+    if let Some(parent) = path.parent() {
+        if parent != path && !parent.as_os_str().is_empty() {
+            create_secure_dir_all(parent)?;
+        }
+    }
+
+    #[cfg(unix)]
+    let create_result = {
+        use std::os::unix::fs::DirBuilderExt;
+
+        std::fs::DirBuilder::new().mode(0o700).create(path)
+    };
+
+    #[cfg(not(unix))]
+    let create_result = std::fs::DirBuilder::new().create(path);
+
+    match create_result {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {
+            // 竞态：目录在 is_dir() 检查后、create 前被其他进程创建，
+            // 需要收紧权限以确保安全
+            #[cfg(unix)]
+            restrict_dir_permissions(path).map_err(|e| AppError::io(path, e))?;
+
+            Ok(false)
+        }
+        Err(err) => Err(AppError::io(path, err)),
+    }
 }
 
 /// 安全地获取 Mutex 锁，避免 unwrap panic
@@ -87,11 +123,13 @@ impl Database {
 
         // 确保父目录存在
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-            crate::config::restrict_dir_permissions(parent).map_err(|e| AppError::io(parent, e))?;
+            create_secure_dir_all(parent)?;
         }
 
-        // 在打开连接前确保文件权限正确：不存在则以 0o600 原子创建，存在则修正权限
+        // 在打开数据库前检查已有配置目录、数据库文件和备份目录权限。
+        crate::config::prompt_fix_permissions()?;
+
+        // 新建数据库文件时以 0o600 原子创建，已有文件的权限由 prompt_fix_permissions 处理
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -101,9 +139,6 @@ impl Database {
                     .create(true)
                     .mode(0o600)
                     .open(&db_path)
-                    .map_err(|e| AppError::io(&db_path, e))?;
-            } else {
-                crate::config::restrict_file_permissions(&db_path)
                     .map_err(|e| AppError::io(&db_path, e))?;
             }
         }

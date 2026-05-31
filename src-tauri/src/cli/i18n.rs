@@ -10676,6 +10676,92 @@ pub mod texts {
             "No live providers were imported"
         }
     }
+
+    // -----------------------------------------------------------------
+    // config.rs - validate_config_dir & prompt_fix_permissions
+    // -----------------------------------------------------------------
+
+    pub fn config_dir_is_system_dir(dir: &str, resolved: &str) -> String {
+        if is_chinese() {
+            format!("CC_SWITCH_CONFIG_DIR 不能设置为系统目录: {dir}（解析后: {resolved}）")
+        } else {
+            format!(
+                "CC_SWITCH_CONFIG_DIR must not be a system directory: {dir} (resolved: {resolved})"
+            )
+        }
+    }
+
+    pub fn config_permissions_insecure_header() -> &'static str {
+        if is_chinese() {
+            "⚠ 检测到以下文件/目录权限不安全："
+        } else {
+            "⚠ Insecure file/directory permissions detected:"
+        }
+    }
+
+    pub fn config_permissions_detail(path: &str, current: u32, expected: u32) -> String {
+        if is_chinese() {
+            format!("  {path}  当前 {current:04o}，期望 {expected:04o}")
+        } else {
+            format!("  {path}  current {current:04o}, expected {expected:04o}")
+        }
+    }
+
+    pub fn config_permissions_fix_prompt() -> &'static str {
+        if is_chinese() {
+            "是否现在修复权限？（仅所有者可访问）"
+        } else {
+            "Fix permissions now? (owner-only access)"
+        }
+    }
+
+    pub fn config_permissions_fixed() -> &'static str {
+        if is_chinese() {
+            "✓ 权限已修复"
+        } else {
+            "✓ Permissions fixed"
+        }
+    }
+
+    pub fn config_permissions_fix_warn_interactive() -> &'static str {
+        if is_chinese() {
+            "⚠ 未来版本将拒绝在权限不安全的情况下启动，请尽快修复。"
+        } else {
+            "⚠ Future versions will refuse to start with insecure permissions. Please fix soon."
+        }
+    }
+
+    pub fn config_permissions_fix_warn_noninteractive() -> &'static str {
+        if is_chinese() {
+            "⚠ 检测到配置文件权限不安全（非交互模式），跳过修复。未来版本将拒绝启动。"
+        } else {
+            "⚠ Insecure config permissions detected (non-interactive). Skipped. Future versions will refuse to start."
+        }
+    }
+
+    pub fn config_permissions_custom_dir_notice(path: &str) -> String {
+        if is_chinese() {
+            format!("检测到自定义配置目录: {path}")
+        } else {
+            format!("Custom config directory detected: {path}")
+        }
+    }
+
+    pub fn config_permissions_confirm_custom_dir() -> &'static str {
+        if is_chinese() {
+            "确认要修改此目录的权限吗？"
+        } else {
+            "Confirm modifying permissions on this directory?"
+        }
+    }
+
+    pub fn config_permissions_custom_dir_skipped() -> &'static str {
+        if is_chinese() {
+            "已跳过权限修复。"
+        } else {
+            "Skipped permission fix."
+        }
+    }
 }
 
 #[cfg(test)]
