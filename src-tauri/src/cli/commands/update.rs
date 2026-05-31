@@ -14,7 +14,7 @@ use tar::Archive;
 use tempfile::TempDir;
 use url::Url;
 
-use crate::cli::ui::{highlight, info, success};
+use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
 
 const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
@@ -135,6 +135,23 @@ pub fn execute(cmd: UpdateCommand) -> Result<(), AppError> {
 async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
     let current_version = env!("CARGO_PKG_VERSION");
     let explicit_version = cmd.version.as_deref().is_some_and(|v| !v.trim().is_empty());
+    let is_homebrew_managed = is_homebrew_install();
+
+    // If the user explicitly requested a specific version, and we're on a Homebrew-managed installation,
+    // block the update process since we should not replace the binary in-place.
+    // For non-Homebrew installations, allow updating to a specific version and replace the binary.
+    // For Homebrew-managed installations without an explicit version (i.e. just checking for updates),
+    // allow the check to proceed and show the user that an update is available, but they will still need to use Homebrew to perform the actual update.
+    if should_block_homebrew_before_update_check(is_homebrew_managed, explicit_version) {
+        println!(
+            "{}",
+            warning(
+                "cc-switch was installed via Homebrew. Self-update to a specific version is not supported.\nPlease use: brew upgrade cc-switch",
+            )
+        );
+        return Ok(());
+    }
+
     let client = create_http_client()?;
     let release = resolve_target_release(&client, REPO_URL, cmd.version.as_deref()).await?;
     let target_tag = release.target_tag().to_string();
@@ -153,6 +170,16 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
             "{}",
             info(&format!(
                 "Current version v{current_version} is newer than target {target_tag}; skipping automatic downgrade. Use `cc-switch update --version {target_tag}` to force."
+            ))
+        );
+        return Ok(());
+    }
+
+    if is_homebrew_managed {
+        println!(
+            "{}",
+            warning(&format!(
+                "Update {target_tag} is available (current v{current_version}).\nPlease update with: brew upgrade cc-switch"
             ))
         );
         return Ok(());
@@ -229,6 +256,13 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
         )
     );
     Ok(())
+}
+
+fn should_block_homebrew_before_update_check(
+    is_homebrew_managed: bool,
+    explicit_version: bool,
+) -> bool {
+    is_homebrew_managed && explicit_version
 }
 
 fn create_runtime() -> Result<tokio::runtime::Runtime, AppError> {
@@ -1215,6 +1249,40 @@ fn replace_current_binary(new_binary_path: &Path) -> Result<(), AppError> {
     }
 }
 
+/// Returns `true` if the running binary lives inside the Homebrew prefix.
+/// Returns false on windows.
+///
+/// Prefers the `HOMEBREW_PREFIX` environment variable that Homebrew sets in
+/// its shell environment.  Falls back to the two well-known default prefixes
+/// (`/opt/homebrew` on Apple Silicon, `/home/linuxbrew/.linuxbrew` on Linux)
+/// so that detection still works when the variable is absent (e.g. the user
+/// launched the binary from a non-Homebrew shell).
+/// Here we ignore the default homebrew prefix on Intel Mac, as Intel homebrew
+/// is retiring in 2026.
+fn is_homebrew_install() -> bool {
+    #[cfg(windows)]
+    {
+        false
+    }
+
+    #[cfg(not(windows))]
+    {
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        if let Ok(prefix) = std::env::var("HOMEBREW_PREFIX") {
+            if exe.starts_with(&prefix) {
+                return true;
+            }
+        }
+        const DEFAULT_PREFIXES: &[&str] = &["/opt/homebrew", "/home/linuxbrew/.linuxbrew"];
+        DEFAULT_PREFIXES
+            .iter()
+            .any(|prefix| exe.starts_with(prefix))
+    }
+}
+
 fn remove_file_if_present(path: &Path) -> Result<(), AppError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -1238,32 +1306,60 @@ pub(crate) struct UpdateCheckInfo {
     pub target_tag: String,
     pub is_already_latest: bool,
     pub is_downgrade: bool,
+    pub is_homebrew_managed: bool,
 }
 
 pub(crate) async fn check_for_update() -> Result<UpdateCheckInfo, AppError> {
+    check_for_update_from_repo(REPO_URL).await
+}
+
+/// Accepts an explicit `repo_url` so tests can point at a local mock server
+/// instead of hitting the real GitHub API.
+async fn check_for_update_from_repo(repo_url: &str) -> Result<UpdateCheckInfo, AppError> {
     let current_version = env!("CARGO_PKG_VERSION");
     let client = create_http_client()?;
-    let target_tag = resolve_target_release(&client, REPO_URL, None)
+    let target_tag = resolve_target_release(&client, repo_url, None)
         .await?
         .target_tag()
         .to_string();
+    Ok(build_update_check_info(
+        current_version,
+        target_tag,
+        is_homebrew_install(),
+    ))
+}
+
+fn build_update_check_info(
+    current_version: &str,
+    target_tag: String,
+    is_homebrew_managed: bool,
+) -> UpdateCheckInfo {
     let target_version = target_tag.trim_start_matches('v');
 
     let is_already_latest = target_version == current_version;
     let is_downgrade = should_skip_implicit_downgrade(current_version, target_version, false);
 
-    Ok(UpdateCheckInfo {
+    UpdateCheckInfo {
         current_version: current_version.to_string(),
         target_tag,
         is_already_latest,
         is_downgrade,
-    })
+        is_homebrew_managed,
+    }
 }
 
 pub(crate) async fn download_and_apply(
     target_tag: &str,
     on_progress: impl Fn(u64, Option<u64>),
 ) -> Result<(), AppError> {
+    // Same brew-prefix guard as the CLI path (see execute_async).
+    if is_homebrew_install() {
+        return Err(AppError::Message(
+            "cc-switch was installed via Homebrew. Please upgrade with: brew upgrade cc-switch"
+                .to_string(),
+        ));
+    }
+
     let client = create_http_client()?;
     let release = resolve_target_release(&client, REPO_URL, Some(target_tag)).await?;
     let downloaded_asset = match release {

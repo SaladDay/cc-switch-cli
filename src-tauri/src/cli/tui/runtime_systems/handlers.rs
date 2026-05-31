@@ -753,6 +753,15 @@ pub(crate) fn handle_update_msg(app: &mut App, update_check: &mut RequestTracker
                             texts::tui_toast_already_latest(&info.current_version),
                             ToastKind::Success,
                         );
+                    } else if info.is_homebrew_managed {
+                        app.overlay = Overlay::None;
+                        app.push_toast(
+                            texts::tui_toast_update_homebrew_required(
+                                &info.current_version,
+                                &info.target_tag,
+                            ),
+                            ToastKind::Info,
+                        );
                     } else if info.is_downgrade {
                         app.overlay = Overlay::None;
                         app.push_toast(
