@@ -58,6 +58,10 @@ pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError
         .map_err(|e| AppError::Config(format!("JSON serialization failed: {e}")))
 }
 
+// Create folders with 0o700 permissions, and parent folders as well.
+// Leave existing folders untouched.
+// We fix the permissions of existing folders in config::prompt_fix_permissions, 
+// so we don't need to do it here and risk messing with other processes' permissions.
 pub(crate) fn create_secure_dir_all(path: &Path) -> Result<bool, AppError> {
     if path.as_os_str().is_empty() || path.is_dir() {
         return Ok(false);
