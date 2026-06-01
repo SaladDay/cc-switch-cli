@@ -41,7 +41,13 @@ fn command_uses_own_logger(command: &Option<Commands>) -> bool {
 }
 
 fn run(cli: Cli) -> Result<(), AppError> {
-    cc_switch_lib::validate_config_dir()?;
+    if database_access_required(&cli.command) {
+        // 在打开数据库前检查已有配置目录、数据库文件和备份目录权限。
+        // This ensures the chmod happens before database initialization,
+        // and also ensures that the user is only queried once.
+        cc_switch_lib::validate_config_dir()?;
+        cc_switch_lib::prompt_fix_permissions()?;
+    }
     initialize_startup_state_if_needed(&cli.command)?;
 
     match cli.command {
@@ -93,6 +99,15 @@ fn initialize_startup_state_if_needed(command: &Option<Commands>) -> Result<(), 
         let _state = cc_switch_lib::AppState::try_new_with_startup_recovery()?;
     }
     Ok(())
+}
+
+fn database_access_required(command: &Option<Commands>) -> bool {
+    match command {
+        Some(Commands::Completions(_))
+        | Some(Commands::Update(_))
+        | Some(Commands::Internal(_)) => false,
+        _ => true,
+    }
 }
 
 #[cfg(test)]

@@ -123,17 +123,12 @@ impl Database {
     ///
     /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
     pub fn init() -> Result<Self, AppError> {
-        crate::config::validate_config_dir()?;
-
         let db_path = get_app_config_dir().join("cc-switch.db");
 
         // 确保父目录存在
         if let Some(parent) = db_path.parent() {
             create_secure_dir_all(parent)?;
         }
-
-        // 在打开数据库前检查已有配置目录、数据库文件和备份目录权限。
-        crate::config::prompt_fix_permissions()?;
 
         // 新建数据库文件时以 0o600 原子创建，已有文件的权限由 prompt_fix_permissions 处理
         #[cfg(unix)]

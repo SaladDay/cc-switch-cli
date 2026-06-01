@@ -1482,21 +1482,6 @@ fn schema_model_pricing_is_seeded_on_init() {
 #[test]
 #[serial_test::serial]
 #[cfg(unix)]
-fn init_rejects_system_config_dir() {
-    let _lock = crate::test_support::lock_test_home_and_settings();
-    let _guard = ConfigDirEnvGuard::set(Path::new("/etc"));
-
-    let result = Database::init();
-
-    assert!(
-        result.is_err(),
-        "Database::init should reject system CC_SWITCH_CONFIG_DIR values"
-    );
-}
-
-#[test]
-#[serial_test::serial]
-#[cfg(unix)]
 fn init_creates_db_file_with_restrictive_permissions() {
     use std::os::unix::fs::PermissionsExt;
 
