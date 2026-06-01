@@ -48,6 +48,9 @@ pub fn parse_deeplink_url(url_str: &str) -> Result<DeepLinkImportRequest, AppErr
 
     match resource.as_str() {
         "provider" => parse_provider_deeplink(&params, version, resource),
+        "prompt" => parse_prompt_deeplink(&params, version, resource),
+        "mcp" => parse_mcp_deeplink(&params, version, resource),
+        "skill" => parse_skill_deeplink(&params, version, resource),
         _ => Err(AppError::InvalidInput(format!(
             "Unsupported resource type: {resource}"
         ))),
@@ -137,6 +140,185 @@ fn parse_provider_deeplink(
         usage_auto_interval: params
             .get("usageAutoInterval")
             .and_then(|v| v.parse::<u64>().ok()),
+        openclaw_config: None,
+    })
+}
+
+fn parse_prompt_deeplink(
+    params: &HashMap<String, String>,
+    version: String,
+    resource: String,
+) -> Result<DeepLinkImportRequest, AppError> {
+    let app = params
+        .get("app")
+        .ok_or_else(|| AppError::InvalidInput("Missing 'app' parameter for prompt".to_string()))?
+        .clone();
+
+    if !matches!(
+        app.as_str(),
+        "claude" | "codex" | "gemini" | "opencode" | "openclaw" | "hermes"
+    ) {
+        return Err(AppError::InvalidInput(format!(
+            "Invalid app type: must be 'claude', 'codex', 'gemini', 'opencode', 'openclaw', or 'hermes', got '{app}'"
+        )));
+    }
+
+    let name = params
+        .get("name")
+        .ok_or_else(|| AppError::InvalidInput("Missing 'name' parameter for prompt".to_string()))?
+        .clone();
+
+    let content = params
+        .get("content")
+        .ok_or_else(|| {
+            AppError::InvalidInput("Missing 'content' parameter for prompt".to_string())
+        })?
+        .clone();
+
+    Ok(DeepLinkImportRequest {
+        version,
+        resource,
+        app: Some(app),
+        name: Some(name),
+        enabled: params.get("enabled").and_then(|v| v.parse::<bool>().ok()),
+        content: Some(content),
+        description: params.get("description").cloned(),
+        icon: None,
+        homepage: None,
+        endpoint: None,
+        api_key: None,
+        model: None,
+        notes: None,
+        haiku_model: None,
+        sonnet_model: None,
+        opus_model: None,
+        apps: None,
+        repo: None,
+        directory: None,
+        branch: None,
+        config: None,
+        config_format: None,
+        config_url: None,
+        usage_enabled: None,
+        usage_script: None,
+        usage_api_key: None,
+        usage_base_url: None,
+        usage_access_token: None,
+        usage_user_id: None,
+        usage_auto_interval: None,
+        openclaw_config: None,
+    })
+}
+
+fn parse_mcp_deeplink(
+    params: &HashMap<String, String>,
+    version: String,
+    resource: String,
+) -> Result<DeepLinkImportRequest, AppError> {
+    let apps = params
+        .get("apps")
+        .ok_or_else(|| AppError::InvalidInput("Missing 'apps' parameter for MCP".to_string()))?
+        .clone();
+
+    for app in apps.split(',') {
+        let trimmed = app.trim();
+        if !matches!(
+            trimmed,
+            "claude" | "codex" | "gemini" | "opencode" | "openclaw" | "hermes"
+        ) {
+            return Err(AppError::InvalidInput(format!(
+                "Invalid app in 'apps': must be 'claude', 'codex', 'gemini', 'opencode', 'openclaw', or 'hermes', got '{trimmed}'"
+            )));
+        }
+    }
+
+    let config = params
+        .get("config")
+        .ok_or_else(|| AppError::InvalidInput("Missing 'config' parameter for MCP".to_string()))?
+        .clone();
+
+    Ok(DeepLinkImportRequest {
+        version,
+        resource,
+        apps: Some(apps),
+        enabled: params.get("enabled").and_then(|v| v.parse::<bool>().ok()),
+        config: Some(config),
+        config_format: Some("json".to_string()),
+        app: None,
+        name: None,
+        icon: None,
+        homepage: None,
+        endpoint: None,
+        api_key: None,
+        model: None,
+        notes: None,
+        haiku_model: None,
+        sonnet_model: None,
+        opus_model: None,
+        content: None,
+        description: None,
+        repo: None,
+        directory: None,
+        branch: None,
+        config_url: None,
+        usage_enabled: None,
+        usage_script: None,
+        usage_api_key: None,
+        usage_base_url: None,
+        usage_access_token: None,
+        usage_user_id: None,
+        usage_auto_interval: None,
+        openclaw_config: None,
+    })
+}
+
+fn parse_skill_deeplink(
+    params: &HashMap<String, String>,
+    version: String,
+    resource: String,
+) -> Result<DeepLinkImportRequest, AppError> {
+    let repo = params
+        .get("repo")
+        .ok_or_else(|| AppError::InvalidInput("Missing 'repo' parameter for skill".to_string()))?
+        .clone();
+
+    if !repo.contains('/') || repo.split('/').count() != 2 {
+        return Err(AppError::InvalidInput(format!(
+            "Invalid repo format: expected 'owner/name', got '{repo}'"
+        )));
+    }
+
+    Ok(DeepLinkImportRequest {
+        version,
+        resource,
+        repo: Some(repo),
+        directory: params.get("directory").cloned(),
+        branch: params.get("branch").cloned(),
+        icon: None,
+        app: Some("claude".to_string()),
+        name: None,
+        enabled: params.get("enabled").and_then(|v| v.parse::<bool>().ok()),
+        homepage: None,
+        endpoint: None,
+        api_key: None,
+        model: None,
+        notes: None,
+        haiku_model: None,
+        sonnet_model: None,
+        opus_model: None,
+        content: None,
+        description: None,
+        apps: None,
+        config: None,
+        config_format: None,
+        config_url: None,
+        usage_enabled: None,
+        usage_script: None,
+        usage_api_key: None,
+        usage_base_url: None,
+        usage_access_token: None,
+        usage_user_id: None,
+        usage_auto_interval: None,
         openclaw_config: None,
     })
 }

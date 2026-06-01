@@ -48,14 +48,17 @@ pub fn import_prompt_from_deeplink(
     let content = String::from_utf8(content)
         .map_err(|e| AppError::InvalidInput(format!("Invalid UTF-8 in content: {e}")))?;
 
-    // Generate ID
-    let timestamp = chrono::Utc::now().timestamp_millis();
+    // Generate ID (millisecond suffix keeps it unique)
+    let now = chrono::Utc::now();
     let sanitized_name = name
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
         .collect::<String>()
         .to_lowercase();
-    let id = format!("{sanitized_name}-{timestamp}");
+    let id = format!("{sanitized_name}-{}", now.timestamp_millis());
+
+    // Timestamps are stored in seconds to match the rest of the prompt store.
+    let timestamp = now.timestamp();
 
     // Check if we should enable this prompt
     let should_enable = request.enabled.unwrap_or(false);

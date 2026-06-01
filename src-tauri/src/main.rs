@@ -74,6 +74,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
         #[cfg(unix)]
         Some(Commands::Daemon(cmd)) => cc_switch_lib::cli::commands::daemon::execute(cmd),
         Some(Commands::Env(cmd)) => cc_switch_lib::cli::commands::env::execute(cmd, cli.app),
+        Some(Commands::Deeplink(cmd)) => cc_switch_lib::cli::commands::deeplink::execute(cmd),
         Some(Commands::Update(cmd)) => cc_switch_lib::cli::commands::update::execute(cmd),
         Some(Commands::Completions(cmd)) => cc_switch_lib::cli::commands::completions::execute(cmd),
         Some(Commands::Internal(cmd)) => cc_switch_lib::cli::commands::internal::execute(cmd),
