@@ -917,7 +917,7 @@ mod tests {
     fn interactive_permission_prompt_fixes_permissions_when_confirmed() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create temp dir");
+        let temp = tempfile::tempdir().expect("create temp dir");
         std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
             .expect("set dir perms");
         let issues = vec![(temp.path().to_path_buf(), 0o755, 0o700)];
@@ -941,7 +941,7 @@ mod tests {
     fn interactive_permission_prompt_fixes_file_permissions_when_confirmed() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create temp dir");
+        let temp = tempfile::tempdir().expect("create temp dir");
         let db_path = temp.path().join("cc-switch.db");
         std::fs::OpenOptions::new()
             .write(true)
@@ -970,7 +970,7 @@ mod tests {
     fn interactive_permission_prompt_leaves_permissions_when_fix_declined() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create temp dir");
+        let temp = tempfile::tempdir().expect("create temp dir");
         std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
             .expect("set dir perms");
         let issues = vec![(temp.path().to_path_buf(), 0o755, 0o700)];
@@ -994,7 +994,7 @@ mod tests {
     fn interactive_permission_prompt_skips_custom_dir_when_not_confirmed() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create temp dir");
+        let temp = tempfile::tempdir().expect("create temp dir");
         std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
             .expect("set dir perms");
         let custom_dir = temp.path().to_path_buf();
