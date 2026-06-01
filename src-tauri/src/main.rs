@@ -113,7 +113,8 @@ fn database_access_required(command: &Option<Commands>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_requires_startup_state, command_uses_own_logger, initialize_startup_state_if_needed,
+        command_requires_startup_state, command_uses_own_logger, database_access_required,
+        initialize_startup_state_if_needed,
     };
     use cc_switch_lib::cli::Cli;
     use clap::Parser;
@@ -196,6 +197,38 @@ mod tests {
         ));
         assert!(!command_requires_startup_state(&internal_capture.command));
         assert!(command_requires_startup_state(&provider.command));
+    }
+
+    #[test]
+    fn completions_update_internal_skip_database_access() {
+        let update = Cli::parse_from(["cc-switch", "update"]);
+        let completions = Cli::parse_from(["cc-switch", "completions", "bash"]);
+        let internal = Cli::parse_from([
+            "cc-switch",
+            "internal",
+            "capture-codex-temp",
+            "official",
+            "/tmp/codex-home",
+        ]);
+
+        assert!(!database_access_required(&update.command));
+        assert!(!database_access_required(&completions.command));
+        assert!(!database_access_required(&internal.command));
+    }
+
+    #[test]
+    fn normal_commands_require_database_access() {
+        let provider = Cli::parse_from(["cc-switch", "provider", "list"]);
+        let mcp = Cli::parse_from(["cc-switch", "mcp", "list"]);
+        let config = Cli::parse_from(["cc-switch", "config", "validate"]);
+        let proxy = Cli::parse_from(["cc-switch", "proxy", "show"]);
+        let interactive = Cli::parse_from(["cc-switch"]);
+
+        assert!(database_access_required(&provider.command));
+        assert!(database_access_required(&mcp.command));
+        assert!(database_access_required(&config.command));
+        assert!(database_access_required(&proxy.command));
+        assert!(database_access_required(&interactive.command));
     }
 
     #[test]

@@ -10741,9 +10741,9 @@ pub mod texts {
 
     pub fn config_permissions_custom_dir_notice(path: &str) -> String {
         if is_chinese() {
-            format!("检测到自定义配置目录: {path}")
+            format!("检测到自定义配置目录: {path}，请核实此目录不是关键系统目录")
         } else {
-            format!("Custom config directory detected: {path}")
+            format!("Custom config directory detected: {path}, please verify this is not a critical system directory")
         }
     }
 

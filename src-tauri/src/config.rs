@@ -261,6 +261,90 @@ pub fn check_permissions() -> Vec<(PathBuf, u32, u32)> {
     Vec::new()
 }
 
+trait PermissionPrompter {
+    fn confirm_custom_dir(&mut self, path: &Path) -> Result<bool, AppError>;
+    fn confirm_fix(&mut self) -> Result<bool, AppError>;
+}
+
+struct InquirePermissionPrompter;
+
+impl PermissionPrompter for InquirePermissionPrompter {
+    fn confirm_custom_dir(&mut self, _path: &Path) -> Result<bool, AppError> {
+        inquire::Confirm::new(texts::config_permissions_confirm_custom_dir())
+            .with_default(false)
+            .prompt()
+            .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))
+    }
+
+    fn confirm_fix(&mut self) -> Result<bool, AppError> {
+        inquire::Confirm::new(texts::config_permissions_fix_prompt())
+            .with_default(true)
+            .prompt()
+            .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))
+    }
+}
+
+fn prompt_fix_permissions_interactive(
+    issues: &[(PathBuf, u32, u32)],
+    custom_dir: Option<PathBuf>,
+    prompter: &mut dyn PermissionPrompter,
+) -> Result<(), AppError> {
+    eprintln!("{}", texts::config_permissions_insecure_header());
+    for (path, current, expected) in issues {
+        eprintln!(
+            "{}",
+            texts::config_permissions_detail(&path.display().to_string(), *current, *expected,)
+        );
+    }
+
+    if let Some(custom_path) = custom_dir {
+        if !custom_path.as_os_str().is_empty() {
+            eprintln!(
+                "{}",
+                texts::config_permissions_custom_dir_notice(&custom_path.display().to_string())
+            );
+            if !prompter.confirm_custom_dir(&custom_path)? {
+                eprintln!("{}", texts::config_permissions_custom_dir_skipped());
+                return Ok(());
+            }
+        }
+    }
+
+    if prompter.confirm_fix()? {
+        for (path, _, _) in issues {
+            if path.is_dir() {
+                restrict_dir_permissions(path).map_err(|e| AppError::io(path, e))?;
+            } else {
+                restrict_file_permissions(path).map_err(|e| AppError::io(path, e))?;
+            }
+        }
+        eprintln!("{}", texts::config_permissions_fixed());
+    } else {
+        eprintln!("{}", texts::config_permissions_fix_warn_interactive());
+    }
+
+    Ok(())
+}
+
+fn write_permissions_noninteractive_warning<W: Write>(
+    mut output: W,
+    issues: &[(PathBuf, u32, u32)],
+) -> std::io::Result<()> {
+    writeln!(
+        output,
+        "{}",
+        texts::config_permissions_fix_warn_noninteractive()
+    )?;
+    for (path, current, expected) in issues {
+        writeln!(
+            output,
+            "{}",
+            texts::config_permissions_detail(&path.display().to_string(), *current, *expected,)
+        )?;
+    }
+    Ok(())
+}
+
 /// 访问数据库前检查权限，若不安全则提示用户是否修复
 ///
 /// - 交互终端：使用 inquire 提示用户，确认后修复，拒绝则警告
@@ -271,67 +355,20 @@ pub fn prompt_fix_permissions() -> Result<(), AppError> {
         return Ok(());
     }
 
-    // In test builds, skip the interactive prompt to avoid blocking on stdin.
-    if cfg!(test) {
-        return Ok(());
-    }
-
-    let is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdin())
+    let is_terminal = !cfg!(test)
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
         && std::io::IsTerminal::is_terminal(&std::io::stdout())
         && std::io::IsTerminal::is_terminal(&std::io::stderr());
 
     if is_terminal {
-        eprintln!("{}", texts::config_permissions_insecure_header());
-        for (path, current, expected) in &issues {
-            eprintln!(
-                "{}",
-                texts::config_permissions_detail(&path.display().to_string(), *current, *expected,)
-            );
-        }
-
-        if let Some(custom) = env::var_os("CC_SWITCH_CONFIG_DIR") {
-            let custom_path = PathBuf::from(&custom);
-            if !custom_path.as_os_str().is_empty() {
-                eprintln!(
-                    "{}",
-                    texts::config_permissions_custom_dir_notice(&custom_path.display().to_string())
-                );
-                let dir_ok = inquire::Confirm::new(texts::config_permissions_confirm_custom_dir())
-                    .with_default(false)
-                    .prompt()
-                    .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
-                if !dir_ok {
-                    eprintln!("{}", texts::config_permissions_custom_dir_skipped());
-                    return Ok(());
-                }
-            }
-        }
-
-        let confirm = inquire::Confirm::new(texts::config_permissions_fix_prompt())
-            .with_default(true)
-            .prompt()
-            .map_err(|e| AppError::Message(format!("Prompt failed: {}", e)))?;
-
-        if confirm {
-            for (path, _, _) in &issues {
-                if path.is_dir() {
-                    restrict_dir_permissions(path).map_err(|e| AppError::io(path, e))?;
-                } else {
-                    restrict_file_permissions(path).map_err(|e| AppError::io(path, e))?;
-                }
-            }
-            eprintln!("{}", texts::config_permissions_fixed());
-        } else {
-            eprintln!("{}", texts::config_permissions_fix_warn_interactive());
-        }
+        let custom_dir = env::var_os("CC_SWITCH_CONFIG_DIR").map(PathBuf::from);
+        let mut prompter = InquirePermissionPrompter;
+        prompt_fix_permissions_interactive(&issues, custom_dir, &mut prompter)?;
     } else {
-        eprintln!("{}", texts::config_permissions_fix_warn_noninteractive());
-        for (path, current, expected) in &issues {
-            eprintln!(
-                "{}",
-                texts::config_permissions_detail(&path.display().to_string(), *current, *expected,)
-            );
-        }
+        let stderr = std::io::stderr();
+        let mut stderr = stderr.lock();
+        write_permissions_noninteractive_warning(&mut stderr, &issues)
+            .map_err(|e| AppError::Message(format!("Failed to write permission warning: {e}")))?;
     }
 
     Ok(())
@@ -498,6 +535,36 @@ mod tests {
     impl Drop for SettingsGuard {
         fn drop(&mut self) {
             let _ = crate::settings::update_settings(self.original.clone());
+        }
+    }
+
+    struct FakePermissionPrompter {
+        custom_dir_response: bool,
+        fix_response: bool,
+        custom_dir_calls: usize,
+        fix_calls: usize,
+    }
+
+    impl FakePermissionPrompter {
+        fn new(custom_dir_response: bool, fix_response: bool) -> Self {
+            Self {
+                custom_dir_response,
+                fix_response,
+                custom_dir_calls: 0,
+                fix_calls: 0,
+            }
+        }
+    }
+
+    impl PermissionPrompter for FakePermissionPrompter {
+        fn confirm_custom_dir(&mut self, _path: &Path) -> Result<bool, AppError> {
+            self.custom_dir_calls += 1;
+            Ok(self.custom_dir_response)
+        }
+
+        fn confirm_fix(&mut self) -> Result<bool, AppError> {
+            self.fix_calls += 1;
+            Ok(self.fix_response)
         }
     }
 
@@ -816,6 +883,135 @@ mod tests {
         assert_eq!(issues[0].0, backup_dir);
         assert_eq!(issues[0].1, 0o755);
         assert_eq!(issues[0].2, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prompt_fix_permissions_does_not_fix_in_test_build() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = lock_test_home_and_settings();
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env =
+            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
+
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
+            .expect("set dir perms");
+
+        prompt_fix_permissions().expect("test build should only warn");
+
+        // Permissions should remain unchanged because cfg!(test) skips the fix logic
+        let mode = std::fs::metadata(temp.path())
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "test build should not modify directory permissions"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_permission_prompt_fixes_permissions_when_confirmed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create temp dir");
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
+            .expect("set dir perms");
+        let issues = vec![(temp.path().to_path_buf(), 0o755, 0o700)];
+        let mut prompter = FakePermissionPrompter::new(true, true);
+
+        prompt_fix_permissions_interactive(&issues, None, &mut prompter)
+            .expect("interactive fix should succeed");
+
+        let mode = std::fs::metadata(temp.path())
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+        assert_eq!(prompter.custom_dir_calls, 0);
+        assert_eq!(prompter.fix_calls, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_permission_prompt_fixes_file_permissions_when_confirmed() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create temp dir");
+        let db_path = temp.path().join("cc-switch.db");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o644)
+            .open(&db_path)
+            .expect("create db file");
+        let issues = vec![(db_path.clone(), 0o644, 0o600)];
+        let mut prompter = FakePermissionPrompter::new(true, true);
+
+        prompt_fix_permissions_interactive(&issues, None, &mut prompter)
+            .expect("interactive file fix should succeed");
+
+        let mode = std::fs::metadata(&db_path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(prompter.custom_dir_calls, 0);
+        assert_eq!(prompter.fix_calls, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_permission_prompt_leaves_permissions_when_fix_declined() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create temp dir");
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
+            .expect("set dir perms");
+        let issues = vec![(temp.path().to_path_buf(), 0o755, 0o700)];
+        let mut prompter = FakePermissionPrompter::new(true, false);
+
+        prompt_fix_permissions_interactive(&issues, None, &mut prompter)
+            .expect("interactive prompt should succeed");
+
+        let mode = std::fs::metadata(temp.path())
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755);
+        assert_eq!(prompter.custom_dir_calls, 0);
+        assert_eq!(prompter.fix_calls, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_permission_prompt_skips_custom_dir_when_not_confirmed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("create temp dir");
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
+            .expect("set dir perms");
+        let custom_dir = temp.path().to_path_buf();
+        let issues = vec![(custom_dir.clone(), 0o755, 0o700)];
+        let mut prompter = FakePermissionPrompter::new(false, true);
+
+        prompt_fix_permissions_interactive(&issues, Some(custom_dir), &mut prompter)
+            .expect("interactive prompt should succeed");
+
+        let mode = std::fs::metadata(temp.path())
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755);
+        assert_eq!(prompter.custom_dir_calls, 1);
+        assert_eq!(prompter.fix_calls, 0);
     }
 }
 
