@@ -1,5 +1,8 @@
 use base64::prelude::*;
-use cc_switch_lib::{import_provider_from_deeplink, parse_deeplink_url, AppType, MultiAppConfig};
+use cc_switch_lib::{
+    import_mcp_from_deeplink, import_prompt_from_deeplink, import_provider_from_deeplink,
+    import_skill_from_deeplink, parse_deeplink_url, AppType, MultiAppConfig,
+};
 
 #[path = "support.rs"]
 mod support;
@@ -332,5 +335,126 @@ fn deeplink_import_rejects_non_http_endpoints_from_config() {
     assert!(
         err.to_string().contains("Invalid URL scheme"),
         "expected scheme validation error, got {err:?}"
+    );
+}
+
+#[test]
+fn deeplink_import_mcp_server_persists_with_app_flags() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let config_json = r#"{"mcpServers":{"fetch":{"command":"uvx","args":["mcp-server-fetch"]}}}"#;
+    let config_b64 = BASE64_URL_SAFE_NO_PAD.encode(config_json.as_bytes());
+    let url = format!(
+        "ccswitch://v1/import?resource=mcp&apps=claude,codex&config={config_b64}&enabled=true"
+    );
+    let request = parse_deeplink_url(&url).expect("parse deeplink url");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    let state = state_from_config(config);
+
+    let result = import_mcp_from_deeplink(&state, request).expect("import mcp from deeplink");
+    assert_eq!(result.imported_count, 1);
+    assert!(result.failed.is_empty(), "no imports should fail");
+    assert_eq!(result.imported_ids, vec!["fetch".to_string()]);
+
+    let servers = state.db.get_all_mcp_servers().expect("read mcp servers");
+    let server = servers.get("fetch").expect("mcp server persisted");
+    assert!(server.apps.claude, "claude flag should be set");
+    assert!(server.apps.codex, "codex flag should be set");
+    assert!(!server.apps.gemini, "gemini flag should remain unset");
+    assert_eq!(
+        server.server.pointer("/command").and_then(|v| v.as_str()),
+        Some("uvx")
+    );
+}
+
+#[test]
+fn deeplink_import_prompt_persists_and_enables() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let content = "You are a helpful assistant.";
+    let content_b64 = BASE64_URL_SAFE_NO_PAD.encode(content.as_bytes());
+    let url = format!(
+        "ccswitch://v1/import?resource=prompt&app=claude&name=Helper&content={content_b64}&description=desc&enabled=true"
+    );
+    let request = parse_deeplink_url(&url).expect("parse deeplink url");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    let state = state_from_config(config);
+
+    let prompt_id = import_prompt_from_deeplink(&state, request).expect("import prompt");
+
+    let prompts = state.db.get_prompts("claude").expect("read prompts");
+    let prompt = prompts.get(&prompt_id).expect("prompt persisted");
+    assert_eq!(prompt.content, content);
+    assert_eq!(prompt.name, "Helper");
+    assert_eq!(prompt.description.as_deref(), Some("desc"));
+    assert!(prompt.enabled, "enabled=true should activate the prompt");
+}
+
+#[test]
+fn deeplink_import_prompt_without_enabled_stays_disabled() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let content_b64 = BASE64_URL_SAFE_NO_PAD.encode(b"hello");
+    let url =
+        format!("ccswitch://v1/import?resource=prompt&app=claude&name=Idle&content={content_b64}");
+    let request = parse_deeplink_url(&url).expect("parse deeplink url");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    let state = state_from_config(config);
+
+    let prompt_id = import_prompt_from_deeplink(&state, request).expect("import prompt");
+
+    let prompts = state.db.get_prompts("claude").expect("read prompts");
+    let prompt = prompts.get(&prompt_id).expect("prompt persisted");
+    assert!(!prompt.enabled, "prompt should default to disabled");
+}
+
+#[test]
+fn deeplink_import_skill_repo_persists() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let url = "ccswitch://v1/import?resource=skill&repo=octocat/example-skills&branch=dev";
+    let request = parse_deeplink_url(url).expect("parse deeplink url");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    let state = state_from_config(config);
+
+    let repo_id = import_skill_from_deeplink(&state, request).expect("import skill repo");
+    assert_eq!(repo_id, "octocat/example-skills");
+
+    let repos = state.db.get_skill_repos().expect("read skill repos");
+    let repo = repos
+        .iter()
+        .find(|r| r.owner == "octocat" && r.name == "example-skills")
+        .expect("skill repo persisted");
+    assert_eq!(repo.branch, "dev");
+    assert!(repo.enabled, "repo should default to enabled");
+}
+
+#[test]
+fn deeplink_import_skill_rejects_malformed_repo() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let err = parse_deeplink_url("ccswitch://v1/import?resource=skill&repo=not-a-repo")
+        .expect_err("malformed repo should be rejected");
+    assert!(
+        err.to_string().contains("Invalid repo format"),
+        "expected repo format error, got {err:?}"
     );
 }
