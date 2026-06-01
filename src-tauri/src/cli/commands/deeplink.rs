@@ -95,9 +95,5 @@ fn import_skill(state: &AppState, request: crate::DeepLinkImportRequest) -> Resu
     let repo_id = crate::import_skill_from_deeplink(state, request)?;
 
     println!("{}", success(&format!("✓ Added skill repo '{repo_id}'")));
-    println!(
-        "{}",
-        info("  Run `cc-switch skills repos sync` to install skills from it")
-    );
     Ok(())
 }
