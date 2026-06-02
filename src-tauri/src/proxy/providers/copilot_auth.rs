@@ -1515,6 +1515,61 @@ impl CopilotAuthManager {
 
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) async fn seed_account_for_tests(
+        &self,
+        account_id: &str,
+        github_token: &str,
+        copilot_token: Option<&str>,
+        api_endpoint: Option<&str>,
+        models: Vec<CopilotModel>,
+    ) -> Result<(), CopilotAuthError> {
+        let user_id = account_id.parse::<u64>().unwrap_or(1);
+        {
+            let mut accounts = self.accounts.write().await;
+            accounts.insert(
+                account_id.to_string(),
+                GitHubAccountData {
+                    github_token: github_token.to_string(),
+                    user: GitHubUser {
+                        login: format!("user-{account_id}"),
+                        id: user_id,
+                        avatar_url: None,
+                    },
+                    authenticated_at: chrono::Utc::now().timestamp(),
+                    github_domain: DEFAULT_GITHUB_DOMAIN.to_string(),
+                },
+            );
+        }
+        {
+            let mut default_account_id = self.default_account_id.write().await;
+            if default_account_id.is_none() {
+                *default_account_id = Some(account_id.to_string());
+            }
+        }
+        if let Some(copilot_token) = copilot_token {
+            self.copilot_tokens.write().await.insert(
+                account_id.to_string(),
+                CopilotToken {
+                    token: copilot_token.to_string(),
+                    expires_at: chrono::Utc::now().timestamp() + 3600,
+                },
+            );
+        }
+        if let Some(api_endpoint) = api_endpoint {
+            self.api_endpoints.write().await.insert(
+                account_id.to_string(),
+                api_endpoint.trim_end_matches('/').to_string(),
+            );
+        }
+        self.copilot_models
+            .write()
+            .await
+            .insert(account_id.to_string(), models);
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

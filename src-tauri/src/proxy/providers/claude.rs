@@ -431,11 +431,34 @@ impl ProviderAdapter for ClaudeAdapter {
             AuthStrategy::ClaudeAuth => {
                 request.header("Authorization", format!("Bearer {}", auth.api_key))
             }
-            AuthStrategy::GitHubCopilot => request
-                .header("Authorization", format!("Bearer {}", auth.api_key))
-                .header("Editor-Version", "vscode/1.85.0")
-                .header("Editor-Plugin-Version", "copilot/1.150.0")
-                .header("Copilot-Integration-Id", "vscode-chat"),
+            AuthStrategy::GitHubCopilot => {
+                let request_id = uuid::Uuid::new_v4().to_string();
+                request
+                    .header("Authorization", format!("Bearer {}", auth.api_key))
+                    .header(
+                        "editor-version",
+                        super::copilot_auth::COPILOT_EDITOR_VERSION,
+                    )
+                    .header(
+                        "editor-plugin-version",
+                        super::copilot_auth::COPILOT_PLUGIN_VERSION,
+                    )
+                    .header(
+                        "copilot-integration-id",
+                        super::copilot_auth::COPILOT_INTEGRATION_ID,
+                    )
+                    .header("user-agent", super::copilot_auth::COPILOT_USER_AGENT)
+                    .header(
+                        "x-github-api-version",
+                        super::copilot_auth::COPILOT_API_VERSION,
+                    )
+                    .header("openai-intent", "conversation-agent")
+                    .header("x-initiator", "user")
+                    .header("x-interaction-type", "conversation-agent")
+                    .header("x-vscode-user-agent-library-version", "electron-fetch")
+                    .header("x-request-id", &request_id)
+                    .header("x-agent-task-id", request_id)
+            }
             AuthStrategy::CodexOAuth => request
                 .header("Authorization", format!("Bearer {}", auth.api_key))
                 .header("originator", "cc-switch"),

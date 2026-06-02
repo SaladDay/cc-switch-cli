@@ -1,7 +1,7 @@
 use axum::http::HeaderMap;
 use serde_json::Value;
 
-use crate::services::CodexOAuthService;
+use crate::services::{CodexOAuthService, CopilotAuthService};
 use crate::{app_config::AppType, provider::Provider};
 
 use super::super::{
@@ -11,9 +11,9 @@ use super::super::{
     json_canonical::canonicalize_value,
     model_mapper::apply_model_mapping,
     providers::{
-        apply_codex_chat_upstream_model, get_adapter, resolve_codex_chat_reasoning_config,
-        should_convert_codex_responses_to_chat, transform_codex_chat, AuthStrategy,
-        ProviderAdapter,
+        apply_codex_chat_upstream_model, claude_api_format_needs_transform, get_adapter,
+        resolve_codex_chat_reasoning_config, should_convert_codex_responses_to_chat,
+        transform_codex_chat, AuthStrategy, ProviderAdapter,
     },
 };
 use super::{ForwardOptions, RequestForwarder};
@@ -72,13 +72,17 @@ impl RequestForwarder {
         let adapter = get_adapter(app_type);
         let is_claude_request = matches!(app_type, AppType::Claude);
         let mut upstream_endpoint = self.router.upstream_endpoint(app_type, provider, endpoint);
-        let base_url = adapter.extract_base_url(provider)?;
+        let mut base_url = adapter.extract_base_url(provider)?;
+        let is_full_url = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.is_full_url)
+            .unwrap_or(false);
+        let is_copilot = is_claude_request
+            && (provider.is_github_copilot() || base_url.contains("githubcopilot.com"));
         let (mut mapped_body, _, _) = apply_model_mapping(body.clone(), provider);
         let codex_responses_to_chat = should_convert_codex_responses_to_chat(provider, endpoint)
             && matches!(app_type, AppType::Codex);
-        let needs_transform = adapter.needs_transform(provider);
-        let claude_api_format =
-            is_claude_request.then(|| super::super::providers::get_claude_api_format(provider));
 
         if is_claude_request && self.optimizer_config.enabled && is_bedrock_provider(provider) {
             if self.optimizer_config.thinking_optimizer {
@@ -92,8 +96,49 @@ impl RequestForwarder {
             }
         }
 
-        if claude_api_format == Some("gemini_native") {
-            upstream_endpoint = rewrite_claude_gemini_native_endpoint(endpoint, &mapped_body);
+        if is_copilot {
+            mapped_body =
+                super::super::providers::copilot_model_map::apply_copilot_model_normalization(
+                    mapped_body,
+                );
+            self.apply_copilot_live_model_resolution(provider, &mut mapped_body)
+                .await;
+
+            if !is_full_url {
+                let dynamic_endpoint = match provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.managed_account_id_for("github_copilot"))
+                {
+                    Some(account_id) => CopilotAuthService::get_api_endpoint(&account_id).await,
+                    None => CopilotAuthService::get_default_api_endpoint().await,
+                };
+                if dynamic_endpoint != base_url {
+                    base_url = dynamic_endpoint;
+                }
+            }
+        }
+
+        let claude_api_format = if is_claude_request {
+            Some(
+                self.resolve_claude_api_format(provider, &mapped_body, is_copilot)
+                    .await,
+            )
+        } else {
+            None
+        };
+        let needs_transform = match claude_api_format.as_deref() {
+            Some(api_format) => claude_api_format_needs_transform(api_format),
+            None => adapter.needs_transform(provider),
+        };
+
+        if is_claude_request && needs_transform {
+            upstream_endpoint = rewrite_claude_transform_endpoint(
+                endpoint,
+                claude_api_format.as_deref().unwrap_or("anthropic"),
+                is_copilot,
+                &mapped_body,
+            );
         }
 
         let request_body = if codex_responses_to_chat {
@@ -112,7 +157,7 @@ impl RequestForwarder {
                 super::super::providers::transform_claude_request_for_api_format_with_shadow(
                     mapped_body,
                     provider,
-                    claude_api_format.unwrap_or("anthropic"),
+                    claude_api_format.as_deref().unwrap_or("anthropic"),
                     self.session_client_provided
                         .then_some(self.session_id.as_str()),
                     self.gemini_shadow.as_deref(),
@@ -142,9 +187,71 @@ impl RequestForwarder {
             self.session_client_provided
                 .then_some(self.session_id.as_str()),
             force_identity_encoding,
-            claude_api_format,
+            claude_api_format.as_deref(),
         )
         .await
+    }
+
+    async fn resolve_claude_api_format(
+        &self,
+        provider: &Provider,
+        body: &Value,
+        is_copilot: bool,
+    ) -> String {
+        if !is_copilot {
+            return super::super::providers::get_claude_api_format(provider).to_string();
+        }
+
+        let model = body.get("model").and_then(|value| value.as_str());
+        if let Some(model_id) = model {
+            if self
+                .is_copilot_openai_vendor_model(provider, model_id)
+                .await
+            {
+                return "openai_responses".to_string();
+            }
+        }
+
+        "openai_chat".to_string()
+    }
+
+    async fn apply_copilot_live_model_resolution(&self, provider: &Provider, body: &mut Value) {
+        let Some(model_id) = body.get("model").and_then(|value| value.as_str()) else {
+            return;
+        };
+        let model_id = model_id.to_string();
+        let account_id = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.managed_account_id_for("github_copilot"));
+
+        let models_result = match account_id.as_deref() {
+            Some(id) => CopilotAuthService::fetch_models_for_account(id).await,
+            None => CopilotAuthService::fetch_models().await,
+        };
+        let Ok(models) = models_result else {
+            return;
+        };
+
+        if let Some(resolved) =
+            super::super::providers::copilot_model_map::resolve_against_models(&model_id, &models)
+        {
+            body["model"] = Value::String(resolved);
+        }
+    }
+
+    async fn is_copilot_openai_vendor_model(&self, provider: &Provider, model_id: &str) -> bool {
+        let account_id = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.managed_account_id_for("github_copilot"));
+
+        let vendor_result = match account_id.as_deref() {
+            Some(id) => CopilotAuthService::get_model_vendor_for_account(id, model_id).await,
+            None => CopilotAuthService::get_model_vendor(model_id).await,
+        };
+
+        matches!(vendor_result, Ok(Some(vendor)) if vendor.eq_ignore_ascii_case("openai"))
     }
 
     fn client_for_provider(&self, provider: &Provider) -> reqwest::Client {
@@ -183,6 +290,13 @@ async fn build_request(
             .and_then(|meta| meta.is_full_url)
             .unwrap_or(false);
         super::super::gemini_url::resolve_gemini_native_url(base_url, endpoint, is_full_url)
+    } else if provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.is_full_url)
+        .unwrap_or(false)
+    {
+        append_query_to_url(base_url.trim_end_matches('/'), endpoint_query)
     } else if base_url
         .trim_end_matches('/')
         .to_ascii_lowercase()
@@ -212,8 +326,7 @@ async fn build_request(
         request = request.header(key, value);
     }
 
-    let send_anthropic_headers = is_claude_request
-        && super::super::providers::get_claude_api_format(provider) == "anthropic";
+    let send_anthropic_headers = is_claude_request && claude_api_format == Some("anthropic");
 
     if send_anthropic_headers {
         const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
@@ -244,7 +357,27 @@ async fn build_request(
 
     if let Some(auth) = adapter.extract_auth(provider) {
         let mut effective_auth = auth.clone();
-        if auth.strategy == AuthStrategy::CodexOAuth {
+        if auth.strategy == AuthStrategy::GitHubCopilot {
+            let account_id = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.managed_account_id_for("github_copilot"));
+
+            match match &account_id {
+                Some(id) => CopilotAuthService::get_valid_token_for_account(id).await,
+                None => CopilotAuthService::get_valid_token().await,
+            } {
+                Ok(token) => {
+                    effective_auth.api_key = token;
+                    request = adapter.add_auth_headers(request, &effective_auth);
+                }
+                Err(error) => {
+                    return Err(ProxyError::AuthError(format!(
+                        "GitHub Copilot 认证失败: {error}"
+                    )));
+                }
+            }
+        } else if auth.strategy == AuthStrategy::CodexOAuth {
             let account_id = provider
                 .meta
                 .as_ref()
@@ -306,28 +439,71 @@ fn rewrite_codex_responses_endpoint_to_chat(endpoint: &str) -> String {
     }
 }
 
-fn rewrite_claude_gemini_native_endpoint(endpoint: &str, body: &Value) -> String {
+fn strip_beta_query(query: Option<&str>) -> Option<String> {
+    let filtered = query.map(|query| {
+        query
+            .split('&')
+            .filter(|pair| !pair.is_empty() && !pair.starts_with("beta="))
+            .collect::<Vec<_>>()
+            .join("&")
+    });
+
+    match filtered.as_deref() {
+        Some("") | None => None,
+        Some(_) => filtered,
+    }
+}
+
+fn is_claude_messages_path(path: &str) -> bool {
+    matches!(path, "/v1/messages" | "/claude/v1/messages")
+}
+
+fn rewrite_claude_transform_endpoint(
+    endpoint: &str,
+    api_format: &str,
+    is_copilot: bool,
+    body: &Value,
+) -> String {
     let (path, query) = split_endpoint_and_query(endpoint);
-    if path != "/v1/messages" {
+    if !is_claude_messages_path(path) {
         return endpoint.to_string();
     }
 
-    let model = super::super::providers::transform_gemini::extract_gemini_model(body)
-        .map(super::super::gemini_url::normalize_gemini_model_id)
-        .unwrap_or("unknown");
-    let is_stream = body
-        .get("stream")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-    let target = if is_stream {
-        format!("/v1beta/models/{model}:streamGenerateContent")
+    let query = strip_beta_query(query);
+
+    if api_format == "gemini_native" {
+        let model = super::super::providers::transform_gemini::extract_gemini_model(body)
+            .map(super::super::gemini_url::normalize_gemini_model_id)
+            .unwrap_or("unknown");
+        let is_stream = body
+            .get("stream")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let target = if is_stream {
+            format!("/v1beta/models/{model}:streamGenerateContent")
+        } else {
+            format!("/v1beta/models/{model}:generateContent")
+        };
+        let query = merge_query_params(query.as_deref(), is_stream.then_some("alt=sse"));
+        return match query {
+            Some(query) if !query.is_empty() => format!("{target}?{query}"),
+            _ => target,
+        };
+    }
+
+    let target = if is_copilot && api_format == "openai_responses" {
+        "/v1/responses"
+    } else if is_copilot {
+        "/chat/completions"
+    } else if api_format == "openai_responses" {
+        "/v1/responses"
     } else {
-        format!("/v1beta/models/{model}:generateContent")
+        "/v1/chat/completions"
     };
-    let query = merge_query_params(query, is_stream.then_some("alt=sse"));
+
     match query {
         Some(query) if !query.is_empty() => format!("{target}?{query}"),
-        _ => target,
+        _ => target.to_string(),
     }
 }
 

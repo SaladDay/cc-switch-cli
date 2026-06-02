@@ -7,6 +7,7 @@ pub mod codex_chat_history;
 pub mod codex_oauth_auth;
 #[allow(dead_code)]
 pub mod copilot_auth;
+pub mod copilot_model_map;
 mod gemini;
 pub(crate) mod gemini_schema;
 pub mod gemini_shadow;

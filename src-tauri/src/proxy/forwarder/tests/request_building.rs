@@ -12,9 +12,10 @@ use crate::{
     provider::{AuthBinding, AuthBindingSource, Provider, ProviderMeta},
     proxy::{
         forwarder::{ForwardOptions, RequestForwarder},
+        providers::copilot_auth::CopilotModel,
         types::{OptimizerConfig, RectifierConfig},
     },
-    services::CodexOAuthService,
+    services::{CodexOAuthService, CopilotAuthService},
     test_support::lock_test_home_and_settings,
 };
 
@@ -640,6 +641,258 @@ async fn codex_oauth_prepare_request_errors_without_available_account() {
 }
 
 #[tokio::test]
+async fn github_copilot_prepare_request_uses_responses_for_openai_vendor_model() {
+    let _lock = lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
+    CopilotAuthService::reset_for_tests();
+    CopilotAuthService::seed_account_for_tests(
+        "12345",
+        "gho-openai",
+        Some("copilot-openai-token"),
+        Some("https://api.githubcopilot.com"),
+        vec![copilot_model("gpt-5.4", "OpenAI")],
+    )
+    .await
+    .expect("seed copilot account");
+
+    let provider = github_copilot_provider(Some("12345"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages?beta=true&x-id=1",
+            &json!({
+                "model": "gpt-5.4",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot OpenAI vendor request")
+        .build()
+        .expect("build Copilot OpenAI vendor request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://api.githubcopilot.com/v1/responses?x-id=1"
+    );
+    assert_eq!(
+        header_value(&request, "authorization"),
+        Some("Bearer copilot-openai-token")
+    );
+    assert_eq!(
+        header_value(&request, "editor-version"),
+        Some("vscode/1.110.1")
+    );
+    assert_eq!(header_value(&request, "anthropic-beta"), None);
+    assert_eq!(header_value(&request, "anthropic-version"), None);
+
+    let body = request_body_json(&request);
+    assert_eq!(body["model"], "gpt-5.4");
+    assert!(body.get("input").is_some());
+    assert!(body.get("messages").is_none());
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_uses_chat_for_anthropic_vendor_model() {
+    let _lock = lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
+    CopilotAuthService::reset_for_tests();
+    CopilotAuthService::seed_account_for_tests(
+        "67890",
+        "gho-anthropic",
+        Some("copilot-anthropic-token"),
+        Some("https://api.githubcopilot.com"),
+        vec![copilot_model("claude-sonnet-4.6", "Anthropic")],
+    )
+    .await
+    .expect("seed copilot account");
+
+    let provider = github_copilot_provider(Some("67890"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages?beta=true&x-id=2",
+            &json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "hello"
+                    }]
+                }]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot Anthropic vendor request")
+        .build()
+        .expect("build Copilot Anthropic vendor request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://api.githubcopilot.com/chat/completions?x-id=2"
+    );
+    assert_eq!(
+        header_value(&request, "authorization"),
+        Some("Bearer copilot-anthropic-token")
+    );
+    assert_eq!(header_value(&request, "anthropic-beta"), None);
+    assert_eq!(header_value(&request, "anthropic-version"), None);
+
+    let body = request_body_json(&request);
+    assert_eq!(body["model"], "claude-sonnet-4.6");
+    assert!(body["messages"].is_array());
+    assert!(body.get("input").is_none());
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_detects_copilot_base_url_without_provider_type() {
+    let _lock = lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
+    CopilotAuthService::reset_for_tests();
+    CopilotAuthService::seed_account_for_tests(
+        "24680",
+        "gho-base-url",
+        Some("copilot-base-url-token"),
+        Some("https://api.githubcopilot.com"),
+        vec![copilot_model("gpt-5.4", "OpenAI")],
+    )
+    .await
+    .expect("seed copilot account");
+
+    let provider = claude_provider("copilot-url", "https://api.githubcopilot.com", None);
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &json!({
+                "model": "gpt-5.4",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot base-url request")
+        .build()
+        .expect("build Copilot base-url request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://api.githubcopilot.com/v1/responses"
+    );
+    assert_eq!(
+        header_value(&request, "authorization"),
+        Some("Bearer copilot-base-url-token")
+    );
+    assert_eq!(header_value(&request, "anthropic-beta"), None);
+    assert_eq!(header_value(&request, "anthropic-version"), None);
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_preserves_full_url_relay() {
+    let _lock = lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
+    CopilotAuthService::reset_for_tests();
+    CopilotAuthService::seed_account_for_tests(
+        "13579",
+        "gho-full-url",
+        Some("copilot-full-url-token"),
+        Some("https://api.githubcopilot.com"),
+        vec![copilot_model("gpt-5.4", "OpenAI")],
+    )
+    .await
+    .expect("seed copilot account");
+
+    let mut provider = github_copilot_provider(Some("13579"));
+    provider.settings_config["base_url"] = json!("https://relay.example/copilot/fixed?existing=1");
+    provider.meta.as_mut().expect("copilot meta").is_full_url = Some(true);
+
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages?beta=true&x-id=3",
+            &json!({
+                "model": "gpt-5.4",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot full-url request")
+        .build()
+        .expect("build Copilot full-url request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://relay.example/copilot/fixed?existing=1&x-id=3"
+    );
+    assert_eq!(
+        header_value(&request, "authorization"),
+        Some("Bearer copilot-full-url-token")
+    );
+    assert_eq!(header_value(&request, "anthropic-beta"), None);
+    assert_eq!(header_value(&request, "anthropic-version"), None);
+
+    let body = request_body_json(&request);
+    assert!(body.get("input").is_some());
+    assert!(body.get("messages").is_none());
+}
+
+#[tokio::test]
 async fn codex_oauth_prepare_request_rejects_proxy_managed_placeholder_header() {
     let _lock = lock_test_home_and_settings();
     let temp = tempfile::tempdir().expect("create temp dir");
@@ -996,6 +1249,43 @@ fn codex_oauth_provider(account_id: Option<&str>) -> Provider {
         icon: None,
         icon_color: None,
         in_failover_queue: false,
+    }
+}
+
+fn github_copilot_provider(account_id: Option<&str>) -> Provider {
+    Provider {
+        id: "github-copilot".to_string(),
+        name: "GitHub Copilot".to_string(),
+        settings_config: json!({
+            "base_url": "https://ignored.example.com",
+            "apiKey": "ignored-placeholder"
+        }),
+        website_url: None,
+        category: None,
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: Some(ProviderMeta {
+            provider_type: Some("github_copilot".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("github_copilot".to_string()),
+                account_id: account_id.map(str::to_string),
+            }),
+            ..Default::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    }
+}
+
+fn copilot_model(id: &str, vendor: &str) -> CopilotModel {
+    CopilotModel {
+        id: id.to_string(),
+        name: id.to_string(),
+        vendor: vendor.to_string(),
+        model_picker_enabled: true,
     }
 }
 
