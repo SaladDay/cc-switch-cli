@@ -3267,6 +3267,71 @@ fn provider_add_form_openclaw_ignores_common_config_snippet() {
 }
 
 #[test]
+fn populate_claude_form_reads_anthropic_api_key_when_auth_token_missing() {
+    let provider = Provider {
+        id: "mimo".to_string(),
+        name: "Xiaomi Mimo".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_API_KEY": "sk-from-import",
+                "ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"
+            }
+        }),
+        website_url: None,
+        category: None,
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(form.claude_api_key.value, "sk-from-import");
+    assert_eq!(
+        form.claude_api_key_field,
+        crate::provider::ClaudeApiKeyField::ApiKey
+    );
+}
+
+#[test]
+fn populate_claude_form_honors_auth_token_field_meta_over_api_key() {
+    use crate::provider::ProviderMeta;
+
+    let provider = Provider {
+        id: "claude".to_string(),
+        name: "Claude".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-token",
+                "ANTHROPIC_API_KEY": "sk-key"
+            }
+        }),
+        website_url: None,
+        category: None,
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: Some(ProviderMeta {
+            api_key_field: Some("ANTHROPIC_AUTH_TOKEN".to_string()),
+            ..Default::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(form.claude_api_key.value, "sk-token");
+    assert_eq!(
+        form.claude_api_key_field,
+        crate::provider::ClaudeApiKeyField::AuthToken
+    );
+}
+
+#[test]
 fn provider_edit_form_roundtrip_no_duplicate_common_config_key() {
     // Issue #71: editing a Claude provider and saving fails with
     // "duplicate field `commonConfigEnabled`" because extra (from
