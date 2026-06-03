@@ -101,9 +101,7 @@ pub fn get_app_config_dir() -> PathBuf {
 /// 未设置环境变量时默认路径 `~/.cc-switch` 始终安全，直接放行。
 pub fn validate_config_dir() -> Result<(), AppError> {
     let path = get_app_config_dir();
-
-    // 检查原始路径和 canonicalize 后的路径（macOS 下 /etc -> /private/etc）
-    let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let resolved = resolve_existing_or_new_child_path(&path)?;
 
     if is_system_dir(&path) || is_system_dir(&resolved) {
         return Err(AppError::InvalidInput(texts::config_dir_is_system_dir(
@@ -113,6 +111,47 @@ pub fn validate_config_dir() -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+pub(crate) fn resolve_existing_or_new_child_path(path: &Path) -> Result<PathBuf, AppError> {
+    match path.canonicalize() {
+        Ok(resolved) => Ok(resolved),
+        Err(original_err) => {
+            let file_name = path.file_name().ok_or_else(|| {
+                AppError::InvalidInput(texts::config_dir_invalid_last_component(
+                    &path.display().to_string(),
+                ))
+            })?;
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let parent_resolved =
+                parent
+                    .canonicalize()
+                    .map_err(|parent_err| AppError::IoContext {
+                        context: texts::config_dir_only_final_component_may_be_missing(
+                            &path.display().to_string(),
+                        ),
+                        source: parent_err,
+                    })?;
+
+            let resolved = parent_resolved.join(file_name);
+            if is_system_dir(&resolved) {
+                return Err(AppError::InvalidInput(texts::config_dir_is_system_dir(
+                    &path.display().to_string(),
+                    &resolved.display().to_string(),
+                )));
+            }
+
+            log::debug!(
+                "Config dir does not exist yet, resolved parent and rebuilt path: {} -> {} ({original_err})",
+                path.display(),
+                resolved.display()
+            );
+            Ok(resolved)
+        }
+    }
 }
 
 /// 判断路径是否为系统关键目录（不应被应用修改权限）
@@ -754,6 +793,47 @@ mod tests {
         let _guard = lock_test_home_and_settings();
         let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("/tmp"));
         assert!(validate_config_dir().is_err());
+    }
+
+    #[test]
+    fn validate_config_dir_allows_parent_dir_components_when_parent_resolves() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempfile::tempdir().expect("create temp dir");
+        std::fs::create_dir(temp.path().join("child")).expect("create child dir");
+        let config_dir = temp.path().join("child").join("..").join("cc-switch");
+        let _env = ConfigDirEnvGuard::new(
+            "CC_SWITCH_CONFIG_DIR",
+            Some(config_dir.to_str().expect("utf8 temp path")),
+        );
+
+        assert!(validate_config_dir().is_ok());
+        assert_eq!(
+            resolve_existing_or_new_child_path(&config_dir).expect("resolve config dir"),
+            temp.path()
+                .canonicalize()
+                .expect("canonicalize temp dir")
+                .join("cc-switch")
+        );
+    }
+
+    #[test]
+    fn validate_config_dir_rejects_parent_dir_components_when_parent_does_not_resolve() {
+        let _guard = lock_test_home_and_settings();
+        let _env =
+            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("/tmp/cc-switch-new-child/.."));
+
+        assert!(validate_config_dir().is_err());
+    }
+
+    #[test]
+    fn validate_config_dir_rejects_parent_dir_components_when_resolved_to_system_dir() {
+        let _guard = lock_test_home_and_settings();
+        let _env = ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some("/usr/bin/.."));
+
+        assert!(
+            validate_config_dir().is_err(),
+            "resolved config dir should reject the system parent directory"
+        );
     }
 
     #[cfg(unix)]

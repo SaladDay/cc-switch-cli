@@ -35,7 +35,9 @@ mod tests;
 pub(crate) use dao::providers_seed::is_official_seed_id;
 pub use dao::FailoverQueueItem;
 
-use crate::config::{get_app_config_dir, restrict_dir_permissions};
+use crate::config::{
+    get_app_config_dir, resolve_existing_or_new_child_path, restrict_dir_permissions,
+};
 use crate::error::AppError;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -62,7 +64,13 @@ pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError
 // Leave existing folders untouched.
 // We fix the permissions of existing folders in config::prompt_fix_permissions,
 // so we don't need to do it here and risk messing with other processes' permissions.
+// We should also reject inscure path before actually creating files and folders
 pub(crate) fn create_secure_dir_all(path: &Path) -> Result<bool, AppError> {
+    let resolved_path = resolve_existing_or_new_child_path(path)?;
+    create_secure_dir_all_resolved(&resolved_path)
+}
+
+fn create_secure_dir_all_resolved(path: &Path) -> Result<bool, AppError> {
     if path.as_os_str().is_empty() || path.is_dir() {
         return Ok(false);
     }

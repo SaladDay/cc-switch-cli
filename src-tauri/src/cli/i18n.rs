@@ -10691,6 +10691,22 @@ pub mod texts {
         }
     }
 
+    pub fn config_dir_invalid_last_component(path: &str) -> String {
+        if is_chinese() {
+            format!("配置目录路径无效，无法解析最后一层目录: {path}")
+        } else {
+            format!("Invalid config directory path; unable to resolve the final directory component: {path}")
+        }
+    }
+
+    pub fn config_dir_only_final_component_may_be_missing(path: &str) -> String {
+        if is_chinese() {
+            format!("配置目录路径无效，仅允许最后一层目录不存在: {path}")
+        } else {
+            format!("Invalid config directory path; only the final directory component may be missing: {path}")
+        }
+    }
+
     pub fn config_permissions_insecure_header() -> &'static str {
         if is_chinese() {
             "⚠ 检测到以下文件/目录权限不安全："
@@ -10807,6 +10823,33 @@ mod tests {
         assert!(!help.contains("Skills:"));
         assert!(!help.contains("Config:"));
         assert!(!help.contains("Settings:"));
+    }
+
+    #[test]
+    fn config_dir_validation_messages_are_localized() {
+        {
+            let _lang = use_test_language(Language::English);
+            assert_eq!(
+                texts::config_dir_invalid_last_component("/tmp/child/.."),
+                "Invalid config directory path; unable to resolve the final directory component: /tmp/child/.."
+            );
+            assert_eq!(
+                texts::config_dir_only_final_component_may_be_missing("/tmp/child/.."),
+                "Invalid config directory path; only the final directory component may be missing: /tmp/child/.."
+            );
+        }
+
+        {
+            let _lang = use_test_language(Language::Chinese);
+            assert_eq!(
+                texts::config_dir_invalid_last_component("/tmp/child/.."),
+                "配置目录路径无效，无法解析最后一层目录: /tmp/child/.."
+            );
+            assert_eq!(
+                texts::config_dir_only_final_component_may_be_missing("/tmp/child/.."),
+                "配置目录路径无效，仅允许最后一层目录不存在: /tmp/child/.."
+            );
+        }
     }
 
     #[test]

@@ -1521,6 +1521,39 @@ fn init_creates_config_dir_with_restrictive_permissions() {
 }
 
 #[test]
+#[cfg(unix)]
+fn create_secure_dir_all_rejects_unresolved_parent_dir_components_without_chmodding_parent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("create temp dir");
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("set parent dir perms");
+
+    let path = temp.path().join("child").join("..");
+    let err = create_secure_dir_all(&path).expect_err("unresolved parent should be rejected");
+    let message = err.to_string();
+
+    assert!(
+        message.contains("配置目录路径无效") || message.contains("Invalid config directory path"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        !temp.path().join("child").exists(),
+        "rejected path should not create intermediate directories"
+    );
+
+    let parent_perms = std::fs::metadata(temp.path())
+        .expect("metadata parent")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        parent_perms, 0o755,
+        "rejected path should not chmod the parent directory"
+    );
+}
+
+#[test]
 #[serial_test::serial]
 #[cfg(unix)]
 fn init_does_not_silently_fix_existing_dir_permissions() {
