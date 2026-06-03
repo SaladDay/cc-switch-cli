@@ -43,12 +43,14 @@ use rusqlite::Connection;
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 
 // DAO 方法通过 impl Database 提供，无需额外导出
 
 /// 数据库备份保留数量
 const DB_BACKUP_RETAIN: usize = 10;
+
+static DATABASE_PERMISSION_CHECK: Once = Once::new();
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
@@ -131,6 +133,12 @@ impl Database {
     ///
     /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
     pub fn init() -> Result<Self, AppError> {
+        if let Err(err) = crate::config::validate_config_dir() {
+            log::warn!("拒绝初始化数据库：配置目录校验失败: {err}");
+            return Err(err);
+        }
+        warn_insecure_permissions_once();
+
         let db_path = get_app_config_dir().join("cc-switch.db");
 
         // 确保父目录存在
@@ -245,4 +253,23 @@ impl Database {
     pub(crate) fn runtime_key(&self) -> &str {
         &self.runtime_key
     }
+}
+
+fn warn_insecure_permissions_once() {
+    DATABASE_PERMISSION_CHECK.call_once(|| {
+        let issues = crate::config::check_permissions();
+        if issues.is_empty() {
+            return;
+        }
+
+        log::warn!("检测到不安全的 cc-switch 配置权限，请收紧后再继续使用");
+        for (path, current, expected) in issues {
+            log::warn!(
+                "不安全权限: path={} current={:03o} expected={:03o}",
+                path.display(),
+                current,
+                expected
+            );
+        }
+    });
 }

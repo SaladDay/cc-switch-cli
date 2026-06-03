@@ -235,6 +235,22 @@ fn init_rejects_future_schema_before_creating_tables() {
 }
 
 #[test]
+#[serial_test::serial]
+fn init_rejects_unsafe_config_dir() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let _guard = ConfigDirEnvGuard::set(Path::new("/tmp"));
+
+    let err = match Database::init() {
+        Ok(_) => panic!("unsafe config dir should fail init"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("CC_SWITCH_CONFIG_DIR"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn schema_migration_adds_missing_columns_for_providers() {
     let conn = Connection::open_in_memory().expect("open memory db");
 
