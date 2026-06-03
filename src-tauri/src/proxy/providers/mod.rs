@@ -7,12 +7,17 @@ pub mod codex_chat_history;
 pub mod codex_oauth_auth;
 #[allow(dead_code)]
 pub mod copilot_auth;
+pub mod copilot_model_map;
 mod gemini;
+pub(crate) mod gemini_schema;
+pub mod gemini_shadow;
 pub mod streaming;
 pub mod streaming_codex_chat;
+pub mod streaming_gemini;
 pub mod streaming_responses;
 pub mod transform;
 pub mod transform_codex_chat;
+pub mod transform_gemini;
 pub mod transform_responses;
 
 use crate::app_config::AppType;
@@ -24,7 +29,9 @@ pub use auth::{AuthInfo, AuthStrategy};
 #[allow(unused_imports)]
 pub use claude::{
     claude_api_format_needs_transform, get_claude_api_format,
-    transform_claude_request_for_api_format, ClaudeAdapter,
+    normalize_anthropic_tool_thinking_history_for_provider,
+    transform_claude_request_for_api_format, transform_claude_request_for_api_format_with_shadow,
+    transform_gemini_response_for_provider, ClaudeAdapter,
 };
 pub use codex::CodexAdapter;
 #[allow(unused_imports)]
@@ -76,6 +83,14 @@ impl ProviderType {
     pub fn from_app_type_and_config(app_type: &AppType, provider: &Provider) -> Self {
         match app_type {
             AppType::Claude => {
+                if get_claude_api_format(provider) == "gemini_native" {
+                    let adapter = ClaudeAdapter::new();
+                    return match adapter.extract_auth(provider).map(|auth| auth.strategy) {
+                        Some(AuthStrategy::GoogleOAuth) => ProviderType::GeminiCli,
+                        _ => ProviderType::Gemini,
+                    };
+                }
+
                 if let Some(meta) = provider.meta.as_ref() {
                     if meta.provider_type.as_deref() == Some("github_copilot") {
                         return ProviderType::GitHubCopilot;

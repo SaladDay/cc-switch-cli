@@ -82,6 +82,10 @@ fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provide
 
 fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
     form.claude_api_format = parse_claude_api_format(provider);
+    form.claude_api_key_field = crate::provider::ClaudeApiKeyField::from_meta_and_settings(
+        provider.meta.as_ref(),
+        &provider.settings_config,
+    );
     form.claude_hide_attribution = claude_hide_attribution_enabled(&provider.settings_config);
     if provider
         .meta
@@ -106,8 +110,12 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
         .and_then(|value| value.as_object())
     {
         if let Some(token) = env
-            .get("ANTHROPIC_AUTH_TOKEN")
+            .get(form.claude_api_key_field.as_env_key())
             .and_then(|value| value.as_str())
+            .or_else(|| {
+                env.get(form.claude_api_key_field.alternate_env_key())
+                    .and_then(|value| value.as_str())
+            })
         {
             form.claude_api_key.set(token);
         }

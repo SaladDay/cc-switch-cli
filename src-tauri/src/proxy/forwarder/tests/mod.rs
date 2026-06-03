@@ -322,12 +322,7 @@ async fn spawn_delayed_body_upstream() -> (String, UpstreamHits, JoinHandle<()>)
 }
 
 async fn closed_base_url() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind closed-port listener");
-    let address = listener.local_addr().expect("closed-port listener address");
-    drop(listener);
-    format!("http://{address}")
+    "http://127.0.0.1:9".to_string()
 }
 
 fn claude_provider(id: &str, base_url: &str, api_format: Option<&str>) -> Provider {

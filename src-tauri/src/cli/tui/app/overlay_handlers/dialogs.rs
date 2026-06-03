@@ -428,7 +428,7 @@ impl App {
         }
 
         let trimmed = raw.trim().to_string();
-        if !is_valid_proxy_listen_address(&trimmed) {
+        if !crate::cli::proxy_settings::is_valid_proxy_listen_address(&trimmed) {
             self.push_toast(
                 texts::tui_toast_proxy_listen_address_invalid(),
                 ToastKind::Warning,
@@ -471,7 +471,7 @@ impl App {
             return Action::None;
         };
 
-        if !(1024..=65535).contains(&port) {
+        if crate::cli::proxy_settings::validate_proxy_listen_port(port).is_err() {
             self.push_toast(
                 texts::tui_toast_proxy_listen_port_invalid(),
                 ToastKind::Warning,
@@ -488,22 +488,4 @@ impl App {
 
         Action::SetProxyListenPort { port }
     }
-}
-
-fn is_valid_proxy_listen_address(value: &str) -> bool {
-    if value.is_empty() {
-        return false;
-    }
-    if matches!(value, "localhost" | "0.0.0.0") {
-        return true;
-    }
-
-    let parts = value.split('.').collect::<Vec<_>>();
-    if parts.len() != 4 {
-        return false;
-    }
-
-    parts
-        .iter()
-        .all(|part| !part.is_empty() && part.parse::<u8>().is_ok())
 }

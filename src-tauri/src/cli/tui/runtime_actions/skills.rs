@@ -1,7 +1,10 @@
 use crate::app_config::{AppType, SkillApps};
 use crate::cli::i18n::texts;
 use crate::error::AppError;
-use crate::services::{skill::SyncMethod, SkillService};
+use crate::services::{
+    skill::{ImportSkillSelection, SyncMethod},
+    SkillService,
+};
 
 use super::super::app::{LoadingKind, Overlay, ToastKind};
 use super::super::route::Route;
@@ -191,12 +194,12 @@ pub(super) fn scan_unmanaged(ctx: &mut RuntimeActionContext<'_>) -> Result<(), A
 
 pub(super) fn import_from_apps(
     ctx: &mut RuntimeActionContext<'_>,
-    directories: Vec<String>,
+    imports: Vec<ImportSkillSelection>,
 ) -> Result<(), AppError> {
     finish_skills_import_with(
         ctx.app,
         ctx.data,
-        || SkillService::import_from_apps(directories),
+        || SkillService::import_from_apps(imports),
         super::super::data::UiData::load,
     )?;
     ctx.app.skills_unmanaged_results = SkillService::scan_unmanaged()?;

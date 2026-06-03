@@ -137,7 +137,7 @@ async fn stream_check_claude_openai_responses_uses_responses_endpoint() {
         upstream_body
             .get("max_output_tokens")
             .and_then(|v| v.as_u64()),
-        Some(1)
+        Some(16)
     );
     assert_eq!(
         upstream_state.authorization.lock().await.as_deref(),
@@ -170,7 +170,7 @@ async fn stream_check_openclaw_returns_unsupported_before_auth_extraction() {
     .expect_err("OpenClaw stream check should be rejected as unsupported");
 
     assert!(
-        err.to_string().contains("OpenClaw 暂不支持流式检查"),
+        err.to_string().contains("openclaw 暂不支持流式检查"),
         "unexpected error: {err}"
     );
 }

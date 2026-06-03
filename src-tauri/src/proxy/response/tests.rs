@@ -240,6 +240,39 @@ async fn codex_chat_buffered_success_converts_to_responses_shape() {
 }
 
 #[tokio::test]
+async fn codex_chat_buffered_response_restores_tool_context_identity() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let request = json!({
+        "model": "gpt-5.4",
+        "tools": [{"type": "tool_search"}],
+        "input": "Find Gmail tools"
+    });
+    let tool_context = transform_codex_chat::build_codex_tool_context_from_request(&request);
+
+    let prepared = build_buffered_codex_chat_response_with_context(
+        reqwest::StatusCode::OK,
+        &headers,
+        Bytes::from_static(
+            br#"{"id":"chatcmpl_tool_search","object":"chat.completion","created":1710000000,"model":"gpt-5.4","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_tool_search_1","type":"function","function":{"name":"tool_search","arguments":"{\"query\":\"Gmail search emails\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ),
+        Arc::new(Default::default()),
+        tool_context,
+    )
+    .await
+    .expect("convert Chat tool_search response");
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&buffered_body(prepared.response).await).expect("response json");
+    assert_eq!(body["output"][0]["type"], "tool_search_call");
+    assert_eq!(body["output"][0]["call_id"], "call_tool_search_1");
+    assert_eq!(
+        body["output"][0]["arguments"]["query"],
+        "Gmail search emails"
+    );
+}
+
+#[tokio::test]
 async fn codex_chat_buffered_transform_strips_hop_by_hop_headers() {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

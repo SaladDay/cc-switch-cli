@@ -27,7 +27,7 @@ mod updates;
 pub(crate) use helpers::{app_display_name, queue_managed_proxy_action};
 #[cfg(test)]
 pub(crate) use helpers::{
-    import_mcp_for_current_app_with, open_proxy_help_overlay_with,
+    import_mcp_from_supported_apps_with, open_proxy_help_overlay_with,
     run_external_editor_for_current_editor, run_external_editor_for_prompt_form_content,
 };
 
@@ -338,9 +338,7 @@ pub(crate) fn handle_action(
         } => skills::repo_toggle_enabled(&mut ctx, owner, name, enabled),
         Action::SkillsOpenImport => skills::open_import(&mut ctx),
         Action::SkillsScanUnmanaged => skills::scan_unmanaged(&mut ctx),
-        Action::SkillsImportFromApps { directories } => {
-            skills::import_from_apps(&mut ctx, directories)
-        }
+        Action::SkillsImportFromApps { imports } => skills::import_from_apps(&mut ctx, imports),
         Action::EditorDiscard => {
             ctx.app.editor = None;
             Ok(())
@@ -394,7 +392,7 @@ pub(crate) fn handle_action(
         Action::McpToggle { id, enabled } => mcp::toggle(&mut ctx, id, enabled),
         Action::McpSetApps { id, apps } => mcp::set_apps(&mut ctx, id, apps),
         Action::McpDelete { id } => mcp::delete(&mut ctx, id),
-        Action::McpImport => mcp::import_current_app(&mut ctx),
+        Action::McpImport => mcp::import_supported_apps(&mut ctx),
         Action::PromptActivate { id } => prompts::activate(&mut ctx, id),
         Action::PromptDeactivate { id } => prompts::deactivate(&mut ctx, id),
         Action::PromptUpdateMetadata {

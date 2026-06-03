@@ -14,7 +14,11 @@ use tokio::{io::AsyncWriteExt, net::TcpListener as TokioTcpListener};
 
 #[path = "support.rs"]
 mod support;
-use support::{ensure_test_home, lock_test_mutex, reset_test_fs};
+#[cfg(unix)]
+use support::wait_for_process_exit;
+use support::{
+    cleanup_test_processes, ensure_test_home, lock_test_mutex, reset_test_fs, TestProcessCleanup,
+};
 
 fn find_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind free local port");
@@ -22,6 +26,20 @@ fn find_free_port() -> u16 {
         .local_addr()
         .expect("read local listener address")
         .port()
+}
+
+async fn set_proxy_port_for_app(db: &Arc<Database>, app_type: &str, listen_port: u16) -> u16 {
+    db.set_app_proxy_preferred_port(app_type, listen_port)
+        .unwrap_or_else(|_| panic!("update {app_type} proxy preferred port"));
+    listen_port
+}
+
+async fn set_claude_proxy_port(db: &Arc<Database>, listen_port: u16) -> u16 {
+    set_proxy_port_for_app(db, "claude", listen_port).await
+}
+
+async fn set_codex_proxy_port(db: &Arc<Database>, listen_port: u16) -> u16 {
+    set_proxy_port_for_app(db, "codex", listen_port).await
 }
 
 fn wait_for<F>(timeout: Duration, mut condition: F)
@@ -93,15 +111,6 @@ fn load_runtime_session_worker_count(state: &AppState) -> usize {
         .map_or(1, serde_json::Map::len)
 }
 
-async fn set_app_proxy_port(db: &Database, app_type: &str, port: u16) {
-    db.set_app_proxy_preferred_port(app_type, port)
-        .unwrap_or_else(|_| panic!("update {app_type} proxy preferred port"));
-}
-
-async fn set_claude_proxy_port(db: &Database, port: u16) {
-    set_app_proxy_port(db, "claude", port).await;
-}
-
 #[cfg(unix)]
 struct ManagedSessionCleanup(Option<u32>);
 
@@ -158,12 +167,12 @@ fn process_group_id(pid: u32) -> i32 {
 #[tokio::test]
 async fn proxy_service_starts_and_stops_without_takeover() {
     let db = Arc::new(Database::memory().expect("create database"));
-    let service = ProxyService::new(db);
+    let service = ProxyService::new(db.clone());
 
     let initial = service.get_status().await;
     assert!(!initial.running, "proxy should start in stopped state");
 
-    let mut config = service.get_config().await.expect("get config");
+    let mut config = service.get_config().await.expect("get proxy config");
     config.listen_port = 0;
 
     let started = service
@@ -264,7 +273,12 @@ async fn proxy_service_status_tracks_runtime_uptime() {
 }
 
 #[tokio::test]
+#[serial]
 async fn proxy_service_updates_global_enabled_switch() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
     let db = Arc::new(Database::memory().expect("create database"));
     let service = ProxyService::new(db);
 
@@ -494,10 +508,84 @@ async fn proxy_service_managed_session_start_is_explicitly_unsupported_on_non_un
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
-async fn proxy_service_can_stop_managed_external_proxy_session() {
+async fn reset_test_fs_stops_test_daemon_before_deleting_runtime() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let _test_process_cleanup = TestProcessCleanup::new(home);
+
+    seed_claude_live_config(json!({
+        "env": {
+            "ANTHROPIC_API_KEY": "claude-live-key"
+        }
+    }));
+
+    let state = AppState::try_new().expect("create app state");
+    set_claude_proxy_port(&state.db, 0).await;
+
+    state
+        .proxy_service
+        .set_managed_session_for_app("claude", true)
+        .await
+        .expect("start managed proxy for claude");
+    let runtime_pid = load_runtime_session_pid(&state);
+    let daemon_pidfile = home.join(".runtime").join("cc-switch").join("daemon.pid");
+    let daemon_pid: u32 = std::fs::read_to_string(&daemon_pidfile)
+        .expect("read test daemon pidfile")
+        .trim()
+        .parse()
+        .expect("parse test daemon pid");
+
+    drop(state);
+    reset_test_fs();
+
+    assert!(
+        wait_for_process_exit(runtime_pid, Duration::from_secs(5)),
+        "managed proxy worker should stop before reset removes the test runtime directory"
+    );
+    assert!(
+        wait_for_process_exit(daemon_pid, Duration::from_secs(5)),
+        "test daemon should stop before reset removes the test runtime directory"
+    );
+    assert!(
+        !home.join(".runtime").exists(),
+        "reset should remove the isolated test runtime directory after daemon cleanup"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn test_process_cleanup_does_not_kill_unrelated_process() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
+
+    let mut unrelated = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn unrelated process");
+    let unrelated_pid = unrelated.id();
+
+    cleanup_test_processes();
+
+    assert!(
+        is_process_alive(unrelated_pid),
+        "test process cleanup must not kill unrelated live processes"
+    );
+
+    let _ = unrelated.kill();
+    let _ = unrelated.wait();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn proxy_service_can_stop_managed_external_proxy_session() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let _test_process_cleanup = TestProcessCleanup::new(home);
 
     std::fs::create_dir_all(get_claude_settings_path().parent().expect("claude dir"))
         .expect("create claude settings dir");
@@ -513,8 +601,7 @@ async fn proxy_service_can_stop_managed_external_proxy_session() {
     .expect("seed claude live config");
 
     let state = AppState::try_new().expect("create app state");
-    let listen_port = find_free_port();
-    set_claude_proxy_port(&state.db, listen_port).await;
+    let listen_port = set_claude_proxy_port(&state.db, find_free_port()).await;
 
     let started = state
         .proxy_service
@@ -554,7 +641,8 @@ async fn proxy_service_can_stop_managed_external_proxy_session() {
 async fn managed_proxy_session_is_detached_from_parent_terminal_session() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let _home = ensure_test_home();
+    let home = ensure_test_home();
+    let _test_process_cleanup = TestProcessCleanup::new(home);
 
     std::fs::create_dir_all(get_claude_settings_path().parent().expect("claude dir"))
         .expect("create claude settings dir");
@@ -570,8 +658,8 @@ async fn managed_proxy_session_is_detached_from_parent_terminal_session() {
     .expect("seed claude live config");
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
-    set_app_proxy_port(&state.db, "codex", find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
+    set_codex_proxy_port(&state.db, find_free_port()).await;
 
     state
         .proxy_service
@@ -673,7 +761,8 @@ async fn proxy_service_rejects_managed_session_attach_when_foreground_runtime_is
 async fn proxy_service_reloaded_app_state_keeps_managed_session_running_for_current_app() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let _home = ensure_test_home();
+    let home = ensure_test_home();
+    let _test_process_cleanup = TestProcessCleanup::new(home);
 
     std::fs::create_dir_all(get_claude_settings_path().parent().expect("claude dir"))
         .expect("create claude settings dir");
@@ -689,8 +778,8 @@ async fn proxy_service_reloaded_app_state_keeps_managed_session_running_for_curr
     .expect("seed claude live config");
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
-    set_app_proxy_port(&state.db, "codex", find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
+    set_codex_proxy_port(&state.db, find_free_port()).await;
 
     state
         .proxy_service
@@ -727,7 +816,8 @@ async fn proxy_service_reloaded_app_state_keeps_managed_session_running_for_curr
 async fn managed_session_allows_second_supported_app_to_start_its_own_worker() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let _home = ensure_test_home();
+    let home = ensure_test_home();
+    let _test_process_cleanup = TestProcessCleanup::new(home);
 
     seed_claude_live_config(json!({
         "env": {
@@ -742,8 +832,8 @@ async fn managed_session_allows_second_supported_app_to_start_its_own_worker() {
     );
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
-    set_app_proxy_port(&state.db, "codex", find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
+    set_codex_proxy_port(&state.db, find_free_port()).await;
 
     state
         .proxy_service
@@ -808,7 +898,8 @@ async fn managed_session_allows_second_supported_app_to_start_its_own_worker() {
 async fn proxy_service_stop_preserves_takeover_state_until_explicit_restore() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let _home = ensure_test_home();
+    let home = ensure_test_home();
+    let _test_process_cleanup = TestProcessCleanup::new(home);
 
     seed_claude_live_config(json!({
         "env": {
@@ -818,7 +909,7 @@ async fn proxy_service_stop_preserves_takeover_state_until_explicit_restore() {
     }));
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
 
     state
         .proxy_service
@@ -889,7 +980,8 @@ async fn proxy_service_stop_preserves_takeover_state_until_explicit_restore() {
 async fn managed_session_keeps_runtime_alive_while_another_supported_app_is_attached() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let _home = ensure_test_home();
+    let home = ensure_test_home();
+    let _test_process_cleanup = TestProcessCleanup::new(home);
 
     seed_claude_live_config(json!({
         "env": {
@@ -904,8 +996,8 @@ async fn managed_session_keeps_runtime_alive_while_another_supported_app_is_atta
     );
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
-    set_app_proxy_port(&state.db, "codex", find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
+    set_codex_proxy_port(&state.db, find_free_port()).await;
 
     state
         .proxy_service
@@ -977,7 +1069,8 @@ async fn managed_session_keeps_runtime_alive_while_another_supported_app_is_atta
 async fn managed_session_disable_last_app_does_not_terminate_when_status_probe_fails() {
     let _guard = lock_test_mutex();
     reset_test_fs();
-    let _home = ensure_test_home();
+    let home = ensure_test_home();
+    let _test_process_cleanup = TestProcessCleanup::new(home);
 
     seed_claude_live_config(json!({
         "env": {
@@ -986,7 +1079,7 @@ async fn managed_session_disable_last_app_does_not_terminate_when_status_probe_f
     }));
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
 
     state
         .proxy_service

@@ -261,6 +261,58 @@ fn prompt_create_command_accepts_custom_id_and_description() {
 
 #[test]
 #[serial]
+fn prompt_import_command_imports_live_file_as_inactive_prompt() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let state = state_from_config(MultiAppConfig::default());
+    state.save().expect("persist config");
+
+    let live_path = cc_switch_lib::get_claude_settings_path()
+        .parent()
+        .expect("claude settings parent")
+        .join("CLAUDE.md");
+    std::fs::create_dir_all(live_path.parent().expect("live prompt parent"))
+        .expect("create live prompt parent");
+    std::fs::write(&live_path, "existing live prompt\nwith two lines\n")
+        .expect("write live prompt");
+
+    execute(PromptsCommand::Import, Some(AppType::Claude)).expect("import command succeeds");
+
+    let persisted = cc_switch_lib::AppState::try_new().expect("reload state");
+    let prompts = PromptService::get_prompts(&persisted, AppType::Claude).expect("load prompts");
+    assert_eq!(prompts.len(), 1);
+
+    let (id, prompt) = prompts.iter().next().expect("imported prompt");
+    assert!(id.starts_with("imported-"), "unexpected id: {id}");
+    assert_eq!(prompt.id, *id);
+    assert_eq!(prompt.content, "existing live prompt\nwith two lines\n");
+    assert_eq!(prompt.description.as_deref(), Some("从现有配置文件导入"));
+    assert!(!prompt.enabled);
+}
+
+#[test]
+#[serial]
+fn prompt_import_command_reports_missing_live_file() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let state = state_from_config(MultiAppConfig::default());
+    state.save().expect("persist config");
+
+    let err = execute(PromptsCommand::Import, Some(AppType::Claude))
+        .expect_err("missing live prompt file should fail");
+
+    assert!(
+        err.to_string().contains("提示词文件不存在"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+#[serial]
 fn generate_prompt_id_falls_back_when_name_has_no_valid_slug_chars() {
     let ids = vec!["prompt".to_string(), "prompt-1".to_string()];
     let generated = PromptService::generate_prompt_id("!!!", &ids);

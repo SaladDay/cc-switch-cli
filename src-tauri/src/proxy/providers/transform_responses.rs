@@ -8,11 +8,7 @@ pub(crate) fn sanitize_anthropic_tool_use_input(name: &str, input: Value) -> Val
 
     match input {
         Value::Object(mut object) => {
-            if object
-                .get("pages")
-                .and_then(Value::as_str)
-                .is_some_and(|pages| pages.trim().is_empty())
-            {
+            if matches!(object.get("pages"), Some(Value::String(value)) if value.is_empty()) {
                 object.remove("pages");
             }
             Value::Object(object)
@@ -642,6 +638,28 @@ mod tests {
         assert_eq!(result["content"][0]["type"], "tool_use");
         assert_eq!(result["content"][0]["name"], "Read");
         assert!(result["content"][0]["input"].get("pages").is_none());
+    }
+
+    #[test]
+    fn responses_to_anthropic_read_tool_preserves_whitespace_pages() {
+        let input = json!({
+            "id": "resp_read",
+            "status": "completed",
+            "model": "gpt-5.4",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_read",
+                "name": "Read",
+                "arguments": "{\"file_path\":\"/tmp/demo.py\",\"pages\":\" \"}"
+            }]
+        });
+
+        let result = responses_to_anthropic(input).expect("transform responses");
+
+        assert_eq!(
+            result["content"][0]["input"],
+            json!({"file_path": "/tmp/demo.py", "pages": " "})
+        );
     }
 
     #[test]

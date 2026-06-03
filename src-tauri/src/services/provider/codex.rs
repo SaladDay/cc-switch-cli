@@ -86,12 +86,35 @@ impl ProviderService {
         root.remove("model_provider");
         // Legacy/alt formats might use a top-level base_url.
         root.remove("base_url");
-        // Profiles can carry provider-specific model_provider overrides. Keep them
-        // in the provider snapshot so storage normalization can restore ids.
+        // Profiles can carry provider-specific model_provider overrides. Keep
+        // unrelated profile settings in the common config snippet.
         root.remove("profile");
-        root.remove("profiles");
         // Remove entire model_providers table (provider-specific configuration)
         root.remove("model_providers");
+
+        if let Some(profiles) = root
+            .get_mut("profiles")
+            .and_then(|item| item.as_table_like_mut())
+        {
+            let profile_keys: Vec<String> =
+                profiles.iter().map(|(key, _)| key.to_string()).collect();
+            for profile_key in profile_keys {
+                let Some(profile) = profiles
+                    .get_mut(&profile_key)
+                    .and_then(|item| item.as_table_like_mut())
+                else {
+                    continue;
+                };
+                profile.remove("model");
+                profile.remove("model_provider");
+                if profile.is_empty() {
+                    profiles.remove(&profile_key);
+                }
+            }
+            if profiles.is_empty() {
+                root.remove("profiles");
+            }
+        }
 
         // Clean up multiple empty lines (keep at most one blank line).
         let mut cleaned = String::new();

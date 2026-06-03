@@ -5,7 +5,7 @@ use crate::services::McpService;
 
 use super::super::app::ToastKind;
 use super::super::data::{load_state, UiData};
-use super::helpers::import_mcp_for_current_app;
+use super::helpers::import_mcp_from_supported_apps;
 use super::RuntimeActionContext;
 
 pub(super) fn toggle(
@@ -99,6 +99,6 @@ pub(super) fn delete(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
     Ok(())
 }
 
-pub(super) fn import_current_app(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
-    import_mcp_for_current_app(ctx.app, ctx.data)
+pub(super) fn import_supported_apps(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
+    import_mcp_from_supported_apps(ctx.app, ctx.data)
 }

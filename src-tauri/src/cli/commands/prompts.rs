@@ -12,6 +12,10 @@ pub enum PromptsCommand {
     List,
     /// Show current active prompt
     Current,
+    /// Show the current live prompt file content
+    Live,
+    /// Import the current live prompt file as an inactive preset
+    Import,
     /// Activate a prompt preset
     Activate {
         /// Prompt preset ID
@@ -72,6 +76,8 @@ pub fn execute(cmd: PromptsCommand, app: Option<AppType>) -> Result<(), AppError
     match cmd {
         PromptsCommand::List => list_prompts(app_type),
         PromptsCommand::Current => show_current(app_type),
+        PromptsCommand::Live => show_live_prompt(app_type),
+        PromptsCommand::Import => import_prompt(app_type),
         PromptsCommand::Activate { id } => activate_prompt(app_type, &id),
         PromptsCommand::Deactivate => deactivate_prompt(app_type),
         PromptsCommand::Create {
@@ -209,6 +215,62 @@ fn show_current(app_type: AppType) -> Result<(), AppError> {
             println!("Use 'cc-switch prompts activate <id>' to activate a prompt.");
         }
     }
+
+    Ok(())
+}
+
+fn show_live_prompt(app_type: AppType) -> Result<(), AppError> {
+    let content = PromptService::get_current_file_content(app_type.clone())?;
+
+    match content {
+        Some(content) => {
+            println!(
+                "{}",
+                highlight(&format!("Live Prompt File: {}", app_type.as_str()))
+            );
+            println!("{}", "=".repeat(50));
+            if content.is_empty() {
+                println!("{}", info("The live prompt file is empty."));
+            } else {
+                println!("{}", content);
+            }
+        }
+        None => {
+            println!(
+                "{}",
+                info(&format!(
+                    "No live prompt file found for {}.",
+                    app_type.as_str()
+                ))
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn import_prompt(app_type: AppType) -> Result<(), AppError> {
+    let state = get_state()?;
+    let id = PromptService::import_from_file(&state, app_type.clone())?;
+    let prompts = PromptService::get_prompts(&state, app_type.clone())?;
+    let name = prompts
+        .get(&id)
+        .map(|prompt| prompt.name.as_str())
+        .unwrap_or(id.as_str());
+
+    println!(
+        "{}",
+        success(&format!("✓ Imported live prompt file as preset '{}'", id))
+    );
+    println!("{}", info(&format!("  Name: {}", name)));
+    println!("{}", info(&format!("  Application: {}", app_type.as_str())));
+    println!(
+        "{}",
+        info(&format!(
+            "Tip: Use 'cc-switch prompts activate {}' to activate it.",
+            id
+        ))
+    );
 
     Ok(())
 }

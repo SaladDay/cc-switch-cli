@@ -424,6 +424,10 @@ pub struct AppSettings {
     /// 是否开机自启
     #[serde(default)]
     pub launch_on_startup: bool,
+    /// Keep Codex ChatGPT login material in auth.json when switching to third-party providers.
+    /// Opt-in: defaults to false so third-party switches cleanly overwrite auth.json.
+    #[serde(default)]
+    pub preserve_codex_official_auth_on_switch: bool,
     /// Skills 同步方式（auto|symlink|copy）
     #[serde(default)]
     pub skill_sync_method: crate::services::skill::SyncMethod,
@@ -479,6 +483,7 @@ impl Default for AppSettings {
             visible_apps_settings: VisibleAppsSettings::default(),
             language: None,
             launch_on_startup: false,
+            preserve_codex_official_auth_on_switch: false,
             skill_sync_method: crate::services::skill::SyncMethod::default(),
             security: None,
             webdav_sync: None,
@@ -780,6 +785,16 @@ pub fn get_codex_override_dir() -> Option<PathBuf> {
         .codex_config_dir
         .as_ref()
         .map(|p| resolve_override_path(p))
+}
+
+pub fn preserve_codex_official_auth_on_switch() -> bool {
+    settings_store()
+        .read()
+        .unwrap_or_else(|error| {
+            log::warn!("设置锁已毒化，使用恢复值: {error}");
+            error.into_inner()
+        })
+        .preserve_codex_official_auth_on_switch
 }
 
 pub fn get_gemini_override_dir() -> Option<PathBuf> {

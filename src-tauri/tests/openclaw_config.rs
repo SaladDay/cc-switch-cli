@@ -369,7 +369,7 @@ fn shared_round_trip_boundary_fixture() -> &'static str {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn openclaw_health_scan_reports_parse_failures_from_backend_source_of_truth() {
     with_fixture("{ broken: [ }", |config_path| {
         let warnings = scan_openclaw_config_health().expect("scan parse warning");
@@ -381,7 +381,7 @@ fn openclaw_health_scan_reports_parse_failures_from_backend_source_of_truth() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn openclaw_health_scan_reports_profile_and_env_shape_warnings() {
     let source = r#"{
   models: {
@@ -413,7 +413,7 @@ fn openclaw_health_scan_reports_profile_and_env_shape_warnings() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_env_config_preserves_other_root_sections() {
     let source = r#"{
   models: {
@@ -463,7 +463,7 @@ fn set_env_config_preserves_other_root_sections() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_tools_config_preserves_other_root_sections() {
     let source = r#"{
   models: {
@@ -512,7 +512,7 @@ fn set_tools_config_preserves_other_root_sections() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_tools_config_writes_effectively_empty_tools_object() {
     let source = r#"{
   models: {
@@ -539,7 +539,7 @@ fn set_tools_config_writes_effectively_empty_tools_object() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn provider_point_updates_preserve_models_mode_and_other_provider_keys() {
     with_fixture(shared_round_trip_boundary_fixture(), |_| {
         set_provider(
@@ -567,7 +567,7 @@ fn provider_point_updates_preserve_models_mode_and_other_provider_keys() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_provider_allows_default_model_refs_to_become_dangling_without_rewriting_agents_section() {
     let source = r#"{
   // preserve root comment
@@ -624,7 +624,7 @@ fn set_provider_allows_default_model_refs_to_become_dangling_without_rewriting_a
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn remove_provider_allows_default_model_refs_to_become_dangling_without_rewriting_agents_section() {
     let source = r#"{
   // preserve root comment
@@ -666,7 +666,7 @@ fn remove_provider_allows_default_model_refs_to_become_dangling_without_rewritin
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_provider_allows_agents_defaults_models_refs_to_become_dangling_and_keeps_agents_text() {
     let source = r#"{
   // preserve root comment
@@ -720,7 +720,7 @@ fn set_provider_allows_agents_defaults_models_refs_to_become_dangling_and_keeps_
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn remove_provider_allows_agents_defaults_models_refs_to_become_dangling_and_keeps_agents_text() {
     let source = r#"{
   // preserve root comment
@@ -764,7 +764,7 @@ fn remove_provider_allows_agents_defaults_models_refs_to_become_dangling_and_kee
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_provider_ignores_invalid_default_model_reference_format() {
     let source = r#"{
   models: {
@@ -811,7 +811,7 @@ fn set_provider_ignores_invalid_default_model_reference_format() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn remove_provider_ignores_invalid_model_catalog_reference_format() {
     let source = r#"{
   models: {
@@ -850,7 +850,7 @@ fn remove_provider_ignores_invalid_model_catalog_reference_format() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_agents_defaults_preserves_sibling_agents_keys() {
     with_fixture(shared_round_trip_boundary_fixture(), |_| {
         set_agents_defaults(&OpenClawAgentsDefaults {
@@ -872,7 +872,7 @@ fn set_agents_defaults_preserves_sibling_agents_keys() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_default_model_allows_dangling_refs() {
     let source = r#"{
   models: {
@@ -910,7 +910,7 @@ fn set_default_model_allows_dangling_refs() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_model_catalog_allows_invalid_reference_format() {
     let source = r#"{
   models: {
@@ -946,7 +946,7 @@ fn set_model_catalog_allows_invalid_reference_format() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_agents_defaults_allows_dangling_model_catalog_refs() {
     let source = r#"{
   models: {
@@ -994,7 +994,7 @@ fn set_agents_defaults_allows_dangling_model_catalog_refs() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_agents_defaults_allows_recovery_write_after_remove_provider_leaves_dangling_default_model() {
     let source = r#"{
   models: {
@@ -1057,7 +1057,7 @@ fn set_agents_defaults_allows_recovery_write_after_remove_provider_leaves_dangli
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn set_default_model_preserves_models_providers_entries() {
     with_fixture(shared_round_trip_boundary_fixture(), |_| {
         set_default_model(&OpenClawDefaultModel {
@@ -1093,7 +1093,7 @@ fn set_default_model_preserves_models_providers_entries() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn shared_round_trip_fixture_preserves_provider_and_agents_contracts() {
     with_fixture(shared_round_trip_boundary_fixture(), |_| {
         set_provider(
@@ -1154,7 +1154,7 @@ fn shared_round_trip_fixture_preserves_provider_and_agents_contracts() {
 }
 
 #[test]
-#[serial]
+#[serial(home_settings)]
 fn remove_last_provider_still_rewrites_models_section_differently_from_upstream_baseline() {
     let source = r#"{
   // preserve top-level comment

@@ -287,7 +287,7 @@ mod tests {
     #[cfg(unix)]
     use std::ffi::OsString;
     #[cfg(unix)]
-    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt, process::ExitStatusExt};
     #[cfg(unix)]
     use std::process::Stdio;
     #[cfg(unix)]
@@ -399,7 +399,10 @@ mod tests {
         assert_eq!(kill_result, 0, "send SIGINT to handoff process group");
 
         let status = child.wait().expect("wait for handoff");
-        assert_eq!(status.code(), Some(130));
+        assert!(
+            status.code() == Some(130) || status.signal() == Some(libc::SIGINT),
+            "handoff should exit for SIGINT, got {status:?}"
+        );
         assert!(
             !codex_home.exists(),
             "temporary Codex home should be removed after interrupt"

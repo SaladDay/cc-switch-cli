@@ -13,10 +13,39 @@ fn manager_store() -> &'static RwLock<Option<(PathBuf, Arc<CodexOAuthManager>)>>
     STORE.get_or_init(|| RwLock::new(None))
 }
 
+#[cfg(test)]
+fn test_manager_override() -> &'static RwLock<Option<Arc<CodexOAuthManager>>> {
+    static STORE: OnceLock<RwLock<Option<Arc<CodexOAuthManager>>>> = OnceLock::new();
+    STORE.get_or_init(|| RwLock::new(None))
+}
+
+#[cfg(test)]
+pub(crate) struct TestCodexOAuthManagerGuard {
+    _temp: tempfile::TempDir,
+    _manager: Arc<CodexOAuthManager>,
+}
+
+#[cfg(test)]
+impl Drop for TestCodexOAuthManagerGuard {
+    fn drop(&mut self) {
+        CodexOAuthService::reset_for_tests();
+    }
+}
+
 pub struct CodexOAuthService;
 
 impl CodexOAuthService {
     pub fn manager() -> Arc<CodexOAuthManager> {
+        #[cfg(test)]
+        {
+            let guard = test_manager_override()
+                .read()
+                .expect("read codex oauth test manager");
+            if let Some(manager) = guard.as_ref() {
+                return Arc::clone(manager);
+            }
+        }
+
         let path = get_app_config_dir();
         {
             let guard = manager_store().read().expect("read codex oauth manager");
@@ -34,7 +63,59 @@ impl CodexOAuthService {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_manager_for_tests(manager: Arc<CodexOAuthManager>) {
+        let mut guard = test_manager_override()
+            .write()
+            .expect("write codex oauth test manager");
+        *guard = Some(manager);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_manager_with_account(
+        account_id: &str,
+        refresh_token: &str,
+        email: Option<&str>,
+        access_token: Option<&str>,
+        expires_at_ms: Option<i64>,
+    ) -> Result<TestCodexOAuthManagerGuard, CodexOAuthError> {
+        let temp = tempfile::tempdir()?;
+        let manager = Arc::new(CodexOAuthManager::new(temp.path().to_path_buf()));
+        manager
+            .seed_account_for_tests(
+                account_id,
+                refresh_token,
+                email,
+                access_token,
+                expires_at_ms,
+            )
+            .await?;
+        Self::set_manager_for_tests(Arc::clone(&manager));
+        Ok(TestCodexOAuthManagerGuard {
+            _temp: temp,
+            _manager: manager,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_empty_manager() -> Result<TestCodexOAuthManagerGuard, CodexOAuthError>
+    {
+        let temp = tempfile::tempdir()?;
+        let manager = Arc::new(CodexOAuthManager::new(temp.path().to_path_buf()));
+        Self::set_manager_for_tests(Arc::clone(&manager));
+        Ok(TestCodexOAuthManagerGuard {
+            _temp: temp,
+            _manager: manager,
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn reset_for_tests() {
+        let mut test_guard = test_manager_override()
+            .write()
+            .expect("write codex oauth test manager");
+        *test_guard = None;
+        drop(test_guard);
+
         let mut guard = manager_store().write().expect("write codex oauth manager");
         *guard = None;
     }

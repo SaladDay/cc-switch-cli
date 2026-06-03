@@ -1,4 +1,5 @@
-use std::{env, ffi::OsString, sync::atomic::Ordering, time::Duration};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use serde_json::{json, Value};
@@ -12,36 +13,12 @@ use crate::{
     provider::{AuthBinding, AuthBindingSource, Provider, ProviderMeta},
     proxy::{
         forwarder::{ForwardOptions, RequestForwarder},
-        types::{OptimizerConfig, RectifierConfig},
+        providers::copilot_auth::CopilotModel,
+        types::{CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
     },
-    services::CodexOAuthService,
+    services::{copilot_auth::TestCopilotAuthManagerGuard, CodexOAuthService, CopilotAuthService},
     test_support::lock_test_home_and_settings,
 };
-
-struct ConfigDirEnvGuard {
-    original: Option<OsString>,
-}
-
-impl ConfigDirEnvGuard {
-    fn set(value: Option<&str>) -> Self {
-        let original = env::var_os("CC_SWITCH_CONFIG_DIR");
-        match value {
-            Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
-        }
-        Self { original }
-    }
-}
-
-impl Drop for ConfigDirEnvGuard {
-    fn drop(&mut self) {
-        match self.original.as_ref() {
-            Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
-        }
-    }
-}
-
 #[tokio::test]
 async fn bedrock_claude_prepare_request_injects_optimizer_and_cache_breakpoints() {
     let (base_url, hits, bodies, server) =
@@ -155,6 +132,95 @@ async fn non_bedrock_claude_prepare_request_skips_optimizer_and_cache_injection(
     assert!(sent["messages"][0]["content"][0]
         .get("cache_control")
         .is_none());
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn non_copilot_claude_prepare_request_strips_one_m_suffix_after_mapping() {
+    let mut provider = claude_provider("p1", "https://example.com", None);
+    provider.settings_config["env"] = json!({
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro [1M]"
+    });
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare regular Claude request")
+        .build()
+        .expect("build regular Claude request");
+
+    let body = request_body_json(&request);
+    assert_eq!(body["model"], "deepseek-v4-pro");
+}
+
+#[tokio::test]
+async fn deepseek_native_claude_prepare_request_normalizes_tool_thinking_history_before_send() {
+    let (base_url, hits, bodies, server) =
+        spawn_scripted_upstream(vec![(StatusCode::OK, json!({"ok": true}))]).await;
+    let provider = claude_provider("deepseek", &base_url, None);
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let body = json!({
+        "model": "deepseek-v4-pro",
+        "max_tokens": 32,
+        "messages": [{
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_123", "name": "read_file", "input": {"path": "README.md"}}
+            ]
+        }]
+    });
+
+    let response = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            body,
+            &HeaderMap::new(),
+            vec![provider],
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("DeepSeek native Claude request should succeed");
+
+    assert_eq!(response.response.status, StatusCode::OK);
+    assert_eq!(hits.count.load(Ordering::SeqCst), 1);
+
+    let sent = bodies.lock().await;
+    let sent = sent.first().expect("captured upstream request body");
+    let content = sent["messages"][0]["content"]
+        .as_array()
+        .expect("assistant content should be array");
+    assert_eq!(content[0]["type"], "thinking");
+    assert_eq!(content[0]["thinking"], "tool call");
+    assert_eq!(content[1]["type"], "tool_use");
 
     server.abort();
 }
@@ -294,6 +360,104 @@ async fn claude_prepare_request_sets_defaults_and_filters_blocked_caller_headers
 }
 
 #[tokio::test]
+async fn claude_gemini_native_prepare_request_rewrites_url_body_and_auth() {
+    let mut provider = claude_provider(
+        "gemini-native",
+        "https://generativelanguage.googleapis.com",
+        None,
+    );
+    provider.meta = Some(ProviderMeta {
+        api_format: Some("gemini_native".to_string()),
+        ..Default::default()
+    });
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &claude_request_body(),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Gemini Native Claude request")
+        .build()
+        .expect("build Gemini Native Claude request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://generativelanguage.googleapis.com/v1beta/models/claude-3-7-sonnet-20250219:generateContent"
+    );
+    assert_eq!(
+        header_value(&request, "x-goog-api-key"),
+        Some("key-gemini-native")
+    );
+    assert_eq!(header_value(&request, "authorization"), None);
+    assert_eq!(header_value(&request, "anthropic-beta"), None);
+    assert_eq!(header_value(&request, "anthropic-version"), None);
+
+    let body = request_body_json(&request);
+    assert!(body.get("contents").is_some());
+    assert!(body.get("messages").is_none());
+    assert_eq!(body["generationConfig"]["maxOutputTokens"], 32);
+}
+
+#[tokio::test]
+async fn claude_gemini_native_prepare_request_preserves_opaque_full_url() {
+    let mut provider =
+        claude_provider("gemini-full", "https://relay.example/custom/generate", None);
+    provider.meta = Some(ProviderMeta {
+        api_format: Some("gemini_native".to_string()),
+        is_full_url: Some(true),
+        ..Default::default()
+    });
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &json!({
+                "model": "models/gemini-2.5-flash",
+                "max_tokens": 4,
+                "stream": true,
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare opaque full-url Gemini Native request")
+        .build()
+        .expect("build opaque full-url Gemini Native request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://relay.example/custom/generate?alt=sse"
+    );
+    assert_eq!(
+        header_value(&request, "x-goog-api-key"),
+        Some("key-gemini-full")
+    );
+}
+
+#[tokio::test]
 async fn non_claude_prepare_request_skips_claude_specific_headers() {
     let request = build_request(
         &AppType::Codex,
@@ -347,10 +511,7 @@ async fn streaming_passthrough_prepare_request_forces_identity_accept_encoding()
 #[tokio::test]
 async fn codex_oauth_prepare_request_injects_bound_account_headers() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-bound",
         "rt-bound",
         Some("bound@example.com"),
@@ -383,10 +544,7 @@ async fn codex_oauth_prepare_request_injects_bound_account_headers() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_injects_client_session_headers() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-session",
         "rt-session",
         Some("session@example.com"),
@@ -438,10 +596,7 @@ async fn codex_oauth_prepare_request_injects_client_session_headers() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_skips_generated_session_headers() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-generated",
         "rt-generated",
         Some("generated@example.com"),
@@ -482,10 +637,7 @@ async fn codex_oauth_prepare_request_skips_generated_session_headers() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_falls_back_to_default_account() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-default",
         "rt-default",
         Some("default@example.com"),
@@ -511,9 +663,9 @@ async fn codex_oauth_prepare_request_falls_back_to_default_account() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_errors_without_available_account() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
+    let _manager = CodexOAuthService::test_empty_manager()
+        .await
+        .expect("create empty oauth manager");
 
     let (_db, router) = test_router().await;
     let forwarder = RequestForwarder::new(router).expect("create forwarder");
@@ -542,12 +694,651 @@ async fn codex_oauth_prepare_request_errors_without_available_account() {
 }
 
 #[tokio::test]
+async fn github_copilot_prepare_request_uses_responses_for_openai_vendor_model() {
+    let _lock = lock_test_home_and_settings();
+    let _auth = seed_copilot_account(
+        "12345",
+        "copilot-openai-token",
+        vec![copilot_model("gpt-5.4", "OpenAI")],
+    )
+    .await;
+
+    let provider = github_copilot_provider(Some("12345"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages?beta=true&x-id=1",
+            &json!({
+                "model": "gpt-5.4",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot OpenAI vendor request")
+        .build()
+        .expect("build Copilot OpenAI vendor request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://api.githubcopilot.com/v1/responses?x-id=1"
+    );
+    assert_eq!(
+        header_value(&request, "authorization"),
+        Some("Bearer copilot-openai-token")
+    );
+    assert_eq!(
+        header_value(&request, "editor-version"),
+        Some("vscode/1.110.1")
+    );
+    assert_eq!(header_value(&request, "anthropic-beta"), None);
+    assert_eq!(header_value(&request, "anthropic-version"), None);
+
+    let body = request_body_json(&request);
+    assert_eq!(body["model"], "gpt-5.4");
+    assert!(body.get("input").is_some());
+    assert!(body.get("messages").is_none());
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_uses_chat_for_anthropic_vendor_model() {
+    let _lock = lock_test_home_and_settings();
+    let _auth = seed_copilot_account(
+        "67890",
+        "copilot-anthropic-token",
+        vec![copilot_model("claude-sonnet-4.6", "Anthropic")],
+    )
+    .await;
+
+    let provider = github_copilot_provider(Some("67890"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages?beta=true&x-id=2",
+            &json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "hello"
+                    }]
+                }]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot Anthropic vendor request")
+        .build()
+        .expect("build Copilot Anthropic vendor request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://api.githubcopilot.com/chat/completions?x-id=2"
+    );
+    assert_eq!(
+        header_value(&request, "authorization"),
+        Some("Bearer copilot-anthropic-token")
+    );
+    assert_eq!(header_value(&request, "anthropic-beta"), None);
+    assert_eq!(header_value(&request, "anthropic-version"), None);
+
+    let body = request_body_json(&request);
+    assert_eq!(body["model"], "claude-sonnet-4.6");
+    assert!(body["messages"].is_array());
+    assert!(body.get("input").is_none());
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_detects_copilot_base_url_without_provider_type() {
+    let _lock = lock_test_home_and_settings();
+    let _auth = seed_copilot_account(
+        "24680",
+        "copilot-base-url-token",
+        vec![copilot_model("gpt-5.4", "OpenAI")],
+    )
+    .await;
+
+    let provider = claude_provider("copilot-url", "https://api.githubcopilot.com", None);
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &json!({
+                "model": "gpt-5.4",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot base-url request")
+        .build()
+        .expect("build Copilot base-url request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://api.githubcopilot.com/v1/responses"
+    );
+    assert_eq!(
+        header_value(&request, "authorization"),
+        Some("Bearer copilot-base-url-token")
+    );
+    assert_eq!(header_value(&request, "anthropic-beta"), None);
+    assert_eq!(header_value(&request, "anthropic-version"), None);
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_preserves_full_url_relay() {
+    let _lock = lock_test_home_and_settings();
+    let _auth = seed_copilot_account(
+        "13579",
+        "copilot-full-url-token",
+        vec![copilot_model("gpt-5.4", "OpenAI")],
+    )
+    .await;
+
+    let mut provider = github_copilot_provider(Some("13579"));
+    provider.settings_config["base_url"] = json!("https://relay.example/copilot/fixed?existing=1");
+    provider.meta.as_mut().expect("copilot meta").is_full_url = Some(true);
+
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages?beta=true&x-id=3",
+            &json!({
+                "model": "gpt-5.4",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot full-url request")
+        .build()
+        .expect("build Copilot full-url request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://relay.example/copilot/fixed?existing=1&x-id=3"
+    );
+    assert_eq!(
+        header_value(&request, "authorization"),
+        Some("Bearer copilot-full-url-token")
+    );
+    assert_eq!(header_value(&request, "anthropic-beta"), None);
+    assert_eq!(header_value(&request, "anthropic-version"), None);
+
+    let body = request_body_json(&request);
+    assert!(body.get("input").is_some());
+    assert!(body.get("messages").is_none());
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_sets_agent_initiator_for_tool_results() {
+    let _lock = lock_test_home_and_settings();
+    let _auth = seed_copilot_account(
+        "tool-result",
+        "copilot-tool-token",
+        vec![copilot_model("claude-sonnet-4.6", "Anthropic")],
+    )
+    .await;
+
+    let provider = github_copilot_provider(Some("tool-result"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 32,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [{
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "read_file",
+                            "input": {"path": "src/lib.rs"}
+                        }]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "call_1",
+                                "content": "file contents"
+                            },
+                            {
+                                "type": "text",
+                                "text": "continue"
+                            }
+                        ]
+                    }
+                ]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot tool result request")
+        .build()
+        .expect("build Copilot tool result request");
+
+    assert_eq!(header_value(&request, "x-initiator"), Some("agent"));
+    assert_eq!(
+        header_value(&request, "x-interaction-type"),
+        Some("conversation-agent")
+    );
+    assert_eq!(header_value(&request, "x-interaction-id"), None);
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_sets_subagent_headers_and_interaction_id() {
+    let _lock = lock_test_home_and_settings();
+    let _auth = seed_copilot_account(
+        "subagent",
+        "copilot-subagent-token",
+        vec![copilot_model("claude-sonnet-4.6", "Anthropic")],
+    )
+    .await;
+
+    let provider = github_copilot_provider(Some("subagent"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 32,
+                "metadata": {
+                    "session_id": "claude-session-abc"
+                },
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "<system-reminder>\n{\"__SUBAGENT_MARKER__\":{\"session_id\":\"abc\",\"agent_id\":\"explore-1\",\"agent_type\":\"Explore\"}}\n</system-reminder>\nSearch the repo"
+                    }]
+                }]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot subagent request")
+        .build()
+        .expect("build Copilot subagent request");
+
+    assert_eq!(header_value(&request, "x-initiator"), Some("agent"));
+    assert_eq!(
+        header_value(&request, "x-interaction-type"),
+        Some("conversation-subagent")
+    );
+    assert!(header_value(&request, "x-interaction-id").is_some());
+    assert_eq!(
+        header_value(&request, "x-request-id"),
+        header_value(&request, "x-agent-task-id")
+    );
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_uses_x_session_id_for_interaction_id_fallback() {
+    let _lock = lock_test_home_and_settings();
+    let _auth = seed_copilot_account(
+        "session-header",
+        "copilot-session-header-token",
+        vec![copilot_model("claude-sonnet-4.6", "Anthropic")],
+    )
+    .await;
+
+    let provider = github_copilot_provider(Some("session-header"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let mut headers = HeaderMap::new();
+    headers.insert("x-session-id", HeaderValue::from_static("short-session"));
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
+            &headers,
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot session fallback request")
+        .build()
+        .expect("build Copilot session fallback request");
+
+    assert!(header_value(&request, "x-interaction-id").is_some());
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_downgrades_warmup_model() {
+    let _lock = lock_test_home_and_settings();
+    let _auth = seed_copilot_account(
+        "warmup",
+        "copilot-warmup-token",
+        vec![
+            copilot_model("gpt-5.4", "OpenAI"),
+            copilot_model("gpt-5-mini", "OpenAI"),
+        ],
+    )
+    .await;
+
+    let provider = github_copilot_provider(Some("warmup"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let mut headers = HeaderMap::new();
+    headers.insert("anthropic-beta", HeaderValue::from_static("beta-signal"));
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages?beta=true",
+            &json!({
+                "model": "gpt-5.4",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
+            &headers,
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot warmup request")
+        .build()
+        .expect("build Copilot warmup request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://api.githubcopilot.com/v1/responses"
+    );
+    assert_eq!(request_body_json(&request)["model"], "gpt-5-mini");
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_strips_thinking_before_transform() {
+    let _lock = lock_test_home_and_settings();
+    let _auth = seed_copilot_account(
+        "thinking",
+        "copilot-thinking-token",
+        vec![copilot_model("deepseek-reasoner", "Anthropic")],
+    )
+    .await;
+
+    let provider = github_copilot_provider(Some("thinking"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &json!({
+                "model": "deepseek-reasoner",
+                "max_tokens": 32,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": "secret-thought"},
+                            {"type": "tool_use", "id": "call_1", "name": "lookup", "input": {}}
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": "result"
+                        }]
+                    }
+                ]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot thinking request")
+        .build()
+        .expect("build Copilot thinking request");
+
+    let body_text = serde_json::to_string(&request_body_json(&request)).expect("serialize body");
+    assert!(!body_text.contains("secret-thought"));
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_overrides_client_fingerprint_headers() {
+    let _lock = lock_test_home_and_settings();
+    let _auth = seed_copilot_account(
+        "fingerprint",
+        "copilot-fingerprint-token",
+        vec![copilot_model("claude-sonnet-4.6", "Anthropic")],
+    )
+    .await;
+
+    let provider = github_copilot_provider(Some("fingerprint"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let mut headers = HeaderMap::new();
+    headers.insert("user-agent", HeaderValue::from_static("client-agent"));
+    headers.insert("editor-version", HeaderValue::from_static("client-editor"));
+    headers.insert("x-initiator", HeaderValue::from_static("user"));
+    headers.insert("x-request-id", HeaderValue::from_static("client-request"));
+    headers.insert("x-agent-task-id", HeaderValue::from_static("client-task"));
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 32,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [{
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "read_file",
+                            "input": {}
+                        }]
+                    },
+                    {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": "ok"
+                        }]
+                    }
+                ]
+            }),
+            &headers,
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot fingerprint request")
+        .build()
+        .expect("build Copilot fingerprint request");
+
+    assert_eq!(
+        header_value(&request, "user-agent"),
+        Some("GitHubCopilotChat/0.38.2")
+    );
+    assert_eq!(
+        header_value(&request, "editor-version"),
+        Some("vscode/1.110.1")
+    );
+    assert_eq!(header_value(&request, "x-initiator"), Some("agent"));
+    assert_ne!(
+        header_value(&request, "x-request-id"),
+        Some("client-request")
+    );
+    assert_eq!(
+        header_value(&request, "x-request-id"),
+        header_value(&request, "x-agent-task-id")
+    );
+}
+
+#[tokio::test]
+async fn github_copilot_prepare_request_disabled_optimizer_keeps_default_headers_and_model() {
+    let _lock = lock_test_home_and_settings();
+    let _auth = seed_copilot_account(
+        "disabled",
+        "copilot-disabled-token",
+        vec![
+            copilot_model("gpt-5.4", "OpenAI"),
+            copilot_model("gpt-5-mini", "OpenAI"),
+        ],
+    )
+    .await;
+
+    let provider = github_copilot_provider(Some("disabled"));
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router)
+        .expect("create forwarder")
+        .with_copilot_optimizer_config(CopilotOptimizerConfig {
+            enabled: false,
+            ..Default::default()
+        })
+        .with_session("claude-session-disabled".to_string(), true);
+    let mut headers = HeaderMap::new();
+    headers.insert("anthropic-beta", HeaderValue::from_static("beta-signal"));
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages?beta=true",
+            &json!({
+                "model": "gpt-5.4",
+                "max_tokens": 32,
+                "messages": [{
+                    "role": "user",
+                    "content": "hello"
+                }]
+            }),
+            &headers,
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Copilot disabled optimizer request")
+        .build()
+        .expect("build Copilot disabled optimizer request");
+
+    assert_eq!(header_value(&request, "x-initiator"), Some("user"));
+    assert_eq!(
+        header_value(&request, "x-interaction-type"),
+        Some("conversation-agent")
+    );
+    assert_eq!(header_value(&request, "x-interaction-id"), None);
+    assert_eq!(request_body_json(&request)["model"], "gpt-5.4");
+}
+
+#[tokio::test]
 async fn codex_oauth_prepare_request_rejects_proxy_managed_placeholder_header() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-placeholder",
         "rt-placeholder",
         Some("placeholder@example.com"),
@@ -898,6 +1689,59 @@ fn codex_oauth_provider(account_id: Option<&str>) -> Provider {
         icon: None,
         icon_color: None,
         in_failover_queue: false,
+    }
+}
+
+fn github_copilot_provider(account_id: Option<&str>) -> Provider {
+    Provider {
+        id: "github-copilot".to_string(),
+        name: "GitHub Copilot".to_string(),
+        settings_config: json!({
+            "base_url": "https://ignored.example.com",
+            "apiKey": "ignored-placeholder"
+        }),
+        website_url: None,
+        category: None,
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: Some(ProviderMeta {
+            provider_type: Some("github_copilot".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("github_copilot".to_string()),
+                account_id: account_id.map(str::to_string),
+            }),
+            ..Default::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    }
+}
+
+async fn seed_copilot_account(
+    account_id: &str,
+    copilot_token: &str,
+    models: Vec<CopilotModel>,
+) -> TestCopilotAuthManagerGuard {
+    CopilotAuthService::test_manager_with_account(
+        account_id,
+        &format!("gho-{account_id}"),
+        Some(copilot_token),
+        Some("https://api.githubcopilot.com"),
+        models,
+    )
+    .await
+    .expect("seed copilot account")
+}
+
+fn copilot_model(id: &str, vendor: &str) -> CopilotModel {
+    CopilotModel {
+        id: id.to_string(),
+        name: id.to_string(),
+        vendor: vendor.to_string(),
+        model_picker_enabled: true,
     }
 }
 

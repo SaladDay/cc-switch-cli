@@ -298,6 +298,52 @@ impl Default for OptimizerConfig {
     }
 }
 
+/// Copilot 优化器配置
+///
+/// 存储在 settings 表中，key = "copilot_optimizer_config"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopilotOptimizerConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub request_classification: bool,
+    #[serde(default = "default_true")]
+    pub tool_result_merging: bool,
+    #[serde(default = "default_true")]
+    pub compact_detection: bool,
+    #[serde(default = "default_true")]
+    pub deterministic_request_id: bool,
+    #[serde(default = "default_true")]
+    pub subagent_detection: bool,
+    #[serde(default = "default_true")]
+    pub warmup_downgrade: bool,
+    #[serde(default = "default_warmup_model")]
+    pub warmup_model: String,
+    #[serde(default = "default_true")]
+    pub strip_thinking: bool,
+}
+
+fn default_warmup_model() -> String {
+    "gpt-5-mini".to_string()
+}
+
+impl Default for CopilotOptimizerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            request_classification: true,
+            tool_result_merging: true,
+            compact_detection: true,
+            deterministic_request_id: true,
+            subagent_detection: true,
+            warmup_downgrade: true,
+            warmup_model: "gpt-5-mini".to_string(),
+            strip_thinking: true,
+        }
+    }
+}
+
 /// 日志配置
 ///
 /// 存储在 settings 表的 log_config 字段中（JSON 格式）
@@ -423,6 +469,35 @@ mod tests {
         assert!(config.thinking_optimizer);
         assert!(config.cache_injection);
         assert_eq!(config.cache_ttl, "1h");
+    }
+
+    #[test]
+    fn test_copilot_optimizer_config_default() {
+        let config = CopilotOptimizerConfig::default();
+        assert!(config.enabled);
+        assert!(config.request_classification);
+        assert!(config.tool_result_merging);
+        assert!(config.compact_detection);
+        assert!(config.deterministic_request_id);
+        assert!(config.subagent_detection);
+        assert!(config.warmup_downgrade);
+        assert_eq!(config.warmup_model, "gpt-5-mini");
+        assert!(config.strip_thinking);
+    }
+
+    #[test]
+    fn test_copilot_optimizer_config_serde_default() {
+        let json = "{}";
+        let config: CopilotOptimizerConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert!(config.request_classification);
+        assert!(config.tool_result_merging);
+        assert!(config.compact_detection);
+        assert!(config.deterministic_request_id);
+        assert!(config.subagent_detection);
+        assert!(config.warmup_downgrade);
+        assert_eq!(config.warmup_model, "gpt-5-mini");
+        assert!(config.strip_thinking);
     }
 
     #[test]

@@ -12,14 +12,14 @@ use super::{
     error::ProxyError,
     provider_router::ProviderRouter,
     providers::codex_chat_history::CodexChatHistoryStore,
+    providers::gemini_shadow::GeminiShadowStore,
     providers::get_adapter,
     response::decode_buffered_response_body,
     thinking_budget_rectifier::{rectify_thinking_budget, should_rectify_thinking_budget},
     thinking_rectifier::{
         normalize_thinking_type, rectify_anthropic_request, should_rectify_thinking_signature,
     },
-    types::OptimizerConfig,
-    types::RectifierConfig,
+    types::{CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
 };
 
 mod request_builder;
@@ -27,9 +27,11 @@ mod request_builder;
 pub struct RequestForwarder {
     router: Arc<ProviderRouter>,
     optimizer_config: OptimizerConfig,
+    copilot_optimizer_config: CopilotOptimizerConfig,
     session_id: String,
     session_client_provided: bool,
     codex_chat_history: Option<Arc<CodexChatHistoryStore>>,
+    gemini_shadow: Option<Arc<GeminiShadowStore>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,14 +113,24 @@ impl RequestForwarder {
         Ok(Self {
             router,
             optimizer_config: OptimizerConfig::default(),
+            copilot_optimizer_config: CopilotOptimizerConfig::default(),
             session_id: String::new(),
             session_client_provided: false,
             codex_chat_history: None,
+            gemini_shadow: None,
         })
     }
 
     pub fn with_optimizer_config(mut self, optimizer_config: OptimizerConfig) -> Self {
         self.optimizer_config = optimizer_config;
+        self
+    }
+
+    pub fn with_copilot_optimizer_config(
+        mut self,
+        copilot_optimizer_config: CopilotOptimizerConfig,
+    ) -> Self {
+        self.copilot_optimizer_config = copilot_optimizer_config;
         self
     }
 
@@ -130,6 +142,11 @@ impl RequestForwarder {
 
     pub fn with_codex_chat_history(mut self, history: Arc<CodexChatHistoryStore>) -> Self {
         self.codex_chat_history = Some(history);
+        self
+    }
+
+    pub fn with_gemini_shadow(mut self, shadow: Arc<GeminiShadowStore>) -> Self {
+        self.gemini_shadow = Some(shadow);
         self
     }
 

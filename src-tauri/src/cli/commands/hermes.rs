@@ -5,6 +5,8 @@
 //! the local-file interactions.
 
 use std::io::{self, Read};
+use std::path::Path;
+use std::process::Command;
 
 use clap::Subcommand;
 
@@ -64,6 +66,9 @@ pub enum MemoryCommand {
     },
     /// Show character limits and enable flags for both memory blobs
     Limits,
+    /// Open the Hermes memories directory in the system file manager
+    #[command(name = "open-dir")]
+    OpenDir,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -81,20 +86,6 @@ impl From<MemoryKindArg> for MemoryKind {
     }
 }
 
-fn ensure_hermes_dir_exists() -> Result<(), AppError> {
-    if get_hermes_dir().exists() {
-        return Ok(());
-    }
-    Err(AppError::localized(
-        "hermes.dir.missing",
-        format!("Hermes 配置目录不存在：{}", get_hermes_dir().display()),
-        format!(
-            "Hermes config dir not found: {}",
-            get_hermes_dir().display()
-        ),
-    ))
-}
-
 pub fn execute(cmd: HermesCommand) -> Result<(), AppError> {
     match cmd {
         HermesCommand::Memory(memory_cmd) => execute_memory(memory_cmd),
@@ -102,7 +93,6 @@ pub fn execute(cmd: HermesCommand) -> Result<(), AppError> {
 }
 
 fn execute_memory(cmd: MemoryCommand) -> Result<(), AppError> {
-    ensure_hermes_dir_exists()?;
     match cmd {
         MemoryCommand::Show { kind } => show_memory(kind.into()),
         MemoryCommand::Set { kind, content } => set_memory_cmd(kind.into(), content),
@@ -110,6 +100,7 @@ fn execute_memory(cmd: MemoryCommand) -> Result<(), AppError> {
         MemoryCommand::Enable { kind } => toggle_memory(kind.into(), true),
         MemoryCommand::Disable { kind } => toggle_memory(kind.into(), false),
         MemoryCommand::Limits => print_limits(),
+        MemoryCommand::OpenDir => open_memory_dir(),
     }
 }
 
@@ -210,4 +201,189 @@ fn print_limits() -> Result<(), AppError> {
     // Avoid `unused import` if the helper isn't used elsewhere in this file.
     let _ = hermes_config::get_hermes_config_path();
     Ok(())
+}
+
+fn open_memory_dir() -> Result<(), AppError> {
+    let target_dir = get_hermes_dir().join("memories");
+    std::fs::create_dir_all(&target_dir).map_err(|e| AppError::io(&target_dir, e))?;
+    open_directory(&target_dir).map_err(AppError::Message)?;
+    println!("{}", success("Opened Hermes memories directory."));
+    Ok(())
+}
+
+fn open_directory(path: &Path) -> Result<bool, String> {
+    if std::env::var_os("CC_SWITCH_TEST_DISABLE_OPEN").is_some() {
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    };
+
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer");
+        command.arg(path);
+        command
+    };
+
+    let status = command
+        .status()
+        .map_err(|error| format!("Failed to open directory {}: {error}", path.display()))?;
+
+    if status.success() {
+        Ok(true)
+    } else {
+        Err(format!(
+            "Failed to open directory {}: opener exited with status {status}",
+            path.display()
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{
+        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
+    };
+    use std::ffi::OsString;
+    use std::path::Path;
+    use tempfile::{tempdir, TempDir};
+
+    struct EnvGuard {
+        _lock: TestHomeSettingsLock,
+        old_home: Option<OsString>,
+        old_userprofile: Option<OsString>,
+        old_config_dir: Option<OsString>,
+        old_disable_open: Option<OsString>,
+        home: TempDir,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            let lock = lock_test_home_and_settings();
+            let home = tempdir().expect("create temp home");
+            let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+            let old_disable_open = std::env::var_os("CC_SWITCH_TEST_DISABLE_OPEN");
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("USERPROFILE", home.path());
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.path().join(".cc-switch"));
+            std::env::set_var("CC_SWITCH_TEST_DISABLE_OPEN", "1");
+            set_test_home_override(Some(home.path()));
+            crate::settings::reload_test_settings();
+            Self {
+                _lock: lock,
+                old_home,
+                old_userprofile,
+                old_config_dir,
+                old_disable_open,
+                home,
+            }
+        }
+
+        fn hermes_memories_dir(&self) -> std::path::PathBuf {
+            self.home.path().join(".hermes").join("memories")
+        }
+
+        fn hermes_config_path(&self) -> std::path::PathBuf {
+            self.home.path().join(".hermes").join("config.yaml")
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.old_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match &self.old_config_dir {
+                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            }
+            match &self.old_disable_open {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_DISABLE_OPEN", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_DISABLE_OPEN"),
+            }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
+        }
+    }
+
+    #[test]
+    fn hermes_memory_open_dir_creates_memories_directory() {
+        let env = EnvGuard::new();
+
+        execute_memory(MemoryCommand::OpenDir).expect("open Hermes memories dir");
+
+        assert!(env.hermes_memories_dir().is_dir());
+    }
+
+    #[test]
+    fn hermes_memory_show_works_without_existing_hermes_dir() {
+        let env = EnvGuard::new();
+
+        execute_memory(MemoryCommand::Show {
+            kind: MemoryKindArg::Memory,
+        })
+        .expect("show Hermes memory");
+
+        assert!(!env.hermes_memories_dir().exists());
+    }
+
+    #[test]
+    fn hermes_memory_set_creates_memories_directory_without_existing_hermes_dir() {
+        let env = EnvGuard::new();
+
+        execute_memory(MemoryCommand::Set {
+            kind: MemoryKindArg::User,
+            content: Some("user profile".to_string()),
+        })
+        .expect("set Hermes user memory");
+
+        assert_eq!(
+            read_memory(MemoryKind::User).expect("read user memory"),
+            "user profile"
+        );
+        assert!(env.hermes_memories_dir().is_dir());
+    }
+
+    #[test]
+    fn hermes_memory_toggle_creates_config_without_existing_hermes_dir() {
+        let env = EnvGuard::new();
+
+        execute_memory(MemoryCommand::Disable {
+            kind: MemoryKindArg::Memory,
+        })
+        .expect("disable Hermes memory");
+
+        let limits = read_memory_limits().expect("read memory limits");
+        assert!(!limits.memory_enabled);
+        assert!(env.hermes_config_path().is_file());
+    }
+
+    #[test]
+    fn hermes_memory_limits_works_without_existing_hermes_dir() {
+        let env = EnvGuard::new();
+
+        execute_memory(MemoryCommand::Limits).expect("print Hermes limits");
+
+        assert!(!env.hermes_config_path().exists());
+    }
 }

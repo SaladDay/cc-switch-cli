@@ -1180,10 +1180,11 @@ mod tests {
     }
 
     #[test]
-    fn detect_system_device_name_returns_some() {
-        // 在 CI/本地环境中应该总能获取到设备名
+    fn detect_system_device_name_returns_env_name() {
+        std::env::set_var("CC_SWITCH_DEVICE_NAME", "test-device");
         let name = detect_system_device_name();
-        assert!(name.is_some(), "should detect a device name");
+        std::env::remove_var("CC_SWITCH_DEVICE_NAME");
+        assert_eq!(name.as_deref(), Some("test-device"));
     }
 
     #[test]

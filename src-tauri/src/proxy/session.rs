@@ -96,14 +96,12 @@ fn extract_from_metadata(body: &Value) -> Option<SessionIdResult> {
         .and_then(|metadata| metadata.get("user_id"))
         .and_then(|v| v.as_str())
     {
-        if let Some((_, session_id)) = user_id.split_once("_session_") {
-            if !session_id.is_empty() {
-                return Some(SessionIdResult {
-                    session_id: session_id.to_string(),
-                    source: SessionIdSource::MetadataUserId,
-                    client_provided: true,
-                });
-            }
+        if let Some(session_id) = parse_session_from_user_id(user_id) {
+            return Some(SessionIdResult {
+                session_id,
+                source: SessionIdSource::MetadataUserId,
+                client_provided: true,
+            });
         }
     }
 
@@ -122,6 +120,12 @@ fn extract_from_metadata(body: &Value) -> Option<SessionIdResult> {
     }
 
     None
+}
+
+pub(crate) fn parse_session_from_user_id(user_id: &str) -> Option<String> {
+    user_id
+        .split_once("_session_")
+        .and_then(|(_, session_id)| (!session_id.is_empty()).then(|| session_id.to_string()))
 }
 
 #[cfg(test)]

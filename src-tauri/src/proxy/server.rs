@@ -21,6 +21,7 @@ use super::{
     handlers,
     provider_router::ProviderRouter,
     providers::codex_chat_history::CodexChatHistoryStore,
+    providers::gemini_shadow::GeminiShadowStore,
     types::{ActiveTarget, ProxyConfig, ProxyServerInfo, ProxyStatus},
 };
 
@@ -35,6 +36,7 @@ pub struct ProxyServerState {
     pub current_providers: Arc<RwLock<HashMap<String, (String, String)>>>,
     pub provider_router: Arc<ProviderRouter>,
     pub codex_chat_history: Arc<CodexChatHistoryStore>,
+    pub gemini_shadow: Arc<GeminiShadowStore>,
 }
 
 impl ProxyServerState {
@@ -279,6 +281,7 @@ mod tests {
             current_providers: Arc::new(RwLock::new(HashMap::new())),
             provider_router: Arc::new(ProviderRouter::new(db)),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            gemini_shadow: Arc::new(GeminiShadowStore::default()),
         }
     }
 
@@ -505,6 +508,7 @@ impl ProxyServer {
                 current_providers: Arc::new(RwLock::new(HashMap::new())),
                 provider_router,
                 codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+                gemini_shadow: Arc::new(GeminiShadowStore::default()),
             },
             shutdown_tx: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),

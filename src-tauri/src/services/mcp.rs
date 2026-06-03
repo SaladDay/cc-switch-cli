@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::app_config::{AppType, McpServer, MultiAppConfig};
+use crate::app_config::{AppType, McpApps, McpServer, MultiAppConfig};
 use crate::error::AppError;
 use crate::mcp;
 use crate::store::AppState;
@@ -9,6 +9,17 @@ use crate::store::AppState;
 pub struct McpService;
 
 impl McpService {
+    pub fn supported_mcp_apps() -> impl Iterator<Item = AppType> {
+        [
+            AppType::Claude,
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::OpenCode,
+            AppType::Hermes,
+        ]
+        .into_iter()
+    }
+
     /// 获取所有 MCP 服务器（统一结构）
     pub fn get_all_servers(state: &AppState) -> Result<HashMap<String, McpServer>, AppError> {
         let cfg = state.config.read()?;
@@ -124,6 +135,45 @@ impl McpService {
         Ok(())
     }
 
+    /// Replace the full supported-app matrix for one MCP server.
+    pub fn set_apps(state: &AppState, server_id: &str, apps: McpApps) -> Result<bool, AppError> {
+        let (server, changes) = {
+            let mut cfg = state.config.write()?;
+
+            let Some(servers) = &mut cfg.mcp.servers else {
+                return Ok(false);
+            };
+            let Some(server) = servers.get_mut(server_id) else {
+                return Ok(false);
+            };
+
+            let before = server.apps.clone();
+            server.apps = apps;
+            let server = server.clone();
+            let changes = Self::supported_mcp_apps()
+                .filter_map(|app| {
+                    let before_enabled = before.is_enabled_for(&app);
+                    let after_enabled = server.apps.is_enabled_for(&app);
+                    (before_enabled != after_enabled).then_some((app, after_enabled))
+                })
+                .collect::<Vec<_>>();
+
+            (server, changes)
+        };
+
+        state.save()?;
+
+        for (app, enabled) in changes {
+            if enabled {
+                Self::sync_server_to_app(state, &server, &app)?;
+            } else {
+                Self::remove_server_from_app(state, server_id, &app)?;
+            }
+        }
+
+        Ok(true)
+    }
+
     /// 将 MCP 服务器同步到所有启用的应用
     fn sync_server_to_apps(state: &AppState, server: &McpServer) -> Result<(), AppError> {
         let cfg = state.config.read()?;
@@ -200,11 +250,7 @@ impl McpService {
     pub fn sync_all_enabled(state: &AppState) -> Result<(), AppError> {
         let servers = Self::get_all_servers(state)?;
 
-        for app in AppType::all() {
-            if matches!(app, AppType::OpenClaw) {
-                continue;
-            }
-
+        for app in Self::supported_mcp_apps() {
             for server in servers.values() {
                 if server.apps.is_enabled_for(&app) {
                     Self::sync_server_to_app(state, server, &app)?;
@@ -308,5 +354,15 @@ impl McpService {
         drop(cfg);
         state.save()?;
         Ok(count)
+    }
+
+    pub fn import_from_supported_apps(state: &AppState) -> Result<usize, AppError> {
+        let mut total = 0;
+        total += Self::import_from_claude(state)?;
+        total += Self::import_from_codex(state)?;
+        total += Self::import_from_gemini(state)?;
+        total += Self::import_from_opencode(state)?;
+        total += Self::import_from_hermes(state)?;
+        Ok(total)
     }
 }

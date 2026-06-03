@@ -1,4 +1,5 @@
 use crate::app_config::AppType;
+use crate::provider::ClaudeApiKeyField;
 use serde_json::json;
 
 use super::{
@@ -271,6 +272,7 @@ impl ProviderAddFormState {
                     self.codex_config_scroll = defaults.codex_config_scroll;
                     self.claude_model_config_touched = defaults.claude_model_config_touched;
                     self.claude_api_key = defaults.claude_api_key;
+                    self.claude_api_key_field = defaults.claude_api_key_field;
                     self.claude_base_url = defaults.claude_base_url;
                     self.claude_api_format = defaults.claude_api_format;
                     self.claude_model = defaults.claude_model;
@@ -322,6 +324,7 @@ impl ProviderAddFormState {
                     self.website_url
                         .set("https://www.anthropic.com/claude-code");
                     self.claude_api_key.set("");
+                    self.claude_api_key_field = ClaudeApiKeyField::AuthToken;
                     self.claude_base_url.set("");
                     self.claude_api_format = ClaudeApiFormat::Anthropic;
                     self.claude_model.set("");
@@ -348,6 +351,7 @@ impl ProviderAddFormState {
                     self.name.set("Codex");
                     self.website_url.set("https://openai.com/chatgpt/pricing");
                     self.claude_api_key.set("");
+                    self.claude_api_key_field = ClaudeApiKeyField::AuthToken;
                     self.claude_base_url
                         .set("https://chatgpt.com/backend-api/codex");
                     self.claude_api_format = ClaudeApiFormat::OpenAiResponses;
@@ -393,7 +397,8 @@ impl ProviderAddFormState {
         }
 
         if !self.id_is_manual && !self.name.is_blank() {
-            let id = crate::cli::commands::provider_input::generate_provider_id(
+            let id = crate::cli::commands::provider_input::generate_provider_id_for_app(
+                &self.app_type,
                 self.name.value.trim(),
                 existing_ids,
             );
@@ -414,6 +419,7 @@ impl ProviderAddFormState {
 
         match self.app_type {
             AppType::Claude => {
+                self.claude_api_key_field = ClaudeApiKeyField::AuthToken;
                 self.claude_base_url.set(preset.claude_base_url);
             }
             AppType::Codex => {

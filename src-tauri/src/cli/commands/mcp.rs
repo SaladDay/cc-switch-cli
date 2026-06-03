@@ -1,6 +1,9 @@
 use clap::Subcommand;
 
 use crate::app_config::{AppType, McpApps, McpServer};
+use crate::cli::commands::app_targets::{
+    app_target_names, app_targets_or_default, parse_app_targets,
+};
 use crate::cli::ui::{create_table, error, highlight, info, success};
 use crate::error::AppError;
 use crate::services::McpService;
@@ -26,11 +29,31 @@ pub enum McpCommand {
     Enable {
         /// Server ID to enable
         id: String,
+        /// Target apps. Accepts repeated values or comma-separated backend ids.
+        #[arg(long, value_name = "APP[,APP]", value_delimiter = ',', num_args = 1)]
+        apps: Vec<String>,
     },
     /// Disable an MCP server for specific app(s)
     Disable {
         /// Server ID to disable
         id: String,
+        /// Target apps. Accepts repeated values or comma-separated backend ids.
+        #[arg(long, value_name = "APP[,APP]", value_delimiter = ',', num_args = 1)]
+        apps: Vec<String>,
+    },
+    /// Replace the app matrix for an MCP server
+    SetApps {
+        /// Server ID to update
+        id: String,
+        /// Complete enabled app list for this server
+        #[arg(
+            long,
+            value_name = "APP[,APP]",
+            required = true,
+            value_delimiter = ',',
+            num_args = 1
+        )]
+        apps: Vec<String>,
     },
     /// Validate a command is in PATH
     Validate {
@@ -51,11 +74,12 @@ pub fn execute(cmd: McpCommand, app: Option<AppType>) -> Result<(), AppError> {
         McpCommand::Add => add_server(app_type),
         McpCommand::Edit { id } => edit_server(app_type, &id),
         McpCommand::Delete { id } => delete_server(&id),
-        McpCommand::Enable { id } => enable_server(app_type, &id),
-        McpCommand::Disable { id } => disable_server(app_type, &id),
+        McpCommand::Enable { id, apps } => set_server_enabled(app_type, &id, &apps, true),
+        McpCommand::Disable { id, apps } => set_server_enabled(app_type, &id, &apps, false),
+        McpCommand::SetApps { id, apps } => set_server_apps(&id, &apps),
         McpCommand::Validate { command } => validate_command(&command),
         McpCommand::Sync => sync_servers(),
-        McpCommand::Import => import_servers(app_type),
+        McpCommand::Import => import_servers(),
     }
 }
 
@@ -198,9 +222,14 @@ fn delete_server(id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn enable_server(app_type: AppType, id: &str) -> Result<(), AppError> {
+fn set_server_enabled(
+    app_type: AppType,
+    id: &str,
+    raw_apps: &[String],
+    enabled: bool,
+) -> Result<(), AppError> {
     let state = get_state()?;
-    let app_str = app_type.as_str().to_string();
+    let apps = app_targets_or_default(raw_apps, app_type, "MCP")?;
 
     // 检查服务器是否存在
     let servers = McpService::get_all_servers(&state)?;
@@ -208,41 +237,54 @@ fn enable_server(app_type: AppType, id: &str) -> Result<(), AppError> {
         return Err(AppError::Message(format!("MCP server '{}' not found", id)));
     }
 
-    // 执行启用
-    McpService::toggle_app(&state, id, app_type, true)?;
+    for app in &apps {
+        McpService::toggle_app(&state, id, app.clone(), enabled)?;
+    }
 
     println!(
         "{}",
-        success(&format!("✓ Enabled MCP server '{}' for {}", id, app_str))
+        success(&format!(
+            "✓ {} MCP server '{}' for {}",
+            if enabled { "Enabled" } else { "Disabled" },
+            id,
+            app_target_names(&apps)
+        ))
     );
     println!(
         "{}",
-        info("Note: Configuration has been synced to live file.")
+        info(if enabled {
+            "Note: Configuration has been synced to live file."
+        } else {
+            "Note: Configuration has been removed from live file."
+        })
     );
 
     Ok(())
 }
 
-fn disable_server(app_type: AppType, id: &str) -> Result<(), AppError> {
+fn set_server_apps(id: &str, raw_apps: &[String]) -> Result<(), AppError> {
     let state = get_state()?;
-    let app_str = app_type.as_str().to_string();
+    let targets = parse_app_targets(raw_apps, "MCP")?;
+    let mut apps = McpApps::default();
+    for target in &targets {
+        apps.set_enabled_for(target, true);
+    }
 
-    // 检查服务器是否存在
-    let servers = McpService::get_all_servers(&state)?;
-    if !servers.contains_key(id) {
+    if !McpService::set_apps(&state, id, apps)? {
         return Err(AppError::Message(format!("MCP server '{}' not found", id)));
     }
 
-    // 执行禁用
-    McpService::toggle_app(&state, id, app_type, false)?;
-
     println!(
         "{}",
-        success(&format!("✓ Disabled MCP server '{}' for {}", id, app_str))
+        success(&format!(
+            "✓ Set MCP server '{}' apps to {}",
+            id,
+            app_target_names(&targets)
+        ))
     );
     println!(
         "{}",
-        info("Note: Configuration has been removed from live file.")
+        info("Note: Live configuration files have been updated.")
     );
 
     Ok(())
@@ -264,33 +306,22 @@ fn sync_servers() -> Result<(), AppError> {
     Ok(())
 }
 
-fn import_servers(app_type: AppType) -> Result<(), AppError> {
+fn import_servers() -> Result<(), AppError> {
     let state = get_state()?;
-    let app_str = app_type.as_str().to_string();
 
     println!(
         "{}",
-        info(&format!(
-            "Importing MCP servers from {} live config...",
-            app_str
-        ))
+        info("Importing MCP servers from supported app live configs...")
     );
 
-    let count = match app_type {
-        AppType::Claude => McpService::import_from_claude(&state)?,
-        AppType::Codex => McpService::import_from_codex(&state)?,
-        AppType::Gemini => McpService::import_from_gemini(&state)?,
-        AppType::OpenCode => McpService::import_from_opencode(&state)?,
-        AppType::Hermes => McpService::import_from_hermes(&state)?,
-        AppType::OpenClaw => 0,
-    };
+    let count = McpService::import_from_supported_apps(&state)?;
 
     if count > 0 {
         println!(
             "{}",
             success(&format!(
-                "✓ Imported {} MCP server(s) from {}",
-                count, app_str
+                "✓ Imported {} MCP server(s) from supported apps",
+                count
             ))
         );
         println!(
@@ -300,7 +331,7 @@ fn import_servers(app_type: AppType) -> Result<(), AppError> {
     } else {
         println!(
             "{}",
-            info(&format!("No new MCP servers found in {} config.", app_str))
+            info("No new MCP servers found in supported app configs.")
         );
     }
 

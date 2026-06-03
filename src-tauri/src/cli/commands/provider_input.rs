@@ -5,17 +5,81 @@ use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::cli::ui::info;
 use crate::error::AppError;
-use crate::provider::{Provider, ProviderMeta};
+use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
 use crate::services::ProviderService;
+use clap::ValueEnum;
 use colored::Colorize;
 use inquire::{Confirm, Select, Text};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum ProviderAddTemplate {
+    Custom,
+    ClaudeOfficial,
+    CodexOauth,
+    OpenaiOfficial,
+    GoogleOauth,
+    Packycode,
+    Aicodemirror,
+    Cubence,
+    Dds,
+}
+
+impl ProviderAddTemplate {
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::ClaudeOfficial => "claude-official",
+            Self::CodexOauth => "codex-oauth",
+            Self::OpenaiOfficial => "openai-official",
+            Self::GoogleOauth => "google-oauth",
+            Self::Packycode => "packycode",
+            Self::Aicodemirror => "aicodemirror",
+            Self::Cubence => "cubence",
+            Self::Dds => "dds",
+        }
+    }
+
+    pub fn is_custom(self) -> bool {
+        matches!(self, Self::Custom)
+    }
+
+    pub fn requires_settings_prompt(self) -> bool {
+        matches!(
+            self,
+            Self::Packycode | Self::Aicodemirror | Self::Cubence | Self::Dds
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderAddMode {
-    Official,
-    ThirdParty,
+pub struct ProviderAddTemplateChoice {
+    pub template: ProviderAddTemplate,
+    pub label: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct SettingsConfigPromptResult {
+    pub settings_config: Value,
+    pub claude_api_key_field: Option<ClaudeApiKeyField>,
+}
+
+impl SettingsConfigPromptResult {
+    fn new(settings_config: Value) -> Self {
+        Self {
+            settings_config,
+            claude_api_key_field: None,
+        }
+    }
+
+    fn claude(settings_config: Value, api_key_field: ClaudeApiKeyField) -> Self {
+        Self {
+            settings_config,
+            claude_api_key_field: Some(api_key_field),
+        }
+    }
 }
 
 pub fn supports_common_config(app_type: &AppType) -> bool {
@@ -71,6 +135,532 @@ pub fn set_provider_common_config_meta(provider: &mut Provider, enabled: bool) {
         .meta
         .get_or_insert_with(ProviderMeta::default)
         .apply_common_config = Some(enabled);
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SponsorProviderPreset {
+    id: ProviderAddTemplate,
+    provider_name: &'static str,
+    chip_label: &'static str,
+    website_url: &'static str,
+    partner_promotion_key: &'static str,
+    claude_base_url: &'static str,
+    codex_base_url: &'static str,
+    gemini_base_url: &'static str,
+    opencode_base_url: &'static str,
+    openclaw_base_url: &'static str,
+    hermes_base_url: &'static str,
+}
+
+const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 4] = [
+    SponsorProviderPreset {
+        id: ProviderAddTemplate::Packycode,
+        provider_name: "PackyCode",
+        chip_label: "* PackyCode",
+        website_url: "https://www.packyapi.com",
+        partner_promotion_key: "packycode",
+        claude_base_url: "https://www.packyapi.com",
+        codex_base_url: "https://www.packyapi.com/v1",
+        gemini_base_url: "https://www.packyapi.com",
+        opencode_base_url: "https://www.packyapi.com/v1",
+        openclaw_base_url: "https://www.packyapi.com",
+        hermes_base_url: "https://www.packyapi.com",
+    },
+    SponsorProviderPreset {
+        id: ProviderAddTemplate::Aicodemirror,
+        provider_name: "AICodeMirror",
+        chip_label: "* AICodeMirror",
+        website_url: "https://www.aicodemirror.com",
+        partner_promotion_key: "aicodemirror",
+        claude_base_url: "https://api.aicodemirror.com/api/claudecode",
+        codex_base_url: "https://api.aicodemirror.com/api/codex/backend-api/codex",
+        gemini_base_url: "https://api.aicodemirror.com/api/gemini",
+        opencode_base_url: "https://api.aicodemirror.com/api/claudecode",
+        openclaw_base_url: "https://api.aicodemirror.com/api/claudecode",
+        hermes_base_url: "",
+    },
+    SponsorProviderPreset {
+        id: ProviderAddTemplate::Cubence,
+        provider_name: "Cubence",
+        chip_label: "* Cubence",
+        website_url: "https://cubence.com",
+        partner_promotion_key: "cubence",
+        claude_base_url: "https://api.cubence.com",
+        codex_base_url: "https://api.cubence.com/v1",
+        gemini_base_url: "https://api.cubence.com",
+        opencode_base_url: "https://api.cubence.com/v1",
+        openclaw_base_url: "https://api.cubence.com",
+        hermes_base_url: "https://api.cubence.com",
+    },
+    SponsorProviderPreset {
+        id: ProviderAddTemplate::Dds,
+        provider_name: "DDS",
+        chip_label: "* DDS",
+        website_url: "https://www.ddshub.cc",
+        partner_promotion_key: "dds",
+        claude_base_url: "https://www.ddshub.cc",
+        codex_base_url: "https://www.ddshub.cc",
+        gemini_base_url: "",
+        opencode_base_url: "",
+        openclaw_base_url: "",
+        hermes_base_url: "",
+    },
+];
+
+const PROVIDER_TEMPLATE_CHOICES_CLAUDE: [ProviderAddTemplateChoice; 7] = [
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Custom,
+        label: "Custom",
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::ClaudeOfficial,
+        label: "Claude Official",
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::CodexOauth,
+        label: "Codex",
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Packycode,
+        label: SPONSOR_PROVIDER_PRESETS[0].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Aicodemirror,
+        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Dds,
+        label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+];
+
+const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 6] = [
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Custom,
+        label: "Custom",
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::OpenaiOfficial,
+        label: "OpenAI Official",
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Packycode,
+        label: SPONSOR_PROVIDER_PRESETS[0].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Aicodemirror,
+        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Dds,
+        label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+];
+
+const PROVIDER_TEMPLATE_CHOICES_GEMINI: [ProviderAddTemplateChoice; 5] = [
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Custom,
+        label: "Custom",
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::GoogleOauth,
+        label: "Google OAuth",
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Packycode,
+        label: SPONSOR_PROVIDER_PRESETS[0].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Aicodemirror,
+        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+];
+
+const PROVIDER_TEMPLATE_CHOICES_OPENCODE: [ProviderAddTemplateChoice; 3] = [
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Custom,
+        label: "Custom",
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Aicodemirror,
+        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+];
+
+const PROVIDER_TEMPLATE_CHOICES_HERMES: [ProviderAddTemplateChoice; 2] = [
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Custom,
+        label: "Custom",
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+];
+
+const PROVIDER_TEMPLATE_CHOICES_OPENCLAW: [ProviderAddTemplateChoice; 3] = [
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Custom,
+        label: "Custom",
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Aicodemirror,
+        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+];
+
+pub fn provider_add_template_choices(app_type: &AppType) -> &'static [ProviderAddTemplateChoice] {
+    match app_type {
+        AppType::Claude => &PROVIDER_TEMPLATE_CHOICES_CLAUDE,
+        AppType::Codex => &PROVIDER_TEMPLATE_CHOICES_CODEX,
+        AppType::Gemini => &PROVIDER_TEMPLATE_CHOICES_GEMINI,
+        AppType::OpenCode => &PROVIDER_TEMPLATE_CHOICES_OPENCODE,
+        AppType::Hermes => &PROVIDER_TEMPLATE_CHOICES_HERMES,
+        AppType::OpenClaw => &PROVIDER_TEMPLATE_CHOICES_OPENCLAW,
+    }
+}
+
+pub fn provider_add_template_supported(app_type: &AppType, template: ProviderAddTemplate) -> bool {
+    provider_add_template_choices(app_type)
+        .iter()
+        .any(|choice| choice.template == template)
+}
+
+pub fn provider_add_template_supported_names(app_type: &AppType) -> String {
+    provider_add_template_choices(app_type)
+        .iter()
+        .map(|choice| choice.template.cli_name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn validate_provider_add_template(
+    app_type: &AppType,
+    template: ProviderAddTemplate,
+) -> Result<(), AppError> {
+    if provider_add_template_supported(app_type, template) {
+        return Ok(());
+    }
+
+    let supported = provider_add_template_supported_names(app_type);
+    if crate::cli::i18n::is_chinese() {
+        Err(AppError::InvalidInput(format!(
+            "供应商模板 '{}' 不支持应用 {}。可用模板：{}",
+            template.cli_name(),
+            app_type.as_str(),
+            supported
+        )))
+    } else {
+        Err(AppError::InvalidInput(format!(
+            "Provider template '{}' is not supported for {}. Supported templates: {}",
+            template.cli_name(),
+            app_type.as_str(),
+            supported
+        )))
+    }
+}
+
+pub fn build_provider_from_add_template(
+    app_type: &AppType,
+    template: ProviderAddTemplate,
+    existing_ids: &[String],
+) -> Result<Provider, AppError> {
+    let mut provider = build_provider_template_seed(app_type, template, existing_ids)?;
+    provider.created_at = Some(current_timestamp());
+    Ok(provider)
+}
+
+pub fn build_provider_template_seed(
+    app_type: &AppType,
+    template: ProviderAddTemplate,
+    existing_ids: &[String],
+) -> Result<Provider, AppError> {
+    validate_provider_add_template(app_type, template)?;
+    if template.is_custom() {
+        return Err(AppError::InvalidInput(
+            "Custom provider templates require interactive field prompts".to_string(),
+        ));
+    }
+
+    let name = template_default_name(template)?;
+    let id = generate_provider_id(name, existing_ids);
+    let website_url = template_default_website_url(template).map(str::to_string);
+    let category = template_default_category(template).map(str::to_string);
+    let meta = template_default_meta(template);
+    let settings_config = build_provider_template_settings_config(app_type, template, &id)?;
+
+    Ok(Provider {
+        id,
+        name: name.to_string(),
+        settings_config,
+        website_url,
+        category,
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        icon: None,
+        icon_color: None,
+        meta,
+        in_failover_queue: false,
+    })
+}
+
+fn template_default_name(template: ProviderAddTemplate) -> Result<&'static str, AppError> {
+    Ok(match template {
+        ProviderAddTemplate::ClaudeOfficial => "Claude Official",
+        ProviderAddTemplate::CodexOauth => "Codex",
+        ProviderAddTemplate::OpenaiOfficial => "OpenAI Official",
+        ProviderAddTemplate::GoogleOauth => "Google OAuth",
+        ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Dds => sponsor_preset(template)
+            .map(|preset| preset.provider_name)
+            .ok_or_else(|| unsupported_template_error(template))?,
+        ProviderAddTemplate::Custom => return Err(unsupported_template_error(template)),
+    })
+}
+
+fn template_default_website_url(template: ProviderAddTemplate) -> Option<&'static str> {
+    match template {
+        ProviderAddTemplate::ClaudeOfficial => Some("https://www.anthropic.com/claude-code"),
+        ProviderAddTemplate::CodexOauth => Some("https://openai.com/chatgpt/pricing"),
+        ProviderAddTemplate::OpenaiOfficial => Some("https://chatgpt.com/codex"),
+        ProviderAddTemplate::GoogleOauth => Some("https://ai.google.dev"),
+        ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Dds => sponsor_preset(template).map(|preset| preset.website_url),
+        ProviderAddTemplate::Custom => None,
+    }
+}
+
+fn template_default_category(template: ProviderAddTemplate) -> Option<&'static str> {
+    match template {
+        ProviderAddTemplate::ClaudeOfficial
+        | ProviderAddTemplate::OpenaiOfficial
+        | ProviderAddTemplate::GoogleOauth => Some("official"),
+        ProviderAddTemplate::Custom
+        | ProviderAddTemplate::CodexOauth
+        | ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Dds => None,
+    }
+}
+
+fn template_default_meta(template: ProviderAddTemplate) -> Option<ProviderMeta> {
+    match template {
+        ProviderAddTemplate::CodexOauth => Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            api_format: Some("openai_responses".to_string()),
+            codex_fast_mode: Some(false),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("codex_oauth".to_string()),
+                account_id: None,
+            }),
+            ..Default::default()
+        }),
+        ProviderAddTemplate::OpenaiOfficial => Some(ProviderMeta {
+            codex_official: Some(true),
+            ..Default::default()
+        }),
+        ProviderAddTemplate::GoogleOauth => Some(ProviderMeta {
+            partner_promotion_key: Some("google-official".to_string()),
+            ..Default::default()
+        }),
+        ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Dds => sponsor_preset(template).map(|preset| ProviderMeta {
+            is_partner: Some(true),
+            partner_promotion_key: Some(preset.partner_promotion_key.to_string()),
+            ..Default::default()
+        }),
+        ProviderAddTemplate::Custom | ProviderAddTemplate::ClaudeOfficial => None,
+    }
+}
+
+fn build_provider_template_settings_config(
+    app_type: &AppType,
+    template: ProviderAddTemplate,
+    provider_id: &str,
+) -> Result<Value, AppError> {
+    match template {
+        ProviderAddTemplate::ClaudeOfficial => Ok(json!({ "env": {} })),
+        ProviderAddTemplate::CodexOauth => Ok(json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex",
+                "ANTHROPIC_MODEL": "gpt-5.4",
+                "ANTHROPIC_REASONING_MODEL": "gpt-5.4",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.4",
+            },
+            "attribution": {
+                "commit": "",
+                "pr": ""
+            }
+        })),
+        ProviderAddTemplate::OpenaiOfficial => build_codex_official_settings_config(None),
+        ProviderAddTemplate::GoogleOauth => Ok(json!({ "env": {} })),
+        ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Dds => build_sponsor_template_settings_config(
+            app_type,
+            sponsor_preset(template).ok_or_else(|| unsupported_template_error(template))?,
+            provider_id,
+        ),
+        ProviderAddTemplate::Custom => Err(unsupported_template_error(template)),
+    }
+}
+
+fn build_sponsor_template_settings_config(
+    app_type: &AppType,
+    preset: SponsorProviderPreset,
+    provider_id: &str,
+) -> Result<Value, AppError> {
+    match app_type {
+        AppType::Claude => Ok(json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": preset.claude_base_url,
+            }
+        })),
+        AppType::Codex => Ok(build_codex_settings_config(
+            None,
+            preset.codex_base_url,
+            "gpt-5.4",
+            "responses",
+            provider_id,
+        )),
+        AppType::Gemini => Ok(json!({
+            "env": {
+                "GOOGLE_GEMINI_BASE_URL": preset.gemini_base_url,
+            }
+        })),
+        AppType::OpenCode => {
+            if preset.id == ProviderAddTemplate::Aicodemirror {
+                Ok(json!({
+                    "npm": "@ai-sdk/anthropic",
+                    "options": {
+                        "baseURL": preset.claude_base_url,
+                    },
+                    "models": {
+                        "claude-opus-4.6": {
+                            "name": "Claude Opus 4.6",
+                        },
+                        "claude-sonnet-4.6": {
+                            "name": "Claude Sonnet 4.6",
+                        },
+                    },
+                }))
+            } else {
+                build_opencode_settings_config(
+                    None,
+                    "@ai-sdk/openai-compatible",
+                    "",
+                    preset.opencode_base_url,
+                    "",
+                    "",
+                    "",
+                    "",
+                    None,
+                )
+            }
+        }
+        AppType::Hermes => build_hermes_settings_config(
+            None,
+            crate::hermes_config::HERMES_DEFAULT_API_MODE,
+            preset.hermes_base_url,
+            "",
+            json!([]),
+            "",
+        ),
+        AppType::OpenClaw => {
+            if preset.id == ProviderAddTemplate::Aicodemirror {
+                build_openclaw_settings_config(
+                    None,
+                    "anthropic-messages",
+                    "",
+                    preset.claude_base_url,
+                    false,
+                    json!([
+                        {
+                            "id": "claude-opus-4-6",
+                            "name": "Claude Opus 4.6",
+                            "contextWindow": 200000,
+                            "cost": {
+                                "input": 5,
+                                "output": 25,
+                            },
+                        },
+                        {
+                            "id": "claude-sonnet-4-6",
+                            "name": "Claude Sonnet 4.6",
+                            "contextWindow": 200000,
+                            "cost": {
+                                "input": 3,
+                                "output": 15,
+                            },
+                        },
+                    ]),
+                )
+            } else {
+                build_openclaw_settings_config(
+                    None,
+                    crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL,
+                    "",
+                    preset.openclaw_base_url,
+                    false,
+                    json!([{
+                        "id": "placeholder-model"
+                    }]),
+                )
+                .map(|mut value| {
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.remove("models");
+                    }
+                    value
+                })
+            }
+        }
+    }
+}
+
+fn sponsor_preset(template: ProviderAddTemplate) -> Option<SponsorProviderPreset> {
+    SPONSOR_PROVIDER_PRESETS
+        .iter()
+        .copied()
+        .find(|preset| preset.id == template)
+}
+
+fn unsupported_template_error(template: ProviderAddTemplate) -> AppError {
+    AppError::InvalidInput(format!(
+        "Unsupported provider template '{}'",
+        template.cli_name()
+    ))
 }
 
 #[cfg(test)]
@@ -131,6 +721,193 @@ mod tests {
     }
 
     #[test]
+    fn cli_codex_prompt_update_preserves_template_model_provider_key() {
+        let seed =
+            build_provider_template_seed(&AppType::Codex, ProviderAddTemplate::Aicodemirror, &[])
+                .expect("build AICodeMirror Codex seed");
+
+        let cfg = build_codex_settings_config_from_prompt(
+            Some(&seed.settings_config),
+            "sk-updated",
+            "https://codex.example/v1/",
+            "gpt-6",
+            "custom",
+        );
+
+        let config = cfg
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config should be present");
+        assert!(config.contains("model_provider = \"aicodemirror\""));
+        assert!(config.contains("[model_providers.aicodemirror]"));
+        assert!(!config.contains("model_provider = \"custom\""));
+        assert!(!config.contains("[model_providers.custom]"));
+        assert!(config.contains("model = \"gpt-6\""));
+        assert!(config.contains("base_url = \"https://codex.example/v1\""));
+        assert_eq!(cfg["auth"]["OPENAI_API_KEY"], "sk-updated");
+    }
+
+    #[test]
+    fn cli_codex_prompt_update_preserves_settings_siblings() {
+        let current = json!({
+            "auth": {
+                "OPENAI_API_KEY": "sk-old",
+                "OTHER_TOKEN": "keep"
+            },
+            "config": r#"
+model_provider = "custom"
+model = "gpt-5.4"
+
+[model_providers.custom]
+base_url = "https://api.old.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "deepseek-v4-flash",
+                        "name": "DeepSeek V4 Flash"
+                    }
+                ]
+            },
+            "unknownSibling": {
+                "keep": true
+            }
+        });
+
+        let cfg = build_codex_settings_config_from_prompt(
+            Some(&current),
+            "sk-updated",
+            "https://api.changed.example/v1",
+            "gpt-6",
+            "fallback",
+        );
+
+        assert_eq!(cfg["auth"]["OPENAI_API_KEY"], "sk-updated");
+        assert_eq!(cfg["auth"]["OTHER_TOKEN"], "keep");
+        assert_eq!(
+            cfg["modelCatalog"]["models"][0]["model"],
+            "deepseek-v4-flash"
+        );
+        assert_eq!(cfg["unknownSibling"]["keep"], true);
+
+        let config = cfg
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config should be present");
+        assert!(config.contains("model_provider = \"custom\""));
+        assert!(config.contains("model = \"gpt-6\""));
+        assert!(config.contains("base_url = \"https://api.changed.example/v1\""));
+    }
+
+    #[test]
+    fn cli_gemini_api_key_settings_match_tui_env_shape() {
+        let cfg = build_gemini_api_key_settings_config(
+            None,
+            "AIza-updated",
+            "https://generativelanguage.googleapis.com",
+            "gemini-3-pro-preview",
+        );
+
+        assert_eq!(cfg["env"]["GEMINI_API_KEY"], "AIza-updated");
+        assert_eq!(
+            cfg["env"]["GOOGLE_GEMINI_BASE_URL"],
+            "https://generativelanguage.googleapis.com"
+        );
+        assert_eq!(cfg["env"]["GEMINI_MODEL"], "gemini-3-pro-preview");
+        assert!(
+            cfg.get("config").is_none(),
+            "Gemini API-key settings should match TUI by omitting config"
+        );
+    }
+
+    #[test]
+    fn cli_gemini_oauth_settings_match_tui_empty_env_shape() {
+        let cfg = build_gemini_oauth_settings_config(None);
+
+        assert_eq!(cfg, json!({ "env": {} }));
+        assert!(
+            cfg.get("config").is_none(),
+            "Gemini OAuth settings should not carry config or model fields"
+        );
+    }
+
+    #[test]
+    fn cli_gemini_api_key_settings_preserve_settings_siblings() {
+        let current = json!({
+            "env": {
+                "GEMINI_API_KEY": "AIza-old",
+                "GOOGLE_GEMINI_BASE_URL": "https://old.example",
+                "GEMINI_BASE_URL": "https://legacy.example",
+                "GEMINI_MODEL": "old-model",
+                "EXTRA_ENV": "keep"
+            },
+            "config": {
+                "safetySettings": [
+                    {
+                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                        "threshold": "BLOCK_NONE"
+                    }
+                ]
+            },
+            "unknownSibling": {
+                "keep": true
+            }
+        });
+
+        let cfg = build_gemini_api_key_settings_config(
+            Some(&current),
+            "AIza-updated",
+            "https://generativelanguage.googleapis.com",
+            "gemini-3-pro-preview",
+        );
+
+        assert_eq!(cfg["env"]["GEMINI_API_KEY"], "AIza-updated");
+        assert_eq!(
+            cfg["env"]["GOOGLE_GEMINI_BASE_URL"],
+            "https://generativelanguage.googleapis.com"
+        );
+        assert_eq!(cfg["env"]["GEMINI_MODEL"], "gemini-3-pro-preview");
+        assert_eq!(cfg["env"]["EXTRA_ENV"], "keep");
+        assert_eq!(cfg["env"]["GEMINI_BASE_URL"], "https://legacy.example");
+        assert_eq!(
+            cfg["config"]["safetySettings"][0]["threshold"],
+            "BLOCK_NONE"
+        );
+        assert_eq!(cfg["unknownSibling"]["keep"], true);
+    }
+
+    #[test]
+    fn cli_gemini_oauth_settings_preserve_siblings_and_clear_gemini_env() {
+        let current = json!({
+            "env": {
+                "GEMINI_API_KEY": "AIza-old",
+                "GOOGLE_GEMINI_BASE_URL": "https://old.example",
+                "GEMINI_BASE_URL": "https://legacy.example",
+                "GEMINI_MODEL": "old-model",
+                "EXTRA_ENV": "keep"
+            },
+            "config": {
+                "safetySettings": []
+            },
+            "unknownSibling": {
+                "keep": true
+            }
+        });
+
+        let cfg = build_gemini_oauth_settings_config(Some(&current));
+
+        assert!(cfg["env"].get("GEMINI_API_KEY").is_none());
+        assert!(cfg["env"].get("GOOGLE_GEMINI_BASE_URL").is_none());
+        assert!(cfg["env"].get("GEMINI_BASE_URL").is_none());
+        assert!(cfg["env"].get("GEMINI_MODEL").is_none());
+        assert_eq!(cfg["env"]["EXTRA_ENV"], "keep");
+        assert_eq!(cfg["config"]["safetySettings"], json!([]));
+        assert_eq!(cfg["unknownSibling"]["keep"], true);
+    }
+
+    #[test]
     fn common_config_helpers_detect_and_mark_supported_provider() {
         assert!(common_snippet_has_effective_config(
             &AppType::Claude,
@@ -157,20 +934,924 @@ mod tests {
             Some(true)
         );
     }
+
+    #[test]
+    fn cli_provider_template_labels_follow_tui_support_matrix() {
+        let labels = |app_type: AppType| {
+            provider_add_template_choices(&app_type)
+                .iter()
+                .map(|choice| choice.label)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            labels(AppType::Claude),
+            vec![
+                "Custom",
+                "Claude Official",
+                "Codex",
+                "* PackyCode",
+                "* AICodeMirror",
+                "* Cubence",
+                "* DDS",
+            ]
+        );
+        assert_eq!(
+            labels(AppType::Codex),
+            vec![
+                "Custom",
+                "OpenAI Official",
+                "* PackyCode",
+                "* AICodeMirror",
+                "* Cubence",
+                "* DDS",
+            ]
+        );
+        assert_eq!(
+            labels(AppType::Gemini),
+            vec![
+                "Custom",
+                "Google OAuth",
+                "* PackyCode",
+                "* AICodeMirror",
+                "* Cubence",
+            ]
+        );
+        assert_eq!(
+            labels(AppType::OpenCode),
+            vec!["Custom", "* AICodeMirror", "* Cubence"]
+        );
+        assert_eq!(labels(AppType::Hermes), vec!["Custom", "* Cubence"]);
+        assert_eq!(
+            labels(AppType::OpenClaw),
+            vec!["Custom", "* AICodeMirror", "* Cubence"]
+        );
+    }
+
+    #[test]
+    fn cli_provider_template_rejects_unsupported_app_template_pairs() {
+        assert!(
+            validate_provider_add_template(&AppType::Gemini, ProviderAddTemplate::Dds).is_err()
+        );
+        assert!(
+            validate_provider_add_template(&AppType::OpenCode, ProviderAddTemplate::Packycode)
+                .is_err()
+        );
+        assert!(
+            validate_provider_add_template(&AppType::Claude, ProviderAddTemplate::GoogleOauth)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cli_provider_add_manual_id_validation_matches_tui_additive_fields() {
+        let existing = vec!["taken".to_string()];
+
+        validate_provider_id_for_add(&AppType::Hermes, "hermes-one", &existing)
+            .expect("valid Hermes provider key should pass");
+        assert!(
+            validate_provider_id_for_add(&AppType::Hermes, "Hermes One", &existing).is_err(),
+            "Hermes provider key should keep the TUI lowercase/hyphen validation"
+        );
+        assert!(
+            validate_provider_id_for_add(&AppType::Hermes, "-bad", &existing).is_err(),
+            "Hermes provider key should reject leading hyphens like the TUI"
+        );
+        validate_provider_id_for_add(&AppType::OpenClaw, "openclaw-provider", &existing)
+            .expect("valid OpenClaw provider key should pass");
+        assert!(
+            validate_provider_id_for_add(&AppType::OpenClaw, "OpenClaw Provider", &existing)
+                .is_err(),
+            "OpenClaw provider key should keep the upstream lowercase/hyphen validation"
+        );
+
+        let err = validate_provider_id_for_add(&AppType::OpenClaw, "taken", &existing)
+            .expect_err("duplicate manual provider ids should be rejected before save");
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn cli_claude_codex_oauth_template_matches_tui_contract() {
+        let provider =
+            build_provider_template_seed(&AppType::Claude, ProviderAddTemplate::CodexOauth, &[])
+                .expect("build Codex OAuth provider");
+
+        assert_eq!(provider.id, "codex");
+        assert_eq!(provider.name, "Codex");
+        assert_eq!(
+            provider.website_url.as_deref(),
+            Some("https://openai.com/chatgpt/pricing")
+        );
+        assert_eq!(
+            provider.settings_config["env"]["ANTHROPIC_BASE_URL"],
+            "https://chatgpt.com/backend-api/codex"
+        );
+        assert_eq!(
+            provider.settings_config["env"]["ANTHROPIC_MODEL"],
+            "gpt-5.4"
+        );
+        assert_eq!(
+            provider.settings_config["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+            "gpt-5.4-mini"
+        );
+        assert!(
+            provider.settings_config["env"]
+                .get("ANTHROPIC_AUTH_TOKEN")
+                .is_none(),
+            "Codex OAuth providers must not persist provider API keys"
+        );
+        assert_eq!(provider.settings_config["attribution"]["commit"], "");
+        assert_eq!(provider.settings_config["attribution"]["pr"], "");
+
+        let meta = provider
+            .meta
+            .expect("Codex OAuth metadata should be present");
+        assert_eq!(meta.provider_type.as_deref(), Some("codex_oauth"));
+        assert_eq!(meta.api_format.as_deref(), Some("openai_responses"));
+        assert_eq!(meta.codex_fast_mode, Some(false));
+        let binding = meta
+            .auth_binding
+            .expect("Codex OAuth should bind to managed account auth");
+        assert_eq!(binding.source, AuthBindingSource::ManagedAccount);
+        assert_eq!(binding.auth_provider.as_deref(), Some("codex_oauth"));
+        assert!(
+            binding.account_id.is_none(),
+            "default-account binding should omit accountId"
+        );
+    }
+
+    #[test]
+    fn cli_claude_sponsor_prompt_blank_api_key_omits_token() {
+        let seed =
+            build_provider_template_seed(&AppType::Claude, ProviderAddTemplate::Packycode, &[])
+                .expect("build PackyCode Claude seed");
+        let base_url = seed.settings_config["env"]["ANTHROPIC_BASE_URL"]
+            .as_str()
+            .expect("seed base URL should exist");
+
+        let cfg = build_claude_settings_config_from_prompt(
+            None,
+            ClaudeApiKeyField::AuthToken,
+            "",
+            base_url,
+            Vec::<(&str, Option<String>)>::new(),
+            false,
+        );
+
+        assert_eq!(cfg["env"]["ANTHROPIC_BASE_URL"], "https://www.packyapi.com");
+        assert!(
+            cfg["env"].get("ANTHROPIC_AUTH_TOKEN").is_none(),
+            "Claude sponsor prompt should match TUI by omitting blank API keys"
+        );
+    }
+
+    #[test]
+    fn cli_claude_prompt_api_key_field_writes_api_key_env() {
+        let current = json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "stale-token",
+                "ANTHROPIC_API_KEY": "old-api-key",
+                "EXTRA_ENV": "keep"
+            }
+        });
+
+        let cfg = build_claude_settings_config_from_prompt(
+            Some(&current),
+            ClaudeApiKeyField::ApiKey,
+            "sk-updated",
+            "https://api.example.com",
+            Vec::<(&str, Option<String>)>::new(),
+            false,
+        );
+
+        assert_eq!(cfg["env"]["ANTHROPIC_API_KEY"], "sk-updated");
+        assert!(
+            cfg["env"].get("ANTHROPIC_AUTH_TOKEN").is_none(),
+            "switching to ANTHROPIC_API_KEY should migrate away from the default auth field"
+        );
+        assert_eq!(cfg["env"]["EXTRA_ENV"], "keep");
+    }
+
+    #[test]
+    fn cli_claude_api_key_field_infers_meta_then_env() {
+        let settings_with_api_key = json!({
+            "env": {
+                "ANTHROPIC_API_KEY": "sk-api-key"
+            }
+        });
+        let meta = ProviderMeta {
+            api_key_field: Some("ANTHROPIC_AUTH_TOKEN".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            ClaudeApiKeyField::from_meta_and_settings(Some(&meta), &settings_with_api_key),
+            ClaudeApiKeyField::AuthToken,
+            "upstream gives meta.apiKeyField precedence over env inference"
+        );
+        assert_eq!(
+            ClaudeApiKeyField::from_meta_and_settings(None, &settings_with_api_key),
+            ClaudeApiKeyField::ApiKey,
+            "without meta, existing ANTHROPIC_API_KEY should select the API_KEY field"
+        );
+    }
+
+    #[test]
+    fn cli_claude_prompt_writes_hide_attribution_upstream_shape() {
+        let cfg = build_claude_settings_config_from_prompt(
+            None,
+            ClaudeApiKeyField::AuthToken,
+            "sk-test",
+            "https://api.anthropic.com",
+            Vec::<(&str, Option<String>)>::new(),
+            true,
+        );
+
+        assert_eq!(
+            cfg["attribution"],
+            json!({
+                "commit": "",
+                "pr": ""
+            })
+        );
+    }
+
+    #[test]
+    fn cli_claude_model_prompt_fields_cover_tui_model_config_keys() {
+        let keys = claude_model_prompt_fields()
+            .into_iter()
+            .map(|field| field.env_key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            vec![
+                "ANTHROPIC_MODEL",
+                "ANTHROPIC_REASONING_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            ],
+            "CLI model prompts should cover the same Claude model env keys as the TUI model config"
+        );
+    }
+
+    #[test]
+    fn cli_claude_prompt_writes_reasoning_model_when_model_config_is_supplied() {
+        let cfg = build_claude_settings_config_from_prompt(
+            None,
+            ClaudeApiKeyField::AuthToken,
+            "sk-test",
+            "https://api.anthropic.com",
+            [
+                ("ANTHROPIC_MODEL", Some("model-main".to_string())),
+                (
+                    "ANTHROPIC_REASONING_MODEL",
+                    Some("model-reasoning".to_string()),
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                    Some("model-haiku".to_string()),
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    Some("model-sonnet".to_string()),
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                    Some("model-opus".to_string()),
+                ),
+            ],
+            false,
+        );
+
+        assert_eq!(cfg["env"]["ANTHROPIC_MODEL"], "model-main");
+        assert_eq!(cfg["env"]["ANTHROPIC_REASONING_MODEL"], "model-reasoning");
+        assert_eq!(cfg["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "model-haiku");
+        assert_eq!(cfg["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "model-sonnet");
+        assert_eq!(cfg["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "model-opus");
+    }
+
+    #[test]
+    fn cli_claude_prompt_preserves_custom_attribution_when_hide_is_disabled() {
+        let current = json!({
+            "env": {
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-20250514"
+            },
+            "attribution": {
+                "commit": "custom",
+                "pr": "custom"
+            },
+            "extra": "keep"
+        });
+
+        let cfg = build_claude_settings_config_from_prompt(
+            Some(&current),
+            ClaudeApiKeyField::AuthToken,
+            "sk-updated",
+            "https://api.example.com",
+            Vec::<(&str, Option<String>)>::new(),
+            false,
+        );
+
+        assert_eq!(cfg["attribution"]["commit"], "custom");
+        assert_eq!(cfg["attribution"]["pr"], "custom");
+        assert_eq!(cfg["extra"], "keep");
+        assert_eq!(
+            cfg["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-4-20250514",
+            "model env fields should survive when the CLI model prompt is skipped"
+        );
+    }
+
+    #[test]
+    fn cli_claude_prompt_preserves_existing_hidden_attribution_when_kept_enabled() {
+        let current = json!({
+            "env": {},
+            "attribution": {
+                "commit": "",
+                "pr": "",
+                "extra": "keep"
+            }
+        });
+
+        let cfg = build_claude_settings_config_from_prompt(
+            Some(&current),
+            ClaudeApiKeyField::AuthToken,
+            "sk-test",
+            "https://api.example.com",
+            Vec::<(&str, Option<String>)>::new(),
+            true,
+        );
+
+        assert_eq!(
+            cfg["attribution"],
+            json!({
+                "commit": "",
+                "pr": "",
+                "extra": "keep"
+            })
+        );
+    }
+
+    #[test]
+    fn cli_claude_prompt_removes_hidden_attribution_when_disabled() {
+        let current = json!({
+            "env": {},
+            "attribution": {
+                "commit": "",
+                "pr": "",
+                "extra": "drop when disabled"
+            }
+        });
+
+        let cfg = build_claude_settings_config_from_prompt(
+            Some(&current),
+            ClaudeApiKeyField::AuthToken,
+            "sk-test",
+            "https://api.example.com",
+            Vec::<(&str, Option<String>)>::new(),
+            false,
+        );
+
+        assert!(
+            cfg.as_object()
+                .is_some_and(|settings| !settings.contains_key("attribution")),
+            "disabling hide attribution should remove the upstream hidden-attribution marker"
+        );
+    }
+
+    #[test]
+    fn cli_official_templates_match_tui_metadata_and_settings_shape() {
+        let claude = build_provider_template_seed(
+            &AppType::Claude,
+            ProviderAddTemplate::ClaudeOfficial,
+            &[],
+        )
+        .expect("build Claude Official provider");
+        assert_eq!(claude.name, "Claude Official");
+        assert_eq!(claude.category.as_deref(), Some("official"));
+        assert_eq!(
+            claude.website_url.as_deref(),
+            Some("https://www.anthropic.com/claude-code")
+        );
+        assert_eq!(claude.settings_config, json!({ "env": {} }));
+        assert!(claude.meta.is_none());
+
+        let codex =
+            build_provider_template_seed(&AppType::Codex, ProviderAddTemplate::OpenaiOfficial, &[])
+                .expect("build OpenAI Official provider");
+        assert_eq!(codex.name, "OpenAI Official");
+        assert_eq!(codex.category.as_deref(), Some("official"));
+        assert_eq!(codex.settings_config.get("auth"), Some(&json!({})));
+        assert_eq!(codex.settings_config.get("config"), Some(&json!("")));
+        assert_eq!(
+            codex.meta.as_ref().and_then(|meta| meta.codex_official),
+            Some(true)
+        );
+
+        let gemini =
+            build_provider_template_seed(&AppType::Gemini, ProviderAddTemplate::GoogleOauth, &[])
+                .expect("build Google OAuth provider");
+        assert_eq!(gemini.name, "Google OAuth");
+        assert_eq!(gemini.category.as_deref(), Some("official"));
+        assert_eq!(gemini.settings_config, json!({ "env": {} }));
+        assert!(gemini.settings_config.get("config").is_none());
+        assert_eq!(
+            gemini
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.partner_promotion_key.as_deref()),
+            Some("google-official")
+        );
+    }
+
+    #[test]
+    fn cli_sponsor_templates_match_tui_partner_metadata_and_app_shapes() {
+        let codex =
+            build_provider_template_seed(&AppType::Codex, ProviderAddTemplate::Packycode, &[])
+                .expect("build PackyCode Codex provider");
+        let codex_config = codex
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("Codex sponsor config should be TOML string");
+        assert_eq!(codex.name, "PackyCode");
+        assert!(codex_config.contains("base_url = \"https://www.packyapi.com/v1\""));
+        assert!(codex_config.contains("model = \"gpt-5.4\""));
+        assert!(codex_config.contains("wire_api = \"responses\""));
+        assert_eq!(
+            codex
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.partner_promotion_key.as_deref()),
+            Some("packycode")
+        );
+        assert_eq!(
+            codex.meta.as_ref().and_then(|meta| meta.is_partner),
+            Some(true)
+        );
+
+        let opencode = build_provider_template_seed(
+            &AppType::OpenCode,
+            ProviderAddTemplate::Aicodemirror,
+            &[],
+        )
+        .expect("build AICodeMirror OpenCode provider");
+        assert_eq!(opencode.settings_config["npm"], "@ai-sdk/anthropic");
+        assert_eq!(
+            opencode.settings_config["options"]["baseURL"],
+            "https://api.aicodemirror.com/api/claudecode"
+        );
+        assert_eq!(
+            opencode.settings_config["models"]["claude-opus-4.6"]["name"],
+            "Claude Opus 4.6"
+        );
+        assert_eq!(
+            opencode
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.partner_promotion_key.as_deref()),
+            Some("aicodemirror")
+        );
+
+        let openclaw =
+            build_provider_template_seed(&AppType::OpenClaw, ProviderAddTemplate::Cubence, &[])
+                .expect("build Cubence OpenClaw provider");
+        assert_eq!(openclaw.settings_config["api"], "openai-completions");
+        assert_eq!(
+            openclaw.settings_config["baseUrl"],
+            "https://api.cubence.com"
+        );
+        assert!(
+            openclaw.settings_config.get("models").is_none(),
+            "Cubence OpenClaw preset should match TUI by leaving models omitted"
+        );
+        assert_eq!(
+            openclaw
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.partner_promotion_key.as_deref()),
+            Some("cubence")
+        );
+    }
+
+    #[test]
+    fn build_hermes_settings_config_writes_upstream_snake_case_shape() {
+        let cfg = build_hermes_settings_config(
+            None,
+            "anthropic_messages",
+            " https://openrouter.ai/api/v1/// ",
+            " sk-hermes ",
+            json!([
+                {
+                    "id": "anthropic/claude-opus-4-7",
+                    "name": "Claude Opus 4.7",
+                    "context_length": 1000000
+                }
+            ]),
+            "0.5",
+        )
+        .expect("build Hermes settings");
+
+        assert_eq!(cfg["api_mode"], "anthropic_messages");
+        assert_eq!(cfg["base_url"], "https://openrouter.ai/api/v1");
+        assert_eq!(cfg["api_key"], "sk-hermes");
+        assert_eq!(cfg["rate_limit_delay"], 0.5);
+        assert_eq!(cfg["models"][0]["id"], "anthropic/claude-opus-4-7");
+    }
+
+    #[test]
+    fn build_hermes_settings_config_removes_legacy_aliases_and_preserves_unknown_fields() {
+        let cfg = build_hermes_settings_config(
+            Some(&json!({
+                "api": "openai-completions",
+                "apiMode": "bedrock_converse",
+                "baseUrl": "https://legacy.example/v1",
+                "baseURL": "https://legacy-upper.example/v1",
+                "endpoint": "https://legacy-endpoint.example/v1",
+                "apiKey": "sk-legacy",
+                "auth_token": "sk-auth-token",
+                "key_env": "HERMES_API_KEY",
+                "models": [
+                    { "id": "legacy-model" }
+                ]
+            })),
+            "",
+            "",
+            "",
+            json!([]),
+            "",
+        )
+        .expect("build Hermes settings");
+        let obj = cfg.as_object().expect("settings object");
+
+        assert_eq!(
+            obj.get("api_mode"),
+            Some(&json!(crate::hermes_config::HERMES_DEFAULT_API_MODE))
+        );
+        assert_eq!(obj.get("auth_token"), Some(&json!("sk-auth-token")));
+        assert_eq!(obj.get("key_env"), Some(&json!("HERMES_API_KEY")));
+        assert!(obj.get("base_url").is_none());
+        assert!(obj.get("api_key").is_none());
+        assert!(obj.get("models").is_none());
+        assert!(obj.get("rate_limit_delay").is_none());
+        for legacy_key in ["api", "apiMode", "baseUrl", "baseURL", "endpoint", "apiKey"] {
+            assert!(
+                !obj.contains_key(legacy_key),
+                "Hermes save should drop legacy alias {legacy_key}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_hermes_settings_config_omits_invalid_delay_and_rejects_non_array_models() {
+        let cfg = build_hermes_settings_config(None, "codex_responses", "", "", json!([]), "-1")
+            .expect("build Hermes settings");
+        assert_eq!(cfg["api_mode"], "codex_responses");
+        assert!(cfg.get("rate_limit_delay").is_none());
+
+        let err = build_hermes_settings_config(
+            None,
+            "chat_completions",
+            "",
+            "",
+            json!({"id": "model"}),
+            "",
+        )
+        .expect_err("non-array models should fail");
+        assert!(err.to_string().contains("models"));
+    }
+
+    #[test]
+    fn hermes_edit_defaults_read_legacy_aliases() {
+        let defaults = HermesPromptDefaults::from_settings(Some(&json!({
+            "apiMode": "bedrock_converse",
+            "baseUrl": "https://legacy.example/v1",
+            "apiKey": "sk-legacy",
+            "auth_token": "sk-auth-token",
+            "models": [
+                { "id": "legacy-model", "name": "Legacy Model" }
+            ],
+            "rate_limit_delay": 1.25
+        })));
+
+        assert_eq!(defaults.api_mode, "bedrock_converse");
+        assert_eq!(defaults.base_url, "https://legacy.example/v1");
+        assert_eq!(defaults.api_key, "sk-legacy");
+        assert!(defaults.models_json.contains("legacy-model"));
+        assert_eq!(defaults.rate_limit_delay, "1.25");
+    }
+
+    #[test]
+    fn build_opencode_settings_config_writes_tui_shape() {
+        let cfg = build_opencode_settings_config(
+            None,
+            "",
+            " sk-oc ",
+            " https://api.example.com/v1 ",
+            "gpt-4.1-mini",
+            "GPT 4.1 Mini",
+            "128000",
+            "8192",
+            None,
+        )
+        .expect("build OpenCode settings");
+
+        assert_eq!(cfg["npm"], crate::opencode_config::OPENCODE_DEFAULT_NPM);
+        assert_eq!(cfg["options"]["apiKey"], "sk-oc");
+        assert_eq!(cfg["options"]["baseURL"], "https://api.example.com/v1");
+        assert_eq!(cfg["models"]["gpt-4.1-mini"]["name"], "GPT 4.1 Mini");
+        assert_eq!(cfg["models"]["gpt-4.1-mini"]["limit"]["context"], 128000);
+        assert_eq!(cfg["models"]["gpt-4.1-mini"]["limit"]["output"], 8192);
+
+        serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(cfg)
+            .expect("OpenCode schema should accept generated settings");
+    }
+
+    #[test]
+    fn build_opencode_settings_config_omits_blank_options_and_models() {
+        let cfg =
+            build_opencode_settings_config(None, "", "", "", "", "", "not-a-number", "-1", None)
+                .expect("build OpenCode settings");
+        let obj = cfg.as_object().expect("settings object");
+
+        assert_eq!(
+            obj.get("npm"),
+            Some(&json!(crate::opencode_config::OPENCODE_DEFAULT_NPM))
+        );
+        assert!(obj.get("options").is_none());
+        assert!(obj.get("models").is_none());
+    }
+
+    #[test]
+    fn build_opencode_settings_config_preserves_unknown_fields_and_removes_renamed_original() {
+        let cfg = build_opencode_settings_config(
+            Some(&json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "apiKey": "sk-old",
+                    "baseURL": "https://old.example/v1",
+                    "headers": {
+                        "X-Test": "1"
+                    },
+                    "setCacheKey": true
+                },
+                "models": {
+                    "primary": {
+                        "name": "Primary",
+                        "limit": {
+                            "context": 128000,
+                            "output": 8192
+                        },
+                        "options": {
+                            "reasoningEffort": "medium"
+                        },
+                        "providerHint": "reasoning"
+                    },
+                    "fallback": {
+                        "name": "Fallback",
+                        "options": {
+                            "fallback": true
+                        }
+                    }
+                },
+                "topExtra": 1
+            })),
+            "@ai-sdk/anthropic",
+            "",
+            "",
+            "renamed",
+            "Renamed",
+            "256000",
+            "",
+            Some("primary"),
+        )
+        .expect("build OpenCode settings");
+
+        assert_eq!(cfg["npm"], "@ai-sdk/anthropic");
+        assert_eq!(cfg["topExtra"], 1);
+        assert!(cfg["options"].get("apiKey").is_none());
+        assert!(cfg["options"].get("baseURL").is_none());
+        assert_eq!(cfg["options"]["headers"]["X-Test"], "1");
+        assert_eq!(cfg["options"]["setCacheKey"], true);
+        assert!(cfg["models"].get("primary").is_none());
+        assert_eq!(cfg["models"]["fallback"]["options"]["fallback"], true);
+        assert_eq!(cfg["models"]["renamed"]["name"], "Renamed");
+        assert_eq!(cfg["models"]["renamed"]["limit"]["context"], 256000);
+        assert!(cfg["models"]["renamed"]["limit"].get("output").is_none());
+    }
+
+    #[test]
+    fn opencode_edit_defaults_match_tui_model_selection() {
+        let defaults = OpenCodePromptDefaults::from_settings(Some(&json!({
+            "npm": "@ai-sdk/anthropic",
+            "options": {
+                "apiKey": "sk-existing",
+                "baseURL": "https://api.existing.example/v1"
+            },
+            "models": {
+                "beta-model": {
+                    "name": "Beta Model",
+                    "limit": {
+                        "context": 64000
+                    }
+                },
+                "alpha-model": {
+                    "name": "Alpha Model",
+                    "options": {
+                        "reasoningEffort": "medium"
+                    },
+                    "limit": {
+                        "context": 128000,
+                        "output": 8192
+                    }
+                }
+            }
+        })));
+
+        assert_eq!(defaults.npm, "@ai-sdk/anthropic");
+        assert_eq!(defaults.api_key, "sk-existing");
+        assert_eq!(defaults.base_url, "https://api.existing.example/v1");
+        assert_eq!(defaults.model_id, "alpha-model");
+        assert_eq!(defaults.model_name, "Alpha Model");
+        assert_eq!(defaults.model_context_limit, "128000");
+        assert_eq!(defaults.model_output_limit, "8192");
+        assert_eq!(defaults.original_model_id.as_deref(), Some("alpha-model"));
+    }
+
+    #[test]
+    fn build_openclaw_settings_config_writes_canonical_shape() {
+        let cfg = build_openclaw_settings_config(
+            None,
+            "",
+            " sk-openclaw ",
+            " https://api.openclaw.example/v1 ",
+            true,
+            json!([
+                {
+                    "id": "primary-model",
+                    "name": "Primary Model",
+                    "contextWindow": 128000
+                }
+            ]),
+        )
+        .expect("build OpenClaw settings");
+
+        assert_eq!(
+            cfg["api"],
+            crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL
+        );
+        assert_eq!(cfg["apiKey"], "sk-openclaw");
+        assert_eq!(cfg["baseUrl"], "https://api.openclaw.example/v1");
+        assert_eq!(
+            cfg["headers"]["User-Agent"],
+            crate::openclaw_config::OPENCLAW_DEFAULT_USER_AGENT
+        );
+        assert_eq!(cfg["models"][0]["id"], "primary-model");
+    }
+
+    #[test]
+    fn build_openclaw_settings_config_removes_legacy_aliases_and_preserves_extra_headers() {
+        let cfg = build_openclaw_settings_config(
+            Some(&json!({
+                "api_key": "legacy-key",
+                "base_url": "https://legacy.example/v1",
+                "npm": "@legacy/package",
+                "options": {
+                    "apiKey": "legacy-options-key"
+                },
+                "headers": {
+                    "User-Agent": "Existing UA",
+                    "X-Test": "1"
+                },
+                "authHeader": true,
+                "models": [
+                    {
+                        "id": "old-model"
+                    }
+                ]
+            })),
+            "anthropic-messages",
+            "",
+            "",
+            false,
+            json!([
+                {
+                    "id": "new-model",
+                    "name": "New Model",
+                    "context_window": 128000
+                }
+            ]),
+        )
+        .expect("build OpenClaw settings");
+        let obj = cfg.as_object().expect("settings object");
+
+        assert_eq!(obj.get("api"), Some(&json!("anthropic-messages")));
+        assert_eq!(obj.get("authHeader"), Some(&json!(true)));
+        assert_eq!(cfg["headers"]["X-Test"], "1");
+        assert!(cfg["headers"].get("User-Agent").is_none());
+        assert!(obj.get("apiKey").is_none());
+        assert!(obj.get("baseUrl").is_none());
+        assert!(obj.get("api_key").is_none());
+        assert!(obj.get("base_url").is_none());
+        assert!(obj.get("npm").is_none());
+        assert!(obj.get("options").is_none());
+        assert_eq!(cfg["models"][0]["id"], "new-model");
+        assert!(
+            cfg["models"][0].get("context_window").is_none(),
+            "CLI should remove legacy OpenClaw model aliases before saving"
+        );
+    }
+
+    #[test]
+    fn build_openclaw_settings_config_rejects_non_array_or_empty_models() {
+        let non_array_err =
+            build_openclaw_settings_config(None, "", "", "", false, json!({"id": "model"}))
+                .expect_err("non-array models should fail");
+        assert!(non_array_err.to_string().contains("models"));
+
+        let empty_err = build_openclaw_settings_config(None, "", "", "", false, json!([]))
+            .expect_err("empty models should fail");
+        assert!(empty_err.to_string().contains("models"));
+    }
+
+    #[test]
+    fn openclaw_cubence_template_prompt_can_preserve_omitted_models() {
+        let seed =
+            build_provider_template_seed(&AppType::OpenClaw, ProviderAddTemplate::Cubence, &[])
+                .expect("build Cubence OpenClaw seed");
+        assert!(
+            seed.settings_config.get("models").is_none(),
+            "Cubence seed should match TUI by omitting models"
+        );
+
+        let models = parse_openclaw_models_json("", false)
+            .expect("template prompt should allow omitted models");
+        let cfg = build_openclaw_settings_config_with_optional_models(
+            Some(&seed.settings_config),
+            crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL,
+            "",
+            seed.settings_config["baseUrl"]
+                .as_str()
+                .expect("seed baseUrl should exist"),
+            false,
+            models,
+        )
+        .expect("build OpenClaw settings");
+
+        assert_eq!(
+            cfg["api"],
+            crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL
+        );
+        assert_eq!(cfg["baseUrl"], "https://api.cubence.com");
+        assert!(
+            cfg.get("models").is_none(),
+            "OpenClaw Cubence template prompt must preserve TUI omitted-models shape"
+        );
+    }
+
+    #[test]
+    fn openclaw_custom_add_still_requires_models() {
+        let err = parse_openclaw_models_json("", true)
+            .expect_err("custom OpenClaw add should still require models");
+        assert!(err.to_string().contains("models"));
+    }
+
+    #[test]
+    fn openclaw_edit_defaults_read_canonical_settings() {
+        let defaults = OpenClawPromptDefaults::from_settings(Some(&json!({
+            "api": "openai-responses",
+            "apiKey": "sk-existing",
+            "baseUrl": "https://api.existing.example/v1",
+            "headers": {
+                "User-Agent": "Existing UA"
+            },
+            "models": [
+                {
+                    "id": "existing-model",
+                    "contextWindow": 200000
+                }
+            ]
+        })));
+
+        assert_eq!(defaults.api, "openai-responses");
+        assert_eq!(defaults.api_key, "sk-existing");
+        assert_eq!(defaults.base_url, "https://api.existing.example/v1");
+        assert!(defaults.user_agent_enabled);
+        assert!(defaults.models_json.contains("existing-model"));
+    }
 }
 
 pub fn prompt_settings_config_for_add(
     app_type: &AppType,
-    mode: ProviderAddMode,
-) -> Result<Value, AppError> {
-    match (app_type, mode) {
-        (AppType::Claude, _) => prompt_claude_config(None),
-        (AppType::Codex, ProviderAddMode::Official) => prompt_codex_official_config(None),
-        (AppType::Codex, ProviderAddMode::ThirdParty) => prompt_codex_config(None),
-        (AppType::Gemini, _) => prompt_gemini_config(None),
-        (AppType::OpenCode, _) => Ok(json!({})),
-        (AppType::Hermes, _) => Ok(json!({})),
-        (AppType::OpenClaw, _) => Ok(json!({})),
+) -> Result<SettingsConfigPromptResult, AppError> {
+    match app_type {
+        AppType::Claude => prompt_claude_config(None, None),
+        AppType::Codex => prompt_codex_config(None).map(SettingsConfigPromptResult::new),
+        AppType::Gemini => prompt_gemini_config(None).map(SettingsConfigPromptResult::new),
+        AppType::OpenCode => prompt_opencode_config(None).map(SettingsConfigPromptResult::new),
+        AppType::Hermes => prompt_hermes_config(None).map(SettingsConfigPromptResult::new),
+        AppType::OpenClaw => prompt_openclaw_config(None).map(SettingsConfigPromptResult::new),
     }
 }
 
@@ -194,31 +1875,144 @@ fn build_codex_settings_config(
     let base_url = base_url.trim();
     let provider_key = clean_codex_provider_key(provider_key);
 
-    // Align with upstream: use full config.toml format with [model_providers.<key>]
-    let config_toml = [
-        format!("model_provider = \"{}\"", provider_key),
-        format!("model = \"{}\"", model),
-        "model_reasoning_effort = \"high\"".to_string(),
-        "disable_response_storage = true".to_string(),
-        String::new(),
-        format!("[model_providers.{}]", provider_key),
-        format!("name = \"{}\"", provider_key),
-        format!("base_url = \"{}\"", base_url),
-        format!("wire_api = \"{}\"", wire_api),
-        "requires_openai_auth = true".to_string(),
-        String::new(),
-    ]
-    .join("\n");
+    let config_toml = crate::codex_config::build_codex_provider_config_toml(
+        &provider_key,
+        base_url,
+        model,
+        wire_api,
+    )
+    .trim()
+    .to_string();
 
     match api_key {
-        Some(key) => json!({
-            "auth": { "OPENAI_API_KEY": key.trim() },
-            "config": config_toml
-        }),
+        Some(key) if !key.trim().is_empty() => {
+            json!({
+                "auth": { "OPENAI_API_KEY": key.trim() },
+                "config": config_toml
+            })
+        }
         None => json!({
             "config": config_toml
         }),
+        Some(_) => json!({
+            "config": config_toml
+        }),
     }
+}
+
+fn build_codex_settings_config_from_prompt(
+    current: Option<&Value>,
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    fallback_provider_key: &str,
+) -> Value {
+    let model = if model.trim().is_empty() {
+        "gpt-5.4"
+    } else {
+        model.trim()
+    };
+    let base_url = base_url.trim().trim_end_matches('/');
+    let current_config = current
+        .and_then(|value| value.get("config"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let base_config = if current_config.trim().is_empty() {
+        let provider_key = clean_codex_provider_key(fallback_provider_key);
+        crate::codex_config::build_codex_provider_config_toml(
+            &provider_key,
+            base_url,
+            model,
+            "responses",
+        )
+    } else {
+        current_config.to_string()
+    };
+    let config_toml = crate::codex_config::update_codex_config_snippet(
+        &base_config,
+        base_url,
+        model,
+        "responses",
+        true,
+        "OPENAI_API_KEY",
+    );
+
+    let mut settings_obj = current
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    settings_obj.insert("config".to_string(), Value::String(config_toml));
+
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        if let Some(auth_obj) = settings_obj.get_mut("auth").and_then(Value::as_object_mut) {
+            auth_obj.remove("OPENAI_API_KEY");
+            if auth_obj.is_empty() {
+                settings_obj.remove("auth");
+            }
+        } else {
+            settings_obj.remove("auth");
+        }
+    } else {
+        let auth_value = settings_obj
+            .entry("auth".to_string())
+            .or_insert_with(|| json!({}));
+        if !auth_value.is_object() {
+            *auth_value = json!({});
+        }
+        let auth = auth_value
+            .as_object_mut()
+            .expect("auth must be a JSON object");
+        auth.insert("OPENAI_API_KEY".to_string(), json!(api_key));
+    }
+
+    Value::Object(settings_obj)
+}
+
+fn build_gemini_oauth_settings_config(current: Option<&Value>) -> Value {
+    let mut settings_obj = current
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let env_value = settings_obj
+        .entry("env".to_string())
+        .or_insert_with(|| json!({}));
+    if !env_value.is_object() {
+        *env_value = json!({});
+    }
+    let env_obj = env_value
+        .as_object_mut()
+        .expect("Gemini env settings must be an object");
+    env_obj.remove("GEMINI_API_KEY");
+    env_obj.remove("GOOGLE_GEMINI_BASE_URL");
+    env_obj.remove("GEMINI_BASE_URL");
+    env_obj.remove("GEMINI_MODEL");
+    Value::Object(settings_obj)
+}
+
+fn build_gemini_api_key_settings_config(
+    current: Option<&Value>,
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+) -> Value {
+    let mut settings_obj = current
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let env_value = settings_obj
+        .entry("env".to_string())
+        .or_insert_with(|| json!({}));
+    if !env_value.is_object() {
+        *env_value = json!({});
+    }
+    let env = env_value
+        .as_object_mut()
+        .expect("Gemini env settings must be an object");
+    set_or_remove_trimmed(env, "GEMINI_API_KEY", api_key);
+    set_or_remove_trimmed(env, "GOOGLE_GEMINI_BASE_URL", base_url);
+    set_or_remove_trimmed(env, "GEMINI_MODEL", model);
+    Value::Object(settings_obj)
 }
 
 fn build_codex_official_settings_config(current: Option<&Value>) -> Result<Value, AppError> {
@@ -237,6 +2031,901 @@ fn build_codex_official_settings_config(current: Option<&Value>) -> Result<Value
         "auth": auth,
         "config": cleaned_config
     }))
+}
+
+struct OpenCodePromptDefaults {
+    npm: String,
+    api_key: String,
+    base_url: String,
+    model_id: String,
+    model_name: String,
+    model_context_limit: String,
+    model_output_limit: String,
+    original_model_id: Option<String>,
+}
+
+impl OpenCodePromptDefaults {
+    fn from_settings(current: Option<&Value>) -> Self {
+        let settings = current.and_then(Value::as_object);
+        let npm = settings
+            .and_then(|obj| obj.get("npm"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(crate::opencode_config::OPENCODE_DEFAULT_NPM)
+            .to_string();
+
+        let options = settings
+            .and_then(|obj| obj.get("options"))
+            .and_then(Value::as_object);
+        let api_key = options
+            .and_then(|obj| obj.get("apiKey"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let base_url = options
+            .and_then(|obj| obj.get("baseURL"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        let mut model_id = String::new();
+        let mut model_name = String::new();
+        let mut model_context_limit = String::new();
+        let mut model_output_limit = String::new();
+        let mut original_model_id = None;
+        if let Some(models) = settings
+            .and_then(|obj| obj.get("models"))
+            .and_then(Value::as_object)
+        {
+            if let Some((selected_id, model_value)) = opencode_selected_model_from_models(models) {
+                model_id = selected_id.clone();
+                model_name = model_value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(selected_id)
+                    .to_string();
+                if let Some(limit) = model_value.get("limit").and_then(Value::as_object) {
+                    if let Some(context) = limit.get("context").and_then(Value::as_u64) {
+                        model_context_limit = context.to_string();
+                    }
+                    if let Some(output) = limit.get("output").and_then(Value::as_u64) {
+                        model_output_limit = output.to_string();
+                    }
+                }
+                original_model_id = Some(selected_id.clone());
+            }
+        }
+
+        Self {
+            npm,
+            api_key,
+            base_url,
+            model_id,
+            model_name,
+            model_context_limit,
+            model_output_limit,
+            original_model_id,
+        }
+    }
+}
+
+fn prompt_opencode_config(current: Option<&Value>) -> Result<Value, AppError> {
+    println!("\n{}", texts::tui_label_app_opencode().bright_cyan().bold());
+
+    let defaults = OpenCodePromptDefaults::from_settings(current);
+
+    let npm = Text::new(texts::tui_label_provider_package())
+        .with_initial_value(&defaults.npm)
+        .with_help_message(opencode_npm_help())
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let api_key = if defaults.api_key.is_empty() {
+        Text::new(texts::api_key_label())
+            .with_placeholder("sk-...")
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    } else {
+        Text::new(texts::api_key_label())
+            .with_initial_value(&defaults.api_key)
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let base_url = if defaults.base_url.is_empty() {
+        Text::new(texts::base_url_label())
+            .with_placeholder("https://api.example.com/v1")
+            .with_help_message(opencode_base_url_help())
+            .prompt()
+    } else {
+        Text::new(texts::base_url_label())
+            .with_initial_value(&defaults.base_url)
+            .with_help_message(opencode_base_url_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let model_id = if defaults.model_id.is_empty() {
+        Text::new(texts::tui_label_opencode_model_id())
+            .with_placeholder("gpt-4.1-mini")
+            .with_help_message(opencode_model_id_help())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_opencode_model_id())
+            .with_initial_value(&defaults.model_id)
+            .with_help_message(opencode_model_id_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let model_name = if defaults.model_name.is_empty() {
+        Text::new(texts::tui_label_opencode_model_name())
+            .with_placeholder("GPT 4.1 Mini")
+            .with_help_message(opencode_model_name_help())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_opencode_model_name())
+            .with_initial_value(&defaults.model_name)
+            .with_help_message(opencode_model_name_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let model_context_limit = if defaults.model_context_limit.is_empty() {
+        Text::new(texts::tui_label_context_limit())
+            .with_placeholder("128000")
+            .with_help_message(opencode_limit_help())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_context_limit())
+            .with_initial_value(&defaults.model_context_limit)
+            .with_help_message(opencode_limit_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let model_output_limit = if defaults.model_output_limit.is_empty() {
+        Text::new(texts::tui_label_output_limit())
+            .with_placeholder("8192")
+            .with_help_message(opencode_limit_help())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_output_limit())
+            .with_initial_value(&defaults.model_output_limit)
+            .with_help_message(opencode_limit_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    build_opencode_settings_config(
+        current,
+        &npm,
+        &api_key,
+        &base_url,
+        &model_id,
+        &model_name,
+        &model_context_limit,
+        &model_output_limit,
+        defaults.original_model_id.as_deref(),
+    )
+}
+
+fn build_opencode_settings_config(
+    current: Option<&Value>,
+    npm: &str,
+    api_key: &str,
+    base_url: &str,
+    model_id: &str,
+    model_name: &str,
+    model_context_limit: &str,
+    model_output_limit: &str,
+    original_model_id: Option<&str>,
+) -> Result<Value, AppError> {
+    let mut settings_obj = current
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    let npm = npm.trim();
+    settings_obj.insert(
+        "npm".to_string(),
+        json!(if npm.is_empty() {
+            crate::opencode_config::OPENCODE_DEFAULT_NPM
+        } else {
+            npm
+        }),
+    );
+
+    let options_value = settings_obj
+        .entry("options".to_string())
+        .or_insert_with(|| json!({}));
+    if !options_value.is_object() {
+        *options_value = json!({});
+    }
+    let options_obj = options_value
+        .as_object_mut()
+        .expect("options must be a JSON object");
+    set_or_remove_trimmed(options_obj, "apiKey", api_key);
+    set_or_remove_trimmed(options_obj, "baseURL", base_url);
+    if options_obj.is_empty() {
+        settings_obj.remove("options");
+    }
+
+    let mut models_value = settings_obj
+        .remove("models")
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    if !models_value.is_object() {
+        models_value = Value::Object(Map::new());
+    }
+    let models_obj = models_value
+        .as_object_mut()
+        .expect("models must be a JSON object");
+
+    let current_model_id = opencode_primary_model_id(model_id, model_name);
+    if let Some(original_id) = original_model_id {
+        if current_model_id.as_deref() != Some(original_id) {
+            models_obj.remove(original_id);
+        }
+    }
+
+    if let Some(model_id) = current_model_id {
+        let mut model_obj = match models_obj.remove(&model_id) {
+            Some(Value::Object(map)) => map,
+            _ => Map::new(),
+        };
+        let model_name = model_name.trim();
+        model_obj.insert(
+            "name".to_string(),
+            json!(if model_name.is_empty() {
+                model_id.as_str()
+            } else {
+                model_name
+            }),
+        );
+
+        let limit_value = model_obj
+            .entry("limit".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !limit_value.is_object() {
+            *limit_value = Value::Object(Map::new());
+        }
+        let limit_obj = limit_value
+            .as_object_mut()
+            .expect("limit must be a JSON object");
+        set_or_remove_u64(limit_obj, "context", model_context_limit);
+        set_or_remove_u64(limit_obj, "output", model_output_limit);
+        if limit_obj.is_empty() {
+            model_obj.remove("limit");
+        }
+
+        models_obj.insert(model_id, Value::Object(model_obj));
+    }
+
+    if !models_obj.is_empty() {
+        settings_obj.insert("models".to_string(), models_value);
+    }
+
+    Ok(Value::Object(settings_obj))
+}
+
+fn opencode_primary_model_id(model_id: &str, model_name: &str) -> Option<String> {
+    let model_id = model_id.trim();
+    if !model_id.is_empty() {
+        return Some(model_id.to_string());
+    }
+
+    let model_name = model_name.trim();
+    if !model_name.is_empty() {
+        return Some(model_name.to_string());
+    }
+
+    None
+}
+
+fn opencode_selected_model_from_models<'a>(
+    models: &'a Map<String, Value>,
+) -> Option<(&'a String, &'a Value)> {
+    models.iter().max_by(|(id_a, model_a), (id_b, model_b)| {
+        opencode_model_rank(model_a)
+            .cmp(&opencode_model_rank(model_b))
+            .then_with(|| id_b.cmp(id_a))
+    })
+}
+
+fn opencode_model_rank(model: &Value) -> usize {
+    let mut rank = 0;
+    if model
+        .get("limit")
+        .and_then(Value::as_object)
+        .is_some_and(|obj| !obj.is_empty())
+    {
+        rank += 1;
+    }
+    if model
+        .get("options")
+        .and_then(Value::as_object)
+        .is_some_and(|obj| !obj.is_empty())
+    {
+        rank += 1;
+    }
+    rank
+}
+
+fn opencode_npm_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "AI SDK provider npm 包；留空使用 OpenAI-compatible 默认值。"
+    } else {
+        "AI SDK provider npm package; leave empty for the OpenAI-compatible default."
+    }
+}
+
+fn opencode_base_url_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "OpenCode provider options.baseURL；留空则不写入。"
+    } else {
+        "OpenCode provider options.baseURL; leave empty to omit it."
+    }
+}
+
+fn opencode_model_id_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "models 对象中的主模型键；留空时使用模型名称。"
+    } else {
+        "Primary model key inside models; the model name is used when this is empty."
+    }
+}
+
+fn opencode_model_name_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "OpenCode 模型显示名称；留空时使用模型 ID。"
+    } else {
+        "OpenCode model display name; the model id is used when this is empty."
+    }
+}
+
+fn opencode_limit_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "正整数；留空或无效值会移除此限制。"
+    } else {
+        "Positive integer; empty or invalid values remove this limit."
+    }
+}
+
+struct HermesPromptDefaults {
+    api_mode: String,
+    api_key: String,
+    base_url: String,
+    models_json: String,
+    rate_limit_delay: String,
+}
+
+impl HermesPromptDefaults {
+    fn from_settings(current: Option<&Value>) -> Self {
+        let settings = current.and_then(Value::as_object);
+        let api_mode = settings
+            .and_then(|obj| obj.get("api_mode").or_else(|| obj.get("apiMode")))
+            .and_then(Value::as_str)
+            .map(normalize_hermes_api_mode)
+            .unwrap_or_else(|| crate::hermes_config::HERMES_DEFAULT_API_MODE.to_string());
+        let api_key = settings
+            .and_then(|obj| {
+                obj.get("api_key")
+                    .or_else(|| obj.get("apiKey"))
+                    .or_else(|| obj.get("auth_token"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let base_url = settings
+            .and_then(|obj| {
+                obj.get("base_url")
+                    .or_else(|| obj.get("baseUrl"))
+                    .or_else(|| obj.get("baseURL"))
+                    .or_else(|| obj.get("endpoint"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let models_json = settings
+            .and_then(|obj| obj.get("models"))
+            .and_then(Value::as_array)
+            .map(|models| Value::Array(models.clone()))
+            .and_then(|value| serde_json::to_string(&value).ok())
+            .unwrap_or_else(|| "[]".to_string());
+        let rate_limit_delay = settings
+            .and_then(|obj| obj.get("rate_limit_delay"))
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+
+        Self {
+            api_mode,
+            api_key,
+            base_url,
+            models_json,
+            rate_limit_delay,
+        }
+    }
+}
+
+fn prompt_hermes_config(current: Option<&Value>) -> Result<Value, AppError> {
+    println!("\n{}", texts::tui_label_app_hermes().bright_cyan().bold());
+
+    let defaults = HermesPromptDefaults::from_settings(current);
+    let api_modes = crate::hermes_config::HERMES_API_MODES
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    let api_mode_index = api_modes
+        .iter()
+        .position(|candidate| candidate == &defaults.api_mode)
+        .unwrap_or(0);
+
+    let api_mode = Select::new(texts::tui_label_hermes_api_mode(), api_modes)
+        .with_starting_cursor(api_mode_index)
+        .with_help_message(hermes_api_mode_help())
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let base_url = if defaults.base_url.is_empty() {
+        Text::new(texts::tui_label_hermes_base_url())
+            .with_placeholder("https://api.example.com/v1")
+            .with_help_message(texts::tui_hermes_base_url_scheme())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_hermes_base_url())
+            .with_initial_value(&defaults.base_url)
+            .with_help_message(texts::tui_hermes_base_url_scheme())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let api_key = if defaults.api_key.is_empty() {
+        Text::new(texts::api_key_label())
+            .with_placeholder("sk-...")
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    } else {
+        Text::new(texts::api_key_label())
+            .with_initial_value(&defaults.api_key)
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let models_json = if defaults.models_json == "[]" {
+        Text::new(texts::tui_label_hermes_models())
+            .with_placeholder(r#"[{"id":"gpt-4.1","name":"GPT 4.1"}]"#)
+            .with_help_message(hermes_models_json_help())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_hermes_models())
+            .with_initial_value(&defaults.models_json)
+            .with_help_message(hermes_models_json_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    let models_value = parse_hermes_models_json(&models_json)?;
+
+    let rate_limit_delay = if defaults.rate_limit_delay.is_empty() {
+        Text::new(texts::tui_label_hermes_rate_limit_delay())
+            .with_placeholder("0.5")
+            .with_help_message(texts::tui_hint_hermes_rate_limit_delay())
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_hermes_rate_limit_delay())
+            .with_initial_value(&defaults.rate_limit_delay)
+            .with_help_message(texts::tui_hint_hermes_rate_limit_delay())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    build_hermes_settings_config(
+        current,
+        &api_mode,
+        &base_url,
+        &api_key,
+        models_value,
+        &rate_limit_delay,
+    )
+}
+
+fn build_hermes_settings_config(
+    current: Option<&Value>,
+    api_mode: &str,
+    base_url: &str,
+    api_key: &str,
+    models_value: Value,
+    rate_limit_delay: &str,
+) -> Result<Value, AppError> {
+    let mut settings_obj = current
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    for legacy_key in ["api", "apiKey", "apiMode", "baseUrl", "baseURL", "endpoint"] {
+        settings_obj.remove(legacy_key);
+    }
+
+    settings_obj.insert(
+        "api_mode".to_string(),
+        json!(normalize_hermes_api_mode(api_mode)),
+    );
+
+    let base_url = base_url.trim().trim_end_matches('/').to_string();
+    set_or_remove_trimmed(&mut settings_obj, "base_url", &base_url);
+    set_or_remove_trimmed(&mut settings_obj, "api_key", api_key);
+
+    let models_value = normalize_hermes_models_value(models_value)?;
+    if models_value.as_array().is_some_and(Vec::is_empty) {
+        settings_obj.remove("models");
+    } else {
+        settings_obj.insert("models".to_string(), models_value);
+    }
+
+    set_or_remove_f64(&mut settings_obj, "rate_limit_delay", rate_limit_delay);
+
+    Ok(Value::Object(settings_obj))
+}
+
+fn normalize_hermes_api_mode(api_mode: &str) -> String {
+    let api_mode = api_mode.trim();
+    if crate::hermes_config::HERMES_API_MODES
+        .iter()
+        .any(|candidate| *candidate == api_mode)
+    {
+        api_mode.to_string()
+    } else {
+        crate::hermes_config::HERMES_DEFAULT_API_MODE.to_string()
+    }
+}
+
+fn parse_hermes_models_json(raw: &str) -> Result<Value, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(json!([]));
+    }
+    let value = serde_json::from_str::<Value>(trimmed)
+        .map_err(|err| AppError::InvalidInput(texts::tui_toast_invalid_json(&err.to_string())))?;
+    normalize_hermes_models_value(value)
+}
+
+fn normalize_hermes_models_value(value: Value) -> Result<Value, AppError> {
+    if value.is_array() {
+        Ok(value)
+    } else {
+        Err(AppError::localized(
+            "provider.hermes.models.invalid",
+            "Hermes 模型列表必须是 JSON 数组",
+            "Hermes models must be a JSON array",
+        ))
+    }
+}
+
+fn hermes_api_mode_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "供应商 API 协议。请选择与端点匹配的格式。"
+    } else {
+        "Provider API protocol. Choose the format that matches your endpoint."
+    }
+}
+
+fn hermes_models_json_help() -> &'static str {
+    if crate::cli::i18n::is_chinese() {
+        "JSON 数组；留空或 [] 表示不写入模型。"
+    } else {
+        "JSON array; leave empty or [] to omit models."
+    }
+}
+
+struct OpenClawPromptDefaults {
+    api: String,
+    api_key: String,
+    base_url: String,
+    user_agent_enabled: bool,
+    models_json: String,
+}
+
+impl OpenClawPromptDefaults {
+    fn from_settings(current: Option<&Value>) -> Self {
+        let settings = current.and_then(Value::as_object);
+        let api = settings
+            .and_then(|obj| obj.get("api"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL)
+            .to_string();
+        let api_key = settings
+            .and_then(|obj| obj.get("apiKey"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let base_url = settings
+            .and_then(|obj| obj.get("baseUrl"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let user_agent_enabled = settings
+            .and_then(|obj| obj.get("headers"))
+            .and_then(Value::as_object)
+            .is_some_and(|headers| headers.contains_key("User-Agent"));
+        let models_json = settings
+            .and_then(|obj| obj.get("models"))
+            .and_then(Value::as_array)
+            .map(|models| Value::Array(models.clone()))
+            .and_then(|value| serde_json::to_string(&value).ok())
+            .unwrap_or_else(|| "[]".to_string());
+        Self {
+            api,
+            api_key,
+            base_url,
+            user_agent_enabled,
+            models_json,
+        }
+    }
+}
+
+fn prompt_openclaw_config(current: Option<&Value>) -> Result<Value, AppError> {
+    println!("\n{}", texts::config_openclaw_header().bright_cyan().bold());
+
+    let defaults = OpenClawPromptDefaults::from_settings(current);
+    let mut api_protocols = crate::openclaw_config::OPENCLAW_API_PROTOCOLS
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    if !api_protocols
+        .iter()
+        .any(|candidate| candidate == &defaults.api)
+    {
+        api_protocols.insert(0, defaults.api.clone());
+    }
+    let api_index = api_protocols
+        .iter()
+        .position(|candidate| candidate == &defaults.api)
+        .unwrap_or(0);
+
+    let api = Select::new(texts::openclaw_api_protocol_label(), api_protocols)
+        .with_starting_cursor(api_index)
+        .with_help_message(texts::openclaw_api_protocol_help())
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let api_key = if defaults.api_key.is_empty() {
+        Text::new(texts::api_key_label())
+            .with_placeholder("sk-...")
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    } else {
+        Text::new(texts::api_key_label())
+            .with_initial_value(&defaults.api_key)
+            .with_help_message(texts::api_key_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let base_url = if defaults.base_url.is_empty() {
+        Text::new(texts::base_url_label())
+            .with_placeholder("https://api.example.com/v1")
+            .with_help_message(texts::openclaw_base_url_help())
+            .prompt()
+    } else {
+        Text::new(texts::base_url_label())
+            .with_initial_value(&defaults.base_url)
+            .with_help_message(texts::openclaw_base_url_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let user_agent_enabled = Confirm::new(texts::openclaw_user_agent_prompt())
+        .with_default(defaults.user_agent_enabled)
+        .with_help_message(texts::openclaw_user_agent_help())
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let models_json = if defaults.models_json == "[]" {
+        Text::new(texts::openclaw_models_json_label())
+            .with_placeholder(r#"[{"id":"gpt-4.1","name":"GPT 4.1"}]"#)
+            .with_help_message(texts::openclaw_models_json_help())
+            .prompt()
+    } else {
+        Text::new(texts::openclaw_models_json_label())
+            .with_initial_value(&defaults.models_json)
+            .with_help_message(texts::openclaw_models_json_help())
+            .prompt()
+    }
+    .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    let models_value = parse_openclaw_models_json(&models_json, current.is_none())?;
+
+    build_openclaw_settings_config_with_optional_models(
+        current,
+        &api,
+        &api_key,
+        &base_url,
+        user_agent_enabled,
+        models_value,
+    )
+}
+
+fn build_openclaw_settings_config(
+    current: Option<&Value>,
+    api: &str,
+    api_key: &str,
+    base_url: &str,
+    user_agent_enabled: bool,
+    models_value: Value,
+) -> Result<Value, AppError> {
+    build_openclaw_settings_config_with_optional_models(
+        current,
+        api,
+        api_key,
+        base_url,
+        user_agent_enabled,
+        Some(models_value),
+    )
+}
+
+fn build_openclaw_settings_config_with_optional_models(
+    current: Option<&Value>,
+    api: &str,
+    api_key: &str,
+    base_url: &str,
+    user_agent_enabled: bool,
+    models_value: Option<Value>,
+) -> Result<Value, AppError> {
+    let mut settings_obj = current
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    for legacy_key in ["npm", "options", "api_key", "base_url"] {
+        settings_obj.remove(legacy_key);
+    }
+
+    set_or_remove_trimmed(&mut settings_obj, "apiKey", api_key);
+    set_or_remove_trimmed(&mut settings_obj, "baseUrl", base_url);
+
+    let api = api.trim();
+    settings_obj.insert(
+        "api".to_string(),
+        json!(if api.is_empty() {
+            crate::openclaw_config::OPENCLAW_DEFAULT_API_PROTOCOL
+        } else {
+            api
+        }),
+    );
+
+    let mut headers_obj = match settings_obj.remove("headers") {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    if user_agent_enabled {
+        headers_obj
+            .entry("User-Agent".to_string())
+            .or_insert_with(|| json!(crate::openclaw_config::OPENCLAW_DEFAULT_USER_AGENT));
+    } else {
+        headers_obj.remove("User-Agent");
+    }
+    if !headers_obj.is_empty() {
+        settings_obj.insert("headers".to_string(), Value::Object(headers_obj));
+    }
+
+    if let Some(models_value) = models_value {
+        let models_value = normalize_openclaw_models_value(models_value)?;
+        settings_obj.insert("models".to_string(), models_value);
+    } else {
+        settings_obj.remove("models");
+    }
+
+    serde_json::from_value::<crate::provider::OpenClawProviderConfig>(Value::Object(
+        settings_obj.clone(),
+    ))
+    .map_err(|err| {
+        AppError::localized(
+            "provider.openclaw.settings.invalid",
+            format!("OpenClaw 配置格式无效: {err}"),
+            format!("OpenClaw provider schema is invalid: {err}"),
+        )
+    })?;
+
+    Ok(Value::Object(settings_obj))
+}
+
+fn parse_openclaw_models_json(
+    raw: &str,
+    require_non_empty: bool,
+) -> Result<Option<Value>, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return if require_non_empty {
+            Err(openclaw_models_required_error())
+        } else {
+            Ok(None)
+        };
+    }
+    let value = serde_json::from_str::<Value>(trimmed)
+        .map_err(|err| AppError::InvalidInput(texts::tui_toast_invalid_json(&err.to_string())))?;
+    if !require_non_empty && value.as_array().is_some_and(Vec::is_empty) {
+        return Ok(None);
+    }
+    normalize_openclaw_models_value(value).map(Some)
+}
+
+fn normalize_openclaw_models_value(value: Value) -> Result<Value, AppError> {
+    let Some(models) = value.as_array() else {
+        return Err(openclaw_models_required_error());
+    };
+    if models.is_empty() {
+        return Err(openclaw_models_required_error());
+    }
+
+    let normalized_models = models
+        .iter()
+        .cloned()
+        .map(remove_openclaw_model_legacy_aliases)
+        .collect::<Vec<_>>();
+    let normalized_value = Value::Array(normalized_models);
+
+    serde_json::from_value::<Vec<crate::provider::OpenClawModelEntry>>(normalized_value.clone())
+        .map_err(|err| {
+            AppError::InvalidInput(texts::openclaw_models_invalid_schema_error(
+                &err.to_string(),
+            ))
+        })?;
+
+    Ok(normalized_value)
+}
+
+fn remove_openclaw_model_legacy_aliases(model: Value) -> Value {
+    let Value::Object(mut model_obj) = model else {
+        return model;
+    };
+    model_obj.remove("context_window");
+    Value::Object(model_obj)
+}
+
+fn openclaw_models_required_error() -> AppError {
+    AppError::localized(
+        "provider.openclaw.models.missing",
+        "OpenClaw 模型列表必须是非空 JSON 数组",
+        "OpenClaw models must be a non-empty JSON array",
+    )
+}
+
+fn set_or_remove_trimmed(settings_obj: &mut Map<String, Value>, key: &str, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        settings_obj.remove(key);
+    } else {
+        settings_obj.insert(key.to_string(), json!(trimmed));
+    }
+}
+
+fn set_or_remove_u64(settings_obj: &mut Map<String, Value>, key: &str, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        settings_obj.remove(key);
+    } else if let Ok(value) = trimmed.parse::<u64>() {
+        settings_obj.insert(key.to_string(), json!(value));
+    } else {
+        settings_obj.remove(key);
+    }
+}
+
+fn set_or_remove_f64(settings_obj: &mut Map<String, Value>, key: &str, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        settings_obj.remove(key);
+    } else if let Ok(value) = trimmed.parse::<f64>() {
+        if value.is_finite() && value >= 0.0 {
+            settings_obj.insert(key.to_string(), json!(value));
+        } else {
+            settings_obj.remove(key);
+        }
+    } else {
+        settings_obj.remove(key);
+    }
 }
 
 /// 可选字段集合
@@ -296,6 +2985,76 @@ pub fn generate_provider_id(name: &str, existing_ids: &[String]) -> String {
     }
 }
 
+pub fn generate_provider_id_for_app(
+    app_type: &AppType,
+    name: &str,
+    existing_ids: &[String],
+) -> String {
+    if ProviderService::is_provider_key_app(app_type) {
+        ProviderService::generate_provider_key(name, existing_ids)
+    } else {
+        generate_provider_id(name, existing_ids)
+    }
+}
+
+pub fn prompt_provider_id_for_add(
+    app_type: &AppType,
+    name: &str,
+    existing_ids: &[String],
+) -> Result<String, AppError> {
+    if !ProviderService::is_provider_key_app(app_type) {
+        let generated_id = generate_provider_id_for_app(app_type, name, existing_ids);
+        return Ok(generated_id);
+    }
+
+    let generated_id = generate_provider_id_for_app(app_type, name, existing_ids);
+    let label = if matches!(app_type, AppType::Hermes) {
+        texts::tui_label_hermes_provider_key()
+    } else {
+        texts::id_label()
+    };
+    let input = Text::new(label)
+        .with_initial_value(&generated_id)
+        .with_help_message(if crate::cli::i18n::is_chinese() {
+            "留空则使用根据名称生成的 ID"
+        } else {
+            "Leave empty to use the generated ID from the provider name"
+        })
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    let id = if input.trim().is_empty() {
+        generated_id
+    } else {
+        input.trim().to_string()
+    };
+
+    validate_provider_id_for_add(app_type, &id, existing_ids)?;
+    Ok(id)
+}
+
+pub fn validate_provider_id_for_add(
+    app_type: &AppType,
+    id: &str,
+    existing_ids: &[String],
+) -> Result<(), AppError> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidInput(
+            texts::provider_id_empty_error().to_string(),
+        ));
+    }
+    ProviderService::validate_provider_key_for_add(app_type, trimmed)?;
+    if existing_ids.iter().any(|existing| existing == trimmed) {
+        return Err(AppError::localized(
+            "provider.id.exists",
+            format!("供应商 ID 已存在: {trimmed}"),
+            format!("Provider ID already exists: {trimmed}"),
+        ));
+    }
+    Ok(())
+}
+
 /// 收集基本字段：name, website_url
 pub fn prompt_basic_fields(
     current: Option<&Provider>,
@@ -353,13 +3112,14 @@ pub fn prompt_basic_fields(
 pub fn prompt_settings_config(
     app_type: &AppType,
     current: Option<&Value>,
+    current_meta: Option<&ProviderMeta>,
     codex_official: bool,
-) -> Result<Value, AppError> {
+) -> Result<SettingsConfigPromptResult, AppError> {
     match app_type {
-        AppType::Claude => prompt_claude_config(current),
+        AppType::Claude => prompt_claude_config(current, current_meta),
         AppType::Codex => {
             if codex_official {
-                return prompt_codex_official_config(current);
+                return prompt_codex_official_config(current).map(SettingsConfigPromptResult::new);
             }
 
             let has_auth = current
@@ -399,15 +3159,15 @@ pub fn prompt_settings_config(
                 .unwrap_or(false);
 
             if !has_auth && is_openai_official_endpoint {
-                prompt_codex_official_config(current)
+                prompt_codex_official_config(current).map(SettingsConfigPromptResult::new)
             } else {
-                prompt_codex_config(current)
+                prompt_codex_config(current).map(SettingsConfigPromptResult::new)
             }
         }
-        AppType::Gemini => prompt_gemini_config(current),
-        AppType::OpenCode => Ok(current.cloned().unwrap_or_else(|| json!({}))),
-        AppType::Hermes => Ok(current.cloned().unwrap_or_else(|| json!({}))),
-        AppType::OpenClaw => Ok(current.cloned().unwrap_or_else(|| json!({}))),
+        AppType::Gemini => prompt_gemini_config(current).map(SettingsConfigPromptResult::new),
+        AppType::OpenCode => prompt_opencode_config(current).map(SettingsConfigPromptResult::new),
+        AppType::Hermes => prompt_hermes_config(current).map(SettingsConfigPromptResult::new),
+        AppType::OpenClaw => prompt_openclaw_config(current).map(SettingsConfigPromptResult::new),
     }
 }
 
@@ -466,16 +3226,70 @@ fn prompt_model_field(
     }
 }
 
+fn claude_api_key_field_label(field: ClaudeApiKeyField) -> &'static str {
+    match field {
+        ClaudeApiKeyField::AuthToken => texts::claude_auth_field_auth_token(),
+        ClaudeApiKeyField::ApiKey => texts::claude_auth_field_api_key(),
+    }
+}
+
+fn prompt_claude_api_key_field(
+    current: Option<&Value>,
+    current_meta: Option<&ProviderMeta>,
+) -> Result<ClaudeApiKeyField, AppError> {
+    let current = current.unwrap_or(&Value::Null);
+    let effective = ClaudeApiKeyField::from_meta_and_settings(current_meta, current);
+    let fields = [ClaudeApiKeyField::AuthToken, ClaudeApiKeyField::ApiKey];
+    let choices = fields
+        .iter()
+        .map(|field| claude_api_key_field_label(*field).to_string())
+        .collect::<Vec<_>>();
+    let default_index = fields
+        .iter()
+        .position(|field| *field == effective)
+        .unwrap_or(0);
+
+    let selected = Select::new(texts::claude_auth_field_label(), choices.clone())
+        .with_starting_cursor(default_index)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    let selected_index = choices
+        .iter()
+        .position(|choice| choice == &selected)
+        .unwrap_or(default_index);
+    Ok(fields
+        .get(selected_index)
+        .copied()
+        .unwrap_or(ClaudeApiKeyField::AuthToken))
+}
+
+fn claude_api_key_from_settings(
+    current: Option<&Value>,
+    api_key_field: ClaudeApiKeyField,
+) -> Option<&str> {
+    let env = current
+        .and_then(|v| v.get("env"))
+        .and_then(|env| env.as_object())?;
+
+    env.get(api_key_field.as_env_key())
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            env.get(api_key_field.alternate_env_key())
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+        })
+}
+
 /// Claude 配置输入
-fn prompt_claude_config(current: Option<&Value>) -> Result<Value, AppError> {
+fn prompt_claude_config(
+    current: Option<&Value>,
+    current_meta: Option<&ProviderMeta>,
+) -> Result<SettingsConfigPromptResult, AppError> {
     println!("\n{}", texts::config_claude_header().bright_cyan().bold());
 
-    let api_key = if let Some(current_key) = current
-        .and_then(|v| v.get("env"))
-        .and_then(|e| e.get("ANTHROPIC_AUTH_TOKEN"))
-        .and_then(|k| k.as_str())
-        .filter(|s| !s.is_empty())
-    {
+    let api_key_field = prompt_claude_api_key_field(current, current_meta)?;
+    let api_key = if let Some(current_key) = claude_api_key_from_settings(current, api_key_field) {
         // 编辑模式：显示完整 API Key 供编辑
         Text::new(texts::api_key_label())
             .with_initial_value(current_key)
@@ -517,56 +3331,131 @@ fn prompt_claude_config(current: Option<&Value>) -> Result<Value, AppError> {
         .prompt()
         .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
 
-    let mut env = serde_json::Map::new();
-    env.insert("ANTHROPIC_AUTH_TOKEN".to_string(), json!(api_key.trim()));
-    env.insert("ANTHROPIC_BASE_URL".to_string(), json!(base_url.trim()));
-
+    let mut model_fields = Vec::new();
     if config_models {
-        // 使用新的辅助函数处理四个模型字段
-        let model = prompt_model_field(
-            texts::model_default_label(),
-            "ANTHROPIC_MODEL",
-            texts::model_sonnet_placeholder(),
-            current,
-        )?;
-
-        let haiku = prompt_model_field(
-            texts::model_haiku_label(),
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            texts::model_haiku_placeholder(),
-            current,
-        )?;
-
-        let sonnet = prompt_model_field(
-            texts::model_sonnet_label(),
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            texts::model_sonnet_placeholder(),
-            current,
-        )?;
-
-        let opus = prompt_model_field(
-            texts::model_opus_label(),
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            texts::model_opus_placeholder(),
-            current,
-        )?;
-
-        // 条件写入：只在值存在时写入配置
-        if let Some(value) = model {
-            env.insert("ANTHROPIC_MODEL".to_string(), json!(value));
-        }
-        if let Some(value) = haiku {
-            env.insert("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), json!(value));
-        }
-        if let Some(value) = sonnet {
-            env.insert("ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(), json!(value));
-        }
-        if let Some(value) = opus {
-            env.insert("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), json!(value));
+        for field in claude_model_prompt_fields() {
+            let value = prompt_model_field(field.label, field.env_key, field.placeholder, current)?;
+            model_fields.push((field.env_key, value));
         }
     }
 
-    Ok(json!({ "env": env }))
+    let hide_attribution = Confirm::new(texts::tui_label_claude_hide_attribution())
+        .with_default(claude_hide_attribution_enabled(current))
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    Ok(SettingsConfigPromptResult::claude(
+        build_claude_settings_config_from_prompt(
+            current,
+            api_key_field,
+            &api_key,
+            &base_url,
+            model_fields,
+            hide_attribution,
+        ),
+        api_key_field,
+    ))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClaudeModelPromptField {
+    label: &'static str,
+    env_key: &'static str,
+    placeholder: &'static str,
+}
+
+fn claude_model_prompt_fields() -> [ClaudeModelPromptField; 5] {
+    [
+        ClaudeModelPromptField {
+            label: texts::model_default_label(),
+            env_key: "ANTHROPIC_MODEL",
+            placeholder: texts::model_sonnet_placeholder(),
+        },
+        ClaudeModelPromptField {
+            label: texts::tui_claude_reasoning_model_label(),
+            env_key: "ANTHROPIC_REASONING_MODEL",
+            placeholder: texts::model_sonnet_placeholder(),
+        },
+        ClaudeModelPromptField {
+            label: texts::model_haiku_label(),
+            env_key: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            placeholder: texts::model_haiku_placeholder(),
+        },
+        ClaudeModelPromptField {
+            label: texts::model_sonnet_label(),
+            env_key: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            placeholder: texts::model_sonnet_placeholder(),
+        },
+        ClaudeModelPromptField {
+            label: texts::model_opus_label(),
+            env_key: "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            placeholder: texts::model_opus_placeholder(),
+        },
+    ]
+}
+
+fn claude_hide_attribution_enabled(settings_config: Option<&Value>) -> bool {
+    let Some(attribution) = settings_config
+        .and_then(|settings| settings.get("attribution"))
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+
+    attribution.get("commit").and_then(Value::as_str) == Some("")
+        && attribution.get("pr").and_then(Value::as_str) == Some("")
+}
+
+fn build_claude_settings_config_from_prompt<'a>(
+    current: Option<&Value>,
+    api_key_field: ClaudeApiKeyField,
+    api_key: &str,
+    base_url: &str,
+    model_fields: impl IntoIterator<Item = (&'a str, Option<String>)>,
+    hide_attribution: bool,
+) -> Value {
+    let mut settings = current
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_else(Map::new);
+    let env_value = settings
+        .entry("env".to_string())
+        .or_insert_with(|| json!({}));
+    if !env_value.is_object() {
+        *env_value = json!({});
+    }
+    let env = env_value
+        .as_object_mut()
+        .expect("Claude env settings must be an object");
+
+    set_or_remove_trimmed(env, api_key_field.as_env_key(), api_key);
+    env.remove(api_key_field.alternate_env_key());
+    set_or_remove_trimmed(env, "ANTHROPIC_BASE_URL", base_url);
+
+    for (key, value) in model_fields {
+        match value {
+            Some(value) => set_or_remove_trimmed(env, key, &value),
+            None => {
+                env.remove(key);
+            }
+        }
+    }
+
+    let hidden_attribution_already_enabled =
+        claude_hide_attribution_enabled(Some(&Value::Object(settings.clone())));
+    if hide_attribution && !hidden_attribution_already_enabled {
+        settings.insert(
+            "attribution".to_string(),
+            json!({
+                "commit": "",
+                "pr": ""
+            }),
+        );
+    } else if !hide_attribution && hidden_attribution_already_enabled {
+        settings.remove("attribution");
+    }
+
+    Value::Object(settings)
 }
 
 /// Codex 配置输入（第三方/自定义：需要 API Key）
@@ -664,11 +3553,11 @@ fn prompt_codex_config(current: Option<&Value>) -> Result<Value, AppError> {
             .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     };
 
-    Ok(build_codex_settings_config(
-        Some(api_key.trim()),
+    Ok(build_codex_settings_config_from_prompt(
+        current,
+        &api_key,
         &base_url,
         model.trim(),
-        "responses",
         "custom",
     ))
 }
@@ -707,10 +3596,7 @@ fn prompt_gemini_config(current: Option<&Value>) -> Result<Value, AppError> {
 
     if auth_type == google_oauth {
         println!("{}", texts::use_google_oauth_warning().yellow());
-        Ok(json!({
-            "env": {},
-            "config": {}
-        }))
+        Ok(build_gemini_oauth_settings_config(current))
     } else {
         // Generic API Key (统一处理所有 API Key 供应商，包括 PackyCode)
         let api_key = if let Some(current_key) = current
@@ -745,19 +3631,34 @@ fn prompt_gemini_config(current: Option<&Value>) -> Result<Value, AppError> {
                 .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
         } else {
             Text::new(texts::gemini_base_url_label())
-                .with_placeholder(texts::gemini_base_url_placeholder())
+                .with_initial_value(texts::gemini_base_url_placeholder())
                 .with_help_message(texts::gemini_base_url_help())
                 .prompt()
                 .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
         };
 
-        Ok(json!({
-            "env": {
-                "GEMINI_API_KEY": api_key.trim(),
-                "GOOGLE_GEMINI_BASE_URL": base_url.trim()
-            },
-            "config": {}
-        }))
+        let model = if let Some(current_model) = current
+            .and_then(|v| v.get("env"))
+            .and_then(|e| e.get("GEMINI_MODEL"))
+            .and_then(|u| u.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            Text::new(&format!("{}:", texts::model_label()))
+                .with_initial_value(current_model)
+                .with_help_message(texts::model_default_help())
+                .prompt()
+                .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+        } else {
+            Text::new(&format!("{}:", texts::model_label()))
+                .with_placeholder("gemini-3-pro-preview")
+                .with_help_message(texts::model_default_help())
+                .prompt()
+                .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+        };
+
+        Ok(build_gemini_api_key_settings_config(
+            current, &api_key, &base_url, &model,
+        ))
     }
 }
 
@@ -853,13 +3754,56 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
     println!("\n{}", texts::core_config_label().bright_cyan());
     match app_type {
         AppType::Claude => {
+            let is_official = provider
+                .category
+                .as_deref()
+                .is_some_and(|category| category.eq_ignore_ascii_case("official"));
+            let is_codex_oauth = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref())
+                == Some("codex_oauth");
+            if !is_official && !is_codex_oauth {
+                let api_format = crate::proxy::providers::get_claude_api_format(provider);
+                println!(
+                    "  {}: {}",
+                    texts::tui_label_claude_api_format(),
+                    texts::tui_claude_api_format_value(api_format)
+                );
+            }
+            if is_codex_oauth {
+                let account_id = provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
+                    .unwrap_or_else(|| texts::tui_managed_accounts_follow_default().to_string());
+                println!("  {}: {}", texts::tui_label_chatgpt_account(), account_id);
+                println!(
+                    "  {}: {}",
+                    texts::tui_label_codex_fast_mode(),
+                    provider.codex_fast_mode_enabled()
+                );
+            }
             if let Some(env) = provider.settings_config.get("env") {
-                if let Some(api_key) = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) {
-                    println!(
-                        "  {}: {}",
-                        texts::api_key_display_label(),
-                        mask_api_key(api_key)
+                if !is_codex_oauth {
+                    let api_key_field = ClaudeApiKeyField::from_meta_and_settings(
+                        provider.meta.as_ref(),
+                        &provider.settings_config,
                     );
+                    if let Some(api_key) = env
+                        .get(api_key_field.as_env_key())
+                        .and_then(|v| v.as_str())
+                        .or_else(|| {
+                            env.get(api_key_field.alternate_env_key())
+                                .and_then(|v| v.as_str())
+                        })
+                    {
+                        println!(
+                            "  {}: {}",
+                            texts::api_key_display_label(),
+                            mask_api_key(api_key)
+                        );
+                    }
                 }
                 if let Some(base_url) = env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) {
                     println!("  {}: {}", texts::base_url_display_label(), base_url);

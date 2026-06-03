@@ -1,4 +1,5 @@
 use super::*;
+use crate::ProviderService;
 use url::Url;
 
 impl App {
@@ -71,12 +72,15 @@ impl App {
                 } else {
                     texts::tui_toast_provider_add_missing_fields()
                 })
-            } else if matches!(provider.app_type, crate::app_config::AppType::Hermes)
+            } else if ProviderService::is_provider_key_app(&provider.app_type)
                 && provider.id.is_blank()
             {
                 Some(texts::tui_toast_provider_add_missing_fields())
-            } else if matches!(provider.app_type, crate::app_config::AppType::Hermes)
-                && !is_valid_hermes_provider_key(provider.id.value.trim())
+            } else if ProviderService::validate_provider_key_for_add(
+                &provider.app_type,
+                provider.id.value.as_str(),
+            )
+            .is_err()
             {
                 Some(texts::tui_hermes_provider_key_invalid())
             } else if matches!(provider.app_type, crate::app_config::AppType::Hermes)
@@ -902,12 +906,13 @@ impl App {
         }
         if changed && selected == ProviderAddField::Name && !provider.id_is_manual {
             let existing_ids = data.existing_provider_ids();
-            provider
-                .id
-                .set(crate::cli::commands::provider_input::generate_provider_id(
+            provider.id.set(
+                crate::cli::commands::provider_input::generate_provider_id_for_app(
+                    &provider.app_type,
                     provider.name.value.trim(),
                     &existing_ids,
-                ));
+                ),
+            );
         }
         if changed && usage_query_provider_credential_field(selected) {
             provider.refresh_usage_query_custom_variable_comment();
@@ -932,9 +937,10 @@ fn usage_query_provider_credential_field(field: ProviderAddField) -> bool {
     )
 }
 
-fn sanitize_hermes_provider_key_char(ch: char) -> Option<char> {
-    let ch = ch.to_ascii_lowercase();
-    (ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-').then_some(ch)
+fn sanitize_provider_key_char(ch: char) -> Option<char> {
+    ProviderService::sanitize_provider_key_text(&ch.to_string())
+        .chars()
+        .next()
 }
 
 fn sanitize_number_char(ch: char) -> Option<char> {
@@ -946,31 +952,12 @@ fn provider_field_sanitize_fn(
     selected: ProviderAddField,
 ) -> Option<fn(char) -> Option<char>> {
     match (app_type, selected) {
-        (&AppType::Hermes, ProviderAddField::Id) => Some(sanitize_hermes_provider_key_char),
+        (&AppType::Hermes | &AppType::OpenClaw, ProviderAddField::Id) => {
+            Some(sanitize_provider_key_char)
+        }
         (&AppType::Hermes, ProviderAddField::HermesRateLimitDelay) => Some(sanitize_number_char),
         _ => None,
     }
-}
-
-fn is_valid_hermes_provider_key(value: &str) -> bool {
-    let mut previous_dash = false;
-    let mut saw_char = false;
-    for ch in value.chars() {
-        let valid = ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-';
-        if !valid {
-            return false;
-        }
-        if ch == '-' {
-            if !saw_char || previous_dash {
-                return false;
-            }
-            previous_dash = true;
-        } else {
-            saw_char = true;
-            previous_dash = false;
-        }
-    }
-    saw_char && !previous_dash
 }
 
 fn is_valid_hermes_rate_limit_delay(value: &str) -> bool {

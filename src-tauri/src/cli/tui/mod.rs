@@ -25,7 +25,7 @@ use app::{Action, App, ToastKind};
 use runtime_actions::handle_action;
 #[cfg(test)]
 use runtime_actions::{
-    import_mcp_for_current_app_with, open_proxy_help_overlay_with, queue_managed_proxy_action,
+    import_mcp_from_supported_apps_with, open_proxy_help_overlay_with, queue_managed_proxy_action,
     run_external_editor_for_current_editor,
 };
 #[cfg(test)]

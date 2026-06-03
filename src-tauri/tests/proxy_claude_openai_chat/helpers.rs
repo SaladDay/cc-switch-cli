@@ -29,6 +29,11 @@ pub(crate) async fn bind_test_listener() -> tokio::net::TcpListener {
     );
 }
 
+pub(crate) async fn set_claude_proxy_port_to_ephemeral(db: &Arc<Database>) {
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct UpstreamState {
     pub(crate) request_body: Arc<Mutex<Option<Value>>>,
@@ -312,15 +317,15 @@ pub(crate) async fn capture_openai_chat_upstream_body(
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(

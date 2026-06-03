@@ -1,5 +1,6 @@
 use std::fs::{self, File, OpenOptions};
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use tokio::sync::{Mutex, MutexGuard};
@@ -28,6 +29,30 @@ impl Drop for RestoreMutationGuard {
     }
 }
 
+fn open_lock_file(lock_path: &Path) -> io::Result<File> {
+    match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+    {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if let Some(parent) = lock_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(lock_path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) async fn acquire_restore_mutation_guard() -> Result<RestoreMutationGuard, String> {
     let lock_path = RestoreMutationGuard::lock_path();
     if let Some(parent) = lock_path.parent() {
@@ -38,24 +63,14 @@ pub(crate) async fn acquire_restore_mutation_guard() -> Result<RestoreMutationGu
     if std::env::var_os(RESTORE_GUARD_BYPASS_ENV_KEY).is_some() {
         return Ok(RestoreMutationGuard {
             _process_guard: process_mutex().lock().await,
-            _file: OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&lock_path)
+            _file: open_lock_file(&lock_path)
                 .map_err(|error| format!("open bypass state coordination lock failed: {error}"))?,
         });
     }
 
     let process_guard = process_mutex().lock().await;
 
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
+    let file = open_lock_file(&lock_path)
         .map_err(|error| format!("open state coordination lock failed: {error}"))?;
     file.lock()
         .map_err(|error| format!("lock state coordination file failed: {error}"))?;

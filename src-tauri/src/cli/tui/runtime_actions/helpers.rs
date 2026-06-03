@@ -15,36 +15,32 @@ use super::super::data::{load_proxy_config, load_state, UiData};
 use super::super::form::{FormFocus, FormState};
 use super::super::runtime_systems::{ProxyReq, RequestTracker};
 
-pub(crate) fn import_mcp_for_current_app_with<FImport, FLoad>(
+pub(crate) fn import_mcp_from_supported_apps_with<FImport, FLoad>(
     app: &mut App,
     data: &mut UiData,
     import: FImport,
     load_data: FLoad,
 ) -> Result<(), AppError>
 where
-    FImport: FnOnce(&AppType) -> Result<usize, AppError>,
+    FImport: FnOnce() -> Result<usize, AppError>,
     FLoad: FnOnce(&AppType) -> Result<UiData, AppError>,
 {
-    let count = import(&app.app_type)?;
+    let count = import()?;
     app.push_toast(texts::tui_toast_mcp_imported(count), ToastKind::Info);
     *data = load_data(&app.app_type)?;
     Ok(())
 }
 
-pub(crate) fn import_mcp_for_current_app(app: &mut App, data: &mut UiData) -> Result<(), AppError> {
-    import_mcp_for_current_app_with(
+pub(crate) fn import_mcp_from_supported_apps(
+    app: &mut App,
+    data: &mut UiData,
+) -> Result<(), AppError> {
+    import_mcp_from_supported_apps_with(
         app,
         data,
-        |app_type| {
+        || {
             let state = load_state()?;
-            match app_type {
-                AppType::Claude => McpService::import_from_claude(&state),
-                AppType::Codex => McpService::import_from_codex(&state),
-                AppType::Gemini => McpService::import_from_gemini(&state),
-                AppType::OpenCode => McpService::import_from_opencode(&state),
-                AppType::Hermes => McpService::import_from_hermes(&state),
-                AppType::OpenClaw => Ok(0),
-            }
+            McpService::import_from_supported_apps(&state)
         },
         UiData::load,
     )

@@ -1081,13 +1081,16 @@ impl App {
                     return Some(Action::None);
                 }
 
-                let directories = skills
+                let imports = skills
                     .iter()
                     .filter(|skill| selected.contains(&skill.directory))
-                    .map(|skill| skill.directory.clone())
+                    .map(|skill| crate::services::skill::ImportSkillSelection {
+                        directory: skill.directory.clone(),
+                        apps: crate::app_config::SkillApps::from_labels(&skill.found_in),
+                    })
                     .collect();
                 self.overlay = Overlay::None;
-                Action::SkillsImportFromApps { directories }
+                Action::SkillsImportFromApps { imports }
             }
             _ => Action::None,
         })

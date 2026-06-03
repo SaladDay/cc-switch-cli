@@ -188,25 +188,7 @@ impl Database {
             data_source TEXT NOT NULL DEFAULT 'proxy'
         )", []).map_err(|e| AppError::Database(e.to_string()))?;
 
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_provider ON proxy_request_logs(provider_id, app_type)", [])
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON proxy_request_logs(created_at)", [])
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_request_logs_model ON proxy_request_logs(model)",
-            [],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_request_logs_session ON proxy_request_logs(session_id)",
-            [],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_request_logs_status ON proxy_request_logs(status_code)",
-            [],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
+        Self::create_request_logs_indexes_if_supported(conn)?;
 
         // 11. Model Pricing 表
         conn.execute(
@@ -427,6 +409,8 @@ impl Database {
                 }
                 version = Self::get_user_version(conn)?;
             }
+            Self::repair_proxy_request_logs_columns(conn)?;
+            Self::create_request_logs_indexes_if_supported(conn)?;
             Self::normalize_auto_failover_requires_takeover(conn)?;
             Ok(())
         })();
@@ -2012,6 +1996,96 @@ impl Database {
         conn.execute(&sql, [])
             .map_err(|e| AppError::Database(format!("为表 {table} 添加列 {column} 失败: {e}")))?;
         log::info!("已为表 {table} 添加缺失列 {column}");
+        Ok(true)
+    }
+
+    fn repair_proxy_request_logs_columns(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "proxy_request_logs")? {
+            return Ok(());
+        }
+
+        for (column, definition) in [
+            ("provider_id", "TEXT NOT NULL DEFAULT ''"),
+            ("app_type", "TEXT NOT NULL DEFAULT 'claude'"),
+            ("model", "TEXT NOT NULL DEFAULT ''"),
+            ("request_model", "TEXT"),
+            ("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("cache_read_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("cache_creation_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("input_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
+            ("output_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
+            ("cache_read_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
+            ("cache_creation_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
+            ("total_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
+            ("latency_ms", "INTEGER NOT NULL DEFAULT 0"),
+            ("first_token_ms", "INTEGER"),
+            ("duration_ms", "INTEGER"),
+            ("status_code", "INTEGER NOT NULL DEFAULT 0"),
+            ("error_message", "TEXT"),
+            ("session_id", "TEXT"),
+            ("provider_type", "TEXT"),
+            ("is_streaming", "INTEGER NOT NULL DEFAULT 0"),
+            ("cost_multiplier", "TEXT NOT NULL DEFAULT '1.0'"),
+            ("created_at", "INTEGER NOT NULL DEFAULT 0"),
+            ("data_source", "TEXT NOT NULL DEFAULT 'proxy'"),
+        ] {
+            Self::add_column_if_missing(conn, "proxy_request_logs", column, definition)?;
+        }
+
+        Ok(())
+    }
+
+    fn create_request_logs_indexes_if_supported(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "proxy_request_logs")? {
+            return Ok(());
+        }
+
+        if Self::has_columns(conn, "proxy_request_logs", &["provider_id", "app_type"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_provider ON proxy_request_logs(provider_id, app_type)",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        if Self::has_columns(conn, "proxy_request_logs", &["created_at"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON proxy_request_logs(created_at)",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        if Self::has_columns(conn, "proxy_request_logs", &["model"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_model ON proxy_request_logs(model)",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        if Self::has_columns(conn, "proxy_request_logs", &["session_id"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_session ON proxy_request_logs(session_id)",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        if Self::has_columns(conn, "proxy_request_logs", &["status_code"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_status ON proxy_request_logs(status_code)",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    fn has_columns(conn: &Connection, table: &str, columns: &[&str]) -> Result<bool, AppError> {
+        for column in columns {
+            if !Self::has_column(conn, table, column)? {
+                return Ok(false);
+            }
+        }
         Ok(true)
     }
 }

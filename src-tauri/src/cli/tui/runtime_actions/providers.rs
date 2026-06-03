@@ -1,11 +1,11 @@
 use crate::cli::i18n::texts;
 use crate::cli::tui::form::ClaudeApiFormat;
 use crate::error::AppError;
+#[cfg(test)]
 use crate::openclaw_config::OpenClawDefaultModel;
 use crate::proxy::providers::get_claude_api_format;
 use crate::services::provider::ProviderSortUpdate;
 use crate::services::ProviderService;
-use serde_json::Value;
 
 use super::super::app::{ConfirmAction, ConfirmOverlay, Overlay, ToastKind};
 use super::super::data::{load_state, UiData};
@@ -70,18 +70,7 @@ pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
 
 pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
     let state = load_state()?;
-    let imported = match ctx.app.app_type {
-        crate::app_config::AppType::OpenCode => {
-            ProviderService::import_opencode_providers_from_live(&state)? > 0
-        }
-        crate::app_config::AppType::OpenClaw => {
-            ProviderService::import_openclaw_providers_from_live(&state)? > 0
-        }
-        crate::app_config::AppType::Hermes => {
-            ProviderService::import_hermes_providers_from_live(&state)? > 0
-        }
-        _ => ProviderService::import_default_config(&state, ctx.app.app_type.clone())?,
-    };
+    let imported = ProviderService::import_live_config(&state, ctx.app.app_type.clone())? > 0;
 
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app.pending_overlay = None;
@@ -312,13 +301,6 @@ pub(super) fn remove_from_config(
 ) -> Result<(), AppError> {
     match ctx.app.app_type {
         crate::app_config::AppType::OpenClaw => {
-            if openclaw_default_model_references_provider(&id)? {
-                return Err(AppError::localized(
-                    "provider.remove_from_config.openclaw_default",
-                    "不能从配置中移除被当前默认模型引用的 OpenClaw 供应商",
-                    "Cannot remove the OpenClaw provider referenced by the current default model from config",
-                ));
-            }
             let state = load_state()?;
             ProviderService::remove_from_live_config(&state, ctx.app.app_type.clone(), &id)?;
             ctx.app.push_toast(
@@ -345,91 +327,19 @@ pub(super) fn remove_from_config(
 pub(super) fn set_default_model(
     ctx: &mut RuntimeActionContext<'_>,
     provider_id: String,
-    model_id: String,
+    _model_id: String,
 ) -> Result<(), AppError> {
-    if matches!(ctx.app.app_type, crate::app_config::AppType::Hermes) {
-        let state = load_state()?;
-        ProviderService::switch(&state, crate::app_config::AppType::Hermes, &provider_id)?;
-        ctx.app.push_toast(
-            texts::tui_toast_provider_enabled(&provider_id),
-            ToastKind::Success,
-        );
-        *ctx.data = UiData::load(&ctx.app.app_type)?;
-        return Ok(());
-    }
-
-    if !matches!(ctx.app.app_type, crate::app_config::AppType::OpenClaw) {
-        return Ok(());
-    }
-
-    let live_provider = openclaw_live_provider_value(&provider_id)?;
-    let ordered_model_ids = openclaw_provider_model_ids(&live_provider);
-    if ordered_model_ids.is_empty() {
-        return Err(AppError::localized(
-            "provider.set_default_model.openclaw_no_models",
-            "该 OpenClaw 供应商在当前配置中没有可用模型",
-            "This OpenClaw provider has no models in the current config",
-        ));
-    }
-
-    // OpenClaw default-setting follows the live provider order from openclaw.json,
-    // so stale TUI snapshots cannot override the current primary model.
-    let model_id = ordered_model_ids.first().cloned().unwrap_or(model_id);
-
-    let primary = format!("{provider_id}/{model_id}");
-    let fallbacks = ordered_model_ids
-        .iter()
-        .filter(|candidate| *candidate != &model_id)
-        .map(|candidate| format!("{provider_id}/{candidate}"))
-        .collect();
-    let model = OpenClawDefaultModel {
-        primary: primary.clone(),
-        fallbacks,
-        extra: crate::openclaw_config::get_default_model()?
-            .map(|existing| existing.extra)
-            .unwrap_or_default(),
+    let state = load_state()?;
+    let default =
+        ProviderService::set_default_model(&state, ctx.app.app_type.clone(), &provider_id, None)?;
+    let message = if matches!(ctx.app.app_type, crate::app_config::AppType::Hermes) {
+        texts::tui_toast_provider_enabled(&provider_id)
+    } else {
+        texts::tui_toast_provider_set_as_default(&default)
     };
-    crate::openclaw_config::set_default_model(&model)?;
-    ctx.app.push_toast(
-        texts::tui_toast_provider_set_as_default(&primary),
-        ToastKind::Success,
-    );
+    ctx.app.push_toast(message, ToastKind::Success);
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     Ok(())
-}
-
-fn openclaw_default_model_references_provider(provider_id: &str) -> Result<bool, AppError> {
-    Ok(
-        crate::openclaw_config::get_default_model()?.is_some_and(|model| {
-            model
-                .primary
-                .split_once('/')
-                .is_some_and(|(default_provider_id, _)| default_provider_id == provider_id)
-        }),
-    )
-}
-
-fn openclaw_live_provider_value(provider_id: &str) -> Result<Value, AppError> {
-    crate::openclaw_config::get_providers()?
-        .remove(provider_id)
-        .ok_or_else(|| {
-            AppError::localized(
-                "provider.set_default_model.openclaw_provider_missing",
-                format!("请先将该 OpenClaw 供应商加入当前配置: {provider_id}"),
-                format!("Add this OpenClaw provider to the current config first: {provider_id}"),
-            )
-        })
-}
-
-fn openclaw_provider_model_ids(provider_value: &Value) -> Vec<String> {
-    provider_value
-        .get("models")
-        .and_then(|value| value.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|model| model.get("id").and_then(|value| value.as_str()))
-        .map(str::to_string)
-        .collect()
 }
 
 pub(super) fn speedtest(ctx: &mut RuntimeActionContext<'_>, url: String) -> Result<(), AppError> {
@@ -1468,7 +1378,8 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
-    fn hermes_switch_adds_and_enables_provider_then_remove_keeps_it_visible_for_re_add() {
+    fn hermes_remove_from_config_rejects_current_provider_and_keeps_non_current_visible_for_re_add()
+    {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
         let hermes_dir = temp_home.path().join(".hermes");
@@ -1493,6 +1404,19 @@ mod tests {
                     "base_url": "https://hermes.example.com/v1",
                     "api_key": "sk-demo",
                     "models": [{"id": "main", "name": "Main"}]
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Hermes Secondary".to_string(),
+                json!({
+                    "base_url": "https://secondary.example.com/v1",
+                    "api_key": "sk-secondary",
+                    "models": [{"id": "secondary", "name": "Secondary"}]
                 }),
                 None,
             ),
@@ -1549,17 +1473,40 @@ mod tests {
             .iter()
             .any(|row| row.id == "p1" && row.is_in_config && row.is_current));
 
-        remove_from_config(&mut ctx, "p1".to_string()).expect("remove hermes provider from config");
+        let err = remove_from_config(&mut ctx, "p1".to_string())
+            .expect_err("current Hermes provider should not be removable from live config");
+        assert!(matches!(
+            err,
+            AppError::Localized {
+                key: "provider.remove_from_config.hermes_current",
+                ..
+            }
+        ));
+        assert!(crate::hermes_config::get_providers()
+            .expect("read hermes providers after failed remove")
+            .contains_key("p1"));
+
+        crate::hermes_config::set_provider(
+            "p2",
+            json!({
+                "base_url": "https://secondary.example.com/v1",
+                "api_key": "sk-secondary",
+                "models": [{"id": "secondary", "name": "Secondary"}]
+            }),
+        )
+        .expect("add secondary hermes provider to live config");
+        remove_from_config(&mut ctx, "p2".to_string())
+            .expect("remove non-current hermes provider from config");
 
         assert!(!crate::hermes_config::get_providers()
             .expect("read hermes providers after remove")
-            .contains_key("p1"));
+            .contains_key("p2"));
         let removed_row = ctx
             .data
             .providers
             .rows
             .iter()
-            .find(|row| row.id == "p1")
+            .find(|row| row.id == "p2")
             .expect("removed provider should remain visible");
         assert!(!removed_row.is_in_config);
         assert!(removed_row.is_saved);

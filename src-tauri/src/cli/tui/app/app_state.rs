@@ -66,7 +66,7 @@ pub enum Action {
     #[allow(dead_code)]
     SkillsScanUnmanaged,
     SkillsImportFromApps {
-        directories: Vec<String>,
+        imports: Vec<crate::services::skill::ImportSkillSelection>,
     },
 
     ProviderSwitch {

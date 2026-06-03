@@ -1,10 +1,13 @@
 use clap::Subcommand;
 use std::future::Future;
 
-use crate::app_config::AppType;
+use crate::app_config::{AppType, SkillApps};
+use crate::cli::commands::app_targets::{
+    app_target_names, app_targets_or_default, parse_app_targets, supported_app_target_labels,
+};
 use crate::cli::ui::{create_table, highlight, info, success};
 use crate::error::AppError;
-use crate::services::skill::{SkillRepo, SyncMethod};
+use crate::services::skill::{ImportSkillSelection, SkillRepo, SyncMethod};
 use crate::services::SkillService;
 
 #[derive(Subcommand)]
@@ -31,11 +34,31 @@ pub enum SkillsCommand {
     Enable {
         /// Skill directory or id
         spec: String,
+        /// Target apps. Accepts repeated values or comma-separated backend ids.
+        #[arg(long, value_name = "APP[,APP]", value_delimiter = ',', num_args = 1)]
+        apps: Vec<String>,
     },
     /// Disable a skill for the selected app
     Disable {
         /// Skill directory or id
         spec: String,
+        /// Target apps. Accepts repeated values or comma-separated backend ids.
+        #[arg(long, value_name = "APP[,APP]", value_delimiter = ',', num_args = 1)]
+        apps: Vec<String>,
+    },
+    /// Replace the app matrix for a skill
+    SetApps {
+        /// Skill directory or id
+        spec: String,
+        /// Complete enabled app list for this skill
+        #[arg(
+            long,
+            value_name = "APP[,APP]",
+            required = true,
+            value_delimiter = ',',
+            num_args = 1
+        )]
+        apps: Vec<String>,
     },
     /// Sync enabled skills to app skills dirs
     Sync,
@@ -43,6 +66,9 @@ pub enum SkillsCommand {
     ScanUnmanaged,
     /// Import unmanaged skills from app skills dirs into SSOT
     ImportFromApps {
+        /// Enabled apps for every imported skill. Defaults to the apps where each skill was found.
+        #[arg(long, value_name = "APP[,APP]", value_delimiter = ',', num_args = 1)]
+        apps: Vec<String>,
         /// One or more skill directories to import
         directories: Vec<String>,
     },
@@ -96,11 +122,12 @@ pub fn execute(cmd: SkillsCommand, app: Option<AppType>) -> Result<(), AppError>
         SkillsCommand::Discover { query } => discover_skills(query.as_deref()),
         SkillsCommand::Install { spec } => install_skill(&app_type, &spec),
         SkillsCommand::Uninstall { spec } => uninstall_skill(&spec),
-        SkillsCommand::Enable { spec } => toggle_skill(&app_type, &spec, true),
-        SkillsCommand::Disable { spec } => toggle_skill(&app_type, &spec, false),
+        SkillsCommand::Enable { spec, apps } => toggle_skill(&app_type, &spec, &apps, true),
+        SkillsCommand::Disable { spec, apps } => toggle_skill(&app_type, &spec, &apps, false),
+        SkillsCommand::SetApps { spec, apps } => set_skill_apps(&spec, &apps),
         SkillsCommand::Sync => sync_skills(app.as_ref()),
         SkillsCommand::ScanUnmanaged => scan_unmanaged(),
-        SkillsCommand::ImportFromApps { directories } => import_from_apps(directories),
+        SkillsCommand::ImportFromApps { apps, directories } => import_from_apps(apps, directories),
         SkillsCommand::Info { spec } => show_skill_info(&spec),
         SkillsCommand::SyncMethod { method } => sync_method(method),
         SkillsCommand::Repos(repos_cmd) => execute_repos(repos_cmd),
@@ -179,6 +206,7 @@ fn discover_skills(query: Option<&str>) -> Result<(), AppError> {
 }
 
 fn install_skill(app_type: &AppType, spec: &str) -> Result<(), AppError> {
+    ensure_supported_skills_app(app_type, "install")?;
     let service = SkillService::new()?;
     let installed = run_async(service.install(spec, app_type))?;
     println!(
@@ -198,23 +226,49 @@ fn uninstall_skill(spec: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn toggle_skill(app_type: &AppType, spec: &str, enabled: bool) -> Result<(), AppError> {
-    SkillService::toggle_app(spec, app_type, enabled)?;
+fn toggle_skill(
+    app_type: &AppType,
+    spec: &str,
+    raw_apps: &[String],
+    enabled: bool,
+) -> Result<(), AppError> {
+    let apps = app_targets_or_default(raw_apps, app_type.clone(), "Skills")?;
+    for app in &apps {
+        SkillService::toggle_app(spec, app, enabled)?;
+    }
     println!(
         "{}",
         success(&format!(
             "✓ {} '{}' for {}",
             if enabled { "Enabled" } else { "Disabled" },
             spec,
-            app_type.as_str()
+            app_target_names(&apps)
         ))
     );
     Ok(())
 }
 
 fn sync_skills(app: Option<&AppType>) -> Result<(), AppError> {
+    if let Some(app) = app {
+        ensure_supported_skills_app(app, "sync")?;
+    }
     SkillService::sync_all_enabled(app)?;
     println!("{}", success("✓ Skills synced successfully"));
+    Ok(())
+}
+
+fn set_skill_apps(spec: &str, raw_apps: &[String]) -> Result<(), AppError> {
+    let targets = parse_app_targets(raw_apps, "Skills")?;
+    let apps = skill_apps_from_targets(&targets);
+    SkillService::set_apps(spec, apps)?;
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Set skill '{}' apps to {}",
+            spec,
+            app_target_names(&targets)
+        ))
+    );
     Ok(())
 }
 
@@ -234,18 +288,49 @@ fn scan_unmanaged() -> Result<(), AppError> {
     Ok(())
 }
 
-fn import_from_apps(directories: Vec<String>) -> Result<(), AppError> {
+fn import_from_apps(raw_apps: Vec<String>, directories: Vec<String>) -> Result<(), AppError> {
     if directories.is_empty() {
         return Err(AppError::InvalidInput(
             "Please provide at least one directory".to_string(),
         ));
     }
 
-    let imported = SkillService::import_from_apps(directories)?;
+    let imported = if raw_apps.is_empty() {
+        SkillService::import_from_app_dirs(directories)?
+    } else {
+        let targets = parse_app_targets(&raw_apps, "Skills")?;
+        let apps = skill_apps_from_targets(&targets);
+        let imports = directories
+            .into_iter()
+            .map(|directory| ImportSkillSelection {
+                directory,
+                apps: apps.clone(),
+            })
+            .collect();
+        SkillService::import_from_apps(imports)?
+    };
     println!(
         "{}",
         success(&format!("✓ Imported {} skill(s) into SSOT", imported.len()))
     );
+    Ok(())
+}
+
+fn skill_apps_from_targets(targets: &[AppType]) -> SkillApps {
+    let mut apps = SkillApps::default();
+    for app in targets {
+        apps.set_enabled_for(app, true);
+    }
+    apps
+}
+
+fn ensure_supported_skills_app(app: &AppType, action: &str) -> Result<(), AppError> {
+    if matches!(app, AppType::OpenClaw) {
+        return Err(AppError::InvalidInput(format!(
+            "Skills {action} does not support openclaw yet. Supported apps: {}",
+            supported_app_target_labels()
+        )));
+    }
     Ok(())
 }
 

@@ -471,7 +471,21 @@ mod tests {
             "candidate".to_string(),
             temp_dir.path(),
             ensure_temp_launch_supported,
-            prepare_claude_launch,
+            |id, temp_dir| {
+                let state = load_state()?;
+                let provider = ProviderService::get_provider(&state, AppType::Claude, id)?;
+                let settings = ProviderService::build_effective_live_snapshot_from_state(
+                    &state,
+                    AppType::Claude,
+                    &provider,
+                )?;
+                crate::cli::claude_temp_launch::prepare_launch_from_settings_with(
+                    &provider.id,
+                    &settings,
+                    temp_dir,
+                    || Ok(PathBuf::from("/usr/bin/claude")),
+                )
+            },
             |_, prepared| {
                 let written: Value = serde_json::from_str(
                     &std::fs::read_to_string(&prepared.settings_path).expect("read temp settings"),

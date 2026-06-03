@@ -14,7 +14,7 @@ use axum::{
     Router,
 };
 use cc_switch_lib::{
-    set_webdav_sync_settings, AppState as CcAppState, Provider, WebDavSyncService,
+    set_webdav_sync_settings, AppState as CcAppState, Database, Provider, WebDavSyncService,
     WebDavSyncSettings, WebDavSyncStatus,
 };
 use sha2::{Digest, Sha256};
@@ -25,6 +25,26 @@ mod support;
 use support::{ensure_test_home, lock_test_mutex, reset_test_fs};
 
 const DAV_ROOT: &str = "/dav";
+
+async fn set_app_proxy_port(db: &Database, app_type: &str, port: u16) {
+    db.set_app_proxy_preferred_port(app_type, port)
+        .unwrap_or_else(|_| panic!("persist {app_type} app proxy port"));
+}
+
+async fn set_claude_proxy_free_port(state: &CcAppState) {
+    let mut config = state
+        .proxy_service
+        .get_config()
+        .await
+        .expect("load proxy config");
+    config.listen_port = 0;
+    state
+        .db
+        .update_proxy_config(config)
+        .await
+        .expect("persist proxy config");
+    set_app_proxy_port(&state.db, "claude", 0).await;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ServerConfig {
@@ -281,11 +301,6 @@ fn sample_settings(base_url: &str) -> WebDavSyncSettings {
     }
 }
 
-fn find_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind free local port");
-    listener.local_addr().expect("read free local port").port()
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -496,17 +511,7 @@ fn webdav_download_rejects_when_proxy_running() {
         .build()
         .expect("build test runtime");
     runtime.block_on(async {
-        let mut config = state
-            .proxy_service
-            .get_config()
-            .await
-            .expect("read proxy config");
-        config.listen_port = find_free_port();
-        state
-            .proxy_service
-            .update_config(&config)
-            .await
-            .expect("update proxy config");
+        set_claude_proxy_free_port(&state).await;
         state
             .proxy_service
             .start()
@@ -588,17 +593,7 @@ fn webdav_migrate_v1_to_v2_rejects_when_takeover_is_active() {
     server.seed_file("/dav/sync-root/v1/default-profile/skills.zip", skills_zip);
 
     runtime.block_on(async {
-        let mut config = state
-            .proxy_service
-            .get_config()
-            .await
-            .expect("read proxy config");
-        config.listen_port = find_free_port();
-        state
-            .proxy_service
-            .update_config(&config)
-            .await
-            .expect("update proxy config");
+        set_claude_proxy_free_port(&state).await;
 
         state
             .proxy_service
@@ -662,17 +657,7 @@ fn webdav_download_rejects_when_takeover_artifacts_exist_even_if_enabled_flag_is
         .build()
         .expect("build test runtime");
     runtime.block_on(async {
-        let mut config = state
-            .proxy_service
-            .get_config()
-            .await
-            .expect("read proxy config");
-        config.listen_port = find_free_port();
-        state
-            .proxy_service
-            .update_config(&config)
-            .await
-            .expect("update proxy config");
+        set_claude_proxy_free_port(&state).await;
 
         state
             .proxy_service

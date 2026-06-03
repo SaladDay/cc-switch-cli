@@ -1,4 +1,4 @@
-use crate::proxy::error::ProxyError;
+use crate::proxy::{error::ProxyError, json_canonical::canonical_json_string};
 use serde_json::{json, Value};
 use std::borrow::Cow;
 
@@ -197,7 +197,7 @@ pub fn anthropic_to_openai_with_reasoning_content(
     }
 
     if let Some(v) = body.get("tool_choice") {
-        result["tool_choice"] = v.clone();
+        result["tool_choice"] = map_tool_choice_to_chat(v);
     }
 
     if let Some(key) = cache_key {
@@ -205,6 +205,33 @@ pub fn anthropic_to_openai_with_reasoning_content(
     }
 
     Ok(result)
+}
+
+/// Translate Anthropic tool_choice into OpenAI Chat Completions format.
+fn map_tool_choice_to_chat(tool_choice: &Value) -> Value {
+    match tool_choice {
+        Value::String(value) => match value.as_str() {
+            "any" => json!("required"),
+            _ => json!(value),
+        },
+        Value::Object(obj) => match obj.get("type").and_then(|value| value.as_str()) {
+            Some("any") => json!("required"),
+            Some("auto") => json!("auto"),
+            Some("none") => json!("none"),
+            Some("tool") => {
+                let name = obj
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                json!({
+                    "type": "function",
+                    "function": { "name": name }
+                })
+            }
+            _ => tool_choice.clone(),
+        },
+        _ => tool_choice.clone(),
+    }
 }
 
 fn normalize_openai_system_messages(messages: &mut Vec<Value>) {
@@ -230,6 +257,10 @@ fn normalize_openai_system_messages(messages: &mut Vec<Value>) {
     }
 
     let mut parts = Vec::new();
+    let mut inherited_cache_control: Option<Value> = None;
+    let mut cache_control_conflict = false;
+    let mut saw_cache_control = false;
+    let mut saw_missing_cache_control = false;
     messages.retain(|message| {
         if message.get("role").and_then(|value| value.as_str()) != Some("system") {
             return true;
@@ -250,11 +281,28 @@ fn normalize_openai_system_messages(messages: &mut Vec<Value>) {
             _ => {}
         }
 
+        if let Some(cache_control) = message.get("cache_control") {
+            saw_cache_control = true;
+            match &inherited_cache_control {
+                None => inherited_cache_control = Some(cache_control.clone()),
+                Some(existing) if existing == cache_control => {}
+                Some(_) => cache_control_conflict = true,
+            }
+        } else {
+            saw_missing_cache_control = true;
+        }
+
         false
     });
 
     if !parts.is_empty() {
-        messages.insert(0, json!({"role": "system", "content": parts.join("\n")}));
+        let mut merged = json!({"role": "system", "content": parts.join("\n")});
+        if !(cache_control_conflict || (saw_cache_control && saw_missing_cache_control)) {
+            if let Some(cache_control) = inherited_cache_control {
+                merged["cache_control"] = cache_control;
+            }
+        }
+        messages.insert(0, merged);
     }
 }
 
@@ -317,7 +365,7 @@ fn convert_message_to_openai(
                         "type": "function",
                         "function": {
                             "name": name,
-                            "arguments": serde_json::to_string(&input).unwrap_or_default()
+                            "arguments": canonical_json_string(&input)
                         }
                     }));
                 }
@@ -329,7 +377,7 @@ fn convert_message_to_openai(
                     let content_val = block.get("content");
                     let content_str = match content_val {
                         Some(Value::String(s)) => s.clone(),
-                        Some(v) => serde_json::to_string(v).unwrap_or_default(),
+                        Some(v) => canonical_json_string(v),
                         None => String::new(),
                     };
                     result.push(json!({
@@ -344,6 +392,9 @@ fn convert_message_to_openai(
                             reasoning_parts.push(thinking.to_string());
                         }
                     }
+                }
+                "redacted_thinking" if preserve_reasoning_content => {
+                    reasoning_parts.push("[redacted thinking]".to_string());
                 }
                 _ => {}
             }
@@ -675,6 +726,74 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_to_openai_preserves_matching_system_cache_control_when_merging() {
+        let input = json!({
+            "model": "claude-3-sonnet",
+            "max_tokens": 1024,
+            "system": [
+                {"type": "text", "text": "You are Claude Code.", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "Be concise.", "cache_control": {"type": "ephemeral"}}
+            ],
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(result["messages"][0]["role"], "system");
+        assert_eq!(
+            result["messages"][0]["content"],
+            "You are Claude Code.\nBe concise."
+        );
+        assert_eq!(result["messages"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(result["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn anthropic_to_openai_drops_mixed_present_absent_system_cache_control_when_merging() {
+        let input = json!({
+            "model": "claude-3-sonnet",
+            "max_tokens": 1024,
+            "system": [
+                {"type": "text", "text": "You are Claude Code.", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "Be concise."}
+            ],
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["messages"][0]["role"], "system");
+        assert_eq!(
+            result["messages"][0]["content"],
+            "You are Claude Code.\nBe concise."
+        );
+        assert!(result["messages"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn anthropic_to_openai_drops_conflicting_system_cache_control_when_merging() {
+        let input = json!({
+            "model": "claude-3-sonnet",
+            "max_tokens": 1024,
+            "system": [
+                {"type": "text", "text": "You are Claude Code.", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "Be concise.", "cache_control": {"type": "ephemeral", "ttl": "5m"}}
+            ],
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["messages"][0]["role"], "system");
+        assert_eq!(
+            result["messages"][0]["content"],
+            "You are Claude Code.\nBe concise."
+        );
+        assert!(result["messages"][0].get("cache_control").is_none());
+    }
+
+    #[test]
     fn anthropic_to_openai_preserves_text_block_cache_control_and_array_shape() {
         let input = json!({
             "model": "claude-3-opus",
@@ -719,6 +838,51 @@ mod tests {
         let result = anthropic_to_openai(input, None).unwrap();
 
         assert_eq!(result["tools"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    fn run_tool_choice(value: Value) -> Value {
+        let input = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [{
+                "name": "search",
+                "description": "Search",
+                "input_schema": {"type": "object", "properties": {}}
+            }],
+            "tool_choice": value
+        });
+
+        anthropic_to_openai(input, None).unwrap()["tool_choice"].clone()
+    }
+
+    #[test]
+    fn tool_choice_string_any_maps_to_required() {
+        assert_eq!(run_tool_choice(json!("any")), json!("required"));
+    }
+
+    #[test]
+    fn tool_choice_string_auto_and_none_pass_through() {
+        assert_eq!(run_tool_choice(json!("auto")), json!("auto"));
+        assert_eq!(run_tool_choice(json!("none")), json!("none"));
+    }
+
+    #[test]
+    fn tool_choice_object_any_maps_to_required() {
+        assert_eq!(run_tool_choice(json!({"type": "any"})), json!("required"));
+    }
+
+    #[test]
+    fn tool_choice_object_auto_and_none_collapse_to_string() {
+        assert_eq!(run_tool_choice(json!({"type": "auto"})), json!("auto"));
+        assert_eq!(run_tool_choice(json!({"type": "none"})), json!("none"));
+    }
+
+    #[test]
+    fn tool_choice_forced_tool_maps_to_nested_function_selector() {
+        assert_eq!(
+            run_tool_choice(json!({"type": "tool", "name": "search"})),
+            json!({"type": "function", "function": {"name": "search"}})
+        );
     }
 
     #[test]
@@ -805,6 +969,89 @@ mod tests {
         let result = anthropic_to_openai_with_reasoning_content(input, None, true).unwrap();
 
         assert_eq!(result["messages"][0]["reasoning_content"], "tool call");
+    }
+
+    #[test]
+    fn anthropic_to_openai_tool_use_uses_redacted_thinking_placeholder() {
+        let input = json!({
+            "model": "mimo-v2.5-pro",
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "redacted_thinking", "data": "opaque"},
+                    {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "Tokyo"}}
+                ]
+            }]
+        });
+
+        let result = anthropic_to_openai_with_reasoning_content(input, None, true).unwrap();
+
+        assert_eq!(
+            result["messages"][0]["reasoning_content"],
+            "[redacted thinking]"
+        );
+        assert_eq!(result["messages"][0]["tool_calls"][0]["id"], "call_1");
+    }
+
+    #[test]
+    fn anthropic_to_openai_tool_use_arguments_are_canonical_json() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "lookup",
+                        "input": {
+                            "z": 1,
+                            "a": {
+                                "b": 2,
+                                "a": 1
+                            }
+                        }
+                    }
+                ]
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(
+            result["messages"][0]["tool_calls"][0]["function"]["arguments"],
+            r#"{"a":{"a":1,"b":2},"z":1}"#
+        );
+    }
+
+    #[test]
+    fn anthropic_to_openai_tool_result_content_is_canonical_json() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": {
+                        "z": 1,
+                        "a": {
+                            "b": 2,
+                            "a": 1
+                        }
+                    }
+                }]
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["messages"][0]["role"], "tool");
+        assert_eq!(result["messages"][0]["tool_call_id"], "call_1");
+        assert_eq!(
+            result["messages"][0]["content"],
+            r#"{"a":{"a":1,"b":2},"z":1}"#
+        );
     }
 
     #[test]

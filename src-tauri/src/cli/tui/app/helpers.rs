@@ -115,43 +115,24 @@ impl OpenClawAgentsFormState {
     pub(crate) fn from_snapshot(
         defaults: Option<&crate::openclaw_config::OpenClawAgentsDefaults>,
     ) -> Self {
-        let defaults = defaults.cloned().unwrap_or_default();
-        let model = defaults
-            .model
-            .unwrap_or(crate::openclaw_config::OpenClawDefaultModel {
-                primary: String::new(),
-                fallbacks: Vec::new(),
-                extra: HashMap::new(),
-            });
-        let mut defaults_extra = defaults.extra;
-        let timeout_seconds_seed = defaults_extra.remove("timeoutSeconds");
-        let legacy_timeout = defaults_extra.remove("timeout");
-        let has_legacy_timeout = legacy_timeout.is_some();
-        let context_tokens_seed = defaults_extra.remove("contextTokens");
-        let max_concurrent_seed = defaults_extra.remove("maxConcurrent");
-
-        let workspace = string_value(defaults_extra.remove("workspace"));
-        let timeout = legacy_timeout
-            .clone()
-            .map(|value| string_value(Some(value)))
-            .unwrap_or_else(|| numeric_value(timeout_seconds_seed.clone()));
-        let context_tokens = numeric_value(context_tokens_seed.clone());
-        let max_concurrent = numeric_value(max_concurrent_seed.clone());
+        let form = crate::cli::openclaw_form_normalization::OpenClawAgentsFormLike::from_snapshot(
+            defaults,
+        );
 
         Self {
-            primary_model: model.primary,
-            fallbacks: model.fallbacks,
-            workspace,
-            timeout,
-            timeout_seconds_seed,
-            context_tokens,
-            context_tokens_seed,
-            max_concurrent,
-            max_concurrent_seed,
-            model_catalog: defaults.models,
-            defaults_extra,
-            model_extra: model.extra,
-            has_legacy_timeout,
+            primary_model: form.primary_model,
+            fallbacks: form.fallbacks,
+            workspace: form.workspace,
+            timeout: form.timeout,
+            timeout_seconds_seed: form.timeout_seconds_seed,
+            context_tokens: form.context_tokens,
+            context_tokens_seed: form.context_tokens_seed,
+            max_concurrent: form.max_concurrent,
+            max_concurrent_seed: form.max_concurrent_seed,
+            model_catalog: form.model_catalog,
+            defaults_extra: form.defaults_extra,
+            model_extra: form.model_extra,
+            has_legacy_timeout: form.has_legacy_timeout,
             section: OpenClawAgentsSection::PrimaryModel,
             row: 0,
         }
@@ -334,50 +315,7 @@ impl OpenClawAgentsFormState {
     }
 
     pub(crate) fn to_config(&self) -> crate::openclaw_config::OpenClawAgentsDefaults {
-        let mut extra = self.defaults_extra.clone();
-        update_string_field(&mut extra, "workspace", &self.workspace);
-        update_timeout_seconds_field(
-            &mut extra,
-            &self.timeout,
-            self.has_legacy_timeout,
-            self.timeout_seconds_seed.as_ref(),
-        );
-        extra.remove("timeout");
-        update_number_field(
-            &mut extra,
-            "contextTokens",
-            &self.context_tokens,
-            self.context_tokens_seed.as_ref(),
-        );
-        update_number_field(
-            &mut extra,
-            "maxConcurrent",
-            &self.max_concurrent,
-            self.max_concurrent_seed.as_ref(),
-        );
-
-        let fallbacks = self
-            .fallbacks
-            .iter()
-            .filter_map(|value| {
-                let trimmed = value.trim();
-                (!trimmed.is_empty()).then(|| trimmed.to_string())
-            })
-            .collect::<Vec<_>>();
-        let primary_model = self.primary_model.trim().to_string();
-        let model =
-            (!primary_model.is_empty() || !fallbacks.is_empty() || !self.model_extra.is_empty())
-                .then(|| crate::openclaw_config::OpenClawDefaultModel {
-                    primary: primary_model,
-                    fallbacks,
-                    extra: self.model_extra.clone(),
-                });
-
-        crate::openclaw_config::OpenClawAgentsDefaults {
-            model,
-            models: self.model_catalog.clone(),
-            extra,
-        }
+        self.to_form_like().to_config()
     }
 
     fn rows_in_section(&self, section: OpenClawAgentsSection) -> usize {
@@ -389,27 +327,52 @@ impl OpenClawAgentsFormState {
     }
 
     pub(crate) fn has_unmigratable_legacy_timeout(&self) -> bool {
-        self.has_legacy_timeout
-            && !self.timeout.trim().is_empty()
-            && parse_number(self.timeout.trim()).is_none()
+        self.to_form_like().has_unmigratable_legacy_timeout()
     }
 
     pub(crate) fn preserved_timeout_seconds(&self) -> Option<&Value> {
-        preserved_non_string_runtime_seed(&self.timeout, self.timeout_seconds_seed.as_ref())
+        crate::cli::openclaw_form_normalization::preserved_non_string_runtime_seed(
+            &self.timeout,
+            self.timeout_seconds_seed.as_ref(),
+        )
     }
 
     pub(crate) fn preserved_context_tokens(&self) -> Option<&Value> {
-        preserved_non_string_runtime_seed(&self.context_tokens, self.context_tokens_seed.as_ref())
+        crate::cli::openclaw_form_normalization::preserved_non_string_runtime_seed(
+            &self.context_tokens,
+            self.context_tokens_seed.as_ref(),
+        )
     }
 
     pub(crate) fn preserved_max_concurrent(&self) -> Option<&Value> {
-        preserved_non_string_runtime_seed(&self.max_concurrent, self.max_concurrent_seed.as_ref())
+        crate::cli::openclaw_form_normalization::preserved_non_string_runtime_seed(
+            &self.max_concurrent,
+            self.max_concurrent_seed.as_ref(),
+        )
     }
 
     pub(crate) fn has_preserved_non_string_runtime_values(&self) -> bool {
         self.preserved_timeout_seconds().is_some()
             || self.preserved_context_tokens().is_some()
             || self.preserved_max_concurrent().is_some()
+    }
+
+    fn to_form_like(&self) -> crate::cli::openclaw_form_normalization::OpenClawAgentsFormLike {
+        crate::cli::openclaw_form_normalization::OpenClawAgentsFormLike {
+            primary_model: self.primary_model.clone(),
+            fallbacks: self.fallbacks.clone(),
+            workspace: self.workspace.clone(),
+            timeout: self.timeout.clone(),
+            timeout_seconds_seed: self.timeout_seconds_seed.clone(),
+            context_tokens: self.context_tokens.clone(),
+            context_tokens_seed: self.context_tokens_seed.clone(),
+            max_concurrent: self.max_concurrent.clone(),
+            max_concurrent_seed: self.max_concurrent_seed.clone(),
+            model_catalog: self.model_catalog.clone(),
+            defaults_extra: self.defaults_extra.clone(),
+            model_extra: self.model_extra.clone(),
+            has_legacy_timeout: self.has_legacy_timeout,
+        }
     }
 
     fn clamp_section(&self, section: OpenClawAgentsSection) -> OpenClawAgentsSection {
@@ -665,126 +628,6 @@ fn model_picker_selection(current: &str, options: &[OpenClawModelOption]) -> usi
         .iter()
         .position(|option| option.value == current)
         .unwrap_or(OPENCLAW_AGENTS_MODEL_PICKER_NONE)
-}
-
-fn string_value(value: Option<Value>) -> String {
-    match value {
-        Some(Value::String(value)) => value,
-        Some(Value::Number(value)) => value.to_string(),
-        Some(Value::Bool(value)) => value.to_string(),
-        Some(other) => other.to_string(),
-        None => String::new(),
-    }
-}
-
-fn numeric_value(value: Option<Value>) -> String {
-    match value {
-        Some(Value::Number(value)) => value.to_string(),
-        Some(Value::String(value)) => value,
-        _ => String::new(),
-    }
-}
-
-fn update_string_field(extra: &mut HashMap<String, Value>, key: &str, value: &str) {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        extra.remove(key);
-    } else {
-        extra.insert(key.to_string(), Value::String(trimmed.to_string()));
-    }
-}
-
-fn update_number_field(
-    extra: &mut HashMap<String, Value>,
-    key: &str,
-    value: &str,
-    seed: Option<&Value>,
-) {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        if should_preserve_non_string_numeric_seed(seed) {
-            extra.insert(key.to_string(), seed.cloned().expect("seed exists"));
-            return;
-        }
-        extra.remove(key);
-        return;
-    }
-
-    let parsed = parse_number(trimmed);
-
-    if let Some(number) = parsed {
-        extra.insert(key.to_string(), Value::Number(number));
-    } else {
-        extra.insert(key.to_string(), Value::String(trimmed.to_string()));
-    }
-}
-
-fn update_timeout_seconds_field(
-    extra: &mut HashMap<String, Value>,
-    value: &str,
-    has_legacy_timeout: bool,
-    timeout_seconds_seed: Option<&Value>,
-) {
-    let trimmed = value.trim();
-    if let Some(number) = parse_number(trimmed) {
-        extra.insert("timeoutSeconds".to_string(), Value::Number(number));
-        return;
-    }
-
-    if trimmed.is_empty() && has_legacy_timeout {
-        if let Some(seed) = timeout_seconds_seed {
-            extra.insert("timeoutSeconds".to_string(), seed.clone());
-            return;
-        }
-    }
-
-    if trimmed.is_empty() {
-        if should_preserve_non_string_numeric_seed(timeout_seconds_seed) {
-            extra.insert(
-                "timeoutSeconds".to_string(),
-                timeout_seconds_seed.cloned().expect("seed exists"),
-            );
-            return;
-        }
-        extra.remove("timeoutSeconds");
-    } else {
-        extra.insert(
-            "timeoutSeconds".to_string(),
-            Value::String(trimmed.to_string()),
-        );
-    }
-}
-
-fn parse_number(value: &str) -> Option<serde_json::Number> {
-    value
-        .parse::<i64>()
-        .ok()
-        .map(serde_json::Number::from)
-        .or_else(|| value.parse::<u64>().ok().map(serde_json::Number::from))
-        .or_else(|| {
-            value
-                .parse::<f64>()
-                .ok()
-                .and_then(serde_json::Number::from_f64)
-        })
-}
-
-fn should_preserve_non_string_numeric_seed(seed: Option<&Value>) -> bool {
-    matches!(
-        seed,
-        Some(Value::Bool(_) | Value::Null | Value::Array(_) | Value::Object(_))
-    )
-}
-
-fn preserved_non_string_runtime_seed<'a>(
-    value: &str,
-    seed: Option<&'a Value>,
-) -> Option<&'a Value> {
-    if value.trim().is_empty() && should_preserve_non_string_numeric_seed(seed) {
-        seed
-    } else {
-        None
-    }
 }
 
 fn openclaw_tools_warning_matches_path(

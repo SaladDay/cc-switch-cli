@@ -1,6 +1,6 @@
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
-use crate::provider::Provider;
+use crate::provider::{ClaudeApiKeyField, Provider};
 use crate::services::ProviderService;
 use serde_json::{json, Value};
 
@@ -135,6 +135,7 @@ impl ProviderAddFormState {
             codex_config_scroll: 0,
             claude_model_config_touched: false,
             claude_api_key: TextInput::new(""),
+            claude_api_key_field: ClaudeApiKeyField::AuthToken,
             claude_base_url: TextInput::new(""),
             claude_api_format: ClaudeApiFormat::Anthropic,
             claude_model: TextInput::new(""),
@@ -313,6 +314,7 @@ impl ProviderAddFormState {
 
     pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {
         let Some(generated_id) = resolve_provider_id_for_submit(
+            &self.app_type,
             self.name.value.as_str(),
             self.id.value.as_str(),
             existing_ids,
@@ -1507,6 +1509,7 @@ impl UsageQueryTemplate {
 }
 
 pub(crate) fn resolve_provider_id_for_submit(
+    app_type: &AppType,
     name: &str,
     id: &str,
     existing_ids: &[String],
@@ -1519,7 +1522,10 @@ pub(crate) fn resolve_provider_id_for_submit(
         return Some(id.to_string());
     }
 
-    let generated_id =
-        crate::cli::commands::provider_input::generate_provider_id(name.trim(), existing_ids);
+    let generated_id = crate::cli::commands::provider_input::generate_provider_id_for_app(
+        app_type,
+        name.trim(),
+        existing_ids,
+    );
     (!generated_id.trim().is_empty()).then_some(generated_id)
 }

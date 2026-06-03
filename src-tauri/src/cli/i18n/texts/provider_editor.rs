@@ -333,6 +333,14 @@ pub fn provider_id_cannot_be_changed() -> &'static str {
     }
 }
 
+pub fn provider_id_empty_error() -> &'static str {
+    if is_chinese() {
+        "供应商 ID 不能为空"
+    } else {
+        "Provider ID cannot be empty"
+    }
+}
+
 pub fn retry_editing() -> &'static str {
     if is_chinese() {
         "是否重新编辑？"

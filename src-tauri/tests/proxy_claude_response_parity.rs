@@ -75,15 +75,16 @@ async fn forward_openai_chat_response(upstream_response: Value) -> Value {
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
+
     let service = ProxyService::new(db);
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(

@@ -1,6 +1,7 @@
 use clap::Subcommand;
 
 use crate::app_config::AppType;
+use crate::cli::proxy_settings::{validate_proxy_listen_address, validate_proxy_listen_port};
 use crate::cli::ui::{highlight, info, success};
 use crate::error::AppError;
 use crate::{AppState, ProxyConfig};
@@ -11,9 +12,6 @@ use crate::daemon::ipc::client as daemon_client;
 use crate::daemon::ipc::protocol::{Request as DaemonRequest, Response as DaemonResponse};
 #[cfg(unix)]
 use crate::daemon::supervisor::{DAEMON_SOCKET_ENV, SESSION_TOKEN_ENV};
-
-const MIN_PROXY_LISTEN_PORT: u16 = 1024;
-const MAX_PROXY_LISTEN_PORT: u16 = u16::MAX;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ProxyCommand {
@@ -28,6 +26,10 @@ pub enum ProxyCommand {
 
     /// Configure the selected app's proxy route
     Config {
+        /// Set the global proxy listen address
+        #[arg(long)]
+        listen_address: Option<String>,
+
         /// Set the selected app's daemon worker listen port
         #[arg(long)]
         listen_port: Option<u16>,
@@ -55,7 +57,10 @@ pub fn execute(cmd: ProxyCommand, app: Option<AppType>) -> Result<(), AppError> 
         ProxyCommand::Show => show_proxy(),
         ProxyCommand::Enable => set_proxy_enabled(app_type, true),
         ProxyCommand::Disable => set_proxy_enabled(app_type, false),
-        ProxyCommand::Config { listen_port } => configure_proxy(app_type, listen_port),
+        ProxyCommand::Config {
+            listen_address,
+            listen_port,
+        } => configure_proxy(app_type, listen_address, listen_port),
         ProxyCommand::Serve {
             listen_address,
             listen_port,
@@ -127,12 +132,24 @@ fn set_proxy_enabled(app_type: AppType, enabled: bool) -> Result<(), AppError> {
     Ok(())
 }
 
-fn configure_proxy(app_type: AppType, listen_port: Option<u16>) -> Result<(), AppError> {
-    let Some(listen_port) = listen_port else {
+fn configure_proxy(
+    app_type: AppType,
+    listen_address: Option<String>,
+    listen_port: Option<u16>,
+) -> Result<(), AppError> {
+    if listen_address.is_none() && listen_port.is_none() {
         return show_proxy();
-    };
-    validate_listen_port(listen_port)?;
-    if !matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
+    }
+    let listen_address = listen_address.map(|address| address.trim().to_string());
+    if let Some(address) = &listen_address {
+        validate_proxy_listen_address(address)?;
+    }
+    if let Some(port) = listen_port {
+        validate_proxy_listen_port(port)?;
+    }
+    if listen_port.is_some()
+        && !matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+    {
         return Err(AppError::InvalidInput(format!(
             "proxy takeover is not supported for {}",
             app_type.as_str()
@@ -141,28 +158,50 @@ fn configure_proxy(app_type: AppType, listen_port: Option<u16>) -> Result<(), Ap
     let state = get_state()?;
     let runtime = create_runtime()?;
     let status = runtime.block_on(state.proxy_service.get_status());
+    if listen_address.is_some() && status.running {
+        return Err(AppError::Message(
+            "stop the proxy before changing its listen address".to_string(),
+        ));
+    }
     let app_running = status
         .active_workers
         .iter()
         .any(|worker| worker.app_type == app_type.as_str());
-    if app_running {
+    if listen_port.is_some() && app_running {
         return Err(AppError::Message(format!(
             "stop the {} proxy route before changing its listen port",
             app_type.as_str()
         )));
     }
-    state
-        .db
-        .set_app_proxy_preferred_port(app_type.as_str(), listen_port)?;
-    println!(
-        "{}",
-        success(&format!(
-            "{} {}: {}",
-            crate::t!("Proxy listen port", "代理监听端口"),
-            app_type.as_str(),
-            listen_port
-        ))
-    );
+
+    if let Some(address) = listen_address {
+        let mut config = runtime.block_on(state.proxy_service.get_config())?;
+        config.listen_address = address.clone();
+        runtime.block_on(state.proxy_service.update_config(&config))?;
+        println!(
+            "{}",
+            success(&format!(
+                "{}: {}",
+                crate::t!("Proxy listen address", "代理监听地址"),
+                address
+            ))
+        );
+    }
+
+    if let Some(port) = listen_port {
+        state
+            .db
+            .set_app_proxy_preferred_port(app_type.as_str(), port)?;
+        println!(
+            "{}",
+            success(&format!(
+                "{} {}: {}",
+                crate::t!("Proxy listen port", "代理监听端口"),
+                app_type.as_str(),
+                port
+            ))
+        );
+    }
     Ok(())
 }
 
@@ -350,16 +389,6 @@ fn apply_overrides(
         config.listen_port = port;
     }
     Ok(config)
-}
-
-fn validate_listen_port(port: u16) -> Result<(), AppError> {
-    if (MIN_PROXY_LISTEN_PORT..=MAX_PROXY_LISTEN_PORT).contains(&port) {
-        return Ok(());
-    }
-
-    Err(AppError::InvalidInput(format!(
-        "proxy listen port must be between {MIN_PROXY_LISTEN_PORT} and {MAX_PROXY_LISTEN_PORT}"
-    )))
 }
 
 fn load_proxy_app_ports(state: &AppState) -> Result<Vec<(AppType, u16)>, AppError> {
@@ -607,13 +636,13 @@ mod tests {
         Database, MultiAppConfig, ProxyService,
     };
 
-    use super::{
-        apply_overrides, build_proxy_overview_lines, load_proxy_app_ports, validate_listen_port,
-    };
+    use super::{apply_overrides, build_proxy_overview_lines, load_proxy_app_ports};
+    use crate::cli::proxy_settings::validate_proxy_listen_port;
 
     #[test]
     fn cli_proxy_listen_port_validation_rejects_reserved_ports() {
-        let error = validate_listen_port(0).expect_err("port 0 should not be accepted from CLI");
+        let error =
+            validate_proxy_listen_port(0).expect_err("port 0 should not be accepted from CLI");
 
         assert!(error.to_string().contains("1024"));
     }

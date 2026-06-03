@@ -773,7 +773,10 @@ fn set_codex_experimental_bearer_token(config_text: &str, token: &str) -> Result
     Ok(doc.to_string())
 }
 
-fn remove_codex_experimental_bearer_token(config_text: &str) -> Result<String, AppError> {
+pub fn remove_codex_experimental_bearer_token_if(
+    config_text: &str,
+    predicate: impl Fn(&str) -> bool,
+) -> Result<String, AppError> {
     if config_text.trim().is_empty() || !config_text.contains("experimental_bearer_token") {
         return Ok(config_text.to_string());
     }
@@ -789,12 +792,30 @@ fn remove_codex_experimental_bearer_token(config_text: &str) -> Result<String, A
             .and_then(|table| table.get_mut(provider_id.as_str()))
             .and_then(|item| item.as_table_mut())
         {
-            provider_table.remove("experimental_bearer_token");
+            let should_remove = provider_table
+                .get("experimental_bearer_token")
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .is_some_and(&predicate);
+            if should_remove {
+                provider_table.remove("experimental_bearer_token");
+            }
         }
     }
 
-    doc.as_table_mut().remove("experimental_bearer_token");
+    let should_remove_top_level = doc
+        .get("experimental_bearer_token")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .is_some_and(&predicate);
+    if should_remove_top_level {
+        doc.as_table_mut().remove("experimental_bearer_token");
+    }
     Ok(doc.to_string())
+}
+
+fn remove_codex_experimental_bearer_token(config_text: &str) -> Result<String, AppError> {
+    remove_codex_experimental_bearer_token_if(config_text, |_| true)
 }
 
 /// Read the current Codex live settings as a `{ auth, config }` object.
@@ -822,16 +843,36 @@ pub fn read_codex_live_settings() -> Result<Value, AppError> {
 
 /// Route a Codex live write between full auth+config or config-only.
 ///
-/// Official providers with usable login material own `auth.json`; everyone
-/// else only touches `config.toml` so the user's ChatGPT login cache survives
-/// third-party switches.
+/// Official providers with usable login material own `auth.json`. Third-party
+/// providers only touch `config.toml` when the compatibility setting is enabled
+/// so the user's ChatGPT login cache survives provider switches.
+pub fn write_codex_provider_live_config_only_with_catalog(
+    settings: &Value,
+    auth: &Value,
+    config_text: Option<&str>,
+) -> Result<(), AppError> {
+    let prepared_config = config_text
+        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text))
+        .transpose()?;
+    let live_config =
+        prepare_codex_provider_live_config(auth, prepared_config.as_deref().unwrap_or(""))?;
+    write_codex_live_config_atomic(Some(&live_config))
+}
+
 pub fn write_codex_live_for_provider(
     category: Option<&str>,
     auth: &Value,
     config_text: Option<&str>,
 ) -> Result<(), AppError> {
-    if category == Some("official") && codex_auth_has_login_material(auth) {
-        write_codex_live_atomic(auth, config_text)
+    let should_write_auth =
+        category == Some("official") || !crate::settings::preserve_codex_official_auth_on_switch();
+
+    if should_write_auth {
+        if category == Some("official") && !codex_auth_has_login_material(auth) {
+            write_codex_live_atomic_optional_auth(None, config_text)
+        } else {
+            write_codex_live_atomic(auth, config_text)
+        }
     } else {
         let live_config = prepare_codex_provider_live_config(auth, config_text.unwrap_or(""))?;
         write_codex_live_config_atomic(Some(&live_config))
@@ -944,6 +985,115 @@ pub fn clean_codex_provider_key(raw: &str) -> String {
     } else {
         key
     }
+}
+
+pub fn build_codex_provider_config_toml(
+    provider_key: &str,
+    base_url: &str,
+    model: &str,
+    wire_api: &str,
+) -> String {
+    let provider_key = escape_toml_string(provider_key);
+    let model = escape_toml_string(model);
+    let base_url = escape_toml_string(base_url);
+    let wire_api = escape_toml_string(wire_api);
+
+    [
+        format!("model_provider = \"{}\"", provider_key),
+        format!("model = \"{}\"", model),
+        "model_reasoning_effort = \"high\"".to_string(),
+        "disable_response_storage = true".to_string(),
+        String::new(),
+        format!("[model_providers.{}]", provider_key),
+        format!("name = \"{}\"", provider_key),
+        format!("base_url = \"{}\"", base_url),
+        format!("wire_api = \"{}\"", wire_api),
+        "requires_openai_auth = true".to_string(),
+        String::new(),
+    ]
+    .join("\n")
+}
+
+pub fn update_codex_config_snippet(
+    original: &str,
+    base_url: &str,
+    model: &str,
+    wire_api: &str,
+    requires_openai_auth: bool,
+    env_key: &str,
+) -> String {
+    let mut doc = match original.trim().parse::<toml_edit::DocumentMut>() {
+        Ok(doc) => doc,
+        Err(_) => return original.to_string(),
+    };
+
+    if let Some(model) = non_empty(model) {
+        doc["model"] = toml_edit::value(model);
+    } else {
+        doc.remove("model");
+    }
+
+    let provider_key = doc
+        .get("model_provider")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+
+    if let Some(key) = provider_key {
+        if doc.get("model_providers").is_none() {
+            doc["model_providers"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let providers = doc["model_providers"]
+            .as_table_like_mut()
+            .expect("model_providers should be a table");
+        if providers.get(&key).is_none() {
+            providers.insert(&key, toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+
+        if let Some(section) = providers
+            .get_mut(&key)
+            .and_then(|value| value.as_table_like_mut())
+        {
+            if let Some(base_url) = non_empty(base_url) {
+                section.insert("base_url", toml_edit::value(base_url));
+            } else {
+                section.remove("base_url");
+            }
+
+            section.insert("wire_api", toml_edit::value(wire_api));
+            section.insert(
+                "requires_openai_auth",
+                toml_edit::value(requires_openai_auth),
+            );
+
+            if requires_openai_auth {
+                section.remove("env_key");
+            } else {
+                let env_key = non_empty(env_key).unwrap_or("OPENAI_API_KEY");
+                section.insert("env_key", toml_edit::value(env_key));
+            }
+        }
+    }
+
+    let result = doc.to_string();
+    let trimmed = result.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn escape_toml_string(value: &str) -> String {
+    value.replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -1131,6 +1281,41 @@ wire_api = "responses"
         assert_eq!(
             extract_codex_experimental_bearer_token(&result).as_deref(),
             Some("sk-test")
+        );
+    }
+
+    #[test]
+    fn remove_codex_experimental_bearer_token_if_only_removes_matching_values() {
+        let input = r#"experimental_bearer_token = "sk-real"
+model_provider = "vendor_alpha"
+model = "gpt-5.4"
+
+[model_providers.vendor_alpha]
+name = "Vendor Alpha"
+base_url = "https://alpha.example/v1"
+wire_api = "responses"
+experimental_bearer_token = "PROXY_MANAGED"
+"#;
+
+        let result =
+            remove_codex_experimental_bearer_token_if(input, |token| token == "PROXY_MANAGED")
+                .expect("remove matching proxy placeholder");
+        let parsed: toml::Value = toml::from_str(&result).expect("parse cleaned config");
+
+        assert_eq!(
+            parsed
+                .get("experimental_bearer_token")
+                .and_then(|value| value.as_str()),
+            Some("sk-real"),
+            "real top-level token must not be removed by placeholder cleanup"
+        );
+        assert!(
+            parsed
+                .get("model_providers")
+                .and_then(|value| value.get("vendor_alpha"))
+                .and_then(|value| value.get("experimental_bearer_token"))
+                .is_none(),
+            "provider-scoped proxy placeholder should be removed"
         );
     }
 

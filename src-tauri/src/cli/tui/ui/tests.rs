@@ -3050,6 +3050,7 @@ fn skills_import_overlay_uses_friendly_copy() {
             name: "Hello Skill".to_string(),
             description: Some("A local skill".to_string()),
             found_in: vec!["claude".to_string()],
+            path: "/tmp/hello-skill".to_string(),
         }],
         selected_idx: 0,
         selected: std::iter::once("hello-skill".to_string()).collect(),

@@ -770,6 +770,7 @@ fn submit_provider_add(
             .unwrap_or_default()
     };
     let Some(provider_id) = crate::cli::tui::form::resolve_provider_id_for_submit(
+        &ctx.app.app_type,
         &provider.name,
         &provider.id,
         &existing_ids,

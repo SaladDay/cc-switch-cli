@@ -5,6 +5,7 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 use crate::app_config::{AppType, CommonConfigSnippets, McpServer};
+pub(crate) use crate::cli::provider_quota::{ProviderUsageQuota, QuotaTarget, QuotaTargetKind};
 use crate::commands::workspace::{self, DailyMemoryFileInfo, ALLOWED_FILES};
 use crate::error::AppError;
 use crate::hermes_config::{HermesMemoryLimits, MemoryKind};
@@ -14,9 +15,7 @@ use crate::openclaw_config::{
 use crate::prompt::Prompt;
 use crate::prompt_files::prompt_file_path;
 use crate::provider::Provider;
-use crate::provider::UsageResult;
 use crate::services::config::BackupInfo;
-use crate::services::SubscriptionQuota;
 use crate::services::{ConfigService, McpService, PromptService, ProviderService, SkillService};
 use crate::store::AppState;
 
@@ -31,40 +30,6 @@ pub struct ProviderRow {
     pub is_default_model: bool,
     pub primary_model_id: Option<String>,
     pub default_model_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum QuotaTargetKind {
-    SubscriptionTool { tool: String },
-    CodexOAuth { account_id: Option<String> },
-    UsageScript,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct QuotaTarget {
-    pub(crate) app_type: AppType,
-    pub(crate) provider_id: String,
-    pub(crate) provider_name: String,
-    pub(crate) kind: QuotaTargetKind,
-}
-
-impl QuotaTarget {
-    pub(crate) fn cache_key(&self) -> String {
-        let kind = match &self.kind {
-            QuotaTargetKind::SubscriptionTool { tool } => format!("subscription:{tool}"),
-            QuotaTargetKind::CodexOAuth { account_id } => {
-                format!("codex_oauth:{}", account_id.as_deref().unwrap_or("default"))
-            }
-            QuotaTargetKind::UsageScript => "usage_script".to_string(),
-        };
-        format!("{}:{}:{kind}", self.app_type.as_str(), self.provider_id)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum ProviderUsageQuota {
-    Subscription(SubscriptionQuota),
-    Script(UsageResult),
 }
 
 #[derive(Debug, Clone)]
@@ -431,194 +396,7 @@ pub(crate) fn quota_target_for_provider(
     app_type: &AppType,
     row: &ProviderRow,
 ) -> Option<QuotaTarget> {
-    if row
-        .provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.usage_script.as_ref())
-        .is_some_and(|script| script.enabled)
-    {
-        return Some(QuotaTarget {
-            app_type: app_type.clone(),
-            provider_id: row.id.clone(),
-            provider_name: provider_display_name(app_type, row),
-            kind: QuotaTargetKind::UsageScript,
-        });
-    }
-
-    if is_codex_oauth_provider(row) {
-        return Some(QuotaTarget {
-            app_type: app_type.clone(),
-            provider_id: row.id.clone(),
-            provider_name: provider_display_name(app_type, row),
-            kind: QuotaTargetKind::CodexOAuth {
-                account_id: row
-                    .provider
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.managed_account_id_for("codex_oauth")),
-            },
-        });
-    }
-
-    let tool = match app_type {
-        AppType::Claude if is_claude_official_provider(row) => "claude",
-        AppType::Codex if is_codex_official_provider(row) => "codex",
-        AppType::Gemini if is_gemini_official_provider(row) => "gemini",
-        _ => return None,
-    };
-
-    Some(QuotaTarget {
-        app_type: app_type.clone(),
-        provider_id: row.id.clone(),
-        provider_name: provider_display_name(app_type, row),
-        kind: QuotaTargetKind::SubscriptionTool {
-            tool: tool.to_string(),
-        },
-    })
-}
-
-fn is_codex_oauth_provider(row: &ProviderRow) -> bool {
-    row.provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.provider_type.as_deref())
-        .is_some_and(|value| value == "codex_oauth")
-}
-
-fn is_claude_official_provider(row: &ProviderRow) -> bool {
-    row.provider
-        .category
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case("official"))
-}
-
-fn is_codex_official_provider(row: &ProviderRow) -> bool {
-    if row
-        .provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.codex_official)
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    if row
-        .provider
-        .category
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case("official"))
-    {
-        return true;
-    }
-
-    let legacy_official_identity = row
-        .provider
-        .website_url
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case("https://chatgpt.com/codex"))
-        || row
-            .provider
-            .name
-            .trim()
-            .eq_ignore_ascii_case("OpenAI Official");
-
-    if !legacy_official_identity {
-        return false;
-    }
-
-    let api_key_blank = row
-        .provider
-        .settings_config
-        .get("auth")
-        .and_then(|auth| auth.get("OPENAI_API_KEY"))
-        .and_then(Value::as_str)
-        .is_none_or(|value| value.trim().is_empty());
-
-    api_key_blank && !codex_config_has_base_url(&row.provider.settings_config)
-}
-
-fn is_gemini_official_provider(row: &ProviderRow) -> bool {
-    if row
-        .provider
-        .category
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case("official"))
-    {
-        return true;
-    }
-
-    if row
-        .provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.partner_promotion_key.as_deref())
-        .is_some_and(|value| value.eq_ignore_ascii_case("google-official"))
-    {
-        return true;
-    }
-
-    let legacy_google_identity = row.provider.website_url.as_deref().is_some_and(|value| {
-        let value = value.trim_end_matches('/');
-        value.eq_ignore_ascii_case("https://ai.google.dev")
-            || value.eq_ignore_ascii_case("https://aistudio.google.com")
-    }) || matches!(
-        row.provider.name.trim().to_ascii_lowercase().as_str(),
-        "google" | "google official" | "google oauth"
-    );
-
-    if !legacy_google_identity {
-        return false;
-    }
-
-    let api_key_blank = row
-        .provider
-        .settings_config
-        .get("env")
-        .and_then(|env| env.get("GEMINI_API_KEY"))
-        .and_then(Value::as_str)
-        .is_none_or(|value| value.trim().is_empty());
-    let base_url_blank = extract_api_url(&row.provider.settings_config, &AppType::Gemini)
-        .is_none_or(|value| value.trim().is_empty());
-
-    api_key_blank && base_url_blank
-}
-
-fn codex_config_has_base_url(settings_config: &Value) -> bool {
-    let Some(config_text) = settings_config
-        .get("config")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return false;
-    };
-
-    let Ok(table) = toml::from_str::<toml::Table>(config_text) else {
-        return false;
-    };
-
-    if table
-        .get("base_url")
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        return true;
-    }
-
-    let Some(provider_key) = table.get("model_provider").and_then(|value| value.as_str()) else {
-        return false;
-    };
-
-    table
-        .get("model_providers")
-        .and_then(|value| value.as_table())
-        .and_then(|providers| providers.get(provider_key))
-        .and_then(|value| value.as_table())
-        .and_then(|provider| provider.get("base_url"))
-        .and_then(|value| value.as_str())
-        .is_some_and(|value| !value.trim().is_empty())
+    crate::cli::provider_quota::quota_target_for_provider(app_type, &row.id, &row.provider)
 }
 
 fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnapshot, AppError> {

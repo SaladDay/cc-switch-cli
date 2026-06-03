@@ -1,7 +1,31 @@
 use serde_json::json;
 
+use crate::{
+    app_config::AppType,
+    provider::{Provider, ProviderMeta},
+};
+
 use super::service::StreamCheckService;
-use super::types::{HealthStatus, StreamCheckConfig};
+use super::types::{AuthStrategy, HealthStatus, StreamCheckConfig};
+
+fn claude_gemini_native_provider(key: &str) -> Provider {
+    let mut provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://generativelanguage.googleapis.com",
+                "GEMINI_API_KEY": key
+            }
+        }),
+        None,
+    );
+    provider.meta = Some(ProviderMeta {
+        api_format: Some("gemini_native".to_string()),
+        ..Default::default()
+    });
+    provider
+}
 
 #[test]
 fn stream_check_default_config_matches_upstream_mvp() {
@@ -80,4 +104,192 @@ fn stream_check_provider_test_config_overrides_global_defaults() {
     assert_eq!(merged.codex_model, "claude-override");
     assert_eq!(merged.gemini_model, "claude-override");
     assert_eq!(merged.test_prompt, "ping");
+}
+
+#[test]
+fn stream_check_claude_gemini_native_keeps_upstream_anthropic_model_env() {
+    let config = StreamCheckConfig::default();
+    let mut provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_MODEL": "claude-old",
+                "GEMINI_MODEL": "models/gemini-2.5-pro"
+            }
+        }),
+        None,
+    );
+    provider.meta = Some(ProviderMeta {
+        api_format: Some("gemini_native".to_string()),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        StreamCheckService::resolve_test_model(&AppType::Claude, &provider, &config),
+        "claude-old"
+    );
+}
+
+#[test]
+fn stream_check_claude_gemini_native_extracts_google_api_key_auth() {
+    let mut provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://generativelanguage.googleapis.com",
+                "GEMINI_API_KEY": "gemini-key"
+            }
+        }),
+        None,
+    );
+    provider.meta = Some(ProviderMeta {
+        api_format: Some("gemini_native".to_string()),
+        ..Default::default()
+    });
+
+    let auth = StreamCheckService::extract_auth(
+        &provider,
+        &AppType::Claude,
+        "https://generativelanguage.googleapis.com",
+    )
+    .expect("extract Claude Gemini auth");
+
+    assert_eq!(auth.strategy, AuthStrategy::Google);
+    assert_eq!(auth.api_key, "gemini-key");
+    assert_eq!(auth.access_token, None);
+}
+
+#[test]
+fn stream_check_claude_gemini_native_extracts_google_oauth_json_token() {
+    let provider = claude_gemini_native_provider(
+        r#"{"access_token":"access-123","refresh_token":"refresh-123"}"#,
+    );
+
+    let auth = StreamCheckService::extract_auth(
+        &provider,
+        &AppType::Claude,
+        "https://generativelanguage.googleapis.com",
+    )
+    .expect("extract Claude Gemini OAuth auth");
+
+    assert_eq!(auth.strategy, AuthStrategy::GoogleOAuth);
+    assert_eq!(auth.access_token.as_deref(), Some("access-123"));
+}
+
+#[test]
+fn stream_check_claude_gemini_native_trims_google_oauth_json() {
+    let provider = claude_gemini_native_provider(
+        "\n  {\"access_token\":\"access-123\",\"refresh_token\":\"refresh-123\"}\n",
+    );
+
+    let auth = StreamCheckService::extract_auth(
+        &provider,
+        &AppType::Claude,
+        "https://generativelanguage.googleapis.com",
+    )
+    .expect("extract Claude Gemini whitespace-padded OAuth JSON auth");
+
+    assert_eq!(auth.strategy, AuthStrategy::GoogleOAuth);
+    assert_eq!(
+        auth.api_key,
+        r#"{"access_token":"access-123","refresh_token":"refresh-123"}"#
+    );
+    assert_eq!(auth.access_token.as_deref(), Some("access-123"));
+}
+
+#[test]
+fn stream_check_claude_gemini_native_trims_raw_google_oauth_token() {
+    let provider = claude_gemini_native_provider("\nya29.raw-token-value\n");
+
+    let auth = StreamCheckService::extract_auth(
+        &provider,
+        &AppType::Claude,
+        "https://generativelanguage.googleapis.com",
+    )
+    .expect("extract Claude Gemini raw OAuth auth");
+
+    assert_eq!(auth.strategy, AuthStrategy::GoogleOAuth);
+    assert_eq!(auth.api_key, "ya29.raw-token-value");
+    assert_eq!(auth.access_token.as_deref(), Some("ya29.raw-token-value"));
+}
+
+#[test]
+fn stream_check_claude_gemini_native_refresh_only_json_does_not_expose_empty_bearer() {
+    let provider = claude_gemini_native_provider(
+        r#"{"refresh_token":"rt-abc","client_id":"cid","client_secret":"cs"}"#,
+    );
+
+    let auth = StreamCheckService::extract_auth(
+        &provider,
+        &AppType::Claude,
+        "https://generativelanguage.googleapis.com",
+    )
+    .expect("extract Claude Gemini refresh-only OAuth auth");
+
+    assert_eq!(auth.strategy, AuthStrategy::GoogleOAuth);
+    assert_eq!(auth.access_token, None);
+}
+
+#[test]
+fn stream_check_claude_gemini_native_empty_access_token_json_does_not_expose_empty_bearer() {
+    let provider = claude_gemini_native_provider(
+        r#"{"access_token":"","refresh_token":"rt-abc","client_id":"cid","client_secret":"cs"}"#,
+    );
+
+    let auth = StreamCheckService::extract_auth(
+        &provider,
+        &AppType::Claude,
+        "https://generativelanguage.googleapis.com",
+    )
+    .expect("extract Claude Gemini expired OAuth auth");
+
+    assert_eq!(auth.strategy, AuthStrategy::GoogleOAuth);
+    assert_eq!(auth.access_token, None);
+}
+
+#[test]
+fn stream_check_resolves_claude_gemini_native_url() {
+    let url = StreamCheckService::resolve_claude_stream_url(
+        "https://generativelanguage.googleapis.com",
+        AuthStrategy::Google,
+        "gemini_native",
+        false,
+        "models/gemini-2.5-pro",
+    );
+
+    assert_eq!(
+        url,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+    );
+}
+
+#[test]
+fn stream_check_resolves_claude_gemini_native_full_openai_compat_url() {
+    let url = StreamCheckService::resolve_claude_stream_url(
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        AuthStrategy::Google,
+        "gemini_native",
+        true,
+        "gemini-2.5-flash",
+    );
+
+    assert_eq!(
+        url,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+    );
+}
+
+#[test]
+fn stream_check_preserves_claude_gemini_native_opaque_full_url() {
+    let url = StreamCheckService::resolve_claude_stream_url(
+        "https://relay.example/custom/generate-content",
+        AuthStrategy::Google,
+        "gemini_native",
+        true,
+        "gemini-2.5-flash",
+    );
+
+    assert_eq!(url, "https://relay.example/custom/generate-content?alt=sse");
 }

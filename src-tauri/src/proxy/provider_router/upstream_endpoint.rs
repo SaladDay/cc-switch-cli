@@ -19,6 +19,7 @@ impl ClaudeEndpointTarget {
             "anthropic" => Self::Messages,
             "openai_chat" => Self::ChatCompletions,
             "openai_responses" => Self::Responses,
+            "gemini_native" => Self::Messages,
             format => unreachable!("unsupported Claude API format for endpoint rewrite: {format}"),
         }
     }

@@ -1,4 +1,5 @@
 use crate::app_config::AppType;
+use crate::provider::ClaudeApiKeyField;
 use crate::services::ProviderService;
 use serde_json::{json, Value};
 
@@ -60,9 +61,10 @@ impl ProviderAddFormState {
                 } else {
                     set_or_remove_trimmed(
                         env_obj,
-                        "ANTHROPIC_AUTH_TOKEN",
+                        self.claude_api_key_field.as_env_key(),
                         &self.claude_api_key.value,
                     );
+                    env_obj.remove(self.claude_api_key_field.alternate_env_key());
                     set_or_remove_trimmed(
                         env_obj,
                         "ANTHROPIC_BASE_URL",
@@ -94,6 +96,7 @@ impl ProviderAddFormState {
                     env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
                 }
                 settings_obj.remove("api_format");
+                settings_obj.remove("apiFormat");
                 settings_obj.remove("openrouter_compat_mode");
                 if self.claude_hide_attribution && self.claude_hide_attribution_touched {
                     settings_obj.insert(
@@ -489,13 +492,20 @@ impl ProviderAddFormState {
         let should_write_common_config_meta = self.should_write_common_config_meta();
         let should_write_claude_api_format = matches!(
             self.claude_api_format,
-            ClaudeApiFormat::OpenAiChat | ClaudeApiFormat::OpenAiResponses
+            ClaudeApiFormat::OpenAiChat
+                | ClaudeApiFormat::OpenAiResponses
+                | ClaudeApiFormat::GeminiNative
         ) && matches!(self.app_type, AppType::Claude)
             && !self.is_claude_official_provider();
+        let should_write_claude_api_key_field = matches!(self.app_type, AppType::Claude)
+            && !self.is_claude_official_provider()
+            && !self.is_claude_codex_oauth_provider()
+            && self.claude_api_key_field == ClaudeApiKeyField::ApiKey;
         let is_codex_oauth = self.is_claude_codex_oauth_provider();
 
         if !should_write_common_config_meta
             && !should_write_claude_api_format
+            && !should_write_claude_api_key_field
             && !is_codex_oauth
             && !self.has_usage_script_meta()
             && !provider_obj.get("meta").is_some_and(Value::is_object)
@@ -541,6 +551,18 @@ impl ProviderAddFormState {
                 ClaudeApiFormat::OpenAiResponses => {
                     meta_obj.insert("apiFormat".to_string(), json!("openai_responses"));
                 }
+                ClaudeApiFormat::GeminiNative => {
+                    meta_obj.insert("apiFormat".to_string(), json!("gemini_native"));
+                }
+            }
+
+            if should_write_claude_api_key_field {
+                meta_obj.insert(
+                    "apiKeyField".to_string(),
+                    json!(self.claude_api_key_field.as_env_key()),
+                );
+            } else {
+                meta_obj.remove("apiKeyField");
             }
         }
 

@@ -182,6 +182,9 @@ pub struct UnmanagedSkill {
     pub description: Option<String>,
     /// 在哪些应用目录中发现（如 ["claude", "codex"]）
     pub found_in: Vec<String>,
+    /// First source path where the unmanaged skill was discovered.
+    #[serde(default)]
+    pub path: String,
 }
 
 /// MCP 服务器定义（v3.7.0 统一结构）

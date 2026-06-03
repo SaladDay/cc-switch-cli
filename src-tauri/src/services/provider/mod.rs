@@ -47,6 +47,14 @@ fn active_failover_last_provider_error() -> AppError {
     )
 }
 
+fn provider_key_invalid_error() -> AppError {
+    AppError::localized(
+        "provider.key.invalid",
+        "供应商标识只能包含小写字母、数字和连字符，且不能以连字符开头或结尾",
+        "Provider key can only contain lowercase letters, numbers, and hyphens, and cannot start or end with a hyphen",
+    )
+}
+
 fn current_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -98,6 +106,87 @@ struct PostCommitAction {
 }
 
 impl ProviderService {
+    pub fn is_provider_key_app(app_type: &AppType) -> bool {
+        matches!(app_type, AppType::OpenClaw | AppType::Hermes)
+    }
+
+    pub fn is_valid_provider_key(value: &str) -> bool {
+        let mut previous_dash = false;
+        let mut saw_char = false;
+        for ch in value.chars() {
+            let valid = ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-';
+            if !valid {
+                return false;
+            }
+            if ch == '-' {
+                if !saw_char || previous_dash {
+                    return false;
+                }
+                previous_dash = true;
+            } else {
+                saw_char = true;
+                previous_dash = false;
+            }
+        }
+        saw_char && !previous_dash
+    }
+
+    pub fn sanitize_provider_key_text(value: &str) -> String {
+        value
+            .chars()
+            .filter_map(|ch| {
+                let ch = ch.to_ascii_lowercase();
+                (ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-').then_some(ch)
+            })
+            .collect()
+    }
+
+    pub fn generate_provider_key(name: &str, existing_ids: &[String]) -> String {
+        let mut base_id = name
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+                    ch
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+
+        while base_id.contains("--") {
+            base_id = base_id.replace("--", "-");
+        }
+        base_id = base_id.trim_matches('-').to_string();
+        if base_id.is_empty() {
+            base_id = "provider".to_string();
+        }
+
+        if !existing_ids.iter().any(|existing| existing == &base_id) {
+            return base_id;
+        }
+
+        let mut counter = 1;
+        loop {
+            let candidate = format!("{base_id}-{counter}");
+            if !existing_ids.iter().any(|existing| existing == &candidate) {
+                return candidate;
+            }
+            counter += 1;
+        }
+    }
+
+    pub fn validate_provider_key_for_add(
+        app_type: &AppType,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        if Self::is_provider_key_app(app_type) && !Self::is_valid_provider_key(provider_id) {
+            return Err(provider_key_invalid_error());
+        }
+        Ok(())
+    }
+
     fn provider_copy_id(original_id: &str, existing_ids: &HashSet<String>) -> String {
         let base_id = format!("{}-copy", original_id.trim());
 
@@ -1633,6 +1722,7 @@ impl ProviderService {
             if app_type_clone.is_additive_mode() {
                 Self::set_provider_live_config_managed(&mut provider_to_store, true);
             }
+            Self::validate_provider_key_for_add(&app_type_clone, &provider_to_store.id)?;
 
             config.ensure_app(&app_type_clone);
             let manager = config
@@ -1644,6 +1734,13 @@ impl ProviderService {
             }
 
             let was_empty = manager.providers.is_empty();
+            if manager.providers.contains_key(&provider_to_store.id) {
+                return Err(AppError::localized(
+                    "provider.id.exists",
+                    format!("供应商 ID 已存在: {}", provider_to_store.id),
+                    format!("Provider ID already exists: {}", provider_to_store.id),
+                ));
+            }
             manager
                 .providers
                 .insert(provider_to_store.id.clone(), provider_to_store.clone());
@@ -2060,6 +2157,8 @@ impl ProviderService {
             ));
         }
 
+        Self::guard_additive_default_provider_removal(&app_type, provider_id)?;
+
         let original = {
             let config = state.config.read().map_err(AppError::from)?;
             let manager = config
@@ -2133,6 +2232,137 @@ impl ProviderService {
         }
 
         Ok(())
+    }
+
+    pub fn import_live_config(state: &AppState, app_type: AppType) -> Result<usize, AppError> {
+        match app_type {
+            AppType::OpenCode => Self::import_opencode_providers_from_live(state),
+            AppType::OpenClaw => Self::import_openclaw_providers_from_live(state),
+            AppType::Hermes => Self::import_hermes_providers_from_live(state),
+            _ => Self::import_default_config(state, app_type).map(|imported| usize::from(imported)),
+        }
+    }
+
+    pub fn set_default_model(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+        model_id: Option<&str>,
+    ) -> Result<String, AppError> {
+        match app_type {
+            AppType::Hermes => {
+                Self::switch(state, AppType::Hermes, provider_id)?;
+                Ok(provider_id.to_string())
+            }
+            AppType::OpenClaw => Self::set_openclaw_default_model(provider_id, model_id),
+            _ => Err(AppError::localized(
+                "provider.set_default_model.unsupported",
+                "只有 Hermes 和 OpenClaw 支持设置默认供应商/模型",
+                "Only Hermes and OpenClaw support setting a default provider/model",
+            )),
+        }
+    }
+
+    fn set_openclaw_default_model(
+        provider_id: &str,
+        model_id: Option<&str>,
+    ) -> Result<String, AppError> {
+        let live_provider = crate::openclaw_config::get_providers()?
+            .remove(provider_id)
+            .ok_or_else(|| {
+                AppError::localized(
+                    "provider.set_default_model.openclaw_provider_missing",
+                    format!("请先将该 OpenClaw 供应商加入当前配置: {provider_id}"),
+                    format!(
+                        "Add this OpenClaw provider to the current config first: {provider_id}"
+                    ),
+                )
+            })?;
+        let ordered_model_ids = Self::openclaw_provider_model_ids(&live_provider);
+        if ordered_model_ids.is_empty() {
+            return Err(AppError::localized(
+                "provider.set_default_model.openclaw_no_models",
+                "该 OpenClaw 供应商在当前配置中没有可用模型",
+                "This OpenClaw provider has no models in the current config",
+            ));
+        }
+
+        let selected_model_id = match model_id {
+            Some(id) if ordered_model_ids.iter().any(|candidate| candidate == id) => id.to_string(),
+            Some(id) => {
+                return Err(AppError::localized(
+                    "provider.set_default_model.openclaw_model_missing",
+                    format!("该 OpenClaw 供应商在当前配置中没有模型: {id}"),
+                    format!(
+                        "This OpenClaw provider does not have model in the current config: {id}"
+                    ),
+                ));
+            }
+            None => ordered_model_ids[0].clone(),
+        };
+        let primary = format!("{provider_id}/{selected_model_id}");
+        let fallbacks = ordered_model_ids
+            .iter()
+            .filter(|candidate| *candidate != &selected_model_id)
+            .map(|candidate| format!("{provider_id}/{candidate}"))
+            .collect();
+        let model = crate::openclaw_config::OpenClawDefaultModel {
+            primary: primary.clone(),
+            fallbacks,
+            extra: crate::openclaw_config::get_default_model()?
+                .map(|existing| existing.extra)
+                .unwrap_or_default(),
+        };
+        crate::openclaw_config::set_default_model(&model)?;
+        Ok(primary)
+    }
+
+    fn openclaw_default_model_references_provider(provider_id: &str) -> Result<bool, AppError> {
+        Ok(
+            crate::openclaw_config::get_default_model()?.is_some_and(|model| {
+                model
+                    .primary
+                    .split_once('/')
+                    .is_some_and(|(default_provider_id, _)| default_provider_id == provider_id)
+            }),
+        )
+    }
+
+    fn guard_additive_default_provider_removal(
+        app_type: &AppType,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        match app_type {
+            AppType::Hermes
+                if crate::hermes_config::get_current_provider_id()?.as_deref()
+                    == Some(provider_id) =>
+            {
+                Err(AppError::localized(
+                    "provider.remove_from_config.hermes_current",
+                    "不能从配置中移除 Hermes 当前默认供应商",
+                    "Cannot remove the current default Hermes provider from config",
+                ))
+            }
+            AppType::OpenClaw if Self::openclaw_default_model_references_provider(provider_id)? => {
+                Err(AppError::localized(
+                    "provider.remove_from_config.openclaw_default",
+                    "不能从配置中移除被当前默认模型引用的 OpenClaw 供应商",
+                    "Cannot remove the OpenClaw provider referenced by the current default model from config",
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn openclaw_provider_model_ids(provider_value: &Value) -> Vec<String> {
+        provider_value
+            .get("models")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|model| model.get("id").and_then(|value| value.as_str()))
+            .map(str::to_string)
+            .collect()
     }
 
     /// 将所有应用的当前供应商配置同步到 live 文件。

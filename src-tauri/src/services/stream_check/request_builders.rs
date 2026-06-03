@@ -4,7 +4,13 @@ use serde_json::json;
 
 use crate::error::AppError;
 use crate::provider::Provider;
-use crate::proxy::providers::get_claude_api_format;
+use crate::proxy::{
+    gemini_url::{normalize_gemini_model_id, resolve_gemini_native_url},
+    providers::{
+        get_claude_api_format, transform::anthropic_to_openai,
+        transform_gemini::anthropic_to_gemini, transform_responses::anthropic_to_responses,
+    },
+};
 
 use super::service::StreamCheckService;
 use super::types::{AuthInfo, AuthStrategy};
@@ -19,60 +25,79 @@ impl StreamCheckService {
         timeout: std::time::Duration,
         provider: &Provider,
     ) -> Result<(u16, String), AppError> {
-        let base = base_url.trim_end_matches('/');
         let api_format = get_claude_api_format(provider);
         let is_openai_compatible = matches!(api_format, "openai_chat" | "openai_responses");
-        let url = match api_format {
-            "openai_chat" => {
-                if base.ends_with("/v1") {
-                    format!("{base}/chat/completions")
-                } else {
-                    format!("{base}/v1/chat/completions")
-                }
-            }
-            "openai_responses" => {
-                if base.ends_with("/v1") {
-                    format!("{base}/responses")
-                } else {
-                    format!("{base}/v1/responses")
-                }
-            }
-            _ => {
-                if base.ends_with("/v1") {
-                    format!("{base}/messages?beta=true")
-                } else {
-                    format!("{base}/v1/messages?beta=true")
-                }
-            }
-        };
+        let is_gemini_native = api_format == "gemini_native";
+        let is_full_url = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.is_full_url)
+            .unwrap_or(false);
+        let url = Self::resolve_claude_stream_url(
+            base_url,
+            auth.strategy,
+            api_format,
+            is_full_url,
+            model,
+        );
+
+        let anthropic_body = json!({
+            "model": model,
+            "max_tokens": if api_format == "openai_responses" { 16 } else { 1 },
+            "messages": [{ "role": "user", "content": test_prompt }],
+            "stream": true,
+        });
 
         let body = if api_format == "openai_responses" {
-            json!({
-                "model": model,
-                "max_output_tokens": 1,
-                "input": [{
-                    "role": "user",
-                    "content": [{ "type": "input_text", "text": test_prompt }]
-                }],
-                "stream": true,
-            })
+            anthropic_to_responses(
+                anthropic_body,
+                Some(&provider.id),
+                provider.is_codex_oauth(),
+                provider.codex_fast_mode_enabled(),
+            )
+            .map_err(|err| AppError::Message(format!("Failed to build test request: {err}")))?
+        } else if is_gemini_native {
+            anthropic_to_gemini(anthropic_body)
+                .map_err(|err| AppError::Message(format!("Failed to build test request: {err}")))?
+        } else if api_format == "openai_chat" {
+            anthropic_to_openai(anthropic_body, None)
+                .map_err(|err| AppError::Message(format!("Failed to build test request: {err}")))?
         } else {
-            json!({
-                "model": model,
-                "max_tokens": 1,
-                "messages": [{ "role": "user", "content": test_prompt }],
-                "stream": true,
-            })
+            anthropic_body
         };
 
-        let mut request = client
-            .post(&url)
-            .header("authorization", format!("Bearer {}", auth.api_key));
+        let mut request = client.post(&url);
 
-        let response = if is_openai_compatible {
+        let response = if is_gemini_native {
+            request = match auth.strategy {
+                AuthStrategy::GoogleOAuth => request
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            auth.access_token
+                                .as_deref()
+                                .unwrap_or(auth.api_key.as_str())
+                        ),
+                    )
+                    .header("x-goog-api-client", "GeminiCLI/1.0"),
+                _ => request.header("x-goog-api-key", &auth.api_key),
+            };
             request
                 .header("content-type", "application/json")
-                .header("accept", "application/json")
+                .header("accept", "text/event-stream")
+                .header("accept-encoding", "identity")
+                .timeout(timeout)
+                .json(&body)
+                .send()
+                .await
+                .map_err(Self::map_request_error)?
+        } else if is_openai_compatible {
+            request
+                .header("authorization", format!("Bearer {}", auth.api_key))
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .header("accept-encoding", "identity")
                 .timeout(timeout)
                 .json(&body)
                 .send()
@@ -82,9 +107,15 @@ impl StreamCheckService {
             let os_name = Self::get_os_name();
             let arch_name = Self::get_arch_name();
 
-            if auth.strategy == AuthStrategy::Anthropic {
-                request = request.header("x-api-key", &auth.api_key);
-            }
+            request = match auth.strategy {
+                AuthStrategy::Anthropic => request
+                    .header("authorization", format!("Bearer {}", auth.api_key))
+                    .header("x-api-key", &auth.api_key),
+                AuthStrategy::ClaudeAuth | AuthStrategy::Bearer => {
+                    request.header("authorization", format!("Bearer {}", auth.api_key))
+                }
+                _ => request.header("authorization", format!("Bearer {}", auth.api_key)),
+            };
 
             request
                 .header("anthropic-version", "2023-06-01")
@@ -305,6 +336,45 @@ impl StreamCheckService {
             "x86_64" => "x86_64",
             "x86" => "x86",
             other => other,
+        }
+    }
+
+    pub(crate) fn resolve_claude_stream_url(
+        base_url: &str,
+        auth_strategy: AuthStrategy,
+        api_format: &str,
+        is_full_url: bool,
+        model: &str,
+    ) -> String {
+        if api_format == "gemini_native" {
+            let normalized_model = normalize_gemini_model_id(model);
+            let endpoint =
+                format!("/v1beta/models/{normalized_model}:streamGenerateContent?alt=sse");
+            return resolve_gemini_native_url(base_url, &endpoint, is_full_url);
+        }
+
+        if is_full_url {
+            return base_url.to_string();
+        }
+
+        let base = base_url.trim_end_matches('/');
+        let _ = auth_strategy;
+        if api_format == "openai_responses" {
+            if base.ends_with("/v1") {
+                format!("{base}/responses")
+            } else {
+                format!("{base}/v1/responses")
+            }
+        } else if api_format == "openai_chat" {
+            if base.ends_with("/v1") {
+                format!("{base}/chat/completions")
+            } else {
+                format!("{base}/v1/chat/completions")
+            }
+        } else if base.ends_with("/v1") {
+            format!("{base}/messages?beta=true")
+        } else {
+            format!("{base}/v1/messages?beta=true")
         }
     }
 }

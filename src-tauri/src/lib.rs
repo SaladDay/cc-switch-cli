@@ -39,7 +39,7 @@ pub(crate) mod test_support;
 pub mod cli;
 
 // Public exports
-pub use app_config::{AppType, McpApps, McpServer, MultiAppConfig};
+pub use app_config::{AppType, McpApps, McpServer, MultiAppConfig, SkillApps};
 pub use claude_plugin::{
     sync_claude_plugin_on_provider_switch, sync_claude_plugin_on_settings_toggle,
 };
@@ -58,14 +58,14 @@ pub use mcp::{
     sync_enabled_to_codex, sync_enabled_to_gemini, sync_single_server_to_claude,
     sync_single_server_to_codex, sync_single_server_to_gemini,
 };
-pub use provider::{Provider, ProviderMeta};
+pub use provider::{Provider, ProviderMeta, UsageScript};
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
 pub use services::{
     AuthService, ConfigService, CredentialStatus, EndpointLatency, ExtraUsage, HealthStatus,
-    ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus, McpService,
-    PromptService, ProviderService, ProxyService, QuotaTier, SkillService, SpeedtestService,
-    StreamCheckConfig, StreamCheckResult, StreamCheckService, SubscriptionQuota, SyncDecision,
-    WebDavSyncService, WebDavSyncSummary,
+    ImportSkillSelection, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus,
+    McpService, PromptService, ProviderService, ProxyService, QuotaTier, SkillService,
+    SpeedtestService, StreamCheckConfig, StreamCheckResult, StreamCheckService, SubscriptionQuota,
+    SyncDecision, WebDavSyncService, WebDavSyncSummary,
 };
 pub use settings::{
     get_enable_claude_plugin_integration, get_skip_claude_onboarding, get_webdav_sync_settings,

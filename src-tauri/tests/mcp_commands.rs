@@ -658,3 +658,90 @@ fn sync_all_enabled_removes_disabled_gemini_server_from_live_config() {
         "sync_all_enabled should remove disabled Gemini binding from live config, got: {settings_text}"
     );
 }
+
+#[test]
+fn set_apps_replaces_matrix_and_syncs_opencode_live_config() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let opencode_dir = home.join(".config").join("opencode");
+    fs::create_dir_all(&opencode_dir).expect("create opencode dir");
+    let opencode_path = opencode_dir.join("opencode.json");
+    fs::write(&opencode_path, json!({ "mcp": {} }).to_string()).expect("seed opencode config");
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.servers = Some(HashMap::new());
+    config.mcp.servers.as_mut().unwrap().insert(
+        "matrix-server".into(),
+        McpServer {
+            id: "matrix-server".to_string(),
+            name: "Matrix Server".to_string(),
+            server: json!({
+                "type": "http",
+                "url": "https://example.com/mcp"
+            }),
+            apps: McpApps::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    );
+
+    let state = state_from_config(config);
+
+    let mut apps = McpApps::default();
+    apps.opencode = true;
+    assert!(
+        McpService::set_apps(&state, "matrix-server", apps).expect("set apps succeeds"),
+        "existing server should be updated"
+    );
+
+    {
+        let guard = state.config.read().expect("lock config");
+        let server = guard
+            .mcp
+            .servers
+            .as_ref()
+            .expect("unified servers")
+            .get("matrix-server")
+            .expect("matrix server exists");
+        assert!(
+            server.apps.opencode,
+            "OpenCode matrix bit should be enabled"
+        );
+        assert!(
+            !server.apps.claude && !server.apps.codex && !server.apps.gemini && !server.apps.hermes,
+            "set_apps should replace the full supported-app matrix"
+        );
+    }
+
+    let opencode_text = fs::read_to_string(&opencode_path).expect("read opencode config");
+    let opencode_json: serde_json::Value =
+        serde_json::from_str(&opencode_text).expect("parse opencode config");
+    assert!(
+        opencode_json
+            .get("mcp")
+            .and_then(|mcp| mcp.as_object())
+            .is_some_and(|mcp| mcp.contains_key("matrix-server")),
+        "enabling OpenCode should write the live MCP config, got: {opencode_text}"
+    );
+
+    assert!(
+        McpService::set_apps(&state, "matrix-server", McpApps::default())
+            .expect("clear apps succeeds"),
+        "existing server should be updated"
+    );
+
+    let opencode_text = fs::read_to_string(&opencode_path).expect("read opencode config");
+    let opencode_json: serde_json::Value =
+        serde_json::from_str(&opencode_text).expect("parse opencode config");
+    assert!(
+        opencode_json
+            .get("mcp")
+            .and_then(|mcp| mcp.as_object())
+            .is_none_or(|mcp| !mcp.contains_key("matrix-server")),
+        "disabling OpenCode should remove the live MCP config, got: {opencode_text}"
+    );
+}

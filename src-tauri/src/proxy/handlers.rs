@@ -18,10 +18,10 @@ use super::{
     providers::{ClaudeAdapter, ProviderAdapter},
     response::{
         build_anthropic_stream_response, build_buffered_codex_chat_response,
-        build_buffered_json_response, build_buffered_passthrough_response,
-        build_codex_chat_error_response, build_codex_chat_response,
-        build_codex_chat_stream_response, build_json_response, build_passthrough_response,
-        is_sse_response, PreparedResponse,
+        build_buffered_codex_chat_response_with_context, build_buffered_json_response,
+        build_buffered_passthrough_response, build_codex_chat_error_response,
+        build_codex_chat_response_with_context, build_codex_chat_stream_response_with_context,
+        build_json_response, build_passthrough_response, is_sse_response, PreparedResponse,
     },
     response_handler::{proxy_error_response, ResponseHandler, SuccessSyncInfo},
     server::ProxyServerState,
@@ -137,7 +137,9 @@ async fn handle_claude_request(
     let forwarder = match RequestForwarder::new(context.provider_router.clone()) {
         Ok(forwarder) => forwarder
             .with_optimizer_config(context.optimizer_config.clone())
-            .with_session(context.session_id.clone(), context.session_client_provided),
+            .with_copilot_optimizer_config(context.copilot_optimizer_config.clone())
+            .with_session(context.session_id.clone(), context.session_client_provided)
+            .with_gemini_shadow(context.state.gemini_shadow.clone()),
         Err(error) => {
             context.state.record_request_error(&error).await;
             return proxy_error_response(error);
@@ -148,6 +150,9 @@ async fn handle_claude_request(
         .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let tool_schema_hints =
+        super::providers::transform_gemini::extract_anthropic_tool_schema_hints(&body);
+    let tool_schema_hints = (!tool_schema_hints.is_empty()).then_some(tool_schema_hints);
     let adapter = ClaudeAdapter::new();
 
     if is_stream {
@@ -223,6 +228,10 @@ async fn handle_claude_request(
                         first_byte_timeout,
                         idle_timeout,
                         api_format,
+                        Some(context.state.gemini_shadow.clone()),
+                        Some(forward_result.provider.id.clone()),
+                        Some(context.session_id.clone()),
+                        tool_schema_hints.clone(),
                     )
                 } else {
                     build_json_response(response, first_byte_timeout, |body| {
@@ -237,7 +246,17 @@ async fn handle_claude_request(
             super::forwarder::StreamingResponse::Buffered(response) => {
                 if adapter.needs_transform(&forward_result.provider) {
                     build_buffered_json_response(status, &response.headers, response.body, |body| {
-                        adapter.transform_response(body)
+                        if api_format == "gemini_native" {
+                            super::providers::transform_gemini_response_for_provider(
+                                body,
+                                &forward_result.provider,
+                                Some(&context.session_id),
+                                Some(context.state.gemini_shadow.as_ref()),
+                                tool_schema_hints.as_ref(),
+                            )
+                        } else {
+                            adapter.transform_response(body)
+                        }
                     })
                 } else {
                     build_buffered_passthrough_response(status, &response.headers, response.body)
@@ -315,7 +334,19 @@ async fn handle_claude_request(
             &response.headers,
             response.body,
             provider.is_codex_oauth() && api_format == "openai_responses",
-            |body| adapter.transform_response(body),
+            |body| {
+                if api_format == "gemini_native" {
+                    super::providers::transform_gemini_response_for_provider(
+                        body,
+                        provider,
+                        Some(&context.session_id),
+                        Some(context.state.gemini_shadow.as_ref()),
+                        tool_schema_hints.as_ref(),
+                    )
+                } else {
+                    adapter.transform_response(body)
+                }
+            },
         )
     } else {
         build_buffered_passthrough_response(status, &response.headers, response.body)
@@ -419,12 +450,12 @@ fn responses_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
 }
 
 fn should_use_claude_transform_streaming(
-    requested_streaming: bool,
+    _requested_streaming: bool,
     upstream_is_sse: bool,
     api_format: &str,
     is_codex_oauth: bool,
 ) -> bool {
-    requested_streaming || upstream_is_sse || (is_codex_oauth && api_format == "openai_responses")
+    upstream_is_sse || (is_codex_oauth && api_format == "openai_responses")
 }
 
 async fn handle_passthrough_request(
@@ -448,6 +479,7 @@ async fn handle_passthrough_request(
     let forwarder = match RequestForwarder::new(context.provider_router.clone()) {
         Ok(forwarder) => forwarder
             .with_optimizer_config(context.optimizer_config.clone())
+            .with_copilot_optimizer_config(context.copilot_optimizer_config.clone())
             .with_session(context.session_id.clone(), context.session_client_provided)
             .with_codex_chat_history(context.state.codex_chat_history.clone()),
         Err(error) => {
@@ -457,6 +489,9 @@ async fn handle_passthrough_request(
     };
 
     let is_stream = request_is_streaming(&context.app_type, &endpoint, &body);
+    let codex_tool_context = matches!(context.app_type, AppType::Codex).then(|| {
+        super::providers::transform_codex_chat::build_codex_tool_context_from_request(&body)
+    });
     let options = if is_stream {
         ForwardOptions {
             max_retries: context.app_proxy.max_retries,
@@ -534,11 +569,12 @@ async fn handle_passthrough_request(
             super::forwarder::StreamingResponse::Live(response)
                 if converts_codex_chat && status.is_success() =>
             {
-                build_codex_chat_stream_response(
+                build_codex_chat_stream_response_with_context(
                     response,
                     remaining_timeout(first_byte_timeout, request_started_at),
                     context.streaming_idle_timeout(),
                     context.state.codex_chat_history.clone(),
+                    codex_tool_context.clone().unwrap_or_default(),
                 )
             }
             super::forwarder::StreamingResponse::Live(response) if converts_codex_chat => {
@@ -558,11 +594,12 @@ async fn handle_passthrough_request(
                 .await
             }
             super::forwarder::StreamingResponse::Buffered(response) if converts_codex_chat => {
-                build_buffered_codex_chat_response(
+                build_buffered_codex_chat_response_with_context(
                     status,
                     &response.headers,
                     response.body,
                     context.state.codex_chat_history.clone(),
+                    codex_tool_context.clone().unwrap_or_default(),
                 )
                 .await
             }
@@ -639,6 +676,7 @@ async fn handle_passthrough_request(
             request_started_at,
             streaming_first_byte_timeout,
             non_streaming_timeout,
+            codex_tool_context.unwrap_or_default(),
         )
         .await;
     }
@@ -893,6 +931,7 @@ async fn finish_codex_live_aware_response(
     request_started_at: Instant,
     streaming_first_byte_timeout: Option<Duration>,
     non_streaming_timeout: Option<Duration>,
+    tool_context: super::providers::transform_codex_chat::CodexToolContext,
 ) -> Response {
     let provider = forward_result.provider;
     let response = forward_result.response;
@@ -914,11 +953,12 @@ async fn finish_codex_live_aware_response(
                     true,
                     UsageLogPolicy::Transformed,
                 ));
-                let response_result = build_codex_chat_stream_response(
+                let response_result = build_codex_chat_stream_response_with_context(
                     response,
                     remaining_timeout(streaming_first_byte_timeout, request_started_at),
                     context.streaming_idle_timeout(),
                     context.state.codex_chat_history.clone(),
+                    tool_context,
                 );
                 ResponseHandler::finish_streaming(
                     &context.state,
@@ -938,10 +978,11 @@ async fn finish_codex_live_aware_response(
                 ));
                 let timeout = remaining_timeout(non_streaming_timeout, request_started_at);
                 let response_result = if status.is_success() {
-                    build_codex_chat_response(
+                    build_codex_chat_response_with_context(
                         response,
                         timeout,
                         context.state.codex_chat_history.clone(),
+                        tool_context,
                     )
                     .await
                 } else {
@@ -968,11 +1009,12 @@ async fn finish_codex_live_aware_response(
                     false,
                     UsageLogPolicy::Transformed,
                 ));
-                let response_result = build_buffered_codex_chat_response(
+                let response_result = build_buffered_codex_chat_response_with_context(
                     response.status,
                     &response.headers,
                     response.body,
                     context.state.codex_chat_history.clone(),
+                    tool_context,
                 )
                 .await;
                 ResponseHandler::finish_buffered(
@@ -1070,6 +1112,7 @@ mod tests {
             error::ProxyError,
             provider_router::ProviderRouter,
             providers::codex_chat_history::CodexChatHistoryStore,
+            providers::gemini_shadow::GeminiShadowStore,
             server::ProxyServerState,
             types::{ProxyConfig, ProxyStatus},
         },
@@ -1148,6 +1191,7 @@ mod tests {
             current_providers: Arc::new(RwLock::new(HashMap::new())),
             provider_router: Arc::new(ProviderRouter::new(db)),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            gemini_shadow: Arc::new(GeminiShadowStore::default()),
         }
     }
 
@@ -1171,6 +1215,43 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind hanging SSE upstream listener");
+        let address = listener.local_addr().expect("upstream listener address");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        (format!("http://{address}"), handle)
+    }
+
+    async fn handle_chat_tool_search_upstream() -> Json<Value> {
+        Json(json!({
+            "id": "chatcmpl_tool_search",
+            "object": "chat.completion",
+            "created": 1710000000,
+            "model": "gpt-5.4",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_tool_search_1",
+                        "type": "function",
+                        "function": {
+                            "name": "tool_search",
+                            "arguments": "{\"query\":\"Gmail search emails\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }))
+    }
+
+    async fn spawn_chat_tool_search_upstream() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route("/*path", any(handle_chat_tool_search_upstream));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind tool_search upstream listener");
         let address = listener.local_addr().expect("upstream listener address");
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -1275,6 +1356,57 @@ mod tests {
         assert!(output.contains("event: response.created"));
         assert!(output.contains("event: response.output_text.delta"));
         assert!(output.contains("\"delta\":\"Hel\""));
+
+        upstream_handle.abort();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(home_settings)]
+    async fn codex_chat_provider_restores_tool_search_identity_through_handler() {
+        let _home = TempHome::new();
+        let (upstream_base_url, upstream_handle) = spawn_chat_tool_search_upstream().await;
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let provider = Provider::with_id(
+            "codex-chat".to_string(),
+            "Codex Chat".to_string(),
+            json!({
+                "api_format": "chat",
+                "apiKey": "test-key",
+                "base_url": upstream_base_url,
+                "model": "gpt-5.4"
+            }),
+            None,
+        );
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("save Codex chat provider");
+        db.set_current_provider(AppType::Codex.as_str(), &provider.id)
+            .expect("set current Codex provider");
+        let state = codex_test_state(db);
+
+        let response = handle_responses(
+            State(state),
+            Uri::from_static("/v1/responses"),
+            HeaderMap::new(),
+            Json(json!({
+                "model": "gpt-5.4",
+                "tools": [{"type": "tool_search"}],
+                "input": "Find Gmail tools"
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let body: Value = serde_json::from_slice(&body).expect("parse response json");
+
+        assert_eq!(body["output"][0]["type"], "tool_search_call");
+        assert_eq!(body["output"][0]["call_id"], "call_tool_search_1");
+        assert_eq!(
+            body["output"][0]["arguments"]["query"],
+            "Gmail search emails"
+        );
 
         upstream_handle.abort();
     }

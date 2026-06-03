@@ -1,4 +1,5 @@
 use crate::app_config::{AppType, McpApps};
+use crate::provider::ClaudeApiKeyField;
 use serde_json::Value;
 
 use super::app::EditorState;
@@ -27,23 +28,10 @@ pub(crate) use provider_state::{
     detect_balance_provider_for_usage_query, detect_coding_plan_provider_for_usage_query,
 };
 
-pub const OPENCLAW_DEFAULT_API_PROTOCOL: &str = "openai-completions";
-pub const OPENCLAW_DEFAULT_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0";
-pub const OPENCLAW_API_PROTOCOLS: [&str; 5] = [
-    "openai-completions",
-    "openai-responses",
-    "anthropic-messages",
-    "google-generative-ai",
-    "bedrock-converse-stream",
-];
-pub const HERMES_DEFAULT_API_MODE: &str = "chat_completions";
-pub const HERMES_API_MODES: [&str; 4] = [
-    "chat_completions",
-    "anthropic_messages",
-    "codex_responses",
-    "bedrock_converse",
-];
+pub(crate) use crate::hermes_config::{HERMES_API_MODES, HERMES_DEFAULT_API_MODE};
+pub(crate) use crate::openclaw_config::{
+    OPENCLAW_API_PROTOCOLS, OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeminiAuthType {
@@ -80,13 +68,15 @@ pub enum ClaudeApiFormat {
     Anthropic,
     OpenAiChat,
     OpenAiResponses,
+    GeminiNative,
 }
 
 impl ClaudeApiFormat {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         ClaudeApiFormat::Anthropic,
         ClaudeApiFormat::OpenAiChat,
         ClaudeApiFormat::OpenAiResponses,
+        ClaudeApiFormat::GeminiNative,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -94,6 +84,7 @@ impl ClaudeApiFormat {
             ClaudeApiFormat::Anthropic => "anthropic",
             ClaudeApiFormat::OpenAiChat => "openai_chat",
             ClaudeApiFormat::OpenAiResponses => "openai_responses",
+            ClaudeApiFormat::GeminiNative => "gemini_native",
         }
     }
 
@@ -101,6 +92,7 @@ impl ClaudeApiFormat {
         match value {
             "openai_chat" => ClaudeApiFormat::OpenAiChat,
             "openai_responses" => ClaudeApiFormat::OpenAiResponses,
+            "gemini_native" => ClaudeApiFormat::GeminiNative,
             _ => ClaudeApiFormat::Anthropic,
         }
     }
@@ -110,6 +102,7 @@ impl ClaudeApiFormat {
             ClaudeApiFormat::Anthropic => 0,
             ClaudeApiFormat::OpenAiChat => 1,
             ClaudeApiFormat::OpenAiResponses => 2,
+            ClaudeApiFormat::GeminiNative => 3,
         }
     }
 
@@ -311,6 +304,7 @@ pub struct ProviderAddFormState {
     claude_model_config_touched: bool,
 
     pub claude_api_key: TextInput,
+    pub claude_api_key_field: ClaudeApiKeyField,
     pub claude_base_url: TextInput,
     pub claude_api_format: ClaudeApiFormat,
     pub claude_model: TextInput,

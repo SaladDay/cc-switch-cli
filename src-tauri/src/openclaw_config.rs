@@ -19,6 +19,17 @@ use std::sync::{Mutex, OnceLock};
 
 const OPENCLAW_DEFAULT_SOURCE: &str =
     "{\n  models: {\n    mode: 'merge',\n    providers: {},\n  },\n}\n";
+pub const OPENCLAW_DEFAULT_API_PROTOCOL: &str = "openai-completions";
+pub const OPENCLAW_DEFAULT_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0";
+pub const OPENCLAW_API_PROTOCOLS: [&str; 5] = [
+    "openai-completions",
+    "openai-responses",
+    "anthropic-messages",
+    "google-generative-ai",
+    "bedrock-converse-stream",
+];
+
 pub fn get_openclaw_dir() -> PathBuf {
     if let Some(override_dir) = get_openclaw_override_dir() {
         return override_dir;
@@ -429,6 +440,11 @@ fn should_use_precise_empty_object_fallback(section: &str, value: &Value) -> boo
         "models" => value
             .as_object()
             .and_then(|models| models.get("providers"))
+            .map(is_empty_object)
+            .unwrap_or(false),
+        "agents" => value
+            .as_object()
+            .and_then(|agents| agents.get("defaults"))
             .map(is_empty_object)
             .unwrap_or(false),
         "tools" => is_empty_object(value),
@@ -1023,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn missing_config_returns_default_models_object() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1035,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn read_openclaw_config_accepts_json5_syntax() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1068,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn read_openclaw_config_does_not_rewrite_string_contents() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1100,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn set_and_remove_provider_only_touch_target_entry() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1131,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn remove_missing_provider_is_noop_and_does_not_create_file() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1149,7 +1165,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn remove_last_provider_keeps_empty_providers_map() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1177,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn remove_last_provider_rewrites_models_section_like_upstream() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1236,6 +1252,9 @@ mod tests {
             "providers": {}
         });
         let empty_tools_value = json!({});
+        let agents_with_empty_defaults = json!({
+            "defaults": {}
+        });
         let env_value = json!({
             "vars": {}
         });
@@ -1255,6 +1274,10 @@ mod tests {
         assert!(should_use_precise_empty_object_fallback(
             "tools",
             &empty_tools_value
+        ));
+        assert!(should_use_precise_empty_object_fallback(
+            "agents",
+            &agents_with_empty_defaults
         ));
         assert!(!should_use_precise_empty_object_fallback("env", &env_value));
         assert!(!should_use_precise_empty_object_fallback(
@@ -1296,7 +1319,30 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
+    fn agents_defaults_empty_object_write_does_not_panic() {
+        let source = r#"{
+  models: {
+    mode: 'merge',
+    providers: {},
+  },
+}
+"#;
+
+        with_test_paths(source, |config_path| {
+            set_agents_defaults(&OpenClawAgentsDefaults::default())
+                .expect("write empty agents.defaults");
+
+            let written = fs::read_to_string(config_path).expect("read written config");
+            assert!(
+                written.contains("defaults: {}"),
+                "agents.defaults should be serialized as an empty object: {written}"
+            );
+        });
+    }
+
+    #[test]
+    #[serial(home_settings)]
     fn default_model_round_trip_preserves_existing_providers() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1347,7 +1393,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn typed_provider_round_trip_preserves_known_and_unknown_fields() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1400,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn get_providers_reads_multiple_json5_entries() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1431,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn scan_openclaw_config_health_returns_parse_warning_for_invalid_json5() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1447,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn default_model_write_preserves_top_level_comments() {
         let source = r#"{
   // top-level comment
@@ -1481,7 +1527,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn default_model_noop_write_skips_backup() {
         let source = r#"{
   models: {
@@ -1530,7 +1576,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn backup_cleanup_uses_settings_retain_count() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1582,7 +1628,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn save_detects_external_conflict() {
         let source = r#"{
   models: {
@@ -1608,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn model_catalog_round_trip_preserves_existing_default_model() {
         let source = r#"{
   models: {
@@ -1668,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn agents_defaults_round_trip_strips_legacy_timeout_and_preserves_extra_fields() {
         let source = r#"{
   models: {
@@ -1726,7 +1772,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn env_and_tools_section_helpers_round_trip() {
         let source = r#"{
   // top-level comment
@@ -1760,7 +1806,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn scan_openclaw_health_detects_invalid_tools_and_env_values() {
         let source = r#"{
   models: {

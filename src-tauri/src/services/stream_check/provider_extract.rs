@@ -225,6 +225,29 @@ impl StreamCheckService {
                         "API key is missing",
                     )
                 })?;
+                if strategy == AuthStrategy::GoogleOAuth {
+                    let trimmed = api_key.trim();
+                    if trimmed.starts_with("ya29.") {
+                        return Ok(AuthInfo::with_access_token(
+                            trimmed.to_string(),
+                            trimmed.to_string(),
+                        ));
+                    }
+                    if trimmed.starts_with('{') {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            if let Some(access_token) =
+                                value.get("access_token").and_then(|value| value.as_str())
+                            {
+                                if !access_token.trim().is_empty() {
+                                    return Ok(AuthInfo::with_access_token(
+                                        api_key,
+                                        access_token.trim().to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(AuthInfo::new(api_key, strategy))
             }
             AppType::Codex => Self::extract_codex_key(provider)
@@ -279,6 +302,16 @@ impl StreamCheckService {
     }
 
     pub(crate) fn detect_claude_auth_strategy(provider: &Provider, base_url: &str) -> AuthStrategy {
+        if crate::proxy::providers::get_claude_api_format(provider) == "gemini_native" {
+            if let Some(key) = Self::extract_claude_key(provider) {
+                let trimmed = key.trim();
+                if trimmed.starts_with("ya29.") || trimmed.starts_with('{') {
+                    return AuthStrategy::GoogleOAuth;
+                }
+            }
+            return AuthStrategy::Google;
+        }
+
         if base_url.contains("openrouter.ai") {
             return AuthStrategy::Bearer;
         }
@@ -308,9 +341,11 @@ impl StreamCheckService {
                 "ANTHROPIC_API_KEY",
                 "OPENROUTER_API_KEY",
                 "OPENAI_API_KEY",
+                "GEMINI_API_KEY",
             ] {
                 if let Some(key) = env.get(key_name).and_then(|value| value.as_str()) {
-                    if !key.trim().is_empty() {
+                    let key = key.trim();
+                    if !key.is_empty() {
                         return Some(key.to_string());
                     }
                 }
@@ -322,8 +357,9 @@ impl StreamCheckService {
             .get("apiKey")
             .or_else(|| provider.settings_config.get("api_key"))
             .and_then(|value| value.as_str())
-            .map(|value| value.to_string())
-            .filter(|value| !value.trim().is_empty())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
     }
 
     pub(crate) fn extract_codex_key(provider: &Provider) -> Option<String> {
@@ -370,29 +406,35 @@ impl StreamCheckService {
         if let Some(token) = env_map
             .get("GOOGLE_ACCESS_TOKEN")
             .or_else(|| env_map.get("GEMINI_ACCESS_TOKEN"))
-            .cloned()
-            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
         {
             return Ok(AuthInfo::with_access_token(token.clone(), token));
         }
 
-        let key = env_map.get("GEMINI_API_KEY").cloned().ok_or_else(|| {
-            AppError::localized(
-                "gemini.missing_api_key",
-                "缺少 GEMINI_API_KEY",
-                "Missing GEMINI_API_KEY",
-            )
-        })?;
+        let key = env_map
+            .get("GEMINI_API_KEY")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AppError::localized(
+                    "gemini.missing_api_key",
+                    "缺少 GEMINI_API_KEY",
+                    "Missing GEMINI_API_KEY",
+                )
+            })?;
 
-        let trimmed = key.trim();
-        if trimmed.starts_with("ya29.") {
+        if key.starts_with("ya29.") {
             return Ok(AuthInfo::with_access_token(key.clone(), key));
         }
-        if trimmed.starts_with('{') {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if key.starts_with('{') {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&key) {
                 if let Some(access_token) = value.get("access_token").and_then(|v| v.as_str()) {
                     if !access_token.trim().is_empty() {
-                        return Ok(AuthInfo::with_access_token(key, access_token.to_string()));
+                        return Ok(AuthInfo::with_access_token(
+                            key,
+                            access_token.trim().to_string(),
+                        ));
                     }
                 }
             }

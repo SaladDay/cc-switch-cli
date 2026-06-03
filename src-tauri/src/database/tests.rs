@@ -174,6 +174,18 @@ fn normalize_default(default: &Option<String>) -> Option<String> {
         .map(|s| s.trim_matches('\'').trim_matches('"').to_string())
 }
 
+fn index_exists(conn: &Connection, index: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1
+        )",
+        [index],
+        |row| row.get::<_, i64>(0),
+    )
+    .expect("check index")
+        != 0
+}
+
 #[test]
 fn schema_migration_sets_user_version_when_missing() {
     let conn = Connection::open_in_memory().expect("open memory db");
@@ -410,6 +422,57 @@ fn schema_migration_v4_adds_pricing_model_columns() {
         Database::get_user_version(&conn).expect("version after migration"),
         SCHEMA_VERSION
     );
+}
+
+#[test]
+fn startup_migration_repairs_legacy_request_logs_before_session_index() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            model TEXT NOT NULL
+        );
+        "#,
+    )
+    .expect("seed legacy request logs table");
+    Database::set_user_version(&conn, 4).expect("set user_version=4");
+
+    Database::create_tables_on_conn(&conn).expect("create tables should tolerate legacy logs");
+    assert!(
+        !Database::has_column(&conn, "proxy_request_logs", "session_id")
+            .expect("check session_id before migration"),
+        "create_tables should not pretend IF NOT EXISTS upgraded an existing table"
+    );
+    assert!(
+        !index_exists(&conn, "idx_request_logs_session"),
+        "session index should wait until the session_id column exists"
+    );
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    for column in [
+        "provider_id",
+        "app_type",
+        "request_model",
+        "input_tokens",
+        "output_tokens",
+        "status_code",
+        "session_id",
+        "created_at",
+        "data_source",
+    ] {
+        assert!(
+            Database::has_column(&conn, "proxy_request_logs", column)
+                .expect("check repaired column"),
+            "proxy_request_logs.{column} should be repaired before creating indexes"
+        );
+    }
+    assert!(index_exists(&conn, "idx_request_logs_provider"));
+    assert!(index_exists(&conn, "idx_request_logs_created_at"));
+    assert!(index_exists(&conn, "idx_request_logs_model"));
+    assert!(index_exists(&conn, "idx_request_logs_session"));
+    assert!(index_exists(&conn, "idx_request_logs_status"));
 }
 
 #[test]

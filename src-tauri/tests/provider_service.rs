@@ -10,7 +10,10 @@ use indexmap::IndexMap;
 
 #[path = "support.rs"]
 mod support;
-use support::{ensure_test_home, lock_test_mutex, reset_test_fs, state_from_config};
+use support::{
+    enable_codex_official_auth_preservation, ensure_test_home, lock_test_mutex, reset_test_fs,
+    state_from_config,
+};
 
 fn sanitize_provider_name(name: &str) -> String {
     name.chars()
@@ -109,6 +112,7 @@ fn insert_codex_managed_mcp(config: &mut MultiAppConfig) {
 fn provider_service_switch_codex_updates_live_and_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();
+    enable_codex_official_auth_preservation();
     let _home = ensure_test_home();
 
     let legacy_auth = json!({ "OPENAI_API_KEY": "legacy-key" });
@@ -243,6 +247,90 @@ command = "echo"
     assert_eq!(
         legacy_auth_value, "legacy-key",
         "previous provider should be backfilled with live auth"
+    );
+}
+
+#[test]
+fn provider_service_switch_codex_default_overwrites_official_auth_when_preservation_off() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "official-oauth-token",
+            "account_id": "acct-1"
+        }
+    });
+    let legacy_config = r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&live_auth, Some(legacy_config))
+        .expect("seed existing Codex OAuth live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "legacy-provider".to_string();
+        manager.providers.insert(
+            "legacy-provider".to_string(),
+            Provider::with_id(
+                "legacy-provider".to_string(),
+                "RightCode".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "rightcode-key"},
+                    "config": legacy_config
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "third-party".to_string(),
+            Provider::with_id(
+                "third-party".to_string(),
+                "AiHubMix".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "third-party-key"},
+                    "config": r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+
+[model_providers.aihubmix]
+name = "AiHubMix"
+base_url = "https://aihubmix.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(initial_config);
+
+    ProviderService::switch(&state, AppType::Codex, "third-party")
+        .expect("switch to third-party provider should succeed");
+
+    let auth_value: serde_json::Value =
+        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
+    assert_eq!(
+        auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
+        Some("third-party-key"),
+        "default (preservation off) should overwrite auth.json with the third-party API key"
+    );
+    assert!(
+        auth_value.pointer("/tokens/access_token").is_none(),
+        "default switch must clear the official ChatGPT OAuth token from live auth.json"
     );
 }
 

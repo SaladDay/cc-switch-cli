@@ -26,6 +26,9 @@ use std::time::{Duration, Instant};
 use serial_test::serial;
 use tempfile::TempDir;
 
+mod support;
+use support::cleanup_daemon_at_paths;
+
 /// Global mutex to prevent test sandboxes racing on shared env vars.
 fn env_mutex() -> &'static Mutex<()> {
     static M: OnceLock<Mutex<()>> = OnceLock::new();
@@ -143,27 +146,7 @@ impl TestSandbox {
 
 impl Drop for TestSandbox {
     fn drop(&mut self) {
-        // Ask the daemon to shut down cleanly, then SIGKILL any leftover.
-        if self.socket.exists() {
-            if let Ok(mut stream) = UnixStream::connect(&self.socket) {
-                let _ = stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-                let _ = stream.write_all(b"{\"kind\":\"shutdown\"}\n");
-                let _ = stream.flush();
-                let mut sink = String::new();
-                let _ = BufReader::new(&stream).read_line(&mut sink);
-            }
-        }
-
-        if let Some(pid) = self.read_pid() {
-            unsafe {
-                let _ = libc::kill(pid as i32, libc::SIGTERM);
-            }
-            // Give it a moment to exit, then SIGKILL.
-            std::thread::sleep(Duration::from_millis(200));
-            unsafe {
-                let _ = libc::kill(pid as i32, libc::SIGKILL);
-            }
-        }
+        cleanup_daemon_at_paths(self._root.path(), &self.socket, &self.pidfile);
 
         // Restore environment.
         for (key, value) in &self.original_env {
@@ -806,6 +789,17 @@ fn read_claude_settings_base_url() -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn wait_for_claude_settings_base_url(expected: Option<&str>, timeout: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if read_claude_settings_base_url().as_deref() == expected {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    read_claude_settings_base_url().as_deref() == expected
+}
+
 fn free_loopback_port() -> u16 {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     listener
@@ -850,10 +844,10 @@ fn sigterm_restores_takeover_and_stops_worker() {
         wait_for_daemon_exit(&mut daemon, Duration::from_secs(5)),
         "daemon should exit after SIGTERM"
     );
-    assert_eq!(
-        read_claude_settings_base_url().as_deref(),
-        None,
-        "SIGTERM shutdown should restore the original Claude live config without a base URL"
+    assert!(
+        wait_for_claude_settings_base_url(None, Duration::from_secs(2)),
+        "SIGTERM shutdown should restore the original Claude live config without a base URL; got {:?}",
+        read_claude_settings_base_url()
     );
     assert!(
         !sandbox.socket().exists(),

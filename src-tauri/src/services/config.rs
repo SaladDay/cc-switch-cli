@@ -328,12 +328,21 @@ impl ConfigService {
         }
         let cfg_text = settings.get("config").and_then(Value::as_str);
 
-        crate::codex_config::write_codex_provider_live_with_catalog(
-            &provider.settings_config,
-            ProviderService::codex_live_write_category(provider),
-            auth,
-            cfg_text,
-        )?;
+        let category = ProviderService::codex_live_write_category(provider);
+        if category == Some("official") {
+            crate::codex_config::write_codex_provider_live_with_catalog(
+                &provider.settings_config,
+                category,
+                auth,
+                cfg_text,
+            )?;
+        } else {
+            crate::codex_config::write_codex_provider_live_config_only_with_catalog(
+                &provider.settings_config,
+                auth,
+                cfg_text,
+            )?;
+        }
         crate::mcp::sync_enabled_to_codex(config)?;
 
         let cfg_text_after = crate::codex_config::read_and_validate_codex_config_text()?;

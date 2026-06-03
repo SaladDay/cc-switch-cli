@@ -9,9 +9,10 @@ use crate::provider::Provider;
 use super::{
     error::ProxyError,
     provider_router::ProviderRouter,
+    providers::gemini_shadow::GeminiShadowStore,
     server::ProxyServerState,
     session::extract_session_id,
-    types::{AppProxyConfig, OptimizerConfig, RectifierConfig},
+    types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
 };
 
 pub struct HandlerContext {
@@ -23,6 +24,7 @@ pub struct HandlerContext {
     pub app_proxy: AppProxyConfig,
     pub rectifier_config: RectifierConfig,
     pub optimizer_config: OptimizerConfig,
+    pub copilot_optimizer_config: CopilotOptimizerConfig,
     pub request_model: String,
     pub session_id: String,
     pub session_client_provided: bool,
@@ -60,6 +62,7 @@ impl HandlerContext {
             })?;
         let rectifier_config = state.db.get_rectifier_config().unwrap_or_default();
         let optimizer_config = state.db.get_optimizer_config().unwrap_or_default();
+        let copilot_optimizer_config = state.db.get_copilot_optimizer_config().unwrap_or_default();
         let request_model = body
             .get("model")
             .and_then(|value| value.as_str())
@@ -76,6 +79,7 @@ impl HandlerContext {
             app_proxy,
             rectifier_config,
             optimizer_config,
+            copilot_optimizer_config,
             request_model,
             session_id: session_result.session_id,
             session_client_provided: session_result.client_provided,
@@ -212,6 +216,7 @@ mod tests {
             current_providers: Arc::new(RwLock::new(Default::default())),
             provider_router: Arc::new(ProviderRouter::new(db)),
             codex_chat_history: Arc::new(Default::default()),
+            gemini_shadow: Arc::new(GeminiShadowStore::default()),
         }
     }
 

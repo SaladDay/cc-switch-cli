@@ -6,6 +6,8 @@ use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
+pub const OPENCODE_DEFAULT_NPM: &str = "@ai-sdk/openai-compatible";
+
 pub fn get_opencode_dir() -> PathBuf {
     if let Some(override_dir) = get_opencode_override_dir() {
         return override_dir;
