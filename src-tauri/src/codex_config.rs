@@ -846,17 +846,33 @@ pub fn read_codex_live_settings() -> Result<Value, AppError> {
 /// Official providers with usable login material own `auth.json`. Third-party
 /// providers only touch `config.toml` when the compatibility setting is enabled
 /// so the user's ChatGPT login cache survives provider switches.
+pub fn write_codex_provider_live_config_only_with_catalog(
+    settings: &Value,
+    auth: &Value,
+    config_text: Option<&str>,
+) -> Result<(), AppError> {
+    let prepared_config = config_text
+        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text))
+        .transpose()?;
+    let live_config =
+        prepare_codex_provider_live_config(auth, prepared_config.as_deref().unwrap_or(""))?;
+    write_codex_live_config_atomic(Some(&live_config))
+}
+
 pub fn write_codex_live_for_provider(
     category: Option<&str>,
     auth: &Value,
     config_text: Option<&str>,
 ) -> Result<(), AppError> {
-    let should_write_auth = (category == Some("official") && codex_auth_has_login_material(auth))
-        || (category != Some("official")
-            && !crate::settings::preserve_codex_official_auth_on_switch());
+    let should_write_auth =
+        category == Some("official") || !crate::settings::preserve_codex_official_auth_on_switch();
 
     if should_write_auth {
-        write_codex_live_atomic(auth, config_text)
+        if category == Some("official") && !codex_auth_has_login_material(auth) {
+            write_codex_live_atomic_optional_auth(None, config_text)
+        } else {
+            write_codex_live_atomic(auth, config_text)
+        }
     } else {
         let live_config = prepare_codex_provider_live_config(auth, config_text.unwrap_or(""))?;
         write_codex_live_config_atomic(Some(&live_config))

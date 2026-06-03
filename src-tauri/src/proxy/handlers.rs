@@ -450,12 +450,12 @@ fn responses_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
 }
 
 fn should_use_claude_transform_streaming(
-    requested_streaming: bool,
+    _requested_streaming: bool,
     upstream_is_sse: bool,
     api_format: &str,
     is_codex_oauth: bool,
 ) -> bool {
-    requested_streaming || upstream_is_sse || (is_codex_oauth && api_format == "openai_responses")
+    upstream_is_sse || (is_codex_oauth && api_format == "openai_responses")
 }
 
 async fn handle_passthrough_request(

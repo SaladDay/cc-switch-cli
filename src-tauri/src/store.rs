@@ -95,15 +95,21 @@ impl AppState {
 
         state.import_live_provider_configs_on_startup()?;
 
-        let proxy_running = state
+        let owned_managed_session_active = state
             .proxy_service
-            .is_running_blocking()
+            .should_skip_startup_recovery_for_active_managed_session_blocking()
             .map_err(AppError::Message)?;
-        if !proxy_running {
-            state
+        if !owned_managed_session_active {
+            let proxy_running = state
                 .proxy_service
-                .recover_takeovers_on_startup_blocking()
-                .map_err(AppError::Config)?;
+                .is_running_blocking()
+                .map_err(AppError::Message)?;
+            if !proxy_running {
+                state
+                    .proxy_service
+                    .recover_takeovers_on_startup_blocking()
+                    .map_err(AppError::Config)?;
+            }
         }
 
         state.import_live_current_provider_configs_on_startup()?;

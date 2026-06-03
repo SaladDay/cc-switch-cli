@@ -188,6 +188,20 @@ impl ProxyService {
         })
     }
 
+    pub fn should_skip_startup_recovery_for_active_managed_session_blocking(
+        &self,
+    ) -> Result<bool, String> {
+        self.run_in_blocking_runtime(|service| async move {
+            Ok(service.should_skip_startup_recovery_for_active_managed_session())
+        })
+    }
+
+    fn should_skip_startup_recovery_for_active_managed_session(&self) -> bool {
+        self.load_persisted_runtime_sessions()
+            .into_iter()
+            .any(|session| self.should_preserve_takeover_for_active_managed_session(&session))
+    }
+
     pub fn recover_takeovers_on_startup_blocking(&self) -> Result<(), String> {
         self.run_in_blocking_runtime(|service| async move {
             service.recover_takeovers_on_startup().await
@@ -643,18 +657,15 @@ impl ProxyService {
     }
 
     async fn should_drop_takeover_via_daemon(&self, app_type: &AppType) -> Result<bool, String> {
-        if let Some(status) = Self::daemon_status_snapshot().await {
-            if Self::status_has_worker_for_app(&status, app_type) {
-                return Ok(true);
-            }
-        }
-
         let Some(session) = self.load_persisted_runtime_session_for_app(app_type) else {
             self.remove_stale_daemon_socket_if_unreachable();
             return Ok(false);
         };
 
         if !session.kind.is_managed_external() {
+            if let Some(status) = Self::daemon_status_snapshot().await {
+                return Ok(Self::status_has_worker_for_app(&status, app_type));
+            }
             return Ok(true);
         }
 
@@ -902,6 +913,15 @@ impl ProxyService {
                 continue;
             }
 
+            if self
+                .load_persisted_runtime_session_for_app(&app_type)
+                .is_some_and(|session| {
+                    self.should_preserve_takeover_for_active_managed_session(&session)
+                })
+            {
+                continue;
+            }
+
             if has_backup {
                 self.restore_live_config_for_app(&app_type).await?;
                 self.db
@@ -966,7 +986,7 @@ impl ProxyService {
     async fn stop_server_unlocked(&self) -> Result<(), String> {
         let mut stopped_runtime = false;
 
-        if let Some(server) = self.runtime.server.read().await.as_ref() {
+        if let Some(server) = self.runtime.server.write().await.take() {
             server.stop().await?;
             self.clear_persisted_runtime_session()?;
             self.sync_persisted_global_proxy_enabled(false).await?;
@@ -1058,10 +1078,6 @@ impl ProxyService {
                     status.uptime_seconds = Self::uptime_seconds_from_active_workers(&workers);
                 }
                 status.active_workers = workers;
-                return status;
-            }
-
-            if let Some(status) = Self::daemon_status_snapshot().await {
                 return status;
             }
 
@@ -1383,9 +1399,9 @@ impl ProxyService {
         let first_provider_id = self.first_failover_provider_id(app_type)?;
         let app_type = Self::takeover_app_from_str(app_type)?;
         let app_key = app_type.as_str();
-        self.set_managed_session_for_app(app_key, true).await?;
         self.switch_proxy_target(app_key, &first_provider_id)
             .await?;
+        self.set_managed_session_for_app(app_key, true).await?;
         self.persist_auto_failover_for_app(app_key, true).await?;
 
         Ok(())
@@ -1957,7 +1973,11 @@ impl ProxyService {
                 .await
                 .map_err(|error| format!("check active takeovers failed: {error}"))?
         {
-            self.stop_server_unlocked().await?;
+            if let Err(error) = self.stop_server_unlocked().await {
+                if error != "proxy server is not running" {
+                    return Err(error);
+                }
+            }
         }
 
         Ok(())
@@ -2001,6 +2021,13 @@ impl ProxyService {
             return self.clear_stale_takeover_from_live_config(app_type);
         };
         if matches!(app_type, AppType::Codex) {
+            if let Some(provider) = provider.as_ref() {
+                let category =
+                    crate::services::provider::ProviderService::codex_live_write_category(provider);
+                if category != Some("official") {
+                    return self.write_codex_provider_live_config_only(&settings, provider);
+                }
+            }
             self.write_codex_live_for_provider(&settings, provider.as_ref())
         } else {
             self.write_live_config_for_app(app_type, &settings)
@@ -2636,6 +2663,41 @@ impl ProxyService {
         .map_err(|error| format!("write Codex live config failed: {error}"))
     }
 
+    fn write_codex_provider_live_config_only(
+        &self,
+        config: &Value,
+        provider: &Provider,
+    ) -> Result<(), String> {
+        let auth = config
+            .get("auth")
+            .ok_or_else(|| "Codex config missing auth field".to_string())?;
+        let config_text = config.get("config").and_then(Value::as_str);
+        let mut settings = config.clone();
+        if !settings
+            .get("modelCatalog")
+            .and_then(|catalog| catalog.get("models"))
+            .is_some()
+        {
+            if let Some(root) = settings.as_object_mut() {
+                root.insert(
+                    "modelCatalog".to_string(),
+                    provider
+                        .settings_config
+                        .get("modelCatalog")
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "models": [] })),
+                );
+            }
+        }
+
+        crate::codex_config::write_codex_provider_live_config_only_with_catalog(
+            &settings,
+            auth,
+            config_text,
+        )
+        .map_err(|error| format!("write Codex live config failed: {error}"))
+    }
+
     fn write_codex_live_verbatim(&self, config: &Value) -> Result<(), String> {
         let auth = config.get("auth");
         let config_text = config.get("config").and_then(Value::as_str);
@@ -2907,6 +2969,15 @@ impl ProxyService {
         {
             pid == std::process::id()
         }
+    }
+
+    fn should_preserve_takeover_for_active_managed_session(
+        &self,
+        session: &PersistedProxyRuntimeSession,
+    ) -> bool {
+        session.kind.is_managed_external()
+            && Self::is_process_alive(session.pid)
+            && Self::has_managed_external_ownership_signal(session)
     }
 
     fn has_managed_external_ownership_signal(session: &PersistedProxyRuntimeSession) -> bool {
