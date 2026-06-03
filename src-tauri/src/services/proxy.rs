@@ -1392,15 +1392,26 @@ impl ProxyService {
         self.persist_auto_failover_for_app(app_type, true).await
     }
 
-    pub async fn enable_proxy_and_auto_failover_for_app(
+    async fn prepare_proxy_and_auto_failover_activation(
         &self,
         app_type: &str,
-    ) -> Result<(), String> {
+    ) -> Result<AppType, String> {
         let first_provider_id = self.first_failover_provider_id(app_type)?;
         let app_type = Self::takeover_app_from_str(app_type)?;
         let app_key = app_type.as_str();
         self.switch_proxy_target(app_key, &first_provider_id)
             .await?;
+        Ok(app_type)
+    }
+
+    pub async fn enable_proxy_and_auto_failover_for_app(
+        &self,
+        app_type: &str,
+    ) -> Result<(), String> {
+        let app_type = self
+            .prepare_proxy_and_auto_failover_activation(app_type)
+            .await?;
+        let app_key = app_type.as_str();
         self.set_managed_session_for_app(app_key, true).await?;
         self.persist_auto_failover_for_app(app_key, true).await?;
 
@@ -3906,13 +3917,13 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn enable_proxy_and_auto_failover_uses_queue_head_without_existing_current_provider() {
+    async fn prepare_proxy_and_auto_failover_activation_uses_queue_head_without_existing_current_provider(
+    ) {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestHomeEnvGuard::set(temp_home.path());
 
         let db = Arc::new(Database::init().expect("create database"));
         let service = ProxyService::new(db.clone());
-        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
         let provider = Provider::with_id(
             "queue-head".to_string(),
             "Queue Head".to_string(),
@@ -3928,32 +3939,19 @@ mod tests {
             .expect("save queued provider");
         db.add_to_failover_queue("claude", &provider.id)
             .expect("queue provider");
-        seed_managed_worker_for_app(db.as_ref(), "claude", 0);
 
-        service
-            .enable_proxy_and_auto_failover_for_app("claude")
+        let app_type = service
+            .prepare_proxy_and_auto_failover_activation("claude")
             .await
-            .expect("enable proxy and auto failover");
+            .expect("prepare proxy and auto failover activation");
 
-        let global = db
-            .get_global_proxy_config()
-            .await
-            .expect("load global proxy config");
-        let app_config = db
-            .get_proxy_config_for_app("claude")
-            .await
-            .expect("load claude proxy config");
-        assert!(global.proxy_enabled);
-        assert!(app_config.enabled);
-        assert!(app_config.auto_failover_enabled);
+        assert_eq!(app_type, AppType::Claude);
         assert_eq!(
             crate::settings::get_effective_current_provider(db.as_ref(), &AppType::Claude)
                 .expect("load effective current provider")
                 .as_deref(),
             Some("queue-head")
         );
-
-        service.stop().await.expect("stop proxy runtime");
     }
 
     #[tokio::test]

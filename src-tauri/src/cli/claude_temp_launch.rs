@@ -633,7 +633,10 @@ mod tests {
         )
         .expect("build effective snapshot");
 
-        let prepared = prepare_launch_from_settings(&provider.id, &effective, temp_dir.path())
+        let prepared =
+            prepare_launch_from_settings_with(&provider.id, &effective, temp_dir.path(), || {
+                Ok(PathBuf::from("/usr/bin/claude"))
+            })
             .expect("prepare launch from effective settings");
 
         let written: Value = serde_json::from_str(

@@ -67,6 +67,21 @@ jobs:
           workspaces: src-tauri
           key: unit-tests
 
+      - name: Library unit tests
+        working-directory: src-tauri
+        run: |
+          sandbox_home="$(mktemp -d)"
+          export HOME="$sandbox_home"
+          export USERPROFILE="$sandbox_home"
+          export CC_SWITCH_CONFIG_DIR="$sandbox_home/.cc-switch"
+          export CLAUDE_CONFIG_DIR="$sandbox_home/.claude"
+          export CODEX_HOME="$sandbox_home/.codex"
+          export XDG_CONFIG_HOME="$sandbox_home/.config"
+          export XDG_RUNTIME_DIR="$sandbox_home/.runtime"
+          export XDG_STATE_HOME="$sandbox_home/.state"
+          export RUST_TEST_THREADS=1
+          cargo test --lib -- --nocapture
+
       - name: Binary unit tests
         working-directory: src-tauri
         run: |

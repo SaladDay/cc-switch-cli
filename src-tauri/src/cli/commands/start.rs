@@ -5,8 +5,8 @@ use indexmap::IndexMap;
 
 use crate::app_config::AppType;
 use crate::cli::claude_temp_launch::{
-    ensure_temp_launch_supported, exec_prepared_claude, prepare_launch_from_settings,
-    PreparedClaudeLaunch,
+    ensure_temp_launch_supported, exec_prepared_claude, prepare_launch_from_settings_with,
+    resolve_claude_binary, PreparedClaudeLaunch,
 };
 use crate::cli::codex_temp_launch::{
     ensure_temp_launch_supported as ensure_codex_temp_launch_supported, exec_prepared_codex,
@@ -74,7 +74,12 @@ fn start_claude(selector: &str, native_args: &[OsString]) -> Result<(), AppError
     let provider = resolve_provider_selector(&providers, selector, "Claude")?;
 
     ensure_temp_launch_supported()?;
-    let prepared = prepare_claude_launch_with(&state, &provider, &std::env::temp_dir())?;
+    let prepared = prepare_claude_launch_with(
+        &state,
+        &provider,
+        &std::env::temp_dir(),
+        resolve_claude_binary,
+    )?;
     handoff_claude_and_cleanup(&prepared, native_args)
 }
 
@@ -143,17 +148,21 @@ where
     launch_provider(&provider)
 }
 
-fn prepare_claude_launch_with(
+fn prepare_claude_launch_with<Resolve>(
     state: &AppState,
     provider: &Provider,
     temp_dir: &std::path::Path,
-) -> Result<PreparedClaudeLaunch, AppError> {
+    resolve_claude_binary: Resolve,
+) -> Result<PreparedClaudeLaunch, AppError>
+where
+    Resolve: FnOnce() -> Result<std::path::PathBuf, AppError>,
+{
     let settings = ProviderService::build_effective_live_snapshot_from_state(
         state,
         AppType::Claude,
         provider,
     )?;
-    prepare_launch_from_settings(&provider.id, &settings, temp_dir)
+    prepare_launch_from_settings_with(&provider.id, &settings, temp_dir, resolve_claude_binary)
 }
 
 fn handoff_claude_and_cleanup(
@@ -421,8 +430,10 @@ mod tests {
             None,
         );
 
-        let prepared =
-            prepare_claude_launch_with(&state, &provider, temp_dir.path()).expect("prepare launch");
+        let prepared = prepare_claude_launch_with(&state, &provider, temp_dir.path(), || {
+            Ok(std::path::PathBuf::from("/usr/bin/claude"))
+        })
+        .expect("prepare launch");
         let written: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(&prepared.settings_path).expect("read temp settings"),
         )
