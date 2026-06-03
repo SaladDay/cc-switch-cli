@@ -103,9 +103,7 @@ fn initialize_startup_state_if_needed(command: &Option<Commands>) -> Result<(), 
 
 fn database_access_required(command: &Option<Commands>) -> bool {
     match command {
-        Some(Commands::Completions(_))
-        | Some(Commands::Update(_))
-        | Some(Commands::Internal(_)) => false,
+        Some(Commands::Completions(_)) | Some(Commands::Update(_)) => false,
         _ => true,
     }
 }
@@ -200,20 +198,12 @@ mod tests {
     }
 
     #[test]
-    fn completions_update_internal_skip_database_access() {
+    fn completions_update_skip_database_access() {
         let update = Cli::parse_from(["cc-switch", "update"]);
         let completions = Cli::parse_from(["cc-switch", "completions", "bash"]);
-        let internal = Cli::parse_from([
-            "cc-switch",
-            "internal",
-            "capture-codex-temp",
-            "official",
-            "/tmp/codex-home",
-        ]);
 
         assert!(!database_access_required(&update.command));
         assert!(!database_access_required(&completions.command));
-        assert!(!database_access_required(&internal.command));
     }
 
     #[test]
@@ -223,12 +213,20 @@ mod tests {
         let config = Cli::parse_from(["cc-switch", "config", "validate"]);
         let proxy = Cli::parse_from(["cc-switch", "proxy", "show"]);
         let interactive = Cli::parse_from(["cc-switch"]);
+        let internal = Cli::parse_from([
+            "cc-switch",
+            "internal",
+            "capture-codex-temp",
+            "official",
+            "/tmp/codex-home",
+        ]);
 
         assert!(database_access_required(&provider.command));
         assert!(database_access_required(&mcp.command));
         assert!(database_access_required(&config.command));
         assert!(database_access_required(&proxy.command));
         assert!(database_access_required(&interactive.command));
+        assert!(database_access_required(&internal.command));
     }
 
     #[test]
