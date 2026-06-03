@@ -327,7 +327,7 @@ fn collect_sensitive_file_permission_issues(dir: &Path, issues: &mut Vec<(PathBu
 fn is_sensitive_config_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "db" | "sql"))
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "db" | "json" | "sql"))
         .unwrap_or(false)
 }
 
