@@ -254,7 +254,7 @@ pub(crate) fn restrict_file_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 检查配置目录、数据库文件和备份目录的权限是否安全（Unix only）
+/// 检查配置目录、敏感配置/数据文件和备份目录的权限是否安全（Unix only）
 ///
 /// 返回不安全的路径列表：`(路径, 当前权限, 期望权限)`
 #[cfg(unix)]
@@ -262,7 +262,6 @@ pub fn check_permissions() -> Vec<(PathBuf, u32, u32)> {
     use std::os::unix::fs::PermissionsExt;
     let mut issues = Vec::new();
     let config_dir = get_app_config_dir();
-    let db_path = config_dir.join("cc-switch.db");
     let backup_dir = config_dir.join("backups");
 
     if config_dir.exists() {
@@ -270,15 +269,6 @@ pub fn check_permissions() -> Vec<(PathBuf, u32, u32)> {
             let mode = meta.permissions().mode() & 0o777;
             if mode != 0o700 {
                 issues.push((config_dir.clone(), mode, 0o700));
-            }
-        }
-    }
-
-    if db_path.exists() {
-        if let Ok(meta) = fs::metadata(&db_path) {
-            let mode = meta.permissions().mode() & 0o777;
-            if mode != 0o600 {
-                issues.push((db_path, mode, 0o600));
             }
         }
     }
@@ -292,12 +282,58 @@ pub fn check_permissions() -> Vec<(PathBuf, u32, u32)> {
         }
     }
 
+    collect_sensitive_file_permission_issues(&config_dir, &mut issues);
+
     issues
 }
 
 #[cfg(not(unix))]
 pub fn check_permissions() -> Vec<(PathBuf, u32, u32)> {
     Vec::new()
+}
+
+#[cfg(unix)]
+fn collect_sensitive_file_permission_issues(dir: &Path, issues: &mut Vec<(PathBuf, u32, u32)>) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+
+        if file_type.is_dir() {
+            collect_sensitive_file_permission_issues(&path, issues);
+        } else if file_type.is_file() && is_sensitive_config_file(&path) {
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
+            let mode = meta.permissions().mode() & 0o777;
+            if is_insecure_sensitive_file_mode(mode) {
+                issues.push((path, mode, 0o600));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_sensitive_config_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "db" | "sql"))
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn is_insecure_sensitive_file_mode(mode: u32) -> bool {
+    mode & !0o600 != 0
 }
 
 trait PermissionPrompter {
@@ -963,6 +999,109 @@ mod tests {
         assert_eq!(issues[0].0, backup_dir);
         assert_eq!(issues[0].1, 0o755);
         assert_eq!(issues[0].2, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_permissions_detects_insecure_sensitive_files_recursively() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let _guard = lock_test_home_and_settings();
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env =
+            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
+
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("set config dir perms");
+        let backup_dir = temp.path().join("backups");
+        let nested = backup_dir.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        std::fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o700))
+            .expect("set backup dir perms");
+
+        let root_json = temp.path().join("config.json");
+        let nested_sql = nested.join("backup.sql");
+        let nested_db = nested.join("snapshot.db");
+        for path in [&root_json, &nested_sql, &nested_db] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .mode(0o644)
+                .open(path)
+                .expect("create sensitive file");
+        }
+
+        let issues = check_permissions();
+        let issue_paths = issues
+            .iter()
+            .map(|(path, current, expected)| (path.clone(), *current, *expected))
+            .collect::<Vec<_>>();
+
+        assert_eq!(issues.len(), 3);
+        assert!(issue_paths.contains(&(root_json, 0o644, 0o600)));
+        assert!(issue_paths.contains(&(nested_sql, 0o644, 0o600)));
+        assert!(issue_paths.contains(&(nested_db, 0o644, 0o600)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_permissions_allows_more_restrictive_sensitive_file_permissions() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let _guard = lock_test_home_and_settings();
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env =
+            ConfigDirEnvGuard::new("CC_SWITCH_CONFIG_DIR", Some(temp.path().to_str().unwrap()));
+
+        std::fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("set config dir perms");
+
+        let read_only = temp.path().join("read-only.json");
+        let write_only = temp.path().join("write-only.sql");
+        for (path, mode) in [(&read_only, 0o400), (&write_only, 0o200)] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .mode(mode)
+                .open(path)
+                .expect("create sensitive file");
+            std::fs::set_permissions(path, fs::Permissions::from_mode(mode))
+                .expect("set sensitive file perms");
+        }
+
+        let issues = check_permissions();
+        assert!(issues.is_empty(), "expected no issues, got: {:?}", issues);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_permission_prompt_fixes_recursive_sensitive_files_when_confirmed() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let nested = temp.path().join("nested");
+        std::fs::create_dir(&nested).expect("create nested dir");
+        let json_path = nested.join("settings.json");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o644)
+            .open(&json_path)
+            .expect("create json file");
+        let issues = vec![(json_path.clone(), 0o644, 0o600)];
+        let mut prompter = FakePermissionPrompter::new(true, true);
+
+        prompt_fix_permissions_interactive(&issues, None, &mut prompter)
+            .expect("interactive recursive file fix should succeed");
+
+        let mode = std::fs::metadata(&json_path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(prompter.custom_dir_calls, 0);
+        assert_eq!(prompter.fix_calls, 1);
     }
 
     #[cfg(unix)]
