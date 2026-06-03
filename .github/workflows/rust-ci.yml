@@ -47,6 +47,41 @@ jobs:
         working-directory: src-tauri
         run: cargo fmt --check
 
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: unit-tests
+
+      - name: Binary unit tests
+        working-directory: src-tauri
+        run: |
+          sandbox_home="$(mktemp -d)"
+          export HOME="$sandbox_home"
+          export USERPROFILE="$sandbox_home"
+          export CC_SWITCH_CONFIG_DIR="$sandbox_home/.cc-switch"
+          export CLAUDE_CONFIG_DIR="$sandbox_home/.claude"
+          export CODEX_HOME="$sandbox_home/.codex"
+          export XDG_CONFIG_HOME="$sandbox_home/.config"
+          export XDG_RUNTIME_DIR="$sandbox_home/.runtime"
+          export XDG_STATE_HOME="$sandbox_home/.state"
+          export RUST_TEST_THREADS=1
+          cargo test --bin cc-switch -- --nocapture
+
   integration-tests:
     name: Integration tests
     runs-on: ubuntu-22.04
@@ -72,6 +107,12 @@ jobs:
           export HOME="$sandbox_home"
           export USERPROFILE="$sandbox_home"
           export CC_SWITCH_CONFIG_DIR="$sandbox_home/.cc-switch"
+          export CLAUDE_CONFIG_DIR="$sandbox_home/.claude"
+          export CODEX_HOME="$sandbox_home/.codex"
+          export XDG_CONFIG_HOME="$sandbox_home/.config"
+          export XDG_RUNTIME_DIR="$sandbox_home/.runtime"
+          export XDG_STATE_HOME="$sandbox_home/.state"
+          export RUST_TEST_THREADS=1
           cargo test --test proxy_claude_forwarder_alignment proxy_claude_auto_failover_uses_activated_queue_providers -- --exact --nocapture
 
       - name: Proxy daemon
@@ -81,4 +122,25 @@ jobs:
           export HOME="$sandbox_home"
           export USERPROFILE="$sandbox_home"
           export CC_SWITCH_CONFIG_DIR="$sandbox_home/.cc-switch"
+          export CLAUDE_CONFIG_DIR="$sandbox_home/.claude"
+          export CODEX_HOME="$sandbox_home/.codex"
+          export XDG_CONFIG_HOME="$sandbox_home/.config"
+          export XDG_RUNTIME_DIR="$sandbox_home/.runtime"
+          export XDG_STATE_HOME="$sandbox_home/.state"
+          export RUST_TEST_THREADS=1
           cargo test --test proxy_daemon proxy_enable_and_disable_cli_manage_daemon_worker -- --exact --nocapture
+
+      - name: Proxy database
+        working-directory: src-tauri
+        run: |
+          sandbox_home="$(mktemp -d)"
+          export HOME="$sandbox_home"
+          export USERPROFILE="$sandbox_home"
+          export CC_SWITCH_CONFIG_DIR="$sandbox_home/.cc-switch"
+          export CLAUDE_CONFIG_DIR="$sandbox_home/.claude"
+          export CODEX_HOME="$sandbox_home/.codex"
+          export XDG_CONFIG_HOME="$sandbox_home/.config"
+          export XDG_RUNTIME_DIR="$sandbox_home/.runtime"
+          export XDG_STATE_HOME="$sandbox_home/.state"
+          export RUST_TEST_THREADS=1
+          cargo test --test proxy_database -- --nocapture
