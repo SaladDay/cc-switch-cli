@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::helpers::{
     bind_test_listener, capture_openai_chat_upstream_body, handle_chat_completions,
-    handle_responses, provider_meta_from_json, UpstreamState,
+    handle_responses, provider_meta_from_json, set_claude_proxy_port_to_ephemeral, UpstreamState,
 };
 
 #[tokio::test]
@@ -160,15 +160,15 @@ async fn proxy_claude_openai_chat_transforms_request_and_response() {
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -313,15 +313,15 @@ async fn proxy_claude_openai_responses_transforms_request_and_response() {
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(

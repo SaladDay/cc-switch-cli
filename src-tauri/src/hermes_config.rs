@@ -1037,24 +1037,14 @@ pub fn read_memory_limits() -> Result<HermesMemoryLimits, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use serde_json::json;
     use serial_test::serial;
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-    }
 
     fn with_test_home<T>(test_fn: impl FnOnce() -> T) -> T {
-        let _guard = test_guard();
         let tmp = tempfile::tempdir().unwrap();
-        crate::test_support::set_test_home_override(Some(tmp.path()));
-        let result = test_fn();
-        crate::test_support::set_test_home_override(None);
-        result
+        let _env = TestEnvGuard::isolated(tmp.path());
+        test_fn()
     }
 
     #[test]

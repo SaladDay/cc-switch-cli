@@ -220,6 +220,7 @@ struct HomeGuard {
     _temp: TempDir,
     old_home: Option<OsString>,
     old_userprofile: Option<OsString>,
+    old_cc_switch_config_dir: Option<OsString>,
 }
 
 impl HomeGuard {
@@ -227,14 +228,17 @@ impl HomeGuard {
         let temp = tempfile::tempdir().expect("create tempdir");
         let old_home = std::env::var_os("HOME");
         let old_userprofile = std::env::var_os("USERPROFILE");
+        let old_cc_switch_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
         std::env::set_var("HOME", temp.path());
         std::env::set_var("USERPROFILE", temp.path());
+        std::env::set_var("CC_SWITCH_CONFIG_DIR", temp.path().join(".cc-switch"));
         reload_test_settings();
 
         Self {
             _temp: temp,
             old_home,
             old_userprofile,
+            old_cc_switch_config_dir,
         }
     }
 
@@ -255,6 +259,12 @@ impl Drop for HomeGuard {
             std::env::set_var("USERPROFILE", value);
         } else {
             std::env::remove_var("USERPROFILE");
+        }
+
+        if let Some(value) = self.old_cc_switch_config_dir.take() {
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", value);
+        } else {
+            std::env::remove_var("CC_SWITCH_CONFIG_DIR");
         }
 
         reload_test_settings();

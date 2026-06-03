@@ -1143,7 +1143,6 @@ fn is_process_alive_for_signal(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -1152,53 +1151,7 @@ mod tests {
     use super::*;
     use crate::daemon::ipc::protocol::Response;
     use crate::provider::Provider;
-    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
-
-    struct TestHomeEnvGuard {
-        _lock: crate::test_support::TestHomeSettingsLock,
-        old_home: Option<OsString>,
-        old_userprofile: Option<OsString>,
-        old_config_dir: Option<OsString>,
-    }
-
-    impl TestHomeEnvGuard {
-        fn set(home: &Path) -> Self {
-            let lock = lock_test_home_and_settings();
-            let old_home = std::env::var_os("HOME");
-            let old_userprofile = std::env::var_os("USERPROFILE");
-            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
-            set_test_home_override(Some(home));
-            crate::settings::reload_test_settings();
-            Self {
-                _lock: lock,
-                old_home,
-                old_userprofile,
-                old_config_dir,
-            }
-        }
-    }
-
-    impl Drop for TestHomeEnvGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match &self.old_config_dir {
-                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
-                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
-            }
-            set_test_home_override(self.old_home.as_deref().map(Path::new));
-            crate::settings::reload_test_settings();
-        }
-    }
+    use crate::test_support::TestEnvGuard;
 
     fn supervisor_for_test(db: Arc<Database>, dir: &Path) -> Supervisor {
         Supervisor::new(
@@ -1270,7 +1223,7 @@ mod tests {
     #[serial_test::serial]
     async fn ensure_worker_validation_failure_does_not_start_worker_or_write_session() {
         let temp_home = tempfile::tempdir().expect("create temp home");
-        let _env = TestHomeEnvGuard::set(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let db = Arc::new(Database::memory().expect("create database"));
         let supervisor = supervisor_for_test(db.clone(), temp_home.path());
 
@@ -1294,7 +1247,7 @@ mod tests {
     #[serial_test::serial]
     async fn ensure_worker_accepts_fallback_provider_when_current_provider_is_missing() {
         let temp_home = tempfile::tempdir().expect("create temp home");
-        let _env = TestHomeEnvGuard::set(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let db = Arc::new(Database::memory().expect("create database"));
         let provider = Provider::with_id(
             "p1".to_string(),
@@ -1329,7 +1282,7 @@ mod tests {
     #[serial_test::serial]
     async fn ensure_worker_spawn_failure_clears_pending_registration() {
         let temp_home = tempfile::tempdir().expect("create temp home");
-        let _env = TestHomeEnvGuard::set(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let db = Arc::new(Database::memory().expect("create database"));
         let provider = Provider::with_id(
             "p1".to_string(),

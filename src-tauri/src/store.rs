@@ -510,60 +510,11 @@ fn migrate_legacy_codex_configs(db: &Database, config: &mut MultiAppConfig) {
 #[cfg(test)]
 mod tests {
     use super::AppState;
-    use crate::test_support::{
-        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
-    };
+    use crate::test_support::TestEnvGuard;
     use serde_json::json;
     use serial_test::serial;
-    use std::ffi::OsString;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use tempfile::TempDir;
-
-    struct EnvGuard {
-        _lock: TestHomeSettingsLock,
-        old_home: Option<OsString>,
-        old_userprofile: Option<OsString>,
-        old_config_dir: Option<OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_home(home: &Path) -> Self {
-            let lock = lock_test_home_and_settings();
-            let old_home = std::env::var_os("HOME");
-            let old_userprofile = std::env::var_os("USERPROFILE");
-            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            std::env::remove_var("CC_SWITCH_CONFIG_DIR");
-            set_test_home_override(Some(home));
-            crate::settings::reload_test_settings();
-            Self {
-                _lock: lock,
-                old_home,
-                old_userprofile,
-                old_config_dir,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match &self.old_config_dir {
-                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
-                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
-            }
-            set_test_home_override(self.old_home.as_deref().map(Path::new));
-            crate::settings::reload_test_settings();
-        }
-    }
 
     fn write_text(path: PathBuf, text: &str) {
         if let Some(parent) = path.parent() {
@@ -587,7 +538,7 @@ mod tests {
     #[serial(home_settings)]
     fn startup_imports_existing_claude_live_config_as_default_provider() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
 
         write_json(
             crate::config::get_claude_settings_path(),
@@ -635,7 +586,7 @@ mod tests {
     #[serial(home_settings)]
     fn startup_imports_existing_codex_live_config_as_default_provider() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
 
         write_json(
             crate::codex_config::get_codex_auth_path(),
@@ -694,7 +645,7 @@ wire_api = "responses"
     #[serial(home_settings)]
     fn startup_migrates_imported_codex_live_provider_after_import() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
 
         write_json(
             crate::codex_config::get_codex_auth_path(),
@@ -755,7 +706,7 @@ requires_openai_auth = true
     #[serial(home_settings)]
     fn startup_seeds_official_providers_when_live_config_is_absent() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
 
         let state = AppState::try_new_with_startup_recovery().expect("create startup state");
 
@@ -778,7 +729,7 @@ requires_openai_auth = true
     #[serial(home_settings)]
     fn import_default_config_runs_when_only_official_seed_exists() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
 
         let state = AppState::try_new_with_startup_recovery().expect("create startup state");
         assert!(state

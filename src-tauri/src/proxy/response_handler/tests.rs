@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
     body::{to_bytes, Body},
@@ -19,59 +19,10 @@ use crate::{
         provider_router::ProviderRouter, providers::gemini_shadow::GeminiShadowStore,
         types::ProxyConfig,
     },
+    test_support::TestEnvGuard,
 };
 
 use super::*;
-
-struct TempHome {
-    #[allow(dead_code)]
-    dir: TempDir,
-    original_home: Option<String>,
-    original_userprofile: Option<String>,
-    original_config_dir: Option<String>,
-}
-
-impl TempHome {
-    fn new() -> Self {
-        let dir = TempDir::new().expect("create temp home");
-        let original_home = env::var("HOME").ok();
-        let original_userprofile = env::var("USERPROFILE").ok();
-        let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
-
-        env::set_var("HOME", dir.path());
-        env::set_var("USERPROFILE", dir.path());
-        env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
-        crate::settings::reload_test_settings();
-
-        Self {
-            dir,
-            original_home,
-            original_userprofile,
-            original_config_dir,
-        }
-    }
-}
-
-impl Drop for TempHome {
-    fn drop(&mut self) {
-        match &self.original_home {
-            Some(value) => env::set_var("HOME", value),
-            None => env::remove_var("HOME"),
-        }
-
-        match &self.original_userprofile {
-            Some(value) => env::set_var("USERPROFILE", value),
-            None => env::remove_var("USERPROFILE"),
-        }
-
-        match &self.original_config_dir {
-            Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
-            None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
-        }
-
-        crate::settings::reload_test_settings();
-    }
-}
 
 fn test_provider_with_settings(
     id: &str,
@@ -266,7 +217,8 @@ async fn buffered_success_streaming_responses_do_not_record_termination_error() 
 #[tokio::test]
 #[serial(home_settings)]
 async fn streaming_success_syncs_failover_state_after_body_drains() {
-    let _home = TempHome::new();
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
     let db = Arc::new(Database::memory().expect("memory db"));
     let current = test_provider_with_settings(
         "claude-current",

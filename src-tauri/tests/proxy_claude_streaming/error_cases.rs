@@ -15,8 +15,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::helpers::{
-    bind_test_listener, handle_slow_streaming_chat, record_upstream_request, wait_for_proxy_status,
-    UpstreamState,
+    bind_test_listener, handle_slow_streaming_chat, record_upstream_request,
+    set_claude_proxy_port_to_ephemeral, wait_for_proxy_status, UpstreamState,
 };
 
 #[derive(Clone, Default)]
@@ -266,19 +266,21 @@ async fn proxy_claude_streaming_first_byte_timeout_uses_app_config() {
     claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_first_byte_timeout = 1;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(claude_proxy)
         .await
         .expect("update claude proxy config");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -372,19 +374,21 @@ async fn proxy_claude_streaming_idle_timeout_uses_app_config() {
     claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_idle_timeout = 1;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(claude_proxy)
         .await
         .expect("update claude proxy config");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -516,19 +520,21 @@ async fn proxy_claude_streaming_idle_timeout_does_not_sync_failover_state() {
     claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_idle_timeout = 1;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(claude_proxy)
         .await
         .expect("update claude proxy config");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db.clone());
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -629,6 +635,8 @@ async fn proxy_claude_streaming_first_chunk_timeout_after_headers_uses_app_confi
     claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_first_byte_timeout = 1;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(claude_proxy)
         .await
         .expect("update claude proxy config");
@@ -727,6 +735,8 @@ async fn proxy_claude_streaming_first_byte_timeout_spans_headers_and_first_chunk
     claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_first_byte_timeout = 1;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(claude_proxy)
         .await
         .expect("update claude proxy config");
@@ -822,6 +832,8 @@ async fn proxy_claude_streaming_non_sse_error_body_uses_timeout_budget() {
     claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_first_byte_timeout = 1;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(claude_proxy)
         .await
         .expect("update claude proxy config");
@@ -915,15 +927,15 @@ async fn proxy_claude_streaming_non_json_error_body_passthrough_preserves_status
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -1007,15 +1019,15 @@ async fn proxy_claude_streaming_non_standard_json_error_body_preserves_upstream_
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db.clone());
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -1108,15 +1120,15 @@ async fn proxy_claude_streaming_standard_json_error_body_transforms_to_anthropic
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db.clone());
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -1221,6 +1233,8 @@ async fn proxy_claude_streaming_non_sse_success_fallback_uses_timeout_budget() {
     claude_proxy.enabled = true;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_first_byte_timeout = 1;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(claude_proxy)
         .await
         .expect("update claude proxy config");
@@ -1325,6 +1339,8 @@ async fn proxy_claude_streaming_retry_respects_total_first_byte_budget() {
     claude_proxy.enabled = true;
     claude_proxy.max_retries = 1;
     claude_proxy.streaming_first_byte_timeout = 1;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(claude_proxy)
         .await
         .expect("update claude proxy config");
@@ -1446,15 +1462,15 @@ async fn proxy_claude_streaming_runtime_disabled_rectifier_does_not_retry_matchi
         )
         .expect("disable rectifier config for streaming test");
 
+        set_claude_proxy_port_to_ephemeral(&db).await;
         let service = ProxyService::new(db);
+
         let mut config = service.get_config().await.expect("read proxy config");
         config.listen_port = 0;
-        service
-            .update_config(&config)
+        let proxy = service
+            .start_with_runtime_config(config)
             .await
-            .expect("update proxy config");
-
-        let proxy = service.start().await.expect("start proxy service");
+            .expect("start proxy service");
         let client = reqwest::Client::new();
         let response = client
             .post(format!(

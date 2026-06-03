@@ -1,4 +1,5 @@
-use std::{env, ffi::OsString, sync::atomic::Ordering, time::Duration};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use serde_json::{json, Value};
@@ -15,34 +16,9 @@ use crate::{
         providers::copilot_auth::CopilotModel,
         types::{CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
     },
-    services::{CodexOAuthService, CopilotAuthService},
+    services::{copilot_auth::TestCopilotAuthManagerGuard, CodexOAuthService, CopilotAuthService},
     test_support::lock_test_home_and_settings,
 };
-
-struct ConfigDirEnvGuard {
-    original: Option<OsString>,
-}
-
-impl ConfigDirEnvGuard {
-    fn set(value: Option<&str>) -> Self {
-        let original = env::var_os("CC_SWITCH_CONFIG_DIR");
-        match value {
-            Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
-        }
-        Self { original }
-    }
-}
-
-impl Drop for ConfigDirEnvGuard {
-    fn drop(&mut self) {
-        match self.original.as_ref() {
-            Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
-        }
-    }
-}
-
 #[tokio::test]
 async fn bedrock_claude_prepare_request_injects_optimizer_and_cache_breakpoints() {
     let (base_url, hits, bodies, server) =
@@ -535,10 +511,7 @@ async fn streaming_passthrough_prepare_request_forces_identity_accept_encoding()
 #[tokio::test]
 async fn codex_oauth_prepare_request_injects_bound_account_headers() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-bound",
         "rt-bound",
         Some("bound@example.com"),
@@ -571,10 +544,7 @@ async fn codex_oauth_prepare_request_injects_bound_account_headers() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_injects_client_session_headers() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-session",
         "rt-session",
         Some("session@example.com"),
@@ -626,10 +596,7 @@ async fn codex_oauth_prepare_request_injects_client_session_headers() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_skips_generated_session_headers() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-generated",
         "rt-generated",
         Some("generated@example.com"),
@@ -670,10 +637,7 @@ async fn codex_oauth_prepare_request_skips_generated_session_headers() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_falls_back_to_default_account() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-default",
         "rt-default",
         Some("default@example.com"),
@@ -699,9 +663,9 @@ async fn codex_oauth_prepare_request_falls_back_to_default_account() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_errors_without_available_account() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
+    let _manager = CodexOAuthService::test_empty_manager()
+        .await
+        .expect("create empty oauth manager");
 
     let (_db, router) = test_router().await;
     let forwarder = RequestForwarder::new(router).expect("create forwarder");
@@ -732,18 +696,12 @@ async fn codex_oauth_prepare_request_errors_without_available_account() {
 #[tokio::test]
 async fn github_copilot_prepare_request_uses_responses_for_openai_vendor_model() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CopilotAuthService::reset_for_tests();
-    CopilotAuthService::seed_account_for_tests(
+    let _auth = seed_copilot_account(
         "12345",
-        "gho-openai",
-        Some("copilot-openai-token"),
-        Some("https://api.githubcopilot.com"),
+        "copilot-openai-token",
         vec![copilot_model("gpt-5.4", "OpenAI")],
     )
-    .await
-    .expect("seed copilot account");
+    .await;
 
     let provider = github_copilot_provider(Some("12345"));
     let (_db, router) = test_router().await;
@@ -798,18 +756,12 @@ async fn github_copilot_prepare_request_uses_responses_for_openai_vendor_model()
 #[tokio::test]
 async fn github_copilot_prepare_request_uses_chat_for_anthropic_vendor_model() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CopilotAuthService::reset_for_tests();
-    CopilotAuthService::seed_account_for_tests(
+    let _auth = seed_copilot_account(
         "67890",
-        "gho-anthropic",
-        Some("copilot-anthropic-token"),
-        Some("https://api.githubcopilot.com"),
+        "copilot-anthropic-token",
         vec![copilot_model("claude-sonnet-4.6", "Anthropic")],
     )
-    .await
-    .expect("seed copilot account");
+    .await;
 
     let provider = github_copilot_provider(Some("67890"));
     let (_db, router) = test_router().await;
@@ -863,18 +815,12 @@ async fn github_copilot_prepare_request_uses_chat_for_anthropic_vendor_model() {
 #[tokio::test]
 async fn github_copilot_prepare_request_detects_copilot_base_url_without_provider_type() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CopilotAuthService::reset_for_tests();
-    CopilotAuthService::seed_account_for_tests(
+    let _auth = seed_copilot_account(
         "24680",
-        "gho-base-url",
-        Some("copilot-base-url-token"),
-        Some("https://api.githubcopilot.com"),
+        "copilot-base-url-token",
         vec![copilot_model("gpt-5.4", "OpenAI")],
     )
-    .await
-    .expect("seed copilot account");
+    .await;
 
     let provider = claude_provider("copilot-url", "https://api.githubcopilot.com", None);
     let (_db, router) = test_router().await;
@@ -920,18 +866,12 @@ async fn github_copilot_prepare_request_detects_copilot_base_url_without_provide
 #[tokio::test]
 async fn github_copilot_prepare_request_preserves_full_url_relay() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CopilotAuthService::reset_for_tests();
-    CopilotAuthService::seed_account_for_tests(
+    let _auth = seed_copilot_account(
         "13579",
-        "gho-full-url",
-        Some("copilot-full-url-token"),
-        Some("https://api.githubcopilot.com"),
+        "copilot-full-url-token",
         vec![copilot_model("gpt-5.4", "OpenAI")],
     )
-    .await
-    .expect("seed copilot account");
+    .await;
 
     let mut provider = github_copilot_provider(Some("13579"));
     provider.settings_config["base_url"] = json!("https://relay.example/copilot/fixed?existing=1");
@@ -984,9 +924,7 @@ async fn github_copilot_prepare_request_preserves_full_url_relay() {
 #[tokio::test]
 async fn github_copilot_prepare_request_sets_agent_initiator_for_tool_results() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    seed_copilot_account(
+    let _auth = seed_copilot_account(
         "tool-result",
         "copilot-tool-token",
         vec![copilot_model("claude-sonnet-4.6", "Anthropic")],
@@ -1054,9 +992,7 @@ async fn github_copilot_prepare_request_sets_agent_initiator_for_tool_results() 
 #[tokio::test]
 async fn github_copilot_prepare_request_sets_subagent_headers_and_interaction_id() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    seed_copilot_account(
+    let _auth = seed_copilot_account(
         "subagent",
         "copilot-subagent-token",
         vec![copilot_model("claude-sonnet-4.6", "Anthropic")],
@@ -1113,9 +1049,7 @@ async fn github_copilot_prepare_request_sets_subagent_headers_and_interaction_id
 #[tokio::test]
 async fn github_copilot_prepare_request_uses_x_session_id_for_interaction_id_fallback() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    seed_copilot_account(
+    let _auth = seed_copilot_account(
         "session-header",
         "copilot-session-header-token",
         vec![copilot_model("claude-sonnet-4.6", "Anthropic")],
@@ -1159,9 +1093,7 @@ async fn github_copilot_prepare_request_uses_x_session_id_for_interaction_id_fal
 #[tokio::test]
 async fn github_copilot_prepare_request_downgrades_warmup_model() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    seed_copilot_account(
+    let _auth = seed_copilot_account(
         "warmup",
         "copilot-warmup-token",
         vec![
@@ -1212,9 +1144,7 @@ async fn github_copilot_prepare_request_downgrades_warmup_model() {
 #[tokio::test]
 async fn github_copilot_prepare_request_strips_thinking_before_transform() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    seed_copilot_account(
+    let _auth = seed_copilot_account(
         "thinking",
         "copilot-thinking-token",
         vec![copilot_model("deepseek-reasoner", "Anthropic")],
@@ -1270,9 +1200,7 @@ async fn github_copilot_prepare_request_strips_thinking_before_transform() {
 #[tokio::test]
 async fn github_copilot_prepare_request_overrides_client_fingerprint_headers() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    seed_copilot_account(
+    let _auth = seed_copilot_account(
         "fingerprint",
         "copilot-fingerprint-token",
         vec![copilot_model("claude-sonnet-4.6", "Anthropic")],
@@ -1351,9 +1279,7 @@ async fn github_copilot_prepare_request_overrides_client_fingerprint_headers() {
 #[tokio::test]
 async fn github_copilot_prepare_request_disabled_optimizer_keeps_default_headers_and_model() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    seed_copilot_account(
+    let _auth = seed_copilot_account(
         "disabled",
         "copilot-disabled-token",
         vec![
@@ -1412,10 +1338,7 @@ async fn github_copilot_prepare_request_disabled_optimizer_keeps_default_headers
 #[tokio::test]
 async fn codex_oauth_prepare_request_rejects_proxy_managed_placeholder_header() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-placeholder",
         "rt-placeholder",
         Some("placeholder@example.com"),
@@ -1797,9 +1720,12 @@ fn github_copilot_provider(account_id: Option<&str>) -> Provider {
     }
 }
 
-async fn seed_copilot_account(account_id: &str, copilot_token: &str, models: Vec<CopilotModel>) {
-    CopilotAuthService::reset_for_tests();
-    CopilotAuthService::seed_account_for_tests(
+async fn seed_copilot_account(
+    account_id: &str,
+    copilot_token: &str,
+    models: Vec<CopilotModel>,
+) -> TestCopilotAuthManagerGuard {
+    CopilotAuthService::test_manager_with_account(
         account_id,
         &format!("gho-{account_id}"),
         Some(copilot_token),
@@ -1807,7 +1733,7 @@ async fn seed_copilot_account(account_id: &str, copilot_token: &str, models: Vec
         models,
     )
     .await
-    .expect("seed copilot account");
+    .expect("seed copilot account")
 }
 
 fn copilot_model(id: &str, vendor: &str) -> CopilotModel {

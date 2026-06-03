@@ -12,10 +12,39 @@ fn manager_store() -> &'static RwLock<Option<(PathBuf, Arc<CopilotAuthManager>)>
     STORE.get_or_init(|| RwLock::new(None))
 }
 
+#[cfg(test)]
+fn test_manager_override() -> &'static RwLock<Option<Arc<CopilotAuthManager>>> {
+    static STORE: OnceLock<RwLock<Option<Arc<CopilotAuthManager>>>> = OnceLock::new();
+    STORE.get_or_init(|| RwLock::new(None))
+}
+
+#[cfg(test)]
+pub(crate) struct TestCopilotAuthManagerGuard {
+    _temp: tempfile::TempDir,
+    _manager: Arc<CopilotAuthManager>,
+}
+
+#[cfg(test)]
+impl Drop for TestCopilotAuthManagerGuard {
+    fn drop(&mut self) {
+        CopilotAuthService::reset_for_tests();
+    }
+}
+
 pub struct CopilotAuthService;
 
 impl CopilotAuthService {
     pub fn manager() -> Arc<CopilotAuthManager> {
+        #[cfg(test)]
+        {
+            let guard = test_manager_override()
+                .read()
+                .expect("read copilot auth test manager");
+            if let Some(manager) = guard.as_ref() {
+                return Arc::clone(manager);
+            }
+        }
+
         let path = get_app_config_dir();
         {
             let guard = manager_store().read().expect("read copilot auth manager");
@@ -33,7 +62,47 @@ impl CopilotAuthService {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_manager_for_tests(manager: Arc<CopilotAuthManager>) {
+        let mut guard = test_manager_override()
+            .write()
+            .expect("write copilot auth test manager");
+        *guard = Some(manager);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_manager_with_account(
+        account_id: &str,
+        github_token: &str,
+        copilot_token: Option<&str>,
+        api_endpoint: Option<&str>,
+        models: Vec<CopilotModel>,
+    ) -> Result<TestCopilotAuthManagerGuard, CopilotAuthError> {
+        let temp = tempfile::tempdir()?;
+        let manager = Arc::new(CopilotAuthManager::new(temp.path().to_path_buf()));
+        manager
+            .seed_account_for_tests(
+                account_id,
+                github_token,
+                copilot_token,
+                api_endpoint,
+                models,
+            )
+            .await?;
+        Self::set_manager_for_tests(Arc::clone(&manager));
+        Ok(TestCopilotAuthManagerGuard {
+            _temp: temp,
+            _manager: manager,
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn reset_for_tests() {
+        let mut test_guard = test_manager_override()
+            .write()
+            .expect("write copilot auth test manager");
+        *test_guard = None;
+        drop(test_guard);
+
         let mut guard = manager_store().write().expect("write copilot auth manager");
         *guard = None;
     }

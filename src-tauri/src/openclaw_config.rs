@@ -1039,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn missing_config_returns_default_models_object() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1051,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn read_openclaw_config_accepts_json5_syntax() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn read_openclaw_config_does_not_rewrite_string_contents() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1116,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn set_and_remove_provider_only_touch_target_entry() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1147,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn remove_missing_provider_is_noop_and_does_not_create_file() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1165,7 +1165,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn remove_last_provider_keeps_empty_providers_map() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1193,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn remove_last_provider_rewrites_models_section_like_upstream() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn agents_defaults_empty_object_write_does_not_panic() {
         let source = r#"{
   models: {
@@ -1342,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn default_model_round_trip_preserves_existing_providers() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1393,7 +1393,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn typed_provider_round_trip_preserves_known_and_unknown_fields() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1446,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn get_providers_reads_multiple_json5_entries() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1477,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn scan_openclaw_config_health_returns_parse_warning_for_invalid_json5() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn default_model_write_preserves_top_level_comments() {
         let source = r#"{
   // top-level comment
@@ -1527,7 +1527,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn default_model_noop_write_skips_backup() {
         let source = r#"{
   models: {
@@ -1576,7 +1576,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn backup_cleanup_uses_settings_retain_count() {
         let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
@@ -1628,7 +1628,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn save_detects_external_conflict() {
         let source = r#"{
   models: {
@@ -1654,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn model_catalog_round_trip_preserves_existing_default_model() {
         let source = r#"{
   models: {
@@ -1714,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn agents_defaults_round_trip_strips_legacy_timeout_and_preserves_extra_fields() {
         let source = r#"{
   models: {
@@ -1772,7 +1772,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn env_and_tools_section_helpers_round_trip() {
         let source = r#"{
   // top-level comment
@@ -1806,7 +1806,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn scan_openclaw_health_detects_invalid_tools_and_env_values() {
         let source = r#"{
   models: {

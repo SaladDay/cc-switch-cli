@@ -9,7 +9,7 @@ fn ensure_test_home_scopes_path_to_current_process() {
         .file_name()
         .and_then(|name| name.to_str())
         .expect("test home should have a terminal directory name");
-    let expected = format!("cc-switch-test-home-{}", std::process::id());
+    let expected = format!("ccs-t-{}", std::process::id());
 
     assert!(
         file_name == expected,

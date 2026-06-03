@@ -7,7 +7,6 @@ mod tests {
     use crossterm::event::{KeyEvent, KeyModifiers};
     use serde_json::json;
     use serial_test::serial;
-    use std::ffi::OsString;
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -25,48 +24,7 @@ mod tests {
     use crate::provider::Provider;
     use crate::services::PromptService;
     use crate::settings::{get_settings, update_settings, AppSettings};
-    use crate::test_support::{
-        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
-    };
-
-    struct EnvGuard {
-        _lock: TestHomeSettingsLock,
-        old_home: Option<OsString>,
-        old_userprofile: Option<OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_home(home: &Path) -> Self {
-            let lock = lock_test_home_and_settings();
-            let old_home = std::env::var_os("HOME");
-            let old_userprofile = std::env::var_os("USERPROFILE");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            set_test_home_override(Some(home));
-            crate::settings::reload_test_settings();
-            Self {
-                _lock: lock,
-                old_home,
-                old_userprofile,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            set_test_home_override(self.old_home.as_deref().map(Path::new));
-            crate::settings::reload_test_settings();
-        }
-    }
-
+    use crate::test_support::TestEnvGuard;
     struct SettingsGuard {
         previous: AppSettings,
     }
@@ -933,7 +891,7 @@ mod tests {
     #[serial(home_settings)]
     fn app_cycles_left_right() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: true,
@@ -958,7 +916,7 @@ mod tests {
     #[serial(home_settings)]
     fn app_cycles_through_opencode() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: true,
@@ -999,7 +957,7 @@ mod tests {
     #[serial(home_settings)]
     fn app_cycle_skips_hidden_apps_from_settings() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: false,
@@ -1022,7 +980,7 @@ mod tests {
     #[serial(home_settings)]
     fn app_cycle_noops_when_only_one_app_is_visible() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: false,
             codex: true,
@@ -1049,7 +1007,7 @@ mod tests {
     #[serial(home_settings)]
     fn app_cycle_backwards_skips_hidden_apps_and_wraps() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: true,
@@ -1072,7 +1030,7 @@ mod tests {
     #[serial(home_settings)]
     fn hidden_current_app_wraps_to_first_visible_replacement() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: true,
@@ -3932,7 +3890,7 @@ mod tests {
     #[serial]
     fn prompts_route_detects_live_prompt_file_and_prompts_import() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let prompt_path =
             crate::prompt_files::prompt_file_path(&AppType::Claude).expect("prompt path");
         std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
@@ -3965,7 +3923,7 @@ mod tests {
     #[serial]
     fn prompts_reload_data_detects_live_prompt_file_and_prompts_import() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let prompt_path =
             crate::prompt_files::prompt_file_path(&AppType::Claude).expect("prompt path");
         std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
@@ -4000,7 +3958,7 @@ mod tests {
     #[serial]
     fn prompts_switch_app_detects_live_prompt_file_and_prompts_import() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let prompt_path =
             crate::prompt_files::prompt_file_path(&AppType::Codex).expect("prompt path");
         std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
@@ -4037,7 +3995,7 @@ mod tests {
     #[serial]
     fn legacy_config_migration_leaves_live_prompt_for_tui_import_prompt() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let mut legacy_config = crate::app_config::MultiAppConfig::default();
         legacy_config
             .get_manager_mut(&AppType::Claude)
@@ -4474,7 +4432,7 @@ mod tests {
     #[serial]
     fn provider_copy_confirm_save_persists_with_source_id_copy_semantics() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _home = EnvGuard::set_home(temp_home.path());
+        let _home = TestEnvGuard::isolated(temp_home.path());
 
         let state = crate::cli::tui::data::load_state().expect("load state");
         {
@@ -5238,7 +5196,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5274,7 +5232,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5316,7 +5274,7 @@ mod tests {
             "hello memory",
         )
         .expect("seed memory file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5356,7 +5314,7 @@ mod tests {
         std::fs::write(&target, "outside").expect("seed target file");
         std::os::unix::fs::symlink(&target, workspace_dir.join("AGENTS.md"))
             .expect("create workspace symlink");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5395,7 +5353,7 @@ mod tests {
             "existing content",
         )
         .expect("seed memory file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5432,7 +5390,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(openclaw_dir.join("workspace/memory")).expect("create memory dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5481,7 +5439,7 @@ mod tests {
         std::fs::create_dir_all(&target).expect("create symlink target dir");
         std::os::unix::fs::symlink(&target, workspace_dir.join("memory"))
             .expect("create memory dir symlink");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5523,7 +5481,7 @@ mod tests {
             "old note",
         )
         .expect("seed old memory file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5582,7 +5540,7 @@ mod tests {
             "focus previous",
         )
         .expect("seed previous memory file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -5638,7 +5596,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -6032,7 +5990,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -6095,7 +6053,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -7376,7 +7334,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8288,7 +8246,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8389,7 +8347,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8476,7 +8434,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let openclaw_dir = temp_home.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8552,7 +8510,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8627,7 +8585,7 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&blocked_path);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -8696,7 +8654,7 @@ mod tests {
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::create_dir_all(&valid_openclaw_dir).expect("create openclaw dir");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&valid_openclaw_dir);
 
         let set_openclaw_dir = |path: &Path| {
@@ -8829,7 +8787,7 @@ mod tests {
         let blocked_path = temp_home.path().join("blocked-openclaw");
         std::fs::create_dir_all(&valid_openclaw_dir).expect("create openclaw dir");
         std::fs::write(&blocked_path, "not a directory").expect("seed blocking file");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&valid_openclaw_dir);
 
         let set_openclaw_dir = |path: &Path| {
@@ -8971,7 +8929,7 @@ mod tests {
 }"#,
         )
         .expect("write malformed openclaw config");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -9141,7 +9099,7 @@ mod tests {
 }"#,
         )
         .expect("write malformed openclaw config");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -9392,7 +9350,7 @@ mod tests {
     #[serial(home_settings)]
     fn settings_openclaw_config_dir_item_opens_text_input() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let mut settings = crate::settings::get_settings();
         settings.openclaw_config_dir = Some(r"\\wsl$\Ubuntu\home\demo\.openclaw".to_string());
         crate::settings::update_settings(settings).expect("save openclaw override");
@@ -9457,7 +9415,7 @@ mod tests {
     #[serial(home_settings)]
     fn settings_visible_apps_item_opens_picker_overlay() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let expected = crate::settings::get_visible_apps();
 
         let mut app = App::new(Some(AppType::Claude));
@@ -9481,7 +9439,7 @@ mod tests {
     #[serial(home_settings)]
     fn visible_apps_picker_rejects_zero_selection_without_closing() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: false,
@@ -9531,7 +9489,7 @@ mod tests {
     #[serial(home_settings)]
     fn visible_apps_picker_x_key_does_not_toggle_selection() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
             codex: false,
@@ -9567,7 +9525,7 @@ mod tests {
     #[serial(home_settings)]
     fn visible_apps_picker_prompts_manual_switch_for_controlled_app_in_auto_mode() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = crate::settings::VisibleApps {
             claude: true,
@@ -9605,7 +9563,7 @@ mod tests {
     #[serial(home_settings)]
     fn visible_apps_picker_prompts_manual_switch_for_claude_codex_in_auto_mode() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = crate::settings::VisibleApps {
             claude: true,
@@ -9643,7 +9601,7 @@ mod tests {
     #[serial(home_settings)]
     fn visible_apps_manual_switch_prompt_cancel_returns_to_picker_without_change() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         let initial = crate::settings::VisibleApps {
             claude: true,
             codex: true,
@@ -10396,7 +10354,7 @@ mod tests {
     #[serial]
     fn prompt_save_runtime_updates_metadata_and_content() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let state = crate::AppState::try_new().expect("load state");
         PromptService::upsert_prompt(
             &state,
@@ -10451,7 +10409,7 @@ mod tests {
     #[test]
     #[serial]
     fn prompt_save_runtime_creates_prompt_from_one_page_form() {
-        let _guard = EnvGuard::set_home(tempfile::tempdir().expect("tempdir").path());
+        let _guard = TestEnvGuard::isolated(tempfile::tempdir().expect("tempdir").path());
         let state = crate::AppState::try_new().expect("load state");
         state.save().expect("persist empty state");
 
@@ -10491,7 +10449,7 @@ mod tests {
     #[serial]
     fn prompt_import_candidate_yes_opens_prefilled_add_form_without_saving() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let state = crate::AppState::try_new().expect("load state");
         state.save().expect("persist empty state");
 
@@ -10540,7 +10498,7 @@ mod tests {
     #[test]
     #[serial]
     fn prompt_create_runtime_clears_filter_when_new_prompt_is_not_visible() {
-        let _guard = EnvGuard::set_home(tempfile::tempdir().expect("tempdir").path());
+        let _guard = TestEnvGuard::isolated(tempfile::tempdir().expect("tempdir").path());
         let state = crate::AppState::try_new().expect("load state");
         state.save().expect("persist empty state");
 
@@ -10576,7 +10534,7 @@ mod tests {
     #[serial]
     fn prompt_rename_runtime_clears_filter_when_renamed_prompt_is_not_visible() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::set_home(temp.path());
+        let _guard = TestEnvGuard::isolated(temp.path());
         let state = crate::AppState::try_new().expect("load state");
         PromptService::upsert_prompt(
             &state,
