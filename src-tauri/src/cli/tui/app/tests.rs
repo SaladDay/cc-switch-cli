@@ -10409,7 +10409,8 @@ mod tests {
     #[test]
     #[serial]
     fn prompt_save_runtime_creates_prompt_from_one_page_form() {
-        let _guard = TestEnvGuard::isolated(tempfile::tempdir().expect("tempdir").path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = TestEnvGuard::isolated(temp.path());
         let state = crate::AppState::try_new().expect("load state");
         state.save().expect("persist empty state");
 
@@ -10498,7 +10499,8 @@ mod tests {
     #[test]
     #[serial]
     fn prompt_create_runtime_clears_filter_when_new_prompt_is_not_visible() {
-        let _guard = TestEnvGuard::isolated(tempfile::tempdir().expect("tempdir").path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = TestEnvGuard::isolated(temp.path());
         let state = crate::AppState::try_new().expect("load state");
         state.save().expect("persist empty state");
 
