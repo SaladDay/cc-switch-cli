@@ -7692,19 +7692,11 @@ pub mod texts {
         }
     }
 
-    pub fn tui_sessions_toast_terminal_launched() -> &'static str {
-        if is_chinese() {
-            "已打开终端恢复会话。"
-        } else {
-            "Terminal launched for session resume."
-        }
-    }
-
     pub fn tui_sessions_toast_resume_fallback(err: &str) -> String {
         if is_chinese() {
-            format!("无法自动打开终端，已显示恢复命令：{err}")
+            format!("无法恢复会话，已显示恢复命令：{err}")
         } else {
-            format!("Could not open a terminal; showing the resume command instead: {err}")
+            format!("Could not resume session; showing the resume command instead: {err}")
         }
     }
 

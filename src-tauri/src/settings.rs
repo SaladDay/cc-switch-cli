@@ -437,8 +437,9 @@ pub struct AppSettings {
     pub webdav_sync: Option<WebDavSyncSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_retain_count: Option<u32>,
-    /// 首选终端应用，用于会话恢复。
+    /// 已废弃，仅用于保留现有配置值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)]
     pub preferred_terminal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_migrations: Option<LocalMigrations>,
@@ -556,13 +557,6 @@ impl AppSettings {
         if let Some(webdav) = self.webdav_sync.as_mut() {
             webdav.normalize();
         }
-
-        self.preferred_terminal = self
-            .preferred_terminal
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
     }
 
     fn normalize_loaded(&mut self) {
@@ -741,13 +735,6 @@ pub fn mark_codex_provider_template_migrated(
             .get_or_insert_with(Default::default);
         migrations.codex_provider_template_v1 = Some(migration);
     })
-}
-
-pub fn get_preferred_terminal() -> Option<String> {
-    settings_store()
-        .read()
-        .ok()
-        .and_then(|settings| settings.preferred_terminal.clone())
 }
 
 pub fn ensure_security_auth_selected_type(selected_type: &str) -> Result<(), AppError> {
@@ -1019,4 +1006,23 @@ pub fn set_skip_claude_onboarding(enabled: bool) -> Result<(), AppError> {
     let mut settings = get_settings();
     settings.skip_claude_onboarding = enabled;
     update_settings(settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppSettings;
+
+    #[test]
+    fn deprecated_preferred_terminal_round_trips_without_normalization() {
+        let original = "  custom-terminal  ";
+        let mut settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "preferredTerminal": original
+        }))
+        .expect("deserialize settings");
+
+        settings.normalize_loaded();
+
+        let serialized = serde_json::to_value(settings).expect("serialize settings");
+        assert_eq!(serialized["preferredTerminal"], original);
+    }
 }
