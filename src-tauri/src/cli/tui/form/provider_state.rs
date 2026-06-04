@@ -145,6 +145,7 @@ impl ProviderAddFormState {
             claude_hide_attribution: false,
             claude_hide_attribution_touched: false,
             codex_oauth_account_id: None,
+            github_copilot_account_id: None,
             codex_fast_mode: false,
             codex_base_url: TextInput::new(codex_defaults.0),
             codex_model: TextInput::new(codex_defaults.1),
@@ -346,6 +347,9 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::CodexOAuthAccount);
                     fields.push(ProviderAddField::CodexFastMode);
                     fields.push(ProviderAddField::ClaudeModelConfig);
+                } else if self.is_claude_github_copilot_provider() {
+                    fields.push(ProviderAddField::GitHubCopilotAccount);
+                    fields.push(ProviderAddField::ClaudeModelConfig);
                 } else if !self.is_claude_official_provider() {
                     fields.push(ProviderAddField::ClaudeBaseUrl);
                     fields.push(ProviderAddField::ClaudeApiFormat);
@@ -496,6 +500,7 @@ impl ProviderAddFormState {
             ProviderAddField::HermesBaseUrl => Some(&self.hermes_base_url),
             ProviderAddField::HermesRateLimitDelay => Some(&self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
+            | ProviderAddField::GitHubCopilotAccount
             | ProviderAddField::CodexFastMode
             | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
@@ -547,6 +552,7 @@ impl ProviderAddFormState {
             ProviderAddField::HermesBaseUrl => Some(&mut self.hermes_base_url),
             ProviderAddField::HermesRateLimitDelay => Some(&mut self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
+            | ProviderAddField::GitHubCopilotAccount
             | ProviderAddField::CodexFastMode
             | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
@@ -1096,6 +1102,18 @@ impl ProviderAddFormState {
             .unwrap_or_else(|| texts::tui_managed_accounts_follow_default().to_string())
     }
 
+    pub fn set_github_copilot_account_id(&mut self, account_id: Option<String>) {
+        self.github_copilot_account_id = account_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    }
+
+    pub fn github_copilot_account_display(&self) -> String {
+        self.github_copilot_account_id
+            .clone()
+            .unwrap_or_else(|| texts::tui_managed_accounts_follow_default().to_string())
+    }
+
     pub fn is_claude_codex_oauth_provider(&self) -> bool {
         if !matches!(self.app_type, AppType::Claude) {
             return false;
@@ -1106,6 +1124,18 @@ impl ProviderAddFormState {
             .and_then(|meta| meta.get("providerType"))
             .and_then(|value| value.as_str())
             .is_some_and(|value| value == "codex_oauth")
+    }
+
+    pub fn is_claude_github_copilot_provider(&self) -> bool {
+        if !matches!(self.app_type, AppType::Claude) {
+            return false;
+        }
+
+        self.extra
+            .get("meta")
+            .and_then(|meta| meta.get("providerType"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value == "github_copilot")
     }
 
     pub fn is_claude_official_provider(&self) -> bool {

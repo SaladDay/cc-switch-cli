@@ -847,6 +847,7 @@ pub(crate) fn provider_field_label_and_value(
             texts::tui_label_claude_hide_attribution().to_string()
         }
         ProviderAddField::CodexOAuthAccount => texts::tui_label_chatgpt_account().to_string(),
+        ProviderAddField::GitHubCopilotAccount => texts::tui_label_copilot_account().to_string(),
         ProviderAddField::CodexFastMode => texts::tui_label_codex_fast_mode().to_string(),
         ProviderAddField::CodexBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::CodexModel => texts::model_label().to_string(),
@@ -918,6 +919,7 @@ pub(crate) fn provider_field_label_and_value(
             }
         }
         ProviderAddField::CodexOAuthAccount => provider.codex_oauth_account_display(),
+        ProviderAddField::GitHubCopilotAccount => provider.github_copilot_account_display(),
         ProviderAddField::CodexFastMode => {
             if provider.codex_fast_mode {
                 format!("[{}]", texts::tui_marker_active())
@@ -1031,6 +1033,7 @@ pub(crate) fn provider_field_editor_line(
                 )
             }
             ProviderAddField::CodexOAuthAccount => texts::tui_key_open().to_string(),
+            ProviderAddField::GitHubCopilotAccount => texts::tui_key_open().to_string(),
             ProviderAddField::CodexFastMode => {
                 format!("codex_fast_mode = {}", provider.codex_fast_mode)
             }

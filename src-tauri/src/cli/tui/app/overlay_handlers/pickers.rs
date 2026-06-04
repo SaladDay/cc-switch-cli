@@ -349,7 +349,12 @@ impl App {
 
                 if binding {
                     if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                        provider.set_codex_oauth_account_id(selected_account_id);
+                        match auth_provider.as_str() {
+                            "github_copilot" => {
+                                provider.set_github_copilot_account_id(selected_account_id)
+                            }
+                            _ => provider.set_codex_oauth_account_id(selected_account_id),
+                        }
                     }
                 }
                 self.overlay = Overlay::None;

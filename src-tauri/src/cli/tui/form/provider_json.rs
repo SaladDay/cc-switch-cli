@@ -493,10 +493,12 @@ impl ProviderAddFormState {
         ) && matches!(self.app_type, AppType::Claude)
             && !self.is_claude_official_provider();
         let is_codex_oauth = self.is_claude_codex_oauth_provider();
+        let is_github_copilot = self.is_claude_github_copilot_provider();
 
         if !should_write_common_config_meta
             && !should_write_claude_api_format
             && !is_codex_oauth
+            && !is_github_copilot
             && !self.has_usage_script_meta()
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
@@ -580,6 +582,42 @@ impl ProviderAddFormState {
                 meta_obj.remove("authBinding");
             }
             meta_obj.remove("codexFastMode");
+        }
+
+        if is_github_copilot {
+            meta_obj.insert("providerType".to_string(), json!("github_copilot"));
+            meta_obj.insert(
+                "authBinding".to_string(),
+                json!({
+                    "source": "managed_account",
+                    "authProvider": "github_copilot",
+                    "accountId": self.github_copilot_account_id.as_deref(),
+                }),
+            );
+            if self.github_copilot_account_id.is_none() {
+                if let Some(auth_binding) = meta_obj
+                    .get_mut("authBinding")
+                    .and_then(|value| value.as_object_mut())
+                {
+                    auth_binding.remove("accountId");
+                }
+            }
+        } else {
+            if meta_obj
+                .get("providerType")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "github_copilot")
+            {
+                meta_obj.remove("providerType");
+            }
+            if meta_obj
+                .get("authBinding")
+                .and_then(|value| value.get("authProvider"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "github_copilot")
+            {
+                meta_obj.remove("authBinding");
+            }
         }
 
         self.update_usage_script_meta(meta_obj);

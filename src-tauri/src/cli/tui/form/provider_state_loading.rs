@@ -100,6 +100,17 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
             .map(|meta| meta.codex_fast_mode_enabled())
             .unwrap_or(false);
     }
+    if provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        == Some("github_copilot")
+    {
+        form.github_copilot_account_id = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.managed_account_id_for("github_copilot"));
+    }
     if let Some(env) = provider
         .settings_config
         .get("env")

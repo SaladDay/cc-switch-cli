@@ -41,6 +41,7 @@ pub(crate) fn add_form_key_items(
                     Some(
                         ProviderAddField::ClaudeModelConfig
                         | ProviderAddField::CodexOAuthAccount
+                        | ProviderAddField::GitHubCopilotAccount
                         | ProviderAddField::CommonSnippet
                         | ProviderAddField::UsageQuery
                         | ProviderAddField::OpenClawModels

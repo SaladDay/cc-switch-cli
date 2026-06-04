@@ -173,6 +173,7 @@ pub enum ProviderAddField {
     ClaudeModelConfig,
     ClaudeHideAttribution,
     CodexOAuthAccount,
+    GitHubCopilotAccount,
     CodexFastMode,
     CodexBaseUrl,
     CodexModel,
@@ -321,6 +322,7 @@ pub struct ProviderAddFormState {
     pub claude_hide_attribution: bool,
     claude_hide_attribution_touched: bool,
     pub codex_oauth_account_id: Option<String>,
+    pub github_copilot_account_id: Option<String>,
     pub codex_fast_mode: bool,
 
     pub codex_base_url: TextInput,

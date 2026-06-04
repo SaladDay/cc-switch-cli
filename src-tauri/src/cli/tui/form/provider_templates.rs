@@ -285,6 +285,7 @@ impl ProviderAddFormState {
                     self.claude_opus_model = defaults.claude_opus_model;
                     self.claude_hide_attribution = defaults.claude_hide_attribution;
                     self.codex_oauth_account_id = defaults.codex_oauth_account_id;
+                    self.github_copilot_account_id = defaults.github_copilot_account_id;
                     self.codex_fast_mode = defaults.codex_fast_mode;
                     self.codex_base_url = defaults.codex_base_url;
                     self.codex_model = defaults.codex_model;
@@ -336,6 +337,7 @@ impl ProviderAddFormState {
                     self.claude_opus_model.set("");
                     self.claude_model_config_touched = false;
                     self.codex_oauth_account_id = None;
+                    self.github_copilot_account_id = None;
                     self.codex_fast_mode = false;
                     self.claude_hide_attribution = false;
                     self.claude_hide_attribution_touched = false;
@@ -363,6 +365,7 @@ impl ProviderAddFormState {
                     self.claude_opus_model.set("gpt-5.4");
                     self.claude_model_config_touched = true;
                     self.codex_oauth_account_id = None;
+                    self.github_copilot_account_id = None;
                     self.codex_fast_mode = false;
                     self.claude_hide_attribution = true;
                     self.claude_hide_attribution_touched = true;
@@ -417,6 +420,8 @@ impl ProviderAddFormState {
                     self.claude_opus_model.set("claude-sonnet-4.6");
                     self.claude_reasoning_model.set("");
                     self.claude_model_config_touched = false;
+                    self.codex_oauth_account_id = None;
+                    self.codex_fast_mode = false;
                 }
             };
         }

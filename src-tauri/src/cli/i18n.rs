@@ -1637,6 +1637,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_copilot_account() -> &'static str {
+        if is_chinese() {
+            "GitHub Copilot 账号"
+        } else {
+            "GitHub Copilot Account"
+        }
+    }
+
     pub fn tui_label_codex_fast_mode() -> &'static str {
         if is_chinese() {
             "FAST 模式"

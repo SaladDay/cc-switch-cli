@@ -1,7 +1,9 @@
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthError;
-use crate::services::CodexOAuthService;
+use crate::proxy::providers::copilot_auth::{CopilotAuthError, GitHubAccount};
+use crate::services::{CodexOAuthService, CopilotService};
 
 const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
+const AUTH_PROVIDER_GITHUB_COPILOT: &str = "github_copilot";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ManagedAuthAccount {
@@ -35,11 +37,12 @@ pub struct ManagedAuthDeviceCodeResponse {
 fn ensure_auth_provider(auth_provider: &str) -> Result<&'static str, String> {
     match auth_provider {
         AUTH_PROVIDER_CODEX_OAUTH => Ok(AUTH_PROVIDER_CODEX_OAUTH),
+        AUTH_PROVIDER_GITHUB_COPILOT => Ok(AUTH_PROVIDER_GITHUB_COPILOT),
         _ => Err(format!("Unsupported auth provider: {auth_provider}")),
     }
 }
 
-fn map_account(
+fn map_codex_account(
     provider: &str,
     account: crate::proxy::providers::codex_oauth_auth::ManagedAuthAccount,
     default_account_id: Option<&str>,
@@ -54,9 +57,38 @@ fn map_account(
     }
 }
 
-fn map_device_code_response(
+fn map_codex_device_code_response(
     provider: &str,
     response: crate::proxy::providers::codex_oauth_auth::ManagedAuthDeviceCodeResponse,
+) -> ManagedAuthDeviceCodeResponse {
+    ManagedAuthDeviceCodeResponse {
+        provider: provider.to_string(),
+        device_code: response.device_code,
+        user_code: response.user_code,
+        verification_uri: response.verification_uri,
+        expires_in: response.expires_in,
+        interval: response.interval,
+    }
+}
+
+fn map_copilot_account(
+    provider: &str,
+    account: GitHubAccount,
+    default_account_id: Option<&str>,
+) -> ManagedAuthAccount {
+    ManagedAuthAccount {
+        is_default: default_account_id == Some(account.id.as_str()),
+        id: account.id,
+        provider: provider.to_string(),
+        login: account.login,
+        avatar_url: account.avatar_url,
+        authenticated_at: account.authenticated_at,
+    }
+}
+
+fn map_copilot_device_code_response(
+    provider: &str,
+    response: crate::proxy::providers::copilot_auth::GitHubDeviceCodeResponse,
 ) -> ManagedAuthDeviceCodeResponse {
     ManagedAuthDeviceCodeResponse {
         provider: provider.to_string(),
@@ -76,7 +108,11 @@ impl AuthService {
         match auth_provider {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::start_device_flow()
                 .await
-                .map(|response| map_device_code_response(auth_provider, response))
+                .map(|response| map_codex_device_code_response(auth_provider, response))
+                .map_err(|error| error.to_string()),
+            AUTH_PROVIDER_GITHUB_COPILOT => CopilotService::start_device_flow(None)
+                .await
+                .map(|response| map_copilot_device_code_response(auth_provider, response))
                 .map_err(|error| error.to_string()),
             _ => unreachable!(),
         }
@@ -94,12 +130,29 @@ impl AuthService {
                     let default_account_id =
                         CodexOAuthService::get_status().await.default_account_id;
                     Ok(account.map(|account| {
-                        map_account(auth_provider, account, default_account_id.as_deref())
+                        map_codex_account(auth_provider, account, default_account_id.as_deref())
                     }))
                 }
                 Err(CodexOAuthError::AuthorizationPending) => Ok(None),
                 Err(error) => Err(error.to_string()),
             },
+            AUTH_PROVIDER_GITHUB_COPILOT => {
+                match CopilotService::poll_for_token(device_code, None).await {
+                    Ok(account) => {
+                        let default_account_id =
+                            CopilotService::get_status().await.default_account_id;
+                        Ok(account.map(|account| {
+                            map_copilot_account(
+                                auth_provider,
+                                account,
+                                default_account_id.as_deref(),
+                            )
+                        }))
+                    }
+                    Err(CopilotAuthError::AuthorizationPending) => Ok(None),
+                    Err(error) => Err(error.to_string()),
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -114,7 +167,18 @@ impl AuthService {
                     .accounts
                     .into_iter()
                     .map(|account| {
-                        map_account(auth_provider, account, default_account_id.as_deref())
+                        map_codex_account(auth_provider, account, default_account_id.as_deref())
+                    })
+                    .collect())
+            }
+            AUTH_PROVIDER_GITHUB_COPILOT => {
+                let status = CopilotService::get_status().await;
+                let default_account_id = status.default_account_id.clone();
+                Ok(status
+                    .accounts
+                    .into_iter()
+                    .map(|account| {
+                        map_copilot_account(auth_provider, account, default_account_id.as_deref())
                     })
                     .collect())
             }
@@ -137,7 +201,28 @@ impl AuthService {
                         .accounts
                         .into_iter()
                         .map(|account| {
-                            map_account(auth_provider, account, default_account_id.as_deref())
+                            map_codex_account(auth_provider, account, default_account_id.as_deref())
+                        })
+                        .collect(),
+                })
+            }
+            AUTH_PROVIDER_GITHUB_COPILOT => {
+                let status = CopilotService::get_status().await;
+                let default_account_id = status.default_account_id.clone();
+                Ok(ManagedAuthStatus {
+                    provider: auth_provider.to_string(),
+                    authenticated: status.authenticated,
+                    default_account_id: default_account_id.clone(),
+                    migration_error: status.migration_error,
+                    accounts: status
+                        .accounts
+                        .into_iter()
+                        .map(|account| {
+                            map_copilot_account(
+                                auth_provider,
+                                account,
+                                default_account_id.as_deref(),
+                            )
                         })
                         .collect(),
                 })
@@ -152,6 +237,9 @@ impl AuthService {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::remove_account(account_id)
                 .await
                 .map_err(|error| error.to_string()),
+            AUTH_PROVIDER_GITHUB_COPILOT => CopilotService::remove_account(account_id)
+                .await
+                .map_err(|error| error.to_string()),
             _ => unreachable!(),
         }
     }
@@ -162,6 +250,9 @@ impl AuthService {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::set_default_account(account_id)
                 .await
                 .map_err(|error| error.to_string()),
+            AUTH_PROVIDER_GITHUB_COPILOT => CopilotService::set_default_account(account_id)
+                .await
+                .map_err(|error| error.to_string()),
             _ => unreachable!(),
         }
     }
@@ -170,6 +261,9 @@ impl AuthService {
         let auth_provider = ensure_auth_provider(auth_provider)?;
         match auth_provider {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::clear_auth()
+                .await
+                .map_err(|error| error.to_string()),
+            AUTH_PROVIDER_GITHUB_COPILOT => CopilotService::clear_auth()
                 .await
                 .map_err(|error| error.to_string()),
             _ => unreachable!(),

@@ -327,6 +327,27 @@ impl App {
                 }
                 Action::None
             }
+            ProviderAddField::GitHubCopilotAccount => {
+                if matches!(key.code, KeyCode::Enter) {
+                    let selected = self
+                        .form
+                        .as_ref()
+                        .and_then(|form| match form {
+                            FormState::ProviderAdd(provider) => {
+                                Some(provider.github_copilot_account_id.clone())
+                            }
+                            _ => None,
+                        })
+                        .flatten();
+                    self.overlay = Overlay::ManagedAccountPicker {
+                        auth_provider: "github_copilot".to_string(),
+                        selected: 0,
+                        binding: true,
+                        selected_account_id: selected,
+                    };
+                }
+                Action::None
+            }
             ProviderAddField::CodexFastMode => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
@@ -921,6 +942,7 @@ fn usage_query_provider_credential_field(field: ProviderAddField) -> bool {
         ProviderAddField::ClaudeApiKey
             | ProviderAddField::ClaudeBaseUrl
             | ProviderAddField::CodexOAuthAccount
+            | ProviderAddField::GitHubCopilotAccount
             | ProviderAddField::CodexApiKey
             | ProviderAddField::CodexBaseUrl
             | ProviderAddField::GeminiApiKey
