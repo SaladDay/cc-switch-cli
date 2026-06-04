@@ -3599,9 +3599,114 @@ fn provider_add_form_usage_query_template_fields_match_upstream_visibility() {
             UsageQueryTemplate::Balance,
         ]
     );
-    assert!(!form
-        .available_usage_query_templates()
-        .contains(&UsageQueryTemplate::TokenPlan));
+    assert_eq!(UsageQueryTemplate::from_str("token_plan"), None);
+    assert_eq!(UsageQueryTemplate::from_str("github_copilot"), None);
+}
+
+#[test]
+fn provider_edit_form_preserves_hidden_usage_query_template_until_touched() {
+    let token_plan_provider = Provider::with_id(
+        "kimi".to_string(),
+        "Kimi Coding".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-kimi",
+                "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding/v1"
+            }
+        }),
+        None,
+    );
+    let provider = Provider {
+        meta: Some(crate::provider::ProviderMeta {
+            usage_script: Some(crate::provider::UsageScript {
+                enabled: true,
+                language: "javascript".to_string(),
+                code: "".to_string(),
+                timeout: Some(10),
+                api_key: None,
+                base_url: None,
+                access_token: None,
+                user_id: None,
+                template_type: Some("token_plan".to_string()),
+                auto_query_interval: Some(5),
+                coding_plan_provider: Some("kimi".to_string()),
+            }),
+            ..Default::default()
+        }),
+        ..token_plan_provider
+    };
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(
+        form.available_usage_query_templates(),
+        vec![
+            UsageQueryTemplate::Custom,
+            UsageQueryTemplate::General,
+            UsageQueryTemplate::NewApi,
+            UsageQueryTemplate::Balance,
+        ]
+    );
+
+    let saved = form.to_provider_json_value();
+    let script = &saved["meta"]["usage_script"];
+    assert_eq!(script["templateType"], "token_plan");
+    assert_eq!(script["codingPlanProvider"], "kimi");
+    assert_eq!(script["code"], "");
+    assert_eq!(script["enabled"], true);
+}
+
+#[test]
+fn provider_edit_form_preserves_hidden_github_copilot_usage_query_until_touched() {
+    let github_provider = Provider::with_id(
+        "github-copilot".to_string(),
+        "GitHub Copilot".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.githubcopilot.com"
+            }
+        }),
+        None,
+    );
+    let provider = Provider {
+        meta: Some(crate::provider::ProviderMeta {
+            provider_type: Some("github_copilot".to_string()),
+            github_account_id: Some("gh-123".to_string()),
+            usage_script: Some(crate::provider::UsageScript {
+                enabled: true,
+                language: "javascript".to_string(),
+                code: "".to_string(),
+                timeout: Some(10),
+                api_key: None,
+                base_url: None,
+                access_token: None,
+                user_id: None,
+                template_type: Some("github_copilot".to_string()),
+                auto_query_interval: Some(5),
+                coding_plan_provider: None,
+            }),
+            ..Default::default()
+        }),
+        ..github_provider
+    };
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    let saved = form.to_provider_json_value();
+    let script = &saved["meta"]["usage_script"];
+
+    assert_eq!(script["templateType"], "github_copilot");
+    assert_eq!(script["code"], "");
+    assert_eq!(
+        saved["meta"]
+            .get("providerType")
+            .and_then(|value| value.as_str()),
+        Some("github_copilot")
+    );
+    assert_eq!(
+        saved["meta"]
+            .get("githubAccountId")
+            .and_then(|value| value.as_str()),
+        Some("gh-123")
+    );
 }
 
 #[test]

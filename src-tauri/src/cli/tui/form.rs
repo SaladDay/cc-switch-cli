@@ -11,6 +11,7 @@ mod provider_json;
 mod provider_state;
 mod provider_state_loading;
 mod provider_templates;
+mod provider_usage_query;
 
 #[cfg(test)]
 mod tests;
@@ -24,9 +25,7 @@ pub(crate) use provider_json::claude_hide_attribution_enabled;
 pub(crate) use provider_json::strip_common_config_from_settings;
 pub(crate) use provider_json::{normalize_usage_interval, normalize_usage_timeout};
 pub(crate) use provider_state::resolve_provider_id_for_submit;
-pub(crate) use provider_state::{
-    detect_balance_provider_for_usage_query, detect_coding_plan_provider_for_usage_query,
-};
+pub(crate) use provider_usage_query::detect_balance_provider_for_usage_query;
 
 pub(crate) use crate::hermes_config::{HERMES_API_MODES, HERMES_DEFAULT_API_MODE};
 pub(crate) use crate::openclaw_config::{
@@ -221,8 +220,6 @@ pub enum UsageQueryTemplate {
     Custom,
     General,
     NewApi,
-    GitHubCopilot,
-    TokenPlan,
     Balance,
 }
 
@@ -236,7 +233,6 @@ pub enum UsageQueryField {
     UserId,
     Timeout,
     AutoInterval,
-    CodingPlanProvider,
     Script,
 }
 
@@ -340,7 +336,6 @@ pub struct ProviderAddFormState {
     pub usage_query_timeout: TextInput,
     pub usage_query_auto_interval: TextInput,
     pub usage_query_code: String,
-    pub usage_query_coding_plan_provider: TextInput,
     pub opencode_npm_package: TextInput,
     pub opencode_api_key: TextInput,
     pub opencode_base_url: TextInput,

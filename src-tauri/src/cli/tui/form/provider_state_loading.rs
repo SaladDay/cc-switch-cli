@@ -1,8 +1,7 @@
 use super::codex_config::parse_codex_config_snippet;
 use super::{
-    claude_hide_attribution_enabled, detect_balance_provider_for_usage_query,
-    detect_coding_plan_provider_for_usage_query, ClaudeApiFormat, ProviderAddFormState,
-    UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
+    claude_hide_attribution_enabled, detect_balance_provider_for_usage_query, ClaudeApiFormat,
+    ProviderAddFormState, UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 use crate::app_config::AppType;
 use crate::provider::Provider;
@@ -51,14 +50,6 @@ fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provide
     if let Some(value) = script.user_id.as_deref() {
         form.usage_query_user_id.set(value);
     }
-    if let Some(value) = script.coding_plan_provider.as_deref() {
-        form.usage_query_coding_plan_provider.set(value);
-    } else if let Some(provider) =
-        detect_coding_plan_provider_for_usage_query(&form.current_provider_base_url())
-    {
-        form.usage_query_coding_plan_provider.set(provider);
-    }
-
     let template = script
         .template_type
         .as_deref()

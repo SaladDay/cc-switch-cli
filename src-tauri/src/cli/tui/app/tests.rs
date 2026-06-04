@@ -13172,6 +13172,80 @@ mod tests {
     }
 
     #[test]
+    fn provider_form_usage_query_hidden_template_edit_save_preserves_untouched_script() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut provider = Provider::with_id(
+            "kimi".to_string(),
+            "Kimi Coding".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-kimi",
+                    "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding/v1"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            usage_script: Some(crate::provider::UsageScript {
+                enabled: true,
+                language: "javascript".to_string(),
+                code: "".to_string(),
+                timeout: Some(10),
+                api_key: None,
+                base_url: None,
+                access_token: None,
+                user_id: None,
+                template_type: Some("token_plan".to_string()),
+                auto_query_interval: Some(5),
+                coding_plan_provider: Some("kimi".to_string()),
+            }),
+            ..Default::default()
+        });
+
+        let mut data = UiData::default();
+        data.providers.rows.push(ProviderRow {
+            id: "kimi".to_string(),
+            provider,
+            api_url: Some("https://api.kimi.com/coding/v1".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        });
+
+        let open_action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(open_action, Action::None));
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.notes.set("Updated without touching Usage Query");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        let Action::EditorSubmit {
+            submit: EditorSubmit::ProviderEdit { id },
+            content,
+        } = submit
+        else {
+            panic!("expected ProviderEdit submit");
+        };
+        assert_eq!(id, "kimi");
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&content).expect("provider submit JSON should parse");
+        assert_eq!(saved["notes"], "Updated without touching Usage Query");
+        let script = &saved["meta"]["usage_script"];
+        assert_eq!(script["templateType"], "token_plan");
+        assert_eq!(script["codingPlanProvider"], "kimi");
+        assert_eq!(script["code"], "");
+    }
+
+    #[test]
     fn provider_form_usage_query_script_opens_plain_editor() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;

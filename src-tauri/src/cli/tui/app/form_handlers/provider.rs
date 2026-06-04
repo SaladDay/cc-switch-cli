@@ -557,13 +557,6 @@ impl App {
                 self.overlay = Overlay::UsageQueryTemplatePicker { selected };
                 Action::None
             }
-            form::UsageQueryField::CodingPlanProvider => {
-                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
-                    return Action::None;
-                };
-                provider.cycle_usage_query_coding_plan_provider();
-                Action::None
-            }
             form::UsageQueryField::Script => self.open_usage_query_script_editor(),
             _ => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
@@ -1038,15 +1031,17 @@ fn normalize_usage_query_numeric_fields(provider: &mut form::ProviderAddFormStat
 }
 
 fn validate_usage_query_form(provider: &form::ProviderAddFormState) -> Option<&'static str> {
+    if provider.should_skip_usage_query_validation() {
+        return None;
+    }
+
     if !provider.usage_query_enabled {
         return None;
     }
 
     if matches!(
         provider.usage_query_template,
-        form::UsageQueryTemplate::GitHubCopilot
-            | form::UsageQueryTemplate::TokenPlan
-            | form::UsageQueryTemplate::Balance
+        form::UsageQueryTemplate::Balance
     ) {
         return None;
     }

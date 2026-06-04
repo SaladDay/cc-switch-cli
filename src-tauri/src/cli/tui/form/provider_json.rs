@@ -612,6 +612,9 @@ impl ProviderAddFormState {
     }
 
     fn update_usage_script_meta(&self, meta_obj: &mut serde_json::Map<String, Value>) {
+        if self.has_usage_script_meta() && !self.usage_query_touched {
+            return;
+        }
         if !self.has_usage_script_meta() && !self.usage_query_enabled && !self.usage_query_touched {
             meta_obj.remove("usage_script");
             return;
@@ -650,16 +653,7 @@ impl ProviderAddFormState {
                 );
                 set_or_remove_trimmed(&mut script, "userId", &self.usage_query_user_id.value);
             }
-            UsageQueryTemplate::TokenPlan => {
-                set_or_remove_trimmed(
-                    &mut script,
-                    "codingPlanProvider",
-                    &self.usage_query_coding_plan_provider.value,
-                );
-            }
-            UsageQueryTemplate::Custom
-            | UsageQueryTemplate::GitHubCopilot
-            | UsageQueryTemplate::Balance => {}
+            UsageQueryTemplate::Custom | UsageQueryTemplate::Balance => {}
         }
 
         meta_obj.insert("usage_script".to_string(), Value::Object(script));

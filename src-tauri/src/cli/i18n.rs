@@ -2476,22 +2476,6 @@ pub mod texts {
         }
     }
 
-    pub fn tui_usage_query_copilot_auto_auth() -> &'static str {
-        if is_chinese() {
-            "自动使用 OAuth 认证，无需手动配置凭证"
-        } else {
-            "Auto OAuth authentication, no manual credentials needed"
-        }
-    }
-
-    pub fn tui_usage_query_token_plan_hint() -> &'static str {
-        if is_chinese() {
-            "自动使用供应商的 API Key 和 Base URL 查询 Token Plan 额度"
-        } else {
-            "Automatically uses the provider's API Key and Base URL to query Token Plan quota"
-        }
-    }
-
     pub fn tui_usage_query_balance_hint() -> &'static str {
         if is_chinese() {
             "自动使用供应商的 API Key 查询账户余额"
@@ -2513,14 +2497,6 @@ pub mod texts {
             "脚本必须包含 return 语句"
         } else {
             "Script must contain return statement"
-        }
-    }
-
-    pub fn tui_usage_query_coding_plan_provider() -> &'static str {
-        if is_chinese() {
-            "Coding Plan 供应商"
-        } else {
-            "Coding Plan Provider"
         }
     }
 

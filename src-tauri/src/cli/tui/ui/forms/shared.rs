@@ -101,8 +101,7 @@ pub(crate) fn usage_query_form_key_items(
                 let enter_action = match selected_field {
                     Some(
                         super::form::UsageQueryField::Enabled
-                        | super::form::UsageQueryField::Template
-                        | super::form::UsageQueryField::CodingPlanProvider,
+                        | super::form::UsageQueryField::Template,
                     ) => texts::tui_key_toggle(),
                     Some(super::form::UsageQueryField::Script) => texts::tui_key_open(),
                     Some(_) => texts::tui_key_edit_mode(),

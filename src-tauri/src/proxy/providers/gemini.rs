@@ -9,9 +9,6 @@ pub struct GeminiAdapter;
 #[derive(Debug, Clone)]
 pub struct OAuthCredentials {
     pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
 }
 
 impl OAuthCredentials {
@@ -76,9 +73,6 @@ impl GeminiAdapter {
         if key.starts_with("ya29.") {
             return Some(OAuthCredentials {
                 access_token: key.to_string(),
-                refresh_token: None,
-                client_id: None,
-                client_secret: None,
             });
         }
 
@@ -96,25 +90,12 @@ impl GeminiAdapter {
             .get("refresh_token")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let client_id = json
-            .get("client_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let client_secret = json
-            .get("client_secret")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
 
         if access_token.is_empty() && refresh_token.is_none() {
             return None;
         }
 
-        Some(OAuthCredentials {
-            access_token,
-            refresh_token,
-            client_id,
-            client_secret,
-        })
+        Some(OAuthCredentials { access_token })
     }
 }
 
