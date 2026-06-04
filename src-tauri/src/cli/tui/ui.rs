@@ -176,8 +176,7 @@ fn render_content(
 }
 
 fn split_filter_area(area: Rect, app: &App) -> (Option<Rect>, Rect) {
-    let show = app.filter.active || !app.filter.input.value.trim().is_empty();
-    if !show {
+    if !app.should_show_filter_bar() {
         return (None, area);
     }
 
@@ -205,6 +204,7 @@ mod effect_tests {
 }
 
 fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::theme::Theme) {
+    let input = app.displayed_filter_input();
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -230,11 +230,8 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super
 
     let input_inner = input_block.inner(inner);
     frame.render_widget(input_block, inner);
-    let (visible, cursor_x) = visible_text_window(
-        &app.filter.input.value,
-        app.filter.input.cursor,
-        input_inner.width as usize,
-    );
+    let (visible, cursor_x) =
+        visible_text_window(&input.value, input.cursor, input_inner.width as usize);
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::raw(visible))).wrap(Wrap { trim: false }),

@@ -110,10 +110,13 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
         SessionMsg::ScanFinished { request_id, result } => match result {
             Ok(rows) => {
                 if app.sessions.finish_scan(request_id, rows) {
-                    let visible_len = crate::cli::tui::app::visible_sessions(
+                    let visible_len = crate::cli::tui::app::visible_sessions_for_state(
                         &app.filter,
                         &app.app_type,
                         &app.sessions.rows,
+                        app.sessions.detail_key.as_deref(),
+                        app.sessions.messages_loaded,
+                        &app.sessions.messages,
                     )
                     .len();
                     if visible_len == 0 {
@@ -137,7 +140,9 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
             result,
         } => match result {
             Ok(messages) => {
-                app.sessions.finish_message_load(request_id, &key, messages);
+                if app.sessions.finish_message_load(request_id, &key, messages) {
+                    crate::cli::tui::app::clamp_session_message_selection(&mut app.sessions);
+                }
             }
             Err(error) => {
                 app.sessions
@@ -155,10 +160,13 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
         } => match result {
             Ok(()) => {
                 if app.sessions.finish_delete(request_id, &key) {
-                    let visible_len = crate::cli::tui::app::visible_sessions(
+                    let visible_len = crate::cli::tui::app::visible_sessions_for_state(
                         &app.filter,
                         &app.app_type,
                         &app.sessions.rows,
+                        app.sessions.detail_key.as_deref(),
+                        app.sessions.messages_loaded,
+                        &app.sessions.messages,
                     )
                     .len();
                     if visible_len == 0 {

@@ -4,6 +4,7 @@ use super::*;
 pub struct FilterState {
     pub active: bool,
     pub input: TextInput,
+    pub scope: FilterScope,
 }
 
 impl FilterState {
@@ -11,6 +12,7 @@ impl FilterState {
         Self {
             active: false,
             input: TextInput::new(""),
+            scope: FilterScope::Global,
         }
     }
 
@@ -21,6 +23,12 @@ impl FilterState {
         }
         Some(trimmed.to_lowercase())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterScope {
+    Global,
+    SessionMessages,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +59,7 @@ pub struct SessionsState {
     pub detail_key: Option<String>,
     pub messages_key: Option<String>,
     pub messages: Vec<crate::session_manager::SessionMessage>,
+    pub message_filter: TextInput,
     pub messages_loading: bool,
     pub messages_loaded: bool,
     pub messages_error: Option<String>,
@@ -77,6 +86,7 @@ impl Default for SessionsState {
             detail_key: None,
             messages_key: None,
             messages: Vec::new(),
+            message_filter: TextInput::new(""),
             messages_loading: false,
             messages_loaded: false,
             messages_error: None,
@@ -152,6 +162,14 @@ impl SessionsState {
         }
         self.detail_key = Some(key);
         self.clear_messages();
+    }
+
+    pub(crate) fn message_query_lower(&self) -> Option<String> {
+        let trimmed = self.message_filter.value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(trimmed.to_lowercase())
     }
 
     pub(crate) fn clear_detail(&mut self) {

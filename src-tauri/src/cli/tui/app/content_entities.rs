@@ -31,7 +31,14 @@ impl App {
     }
 
     fn open_selected_session_detail(&mut self, data: &UiData) -> Action {
-        let visible = visible_sessions(&self.filter, &self.app_type, &self.sessions.rows);
+        let visible = visible_sessions_for_state(
+            &self.filter,
+            &self.app_type,
+            &self.sessions.rows,
+            self.sessions.detail_key.as_deref(),
+            self.sessions.messages_loaded,
+            &self.sessions.messages,
+        );
         let Some(session) = visible.get(self.sessions.selected_idx) else {
             return Action::None;
         };
@@ -495,7 +502,14 @@ impl App {
     }
 
     pub(crate) fn on_sessions_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
-        let visible = visible_sessions(&self.filter, &self.app_type, &self.sessions.rows);
+        let visible = visible_sessions_for_state(
+            &self.filter,
+            &self.app_type,
+            &self.sessions.rows,
+            self.sessions.detail_key.as_deref(),
+            self.sessions.messages_loaded,
+            &self.sessions.messages,
+        );
         match key.code {
             KeyCode::Left => self.move_sessions_focus_left(),
             KeyCode::Right => self.move_sessions_focus_right(data),
@@ -505,7 +519,21 @@ impl App {
                         self.sessions.selected_idx = self.sessions.selected_idx.saturating_sub(1);
                     }
                     SessionsPane::Detail => {
-                        self.sessions.message_idx = self.sessions.message_idx.saturating_sub(1);
+                        let next_idx = {
+                            let messages = visible_session_messages(&self.sessions);
+                            if messages.is_empty() {
+                                Some(0)
+                            } else {
+                                let current = messages
+                                    .iter()
+                                    .position(|(index, _)| *index == self.sessions.message_idx)
+                                    .unwrap_or(0);
+                                Some(messages[current.saturating_sub(1)].0)
+                            }
+                        };
+                        if let Some(next_idx) = next_idx {
+                            self.sessions.message_idx = next_idx;
+                        }
                     }
                 }
                 Action::None
@@ -519,9 +547,20 @@ impl App {
                         }
                     }
                     SessionsPane::Detail => {
-                        if !self.sessions.messages.is_empty() {
-                            self.sessions.message_idx = (self.sessions.message_idx + 1)
-                                .min(self.sessions.messages.len() - 1);
+                        let next_idx = {
+                            let messages = visible_session_messages(&self.sessions);
+                            if messages.is_empty() {
+                                Some(0)
+                            } else {
+                                let current = messages
+                                    .iter()
+                                    .position(|(index, _)| *index == self.sessions.message_idx)
+                                    .unwrap_or(0);
+                                Some(messages[(current + 1).min(messages.len() - 1)].0)
+                            }
+                        };
+                        if let Some(next_idx) = next_idx {
+                            self.sessions.message_idx = next_idx;
                         }
                     }
                 }
@@ -530,8 +569,13 @@ impl App {
             KeyCode::Enter => match self.sessions.pane {
                 SessionsPane::List => self.open_selected_session_detail(data),
                 SessionsPane::Detail => {
-                    let Some(message) = self.sessions.messages.get(self.sessions.message_idx)
-                    else {
+                    let messages = visible_session_messages(&self.sessions);
+                    let message = messages
+                        .iter()
+                        .find(|(index, _)| *index == self.sessions.message_idx)
+                        .or_else(|| messages.first())
+                        .map(|(_, message)| *message);
+                    let Some(message) = message else {
                         return Action::None;
                     };
                     self.overlay = Overlay::TextView(TextViewState {

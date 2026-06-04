@@ -7426,6 +7426,18 @@ pub mod texts {
         }
     }
 
+    pub fn tui_sessions_messages_title_with_filter(query: Option<&str>) -> String {
+        let mut title = tui_sessions_messages_title().to_string();
+        if let Some(query) = query.filter(|value| !value.trim().is_empty()) {
+            if is_chinese() {
+                title.push_str(&format!(" · 搜索: {}", query.trim()));
+            } else {
+                title.push_str(&format!(" · Search: {}", query.trim()));
+            }
+        }
+        title
+    }
+
     pub fn tui_sessions_empty_title() -> &'static str {
         if is_chinese() {
             "未找到本地会话"
@@ -7583,6 +7595,14 @@ pub mod texts {
             "此会话没有可显示的消息。"
         } else {
             "No messages available for this session."
+        }
+    }
+
+    pub fn tui_sessions_messages_filtered_empty() -> &'static str {
+        if is_chinese() {
+            "没有符合当前筛选/搜索的消息。"
+        } else {
+            "No messages match the current filters."
         }
     }
 

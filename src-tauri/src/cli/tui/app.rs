@@ -40,9 +40,9 @@ pub(crate) use content_config::HERMES_MEMORY_ROW_COUNT;
 pub use editor_state::{EditorKind, EditorMode, EditorState, EditorSubmit};
 pub(crate) use helpers::*;
 pub use types::{
-    CommonSnippetViewSource, ConfirmAction, ConfirmOverlay, FilterState, Focus, LoadingKind,
-    ManagedAuthLoginState, Overlay, SessionsPane, SessionsState, TextInputState, TextSubmit,
-    TextViewAction, TextViewState, Toast, ToastKind,
+    CommonSnippetViewSource, ConfirmAction, ConfirmOverlay, FilterScope, FilterState, Focus,
+    LoadingKind, ManagedAuthLoginState, Overlay, SessionsPane, SessionsState, TextInputState,
+    TextSubmit, TextViewAction, TextViewState, Toast, ToastKind,
 };
 
 pub(crate) fn supports_failover_controls(app_type: &AppType) -> bool {

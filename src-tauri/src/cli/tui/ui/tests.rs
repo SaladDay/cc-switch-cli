@@ -101,6 +101,7 @@ fn tui_sessions_renders_split_detail_and_message_preview() {
     });
     app.sessions
         .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.pane = app::SessionsPane::Detail;
     app.sessions.messages_loaded = true;
     app.sessions
         .messages
@@ -221,6 +222,220 @@ fn tui_sessions_filters_rows_by_current_app() {
     let codex = all_text(&render(&app, &minimal_data(&app.app_type)));
     assert!(!codex.contains("Claude visible"), "{codex}");
     assert!(codex.contains("Codex hidden"), "{codex}");
+}
+
+#[test]
+fn tui_sessions_slash_search_filters_user_role_messages() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "abcdef123456".to_string(),
+        title: Some("Debug deploy".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/session.jsonl".to_string()),
+        resume_command: Some("claude --resume abcdef123456".to_string()),
+    });
+    app.sessions
+        .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.pane = app::SessionsPane::Detail;
+    app.sessions.messages_loaded = true;
+    app.sessions.messages = vec![
+        crate::session_manager::SessionMessage {
+            role: "user".to_string(),
+            content: "How do I deploy this service?".to_string(),
+            ts: Some(1_735_689_900_000),
+        },
+        crate::session_manager::SessionMessage {
+            role: "assistant".to_string(),
+            content: "The user should use the release workflow.".to_string(),
+            ts: Some(1_735_689_901_000),
+        },
+        crate::session_manager::SessionMessage {
+            role: "tool".to_string(),
+            content: "cargo test".to_string(),
+            ts: Some(1_735_689_902_000),
+        },
+    ];
+
+    let data = minimal_data(&app.app_type);
+    let action = app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &data);
+    assert!(matches!(action, Action::None));
+    for ch in "User".chars() {
+        let action = app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &data);
+        assert!(matches!(action, Action::None));
+    }
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(!all.contains("Search: User"), "{all}");
+    assert!(all.contains("How do I deploy"), "{all}");
+    assert!(!all.contains("release workflow"), "{all}");
+    assert!(!all.contains("cargo test"), "{all}");
+}
+
+#[test]
+fn tui_sessions_search_filters_loaded_message_content() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "abcdef123456".to_string(),
+        title: Some("Debug deploy".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/session.jsonl".to_string()),
+        resume_command: Some("claude --resume abcdef123456".to_string()),
+    });
+    app.sessions
+        .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.messages_loaded = true;
+    app.sessions.messages = vec![
+        crate::session_manager::SessionMessage {
+            role: "user".to_string(),
+            content: "How do I deploy this service?".to_string(),
+            ts: Some(1_735_689_900_000),
+        },
+        crate::session_manager::SessionMessage {
+            role: "assistant".to_string(),
+            content: "Use the release workflow.".to_string(),
+            ts: Some(1_735_689_901_000),
+        },
+    ];
+    app.sessions.message_filter.set("deploy");
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("How do I deploy"), "{all}");
+    assert!(!all.contains("Use the release workflow"), "{all}");
+}
+
+#[test]
+fn tui_sessions_search_matches_localized_user_role_label() {
+    let _lang = use_test_language(Language::Chinese);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "abcdef123456".to_string(),
+        title: Some("Debug deploy".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/session.jsonl".to_string()),
+        resume_command: Some("claude --resume abcdef123456".to_string()),
+    });
+    app.sessions
+        .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.messages_loaded = true;
+    app.sessions.messages = vec![
+        crate::session_manager::SessionMessage {
+            role: "user".to_string(),
+            content: "How do I deploy this service?".to_string(),
+            ts: Some(1_735_689_900_000),
+        },
+        crate::session_manager::SessionMessage {
+            role: "assistant".to_string(),
+            content: "提醒用户使用发布流程。".to_string(),
+            ts: Some(1_735_689_901_000),
+        },
+    ];
+    app.sessions.message_filter.set("用户");
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("How do I deploy"), "{all}");
+    assert!(!all.contains("发布流程"), "{all}");
+}
+
+#[test]
+fn tui_sessions_session_and_message_filters_are_independent() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "ai-session".to_string(),
+        title: Some("AI incident".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/ai-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/ai.jsonl".to_string()),
+        resume_command: Some("claude --resume ai-session".to_string()),
+    });
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "billing-session".to_string(),
+        title: Some("Billing question".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/billing-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_800_000),
+        source_path: Some("/tmp/billing.jsonl".to_string()),
+        resume_command: Some("claude --resume billing-session".to_string()),
+    });
+    app.sessions
+        .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.pane = app::SessionsPane::Detail;
+    app.sessions.messages_loaded = true;
+    app.sessions.messages = vec![
+        crate::session_manager::SessionMessage {
+            role: "user".to_string(),
+            content: "How do I inspect the deployment?".to_string(),
+            ts: Some(1_735_689_900_000),
+        },
+        crate::session_manager::SessionMessage {
+            role: "assistant".to_string(),
+            content: "AI response for the user.".to_string(),
+            ts: Some(1_735_689_901_000),
+        },
+    ];
+    app.filter.input.set("AI");
+    app.sessions.message_filter.set("User");
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("AI incident"), "{all}");
+    assert!(!all.contains("Billing question"), "{all}");
+    assert!(all.contains("How do I inspect"), "{all}");
+    assert!(!all.contains("AI response"), "{all}");
 }
 
 #[test]

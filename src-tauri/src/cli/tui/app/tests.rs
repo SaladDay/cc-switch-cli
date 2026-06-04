@@ -13776,7 +13776,7 @@ mod tests {
     }
 
     #[test]
-    fn sessions_filter_starts_on_list_pane_from_detail() {
+    fn sessions_filter_targets_messages_from_detail_pane() {
         let mut app = app_with_session_page();
         let data = UiData::default();
         app.sessions.pane = SessionsPane::Detail;
@@ -13784,7 +13784,8 @@ mod tests {
         app.on_key(key(KeyCode::Char('/')), &data);
 
         assert!(app.filter.active);
-        assert_eq!(app.sessions.pane, SessionsPane::List);
+        assert_eq!(app.filter.scope, FilterScope::SessionMessages);
+        assert_eq!(app.sessions.pane, SessionsPane::Detail);
     }
 
     #[test]
@@ -13836,7 +13837,7 @@ mod tests {
             content: "old detail".to_string(),
             ts: Some(1_735_689_900_000),
         }];
-        app.sessions.pane = SessionsPane::Detail;
+        app.sessions.pane = SessionsPane::List;
 
         app.on_key(key(KeyCode::Char('/')), &data);
         app.on_key(key(KeyCode::Char('b')), &data);

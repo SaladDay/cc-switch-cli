@@ -12,6 +12,38 @@ impl App {
         self.daily_memory_idx = 0;
     }
 
+    pub(crate) fn displayed_filter_input(&self) -> &TextInput {
+        match self.displayed_filter_scope() {
+            FilterScope::Global => &self.filter.input,
+            FilterScope::SessionMessages => &self.sessions.message_filter,
+        }
+    }
+
+    pub(crate) fn should_show_filter_bar(&self) -> bool {
+        self.filter.active || !self.displayed_filter_input().value.trim().is_empty()
+    }
+
+    fn displayed_filter_scope(&self) -> FilterScope {
+        if self.filter.active {
+            return self.filter.scope;
+        }
+        if matches!(self.route, Route::Sessions)
+            && matches!(self.focus, Focus::Content)
+            && matches!(self.sessions.pane, SessionsPane::Detail)
+            && !self.sessions.message_filter.value.trim().is_empty()
+        {
+            return FilterScope::SessionMessages;
+        }
+        FilterScope::Global
+    }
+
+    fn active_filter_input_mut(&mut self) -> &mut TextInput {
+        match self.filter.scope {
+            FilterScope::Global => &mut self.filter.input,
+            FilterScope::SessionMessages => &mut self.sessions.message_filter,
+        }
+    }
+
     pub fn new(app_override: Option<AppType>) -> Self {
         let app_type = app_override.unwrap_or(AppType::Claude);
         Self {
@@ -521,13 +553,15 @@ impl App {
     }
 
     pub(crate) fn on_filter_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
-        let is_daily_memory = matches!(self.route, Route::ConfigOpenClawDailyMemory);
+        let scope = self.filter.scope;
+        let is_daily_memory = matches!(scope, FilterScope::Global)
+            && matches!(self.route, Route::ConfigOpenClawDailyMemory);
         let mut filter_changed = false;
         let action = match key.code {
             KeyCode::Esc => {
-                filter_changed = !self.filter.input.value.is_empty();
+                filter_changed = !self.active_filter_input_mut().value.is_empty();
                 self.filter.active = false;
-                self.filter.input.set("");
+                self.active_filter_input_mut().set("");
                 if is_daily_memory {
                     self.openclaw_daily_memory_search_results.clear();
                     self.daily_memory_idx = 0;
@@ -549,7 +583,7 @@ impl App {
                 }
             }
             _ => {
-                let Some(edit) = self.filter.input.apply_key(key) else {
+                let Some(edit) = self.active_filter_input_mut().apply_key(key) else {
                     return Action::None;
                 };
                 filter_changed = edit.changed;
@@ -562,7 +596,7 @@ impl App {
                 }
             }
         };
-        self.sync_after_filter_key(data, filter_changed);
+        self.sync_after_filter_key(data, filter_changed, scope);
         action
     }
 
@@ -623,17 +657,31 @@ impl App {
     }
 
     fn prepare_filter_focus(&mut self) {
-        if matches!(self.route, Route::Sessions) {
+        if matches!(self.route, Route::Sessions)
+            && matches!(self.focus, Focus::Content)
+            && matches!(self.sessions.pane, SessionsPane::Detail)
+        {
+            self.filter.scope = FilterScope::SessionMessages;
+        } else {
+            self.filter.scope = FilterScope::Global;
+        }
+        if matches!(self.route, Route::Sessions) && matches!(self.filter.scope, FilterScope::Global)
+        {
             self.sessions.pane = SessionsPane::List;
         }
     }
 
-    fn sync_after_filter_key(&mut self, data: &UiData, filter_changed: bool) {
+    fn sync_after_filter_key(&mut self, data: &UiData, filter_changed: bool, scope: FilterScope) {
+        if matches!(scope, FilterScope::SessionMessages) {
+            if filter_changed {
+                clamp_session_message_selection(&mut self.sessions);
+            }
+            return;
+        }
         if matches!(self.route, Route::Sessions) {
             self.sessions.pane = SessionsPane::List;
             if filter_changed {
                 self.sessions.selected_idx = 0;
-                self.sessions.clear_detail();
             }
         }
         self.clamp_selections(data);
@@ -661,8 +709,14 @@ impl App {
             self.prompt_idx = self.prompt_idx.min(prompt_len - 1);
         }
 
-        let visible_session_rows =
-            visible_sessions(&self.filter, &self.app_type, &self.sessions.rows);
+        let visible_session_rows = visible_sessions_for_state(
+            &self.filter,
+            &self.app_type,
+            &self.sessions.rows,
+            self.sessions.detail_key.as_deref(),
+            self.sessions.messages_loaded,
+            &self.sessions.messages,
+        );
         let sessions_len = visible_session_rows.len();
         if sessions_len == 0 {
             self.sessions.selected_idx = 0;
@@ -677,14 +731,7 @@ impl App {
         if session_detail_missing {
             self.sessions.clear_detail();
         }
-        if self.sessions.messages.is_empty() {
-            self.sessions.message_idx = 0;
-        } else {
-            self.sessions.message_idx = self
-                .sessions
-                .message_idx
-                .min(self.sessions.messages.len() - 1);
-        }
+        clamp_session_message_selection(&mut self.sessions);
 
         let skills_len = visible_skills_installed(&self.filter, data).len();
         if skills_len == 0 {
