@@ -55,6 +55,31 @@ where
     })
 }
 
+pub(crate) fn preview_launch_with<Resolve>(
+    provider: &Provider,
+    temp_dir: &Path,
+    resolve_codex_binary: Resolve,
+) -> Result<PreparedCodexLaunch, AppError>
+where
+    Resolve: FnOnce() -> Result<PathBuf, AppError>,
+{
+    let executable = resolve_codex_binary()?;
+    let cc_switch_executable = std::env::current_exe().map_err(|err| {
+        AppError::localized(
+            "codex.temp_launch_current_exe_failed",
+            format!("解析当前 cc-switch 可执行文件路径失败: {err}"),
+            format!("Failed to resolve current cc-switch executable path: {err}"),
+        )
+    })?;
+    let _ = parse_launch_settings(provider)?;
+    Ok(PreparedCodexLaunch {
+        executable,
+        cc_switch_executable,
+        provider_id: provider.id.clone(),
+        codex_home: temp_codex_home_path(temp_dir, &provider.id),
+    })
+}
+
 pub(crate) fn resolve_codex_binary() -> Result<PathBuf, AppError> {
     which::which("codex").map_err(|_| {
         AppError::localized(
@@ -138,6 +163,47 @@ fn write_temp_codex_home_with<Finalize>(
 where
     Finalize: FnOnce(&Path) -> Result<(), AppError>,
 {
+    let launch_settings = parse_launch_settings(provider)?;
+    let codex_home = temp_codex_home_path(temp_dir, &provider.id);
+
+    let write_result = (|| {
+        fs::create_dir_all(&codex_home).map_err(|err| AppError::io(&codex_home, err))?;
+        finalize(&codex_home)?;
+
+        let config_path = codex_home.join("config.toml");
+        write_secret_file(&config_path, launch_settings.config_text.as_bytes())?;
+
+        if let Some(auth) = launch_settings.auth {
+            let auth_path = codex_home.join("auth.json");
+            let auth_text = serde_json::to_vec_pretty(&auth)
+                .map_err(|source| AppError::JsonSerialize { source })?;
+            write_secret_file(&auth_path, &auth_text)?;
+        }
+
+        Ok(())
+    })();
+
+    match write_result {
+        Ok(()) => Ok(codex_home),
+        Err(err) => match cleanup_temp_codex_home(&codex_home) {
+            Ok(()) => Err(err),
+            Err(cleanup_err) => Err(AppError::localized(
+                "codex.temp_launch_tempdir_cleanup_failed",
+                format!("写入临时 Codex 配置目录失败: {err}；同时清理失败: {cleanup_err}"),
+                format!(
+                    "Failed to write the temporary Codex home: {err}; also failed to clean it up: {cleanup_err}"
+                ),
+            )),
+        },
+    }
+}
+
+struct CodexLaunchSettings<'a> {
+    config_text: &'a str,
+    auth: Option<Value>,
+}
+
+fn parse_launch_settings(provider: &Provider) -> Result<CodexLaunchSettings<'_>, AppError> {
     let settings = provider.settings_config.as_object().ok_or_else(|| {
         AppError::localized(
             "codex.temp_launch_settings_not_object",
@@ -174,47 +240,20 @@ where
         }
     };
 
+    Ok(CodexLaunchSettings { config_text, auth })
+}
+
+fn temp_codex_home_path(temp_dir: &Path, provider_id: &str) -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let dir_name = format!(
         "cc-switch-codex-{}-{}-{timestamp}",
-        sanitize_filename_fragment(&provider.id),
+        sanitize_filename_fragment(provider_id),
         std::process::id()
     );
-    let codex_home = temp_dir.join(dir_name);
-
-    let write_result = (|| {
-        fs::create_dir_all(&codex_home).map_err(|err| AppError::io(&codex_home, err))?;
-        finalize(&codex_home)?;
-
-        let config_path = codex_home.join("config.toml");
-        write_secret_file(&config_path, config_text.as_bytes())?;
-
-        if let Some(auth) = auth {
-            let auth_path = codex_home.join("auth.json");
-            let auth_text = serde_json::to_vec_pretty(&auth)
-                .map_err(|source| AppError::JsonSerialize { source })?;
-            write_secret_file(&auth_path, &auth_text)?;
-        }
-
-        Ok(())
-    })();
-
-    match write_result {
-        Ok(()) => Ok(codex_home),
-        Err(err) => match cleanup_temp_codex_home(&codex_home) {
-            Ok(()) => Err(err),
-            Err(cleanup_err) => Err(AppError::localized(
-                "codex.temp_launch_tempdir_cleanup_failed",
-                format!("写入临时 Codex 配置目录失败: {err}；同时清理失败: {cleanup_err}"),
-                format!(
-                    "Failed to write the temporary Codex home: {err}; also failed to clean it up: {cleanup_err}"
-                ),
-            )),
-        },
-    }
+    temp_dir.join(dir_name)
 }
 
 #[cfg(unix)]
@@ -500,6 +539,33 @@ mod tests {
                 & 0o777;
             assert_eq!(auth_mode, 0o600);
         }
+    }
+
+    #[test]
+    fn preview_launch_does_not_write_codex_home_files() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let provider = provider_with(
+            "model_provider = \"demo\"\nmodel = \"gpt-5.2-codex\"\n",
+            Some(serde_json::json!({ "OPENAI_API_KEY": "sk-demo" })),
+        );
+
+        let prepared = preview_launch_with(&provider, temp_dir.path(), || {
+            Ok(PathBuf::from("/usr/bin/codex"))
+        })
+        .expect("preview launch");
+
+        assert_eq!(prepared.executable, PathBuf::from("/usr/bin/codex"));
+        assert!(
+            !prepared.codex_home.exists(),
+            "dry-run preview should not write CODEX_HOME"
+        );
+        assert!(
+            std::fs::read_dir(temp_dir.path())
+                .expect("read temp dir")
+                .next()
+                .is_none(),
+            "dry-run preview should leave no temp files"
+        );
     }
 
     #[test]

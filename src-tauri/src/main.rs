@@ -50,6 +50,10 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Some(Commands::Provider(cmd)) => {
             cc_switch_lib::cli::commands::provider::execute(cmd, cli.app)
         }
+        Some(Commands::Use { id }) => cc_switch_lib::cli::commands::provider::execute(
+            cc_switch_lib::cli::commands::provider::ProviderCommand::Switch { id },
+            cli.app,
+        ),
         Some(Commands::Mcp(cmd)) => cc_switch_lib::cli::commands::mcp::execute(cmd, cli.app),
         Some(Commands::Prompts(cmd)) => {
             cc_switch_lib::cli::commands::prompts::execute(cmd, cli.app)

@@ -113,8 +113,10 @@ cc-switch
 ```bash
 cc-switch provider list              # 列出供应商
 cc-switch provider switch <id>       # 切换供应商
+cc-switch use <id>                   # 切换供应商（快捷命令）
 cc-switch provider export <id>       # 导出 Claude 供应商为独立 settings 文件
 cc-switch provider stream-check <id> # 检查供应商流式健康
+cc-switch start <claude|codex> <id> --dry-run # 预览启动配置
 cc-switch config webdav show         # 查看 WebDAV 同步设置
 cc-switch env tools                  # 检查本地 CLI 工具
 cc-switch mcp sync                   # 同步 MCP 服务器
@@ -265,6 +267,7 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 cc-switch provider list              # 列出所有供应商
 cc-switch provider current           # 显示当前供应商
 cc-switch provider switch <id>       # 切换供应商
+cc-switch use <id>                   # 切换供应商（快捷命令）
 cc-switch provider add               # 添加新供应商
 cc-switch provider edit <id>         # 编辑现有供应商
 cc-switch provider duplicate <id>    # 复制供应商

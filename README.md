@@ -113,8 +113,10 @@ cc-switch
 ```bash
 cc-switch provider list              # List providers
 cc-switch provider switch <id>       # Switch provider
+cc-switch use <id>                   # Switch provider (shortcut)
 cc-switch provider export <id>       # Export a Claude provider to a standalone settings file
 cc-switch provider stream-check <id> # Check provider stream health
+cc-switch start <claude|codex> <id> --dry-run # Preview launch
 cc-switch config webdav show         # Inspect WebDAV sync settings
 cc-switch env tools                  # Check local CLI tools
 cc-switch mcp sync                   # Sync MCP servers
@@ -261,6 +263,7 @@ Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode
 cc-switch provider list              # List all providers
 cc-switch provider current           # Show current provider
 cc-switch provider switch <id>       # Switch provider
+cc-switch use <id>                   # Switch provider (shortcut)
 cc-switch provider add               # Add new provider
 cc-switch provider edit <id>         # Edit existing provider
 cc-switch provider duplicate <id>    # Duplicate a provider

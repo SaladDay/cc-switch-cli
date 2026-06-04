@@ -6,12 +6,14 @@ use indexmap::IndexMap;
 use crate::app_config::AppType;
 use crate::cli::claude_temp_launch::{
     ensure_temp_launch_supported, exec_prepared_claude, prepare_launch_from_settings_with,
-    resolve_claude_binary, PreparedClaudeLaunch,
+    preview_launch_from_settings_with, resolve_claude_binary, PreparedClaudeLaunch,
 };
 use crate::cli::codex_temp_launch::{
     ensure_temp_launch_supported as ensure_codex_temp_launch_supported, exec_prepared_codex,
-    prepare_launch as prepare_codex_launch, PreparedCodexLaunch,
+    prepare_launch as prepare_codex_launch, preview_launch_with as preview_codex_launch_with,
+    resolve_codex_binary, PreparedCodexLaunch,
 };
+use crate::cli::ui::{highlight, info};
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::services::ProviderService;
@@ -21,11 +23,13 @@ const CLAUDE_RESERVED_NATIVE_ARGS: &[&str] = &["--settings"];
 const CLAUDE_START_AFTER_LONG_HELP: &str = "\
 Examples:
   cc-switch start claude demo
+  cc-switch start claude demo --dry-run
   cc-switch start claude demo -- --dangerously-skip-permissions";
 
 const CODEX_START_AFTER_LONG_HELP: &str = "\
 Examples:
   cc-switch start codex demo
+  cc-switch start codex demo --dry-run
   cc-switch start codex demo -- --model gpt-5.4";
 
 #[derive(Subcommand)]
@@ -35,6 +39,9 @@ pub enum StartCommand {
     Claude {
         /// Provider selector: exact ID first, then exact Name
         selector: String,
+        /// Preview the resolved launch without starting Claude
+        #[arg(long)]
+        dry_run: bool,
         /// Native Claude CLI arguments to pass through after `--`
         #[arg(last = true, value_name = "NATIVE_ARGS")]
         native_args: Vec<OsString>,
@@ -44,6 +51,9 @@ pub enum StartCommand {
     Codex {
         /// Provider selector: exact ID first, then exact Name
         selector: String,
+        /// Preview the resolved launch without starting Codex
+        #[arg(long)]
+        dry_run: bool,
         /// Native Codex CLI arguments to pass through after `--`
         #[arg(last = true, value_name = "NATIVE_ARGS")]
         native_args: Vec<OsString>,
@@ -54,12 +64,14 @@ pub fn execute(cmd: StartCommand) -> Result<(), AppError> {
     match cmd {
         StartCommand::Claude {
             selector,
+            dry_run,
             native_args,
-        } => start_claude(&selector, &native_args),
+        } => start_claude(&selector, dry_run, &native_args),
         StartCommand::Codex {
             selector,
+            dry_run,
             native_args,
-        } => start_codex(&selector, &native_args),
+        } => start_codex(&selector, dry_run, &native_args),
     }
 }
 
@@ -67,13 +79,22 @@ fn get_state() -> Result<AppState, AppError> {
     AppState::try_new()
 }
 
-fn start_claude(selector: &str, native_args: &[OsString]) -> Result<(), AppError> {
+fn start_claude(selector: &str, dry_run: bool, native_args: &[OsString]) -> Result<(), AppError> {
     reject_reserved_native_args(native_args, "Claude", CLAUDE_RESERVED_NATIVE_ARGS)?;
     let state = get_state()?;
     let providers = ProviderService::list(&state, AppType::Claude)?;
     let provider = resolve_provider_selector(&providers, selector, "Claude")?;
 
     ensure_temp_launch_supported()?;
+    if dry_run {
+        let prepared = preview_claude_launch_with(
+            &state,
+            &provider,
+            &std::env::temp_dir(),
+            resolve_claude_binary,
+        )?;
+        return print_claude_dry_run(&provider, &prepared, native_args);
+    }
     let prepared = prepare_claude_launch_with(
         &state,
         &provider,
@@ -83,7 +104,7 @@ fn start_claude(selector: &str, native_args: &[OsString]) -> Result<(), AppError
     handoff_claude_and_cleanup(&prepared, native_args)
 }
 
-fn start_codex(selector: &str, native_args: &[OsString]) -> Result<(), AppError> {
+fn start_codex(selector: &str, dry_run: bool, native_args: &[OsString]) -> Result<(), AppError> {
     start_with(
         selector,
         "Codex",
@@ -93,6 +114,14 @@ fn start_codex(selector: &str, native_args: &[OsString]) -> Result<(), AppError>
         },
         |provider| {
             ensure_codex_temp_launch_supported()?;
+            if dry_run {
+                let prepared = preview_codex_launch_with(
+                    provider,
+                    &std::env::temp_dir(),
+                    resolve_codex_binary,
+                )?;
+                return print_codex_dry_run(provider, &prepared, native_args);
+            }
             let prepared = prepare_codex_launch(provider, &std::env::temp_dir())?;
             handoff_codex_and_cleanup(&prepared, native_args)
         },
@@ -165,6 +194,23 @@ where
     prepare_launch_from_settings_with(&provider.id, &settings, temp_dir, resolve_claude_binary)
 }
 
+fn preview_claude_launch_with<Resolve>(
+    state: &AppState,
+    provider: &Provider,
+    temp_dir: &std::path::Path,
+    resolve_claude_binary: Resolve,
+) -> Result<PreparedClaudeLaunch, AppError>
+where
+    Resolve: FnOnce() -> Result<std::path::PathBuf, AppError>,
+{
+    let settings = ProviderService::build_effective_live_snapshot_from_state(
+        state,
+        AppType::Claude,
+        provider,
+    )?;
+    preview_launch_from_settings_with(&provider.id, &settings, temp_dir, resolve_claude_binary)
+}
+
 fn handoff_claude_and_cleanup(
     prepared: &PreparedClaudeLaunch,
     native_args: &[OsString],
@@ -191,6 +237,149 @@ fn handoff_codex_and_cleanup(
         "temporary config directory",
         "codex.temp_launch_cleanup_failed",
     )
+}
+
+fn print_claude_dry_run(
+    provider: &Provider,
+    prepared: &PreparedClaudeLaunch,
+    native_args: &[OsString],
+) -> Result<(), AppError> {
+    print_dry_run_header("Claude", provider);
+    println!(
+        "{} {}",
+        info(crate::t!("Executable:", "可执行文件：")),
+        prepared.executable.display()
+    );
+    println!(
+        "{} {}",
+        info(crate::t!("Settings path preview:", "设置文件路径预览：")),
+        prepared.settings_path.display()
+    );
+    println!(
+        "{} {}",
+        info(crate::t!("Launch command:", "启动命令：")),
+        format_command_preview(
+            &prepared.executable,
+            &[
+                OsString::from("--settings"),
+                prepared.settings_path.as_os_str().to_os_string(),
+            ],
+            native_args,
+        )
+    );
+    print_native_args(native_args);
+    print_dry_run_note()
+}
+
+fn print_codex_dry_run(
+    provider: &Provider,
+    prepared: &PreparedCodexLaunch,
+    native_args: &[OsString],
+) -> Result<(), AppError> {
+    print_dry_run_header("Codex", provider);
+    println!(
+        "{} {}",
+        info(crate::t!("Executable:", "可执行文件：")),
+        prepared.executable.display()
+    );
+    println!(
+        "{} {}",
+        info(crate::t!("CODEX_HOME preview:", "CODEX_HOME 预览：")),
+        prepared.codex_home.display()
+    );
+    println!(
+        "{} CODEX_HOME={}",
+        info(crate::t!("Environment:", "环境变量：")),
+        quote_display(&prepared.codex_home.as_os_str().to_string_lossy())
+    );
+    println!(
+        "{} {}",
+        info(crate::t!("Launch command:", "启动命令：")),
+        format_command_preview(&prepared.executable, &[], native_args)
+    );
+    println!(
+        "{} {} internal capture-codex-temp {} {}",
+        info(crate::t!("Persist command:", "持久化命令：")),
+        quote_display(&prepared.cc_switch_executable.as_os_str().to_string_lossy()),
+        quote_display(&prepared.provider_id),
+        quote_display(&prepared.codex_home.as_os_str().to_string_lossy())
+    );
+    print_native_args(native_args);
+    print_dry_run_note()
+}
+
+fn print_dry_run_header(app_name: &str, provider: &Provider) {
+    let title = if crate::cli::i18n::is_chinese() {
+        format!("{app_name} 启动预览")
+    } else {
+        format!("{app_name} dry run")
+    };
+    println!("{}", highlight(&title));
+    println!(
+        "{} {}",
+        info(crate::t!("Provider ID:", "供应商 ID：")),
+        provider.id
+    );
+    println!(
+        "{} {}",
+        info(crate::t!("Provider name:", "供应商名称：")),
+        provider.name
+    );
+}
+
+fn print_native_args(native_args: &[OsString]) {
+    let rendered = if native_args.is_empty() {
+        crate::t!("(none)", "（无）").to_string()
+    } else {
+        native_args
+            .iter()
+            .map(|arg| quote_display(&arg.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    println!(
+        "{} {}",
+        info(crate::t!("Passthrough args:", "透传参数：")),
+        rendered
+    );
+}
+
+fn print_dry_run_note() -> Result<(), AppError> {
+    println!(
+        "{}",
+        info(crate::t!(
+            "Dry run only; no temporary files were written and the app was not started.",
+            "仅 dry-run；未写入临时文件，也未启动应用。"
+        ))
+    );
+    Ok(())
+}
+
+fn format_command_preview(
+    executable: &std::path::Path,
+    managed_args: &[OsString],
+    native_args: &[OsString],
+) -> String {
+    std::iter::once(executable.as_os_str())
+        .chain(managed_args.iter().map(OsString::as_os_str))
+        .chain(native_args.iter().map(OsString::as_os_str))
+        .map(|arg| quote_display(&arg.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_display(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
+    {
+        return value.to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn finish_launch(
@@ -449,6 +638,58 @@ mod tests {
             written, expected,
             "CLI temp launch should write the canonical effective snapshot"
         );
+    }
+
+    #[test]
+    fn dry_run_command_preview_quotes_space_and_single_quote_args() {
+        let preview = format_command_preview(
+            std::path::Path::new("/usr/local/bin/claude"),
+            &[
+                OsString::from("--settings"),
+                OsString::from("/tmp/demo settings.json"),
+            ],
+            &[OsString::from("fix Bob's bug")],
+        );
+
+        assert_eq!(
+            preview,
+            "/usr/local/bin/claude --settings '/tmp/demo settings.json' 'fix Bob'\\''s bug'"
+        );
+    }
+
+    #[test]
+    fn preview_claude_launch_with_does_not_write_temp_settings() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let mut config = crate::app_config::MultiAppConfig::default();
+        config.ensure_app(&AppType::Claude);
+        let state = state_from_config(config);
+        let provider = provider("demo", "Claude Demo");
+
+        let prepared = preview_claude_launch_with(&state, &provider, temp_dir.path(), || {
+            Ok(std::path::PathBuf::from("/usr/bin/claude"))
+        })
+        .expect("preview launch");
+
+        assert_eq!(
+            prepared.executable,
+            std::path::PathBuf::from("/usr/bin/claude")
+        );
+        assert!(
+            !prepared.settings_path.exists(),
+            "dry-run preview should not write settings"
+        );
+        assert!(
+            std::fs::read_dir(temp_dir.path())
+                .expect("read temp dir")
+                .next()
+                .is_none(),
+            "dry-run preview should leave no temp files"
+        );
+    }
+
+    #[test]
+    fn dry_run_note_succeeds() {
+        print_dry_run_note().expect("dry-run note should print without cleanup");
     }
 
     #[test]

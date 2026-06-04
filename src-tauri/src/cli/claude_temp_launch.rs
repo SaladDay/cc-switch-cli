@@ -66,7 +66,33 @@ where
     Resolve: FnOnce() -> Result<PathBuf, AppError>,
 {
     let executable = resolve_claude_binary()?;
+    let normalized_settings = normalize_launch_settings(provider_id, settings)?;
+    let settings_path = write_temp_settings_file(temp_dir, provider_id, &normalized_settings)?;
 
+    Ok(PreparedClaudeLaunch {
+        executable,
+        settings_path,
+    })
+}
+
+pub(crate) fn preview_launch_from_settings_with<Resolve>(
+    provider_id: &str,
+    settings: &Value,
+    temp_dir: &Path,
+    resolve_claude_binary: Resolve,
+) -> Result<PreparedClaudeLaunch, AppError>
+where
+    Resolve: FnOnce() -> Result<PathBuf, AppError>,
+{
+    let executable = resolve_claude_binary()?;
+    let _ = normalize_launch_settings(provider_id, settings)?;
+    Ok(PreparedClaudeLaunch {
+        executable,
+        settings_path: temp_settings_path(temp_dir, provider_id),
+    })
+}
+
+fn normalize_launch_settings(provider_id: &str, settings: &Value) -> Result<Value, AppError> {
     if settings.get("env").and_then(|v| v.as_object()).is_none() {
         return Err(AppError::localized(
             "claude.temp_launch_missing_env",
@@ -77,12 +103,7 @@ where
 
     let mut normalized_settings = settings.clone();
     let _ = ProviderService::normalize_claude_models_in_value(&mut normalized_settings);
-    let settings_path = write_temp_settings_file(temp_dir, provider_id, &normalized_settings)?;
-
-    Ok(PreparedClaudeLaunch {
-        executable,
-        settings_path,
-    })
+    Ok(normalized_settings)
 }
 
 pub(crate) fn resolve_claude_binary() -> Result<PathBuf, AppError> {
@@ -171,16 +192,7 @@ fn write_temp_settings_file_with<Finalize>(
 where
     Finalize: FnOnce(&Path) -> Result<(), AppError>,
 {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let filename = format!(
-        "cc-switch-claude-{}-{}-{timestamp}.json",
-        sanitize_filename_fragment(provider_id),
-        std::process::id()
-    );
-    let path = temp_dir.join(filename);
+    let path = temp_settings_path(temp_dir, provider_id);
     let content =
         serde_json::to_vec_pretty(settings).map_err(|source| AppError::JsonSerialize { source })?;
 
@@ -210,6 +222,19 @@ where
             )),
         },
     }
+}
+
+fn temp_settings_path(temp_dir: &Path, provider_id: &str) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let filename = format!(
+        "cc-switch-claude-{}-{}-{timestamp}.json",
+        sanitize_filename_fragment(provider_id),
+        std::process::id()
+    );
+    temp_dir.join(filename)
 }
 
 #[cfg(unix)]
