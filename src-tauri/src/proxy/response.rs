@@ -333,6 +333,7 @@ pub fn build_anthropic_stream_response(
         )),
         "gemini_native" => Box::pin(create_anthropic_sse_stream_from_gemini(
             timed_stream,
+            Some(stream_completion.clone()),
             gemini_shadow,
             provider_id,
             session_id,

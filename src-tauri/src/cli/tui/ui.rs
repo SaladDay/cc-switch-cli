@@ -2,10 +2,11 @@ use chrono::{Local, TimeZone};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, Gauge, List, ListItem, ListState, Paragraph, Row,
-        Table, TableState, Wrap,
+        Axis, Block, BorderType, Borders, Cell, Chart, Clear, Dataset, Gauge, GraphType, List,
+        ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
     },
     Frame,
 };
@@ -39,12 +40,14 @@ mod forms;
 mod main_page;
 mod mcp;
 mod overlay;
+mod pricing;
 mod prompts;
 mod providers;
 mod proxy_wave;
 mod sessions;
 mod shared;
 mod skills;
+mod usage;
 
 #[cfg(test)]
 mod header_tests;
@@ -59,12 +62,14 @@ use forms::*;
 use main_page::*;
 use mcp::*;
 use overlay::*;
+use pricing::*;
 use prompts::*;
 use providers::*;
 use proxy_wave::*;
 use sessions::*;
 use shared::*;
 use skills::*;
+use usage::*;
 
 pub fn render(frame: &mut Frame<'_>, app: &App, data: &UiData) {
     let theme = theme_for(&app.app_type);
@@ -140,6 +145,15 @@ fn render_content(
         Route::Providers => render_providers(frame, app, data, content_area, theme),
         Route::ProviderDetail { id } => {
             render_provider_detail(frame, app, data, content_area, theme, id)
+        }
+        Route::Usage => render_usage(frame, app, data, content_area, theme),
+        Route::UsageLogs => render_usage_logs(frame, app, data, content_area, theme),
+        Route::UsageLogDetail { request_id } => {
+            render_usage_log_detail(frame, app, data, content_area, theme, request_id)
+        }
+        Route::Pricing => render_pricing(frame, app, data, content_area, theme),
+        Route::PricingDetail { model_id } => {
+            render_pricing_detail(frame, app, data, content_area, theme, model_id)
         }
         Route::Sessions => render_sessions(frame, app, data, content_area, theme),
         Route::Mcp => render_mcp(frame, app, data, content_area, theme),

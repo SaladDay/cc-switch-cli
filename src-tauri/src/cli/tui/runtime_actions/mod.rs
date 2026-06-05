@@ -37,6 +37,11 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             super::route::Route::Main
             | super::route::Route::Providers
             | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Usage
+            | super::route::Route::UsageLogs
+            | super::route::Route::UsageLogDetail { .. }
+            | super::route::Route::Pricing
+            | super::route::Route::PricingDetail { .. }
             | super::route::Route::Sessions
             | super::route::Route::ConfigOpenClawWorkspace
             | super::route::Route::ConfigOpenClawDailyMemory
@@ -52,6 +57,11 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             super::route::Route::Main
             | super::route::Route::Providers
             | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Usage
+            | super::route::Route::UsageLogs
+            | super::route::Route::UsageLogDetail { .. }
+            | super::route::Route::Pricing
+            | super::route::Route::PricingDetail { .. }
             | super::route::Route::Sessions
             | super::route::Route::Mcp
             | super::route::Route::HermesMemory
@@ -76,7 +86,12 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
     }
 }
 
-fn apply_preloaded_app_switch(app: &mut App, data: &mut UiData, next: AppType, next_data: UiData) {
+pub(crate) fn apply_preloaded_app_switch(
+    app: &mut App,
+    data: &mut UiData,
+    next: AppType,
+    next_data: UiData,
+) {
     app.clear_openclaw_daily_memory_search_state();
     app.app_type = next;
     let original_route = app.route.clone();

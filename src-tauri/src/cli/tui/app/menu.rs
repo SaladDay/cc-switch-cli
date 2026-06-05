@@ -74,6 +74,8 @@ impl App {
             usage_query_notice_confirmed: true,
             local_env_results: Vec::new(),
             local_env_loading: true,
+            usage: UsageState::default(),
+            pricing: PricingState::default(),
             sessions: SessionsState::default(),
             provider_idx: 0,
             mcp_idx: 0,
@@ -121,6 +123,8 @@ impl App {
         match route {
             Route::Main => NavItem::Main,
             Route::Providers | Route::ProviderDetail { .. } => NavItem::Providers,
+            Route::Usage | Route::UsageLogs | Route::UsageLogDetail { .. } => NavItem::Usage,
+            Route::Pricing | Route::PricingDetail { .. } => NavItem::Pricing,
             Route::Sessions => NavItem::Sessions,
             Route::Mcp => NavItem::Mcp,
             Route::Prompts => NavItem::Prompts,
@@ -494,12 +498,22 @@ impl App {
             KeyCode::Left if matches!(self.route, Route::Sessions) => {
                 return self.move_sessions_focus_left();
             }
+            KeyCode::Left
+                if matches!(self.route, Route::Usage) && matches!(self.focus, Focus::Content) =>
+            {
+                return self.on_usage_key(key, data);
+            }
             KeyCode::Left => {
                 self.focus = Focus::Nav;
                 return Action::None;
             }
             KeyCode::Right if matches!(self.route, Route::Sessions) => {
                 return self.move_sessions_focus_right(data);
+            }
+            KeyCode::Right
+                if matches!(self.route, Route::Usage) && matches!(self.focus, Focus::Content) =>
+            {
+                return self.on_usage_key(key, data);
             }
             KeyCode::Right => {
                 if route_has_content_list(&self.route) {
@@ -516,8 +530,18 @@ impl App {
                     self.move_sessions_focus_right(data)
                 };
             }
+            KeyCode::Tab
+                if matches!(self.route, Route::Usage) && matches!(self.focus, Focus::Content) =>
+            {
+                return self.on_usage_key(key, data);
+            }
             KeyCode::BackTab if matches!(self.route, Route::Sessions) => {
                 return self.move_sessions_focus_left();
+            }
+            KeyCode::BackTab
+                if matches!(self.route, Route::Usage) && matches!(self.focus, Focus::Content) =>
+            {
+                return self.on_usage_key(key, data);
             }
             KeyCode::Char('q') | KeyCode::Esc => {
                 return self.on_back_key();
@@ -630,6 +654,11 @@ impl App {
         match self.route.clone() {
             Route::Providers => self.on_providers_key(key, data),
             Route::ProviderDetail { id } => self.on_provider_detail_key(key, data, &id),
+            Route::Usage => self.on_usage_key(key, data),
+            Route::UsageLogs => self.on_usage_logs_key(key, data),
+            Route::UsageLogDetail { request_id } => self.on_usage_log_detail_key(key, &request_id),
+            Route::Pricing => self.on_pricing_key(key, data),
+            Route::PricingDetail { model_id } => self.on_pricing_detail_key(key, &model_id),
             Route::Sessions => self.on_sessions_key(key, data),
             Route::Mcp => self.on_mcp_key(key, data),
             Route::Prompts => self.on_prompts_key(key, data),
@@ -732,6 +761,25 @@ impl App {
             self.sessions.clear_detail();
         }
         clamp_session_message_selection(&mut self.sessions);
+
+        let usage_len = usage_active_pane_len(&self.usage.pane, self.usage.range, data);
+        if usage_len == 0 {
+            self.usage.selected_idx = 0;
+        } else {
+            self.usage.selected_idx = self.usage.selected_idx.min(usage_len - 1);
+        }
+        if data.usage.recent_logs.is_empty() {
+            self.usage.logs_idx = 0;
+        } else {
+            self.usage.logs_idx = self.usage.logs_idx.min(data.usage.recent_logs.len() - 1);
+        }
+
+        let pricing_len = visible_pricing_rows(&self.filter, data).len();
+        if pricing_len == 0 {
+            self.pricing.selected_idx = 0;
+        } else {
+            self.pricing.selected_idx = self.pricing.selected_idx.min(pricing_len - 1);
+        }
 
         let skills_len = visible_skills_installed(&self.filter, data).len();
         if skills_len == 0 {

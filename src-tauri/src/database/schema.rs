@@ -1217,6 +1217,15 @@ impl Database {
     /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
     fn seed_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_data = [
+            // Claude 4.8 系列
+            (
+                "claude-opus-4-8",
+                "Claude Opus 4.8",
+                "5",
+                "25",
+                "0.50",
+                "6.25",
+            ),
             // Claude 4.7 系列
             (
                 "claude-opus-4-7",
@@ -1310,6 +1319,13 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
+            // GPT-5.5 系列
+            ("gpt-5.5", "GPT-5.5", "5", "30", "0.50", "0"),
+            ("gpt-5.5-low", "GPT-5.5", "5", "30", "0.50", "0"),
+            ("gpt-5.5-medium", "GPT-5.5", "5", "30", "0.50", "0"),
+            ("gpt-5.5-high", "GPT-5.5", "5", "30", "0.50", "0"),
+            ("gpt-5.5-xhigh", "GPT-5.5", "5", "30", "0.50", "0"),
+            ("gpt-5.5-minimal", "GPT-5.5", "5", "30", "0.50", "0"),
             // GPT-5.4 系列
             ("gpt-5.4", "GPT-5.4", "2.50", "15", "0.25", "0"),
             ("gpt-5.4-mini", "GPT-5.4 Mini", "0.75", "4.50", "0.075", "0"),
@@ -1877,6 +1893,96 @@ impl Database {
         Ok(())
     }
 
+    fn repair_current_model_pricing(conn: &Connection) -> Result<(), AppError> {
+        let pricing_fixes = [
+            (
+                "deepseek-v4-flash",
+                "DeepSeek V4 Flash",
+                "0.14",
+                "0.28",
+                "0.0028",
+                "0",
+                "0.14",
+                "0.28",
+                "0.028",
+                "0",
+            ),
+            (
+                "deepseek-v4-pro",
+                "DeepSeek V4 Pro",
+                "0.435",
+                "0.87",
+                "0.003625",
+                "0",
+                "1.68",
+                "3.36",
+                "0.14",
+                "0",
+            ),
+            (
+                "glm-5", "GLM-5", "1", "3.2", "0.2", "0", "0.72", "2.30", "0", "0",
+            ),
+            (
+                "glm-5.1", "GLM-5.1", "1.4", "4.4", "0.26", "0", "0.95", "3.15", "0", "0",
+            ),
+            (
+                "grok-code-fast-1",
+                "Grok Build 0.1 (Code Fast Alias)",
+                "1",
+                "2",
+                "0.20",
+                "0",
+                "0.20",
+                "1.50",
+                "0.02",
+                "0",
+            ),
+        ];
+
+        for (
+            model_id,
+            display_name,
+            input,
+            output,
+            cache_read,
+            cache_creation,
+            old_input,
+            old_output,
+            old_cache_read,
+            old_cache_creation,
+        ) in pricing_fixes
+        {
+            conn.execute(
+                "UPDATE model_pricing SET
+                    display_name = ?2,
+                    input_cost_per_million = ?3,
+                    output_cost_per_million = ?4,
+                    cache_read_cost_per_million = ?5,
+                    cache_creation_cost_per_million = ?6
+                 WHERE model_id = ?1
+                   AND input_cost_per_million = ?7
+                   AND output_cost_per_million = ?8
+                   AND cache_read_cost_per_million = ?9
+                   AND cache_creation_cost_per_million = ?10",
+                rusqlite::params![
+                    model_id,
+                    display_name,
+                    input,
+                    output,
+                    cache_read,
+                    cache_creation,
+                    old_input,
+                    old_output,
+                    old_cache_read,
+                    old_cache_creation
+                ],
+            )
+            .map_err(|e| AppError::Database(format!("修复模型 {model_id} 定价失败: {e}")))?;
+        }
+
+        Ok(())
+    }
+
     /// 确保模型定价表具备默认数据
     pub fn ensure_model_pricing_seeded(&self) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
@@ -1884,9 +1990,9 @@ impl Database {
     }
 
     fn ensure_model_pricing_seeded_on_conn(conn: &Connection) -> Result<(), AppError> {
-        // 每次启动都增量补种新模型，已有记录保持不变；
-        // 强制纠正历史价格则交给版本化迁移负责。
-        Self::seed_model_pricing(conn)
+        // 每次启动都执行 INSERT OR IGNORE，增量追加新模型；仅修复仍等于旧内置值的定价。
+        Self::seed_model_pricing(conn)?;
+        Self::repair_current_model_pricing(conn)
     }
 
     // --- 辅助方法 ---
@@ -2075,6 +2181,38 @@ impl Database {
                 [],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        if Self::has_columns(conn, "proxy_request_logs", &["app_type", "created_at"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_app_created_at
+                 ON proxy_request_logs(app_type, created_at DESC)",
+                [],
+            )
+            .map_err(|e| AppError::Database(format!("创建使用量应用时间索引失败: {e}")))?;
+        }
+        if Self::has_columns(
+            conn,
+            "proxy_request_logs",
+            &[
+                "app_type",
+                "data_source",
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "created_at",
+                "cache_creation_tokens",
+            ],
+        )? {
+            conn.execute("DROP INDEX IF EXISTS idx_request_logs_dedup_lookup", [])
+                .map_err(|e| AppError::Database(format!("删除旧使用量去重索引失败: {e}")))?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_dedup_lookup_expr
+                 ON proxy_request_logs(app_type, COALESCE(data_source, 'proxy'), input_tokens,
+                                       output_tokens, cache_read_tokens, created_at,
+                                       cache_creation_tokens)",
+                [],
+            )
+            .map_err(|e| AppError::Database(format!("创建使用量去重表达式索引失败: {e}")))?;
         }
 
         Ok(())

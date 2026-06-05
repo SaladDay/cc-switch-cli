@@ -21,7 +21,9 @@ use super::{data, form};
 mod app_state;
 mod content_config;
 mod content_entities;
+mod content_pricing;
 mod content_skills;
+mod content_usage;
 mod editor_handlers;
 mod editor_state;
 mod form_handlers;
@@ -37,12 +39,14 @@ pub(crate) use app_state::{
     SettingsItem, WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
 };
 pub(crate) use content_config::HERMES_MEMORY_ROW_COUNT;
+pub(crate) use content_usage::usage_active_pane_len;
 pub use editor_state::{EditorKind, EditorMode, EditorState, EditorSubmit};
 pub(crate) use helpers::*;
 pub use types::{
     CommonSnippetViewSource, ConfirmAction, ConfirmOverlay, FilterScope, FilterState, Focus,
-    LoadingKind, ManagedAuthLoginState, Overlay, SessionsPane, SessionsState, TextInputState,
-    TextSubmit, TextViewAction, TextViewState, Toast, ToastKind,
+    LoadingKind, ManagedAuthLoginState, Overlay, PricingState, SessionsPane, SessionsState,
+    TextInputState, TextSubmit, TextViewAction, TextViewState, Toast, ToastKind, UsageMetric,
+    UsagePane, UsageState,
 };
 
 pub(crate) fn supports_failover_controls(app_type: &AppType) -> bool {

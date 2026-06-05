@@ -8,7 +8,10 @@ use super::transform_gemini::{
     build_anthropic_usage, is_synthesized_tool_call_id, rectify_tool_call_parts,
     synthesize_tool_call_id, AnthropicToolSchemaHints,
 };
-use crate::proxy::sse::{append_utf8_safe, strip_sse_field, take_sse_block};
+use crate::proxy::{
+    response::StreamCompletion,
+    sse::{append_utf8_safe, strip_sse_field, take_sse_block},
+};
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
@@ -236,6 +239,7 @@ fn encode_sse(event_name: &str, payload: &Value) -> Bytes {
 
 pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'static>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+    stream_completion: Option<StreamCompletion>,
     shadow_store: Option<Arc<GeminiShadowStore>>,
     provider_id: Option<String>,
     session_id: Option<String>,
@@ -403,6 +407,9 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
                     }
                 }
                 Err(error) => {
+                    if let Some(stream_completion) = &stream_completion {
+                        stream_completion.record_error(error.to_string());
+                    }
                     yield Err(std::io::Error::other(error.to_string()));
                     return;
                 }
@@ -570,6 +577,10 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
 
         let message_stop = json!({ "type": "message_stop" });
         yield Ok(encode_sse("message_stop", &message_stop));
+
+        if let Some(stream_completion) = &stream_completion {
+            stream_completion.record_success();
+        }
     }
 }
 
@@ -587,7 +598,8 @@ mod tests {
                 .into_iter()
                 .map(|chunk| Ok::<Bytes, std::io::Error>(Bytes::from(chunk))),
         );
-        let converted = create_anthropic_sse_stream_from_gemini(stream, None, None, None, None);
+        let converted =
+            create_anthropic_sse_stream_from_gemini(stream, None, None, None, None, None);
         futures::executor::block_on(async move {
             converted
                 .collect::<Vec<_>>()
@@ -613,6 +625,7 @@ mod tests {
         );
         let converted = create_anthropic_sse_stream_from_gemini(
             stream,
+            None,
             Some(store),
             Some(provider_id.to_string()),
             Some(session_id.to_string()),
@@ -642,6 +655,61 @@ mod tests {
         assert!(output.contains("\"text\":\"lo\""));
         assert!(output.contains("\"stop_reason\":\"end_turn\""));
         assert!(output.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn records_stream_completion_success() {
+        let stream = futures::stream::iter([Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            b"data: {\"responseId\":\"resp_done\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"Done\"}]}}],\"usageMetadata\":{\"promptTokenCount\":4,\"totalTokenCount\":6}}\n\n",
+        ))]);
+        let completion = StreamCompletion::default();
+        let converted = create_anthropic_sse_stream_from_gemini(
+            stream,
+            Some(completion.clone()),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        futures::executor::block_on(async move {
+            converted
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .for_each(|item| assert!(item.is_ok()));
+        });
+
+        assert_eq!(completion.outcome(), Some(Ok(())));
+    }
+
+    #[test]
+    fn records_stream_completion_error() {
+        let stream = futures::stream::iter([
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                b"data: {\"responseId\":\"resp_err\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Partial\"}]}}],\"usageMetadata\":{\"promptTokenCount\":4,\"totalTokenCount\":6}}\n\n",
+            )),
+            Err(std::io::Error::other("upstream broke")),
+        ]);
+        let completion = StreamCompletion::default();
+        let converted = create_anthropic_sse_stream_from_gemini(
+            stream,
+            Some(completion.clone()),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        futures::executor::block_on(async move {
+            let items = converted.collect::<Vec<_>>().await;
+            assert!(items.iter().any(Result::is_err));
+        });
+
+        assert_eq!(
+            completion.outcome(),
+            Some(Err("upstream broke".to_string()))
+        );
     }
 
     #[test]
@@ -693,7 +761,8 @@ mod tests {
             Ok::<Bytes, std::io::Error>(Bytes::from(chunk_bytes[..split_at].to_vec())),
             Ok::<Bytes, std::io::Error>(Bytes::from(chunk_bytes[split_at..].to_vec())),
         ]);
-        let converted = create_anthropic_sse_stream_from_gemini(stream, None, None, None, None);
+        let converted =
+            create_anthropic_sse_stream_from_gemini(stream, None, None, None, None, None);
         let output = futures::executor::block_on(async move {
             converted
                 .collect::<Vec<_>>()
@@ -765,6 +834,7 @@ mod tests {
         );
         let mut converted = Box::pin(create_anthropic_sse_stream_from_gemini(
             stream,
+            None,
             Some(store.clone()),
             Some("provider-a".to_string()),
             Some("session-1".to_string()),
@@ -811,7 +881,7 @@ mod tests {
             }]
         }));
         let converted =
-            create_anthropic_sse_stream_from_gemini(stream, None, None, None, Some(hints));
+            create_anthropic_sse_stream_from_gemini(stream, None, None, None, None, Some(hints));
         let output = futures::executor::block_on(async move {
             converted
                 .collect::<Vec<_>>()
@@ -875,7 +945,7 @@ mod tests {
             }]
         }));
         let converted =
-            create_anthropic_sse_stream_from_gemini(stream, None, None, None, Some(hints));
+            create_anthropic_sse_stream_from_gemini(stream, None, None, None, None, Some(hints));
         let output = futures::executor::block_on(async move {
             converted
                 .collect::<Vec<_>>()

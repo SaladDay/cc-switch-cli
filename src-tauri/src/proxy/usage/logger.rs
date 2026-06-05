@@ -12,7 +12,7 @@ use super::{
     },
     parser::{
         error_message_from_response_bytes, fallback_model_from_response_bytes,
-        parse_claude_response_usage, ParsedUsage, StreamLogCollector, TokenUsage,
+        parse_response_usage, ParsedUsage, StreamLogCollector, TokenUsage,
     },
 };
 
@@ -74,7 +74,7 @@ pub async fn log_buffered_response(
         return;
     }
 
-    if let Some(parsed) = parse_claude_response_usage(body) {
+    if let Some(parsed) = parse_response_usage(&context.app_type, body) {
         let model = non_empty_model(&parsed, &context.request_model);
         insert_request_log(
             state,
@@ -116,7 +116,7 @@ pub async fn log_stream_response(
         return;
     }
 
-    if let Some(parsed) = collector.parsed_usage() {
+    if let Some(parsed) = collector.parsed_usage_for_app(&context.app_type) {
         let model = non_empty_model(&parsed, &context.request_model);
         insert_request_log(
             state,
@@ -190,11 +190,12 @@ async fn insert_request_log(
         &pricing_config.pricing_model_source,
     );
     let cost = calculate_cost(
+        &context.app_type,
         &usage,
         lookup_model_pricing(state.db.as_ref(), pricing_model).as_ref(),
         pricing_config.cost_multiplier,
     );
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = usage.dedup_request_id();
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
@@ -208,14 +209,14 @@ async fn insert_request_log(
         }
     };
 
-    if let Err(error) = conn.execute(
-        "INSERT INTO proxy_request_logs (
+    match conn.execute(
+        "INSERT OR REPLACE INTO proxy_request_logs (
             request_id, provider_id, app_type, model, request_model,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
-            provider_type, is_streaming, cost_multiplier, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+            provider_type, is_streaming, cost_multiplier, created_at, data_source
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         rusqlite::params![
             request_id,
             &context.provider.id,
@@ -238,11 +239,30 @@ async fn insert_request_log(
             &context.session_id,
             Option::<String>::None,
             context.is_streaming as i64,
-            &pricing_config.cost_multiplier_raw,
+            format_decimal(pricing_config.cost_multiplier),
             created_at,
+            "proxy",
         ],
     ) {
-        log::warn!("record proxy request log failed: {error}");
+        Ok(inserted) if inserted > 0 && (200..300).contains(&status_code) => {
+            match crate::services::session_usage::delete_session_logs_covered_by_proxy_log(
+                &conn,
+                context.app_type.as_str(),
+                model,
+                &usage,
+                created_at,
+            ) {
+                Ok(deleted) if deleted > 0 => {
+                    log::debug!("removed {deleted} session usage log(s) covered by proxy log");
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("deduplicate proxy/session usage logs failed: {error}"),
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!("record proxy request log failed: {error}");
+        }
     }
 }
 

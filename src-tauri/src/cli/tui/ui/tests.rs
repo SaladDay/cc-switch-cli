@@ -23,8 +23,10 @@ use crate::{
             Focus, Overlay, TextInputState, TextSubmit,
         },
         data::{
-            ConfigSnapshot, McpSnapshot, OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow,
-            ProvidersSnapshot, ProxySnapshot, SkillsSnapshot, UiData,
+            ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot,
+            OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
+            ProxySnapshot, SkillsSnapshot, UiData, UsageLogRow, UsageProviderStatsRow,
+            UsageRangePreset, UsageSnapshot, UsageSummarySnapshot, UsageTrendBucket,
         },
         form::{FormFocus, FormState, PromptMetaFormState, ProviderAddField, TextInput},
         route::{NavItem, Route},
@@ -78,6 +80,242 @@ fn tui_sessions_empty_state_is_localized_and_mentions_runtime_scan() {
     assert!(all.contains("No local sessions found"), "{all}");
     assert!(all.contains("local session files"), "{all}");
     assert!(all.contains("database"), "{all}");
+}
+
+#[test]
+fn tui_usage_empty_state_renders_dashboard_shell() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+
+    assert!(all.contains("Usage Statistics"), "{all}");
+    assert!(all.contains("Usage Trend"), "{all}");
+    assert!(all.contains("Top Providers"), "{all}");
+    assert!(all.contains("No usage recorded"), "{all}");
+    assert!(all.contains("Today"), "{all}");
+    assert!(all.contains("7 days"), "{all}");
+    assert!(all.contains("30 days"), "{all}");
+}
+
+#[test]
+fn tui_usage_renders_summary_trend_and_recent_log() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage = UsageSnapshot {
+        summary_7d: UsageSummarySnapshot {
+            total_requests: 4,
+            success_count: 3,
+            total_cost_usd: 1.25,
+            total_tokens: 1_800,
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_read_tokens: 250,
+            cache_creation_tokens: 50,
+            avg_latency_ms: Some(420),
+            avg_first_token_ms: Some(180),
+        },
+        trends_7d: vec![UsageTrendBucket {
+            key: "2026-06-05".to_string(),
+            label: "06/05".to_string(),
+            request_count: 4,
+            total_tokens: 1_800,
+            total_cost_usd: 1.25,
+            error_count: 1,
+        }],
+        top_providers_7d: vec![UsageProviderStatsRow {
+            provider_id: "p1".to_string(),
+            provider_name: Some("Demo Provider".to_string()),
+            request_count: 4,
+            success_count: 3,
+            total_tokens: 1_800,
+            total_cost_usd: 1.25,
+            avg_latency_ms: Some(420),
+        }],
+        recent_logs: vec![UsageLogRow {
+            request_id: "req-1".to_string(),
+            created_at: 1_780_617_600,
+            app_type: "claude".to_string(),
+            provider_id: "p1".to_string(),
+            provider_name: Some("Demo Provider".to_string()),
+            model: "claude-sonnet-4".to_string(),
+            status_code: 200,
+            input_tokens: 1_000,
+            output_tokens: 500,
+            total_cost_usd: 1.25,
+            latency_ms: 420,
+            ..UsageLogRow::default()
+        }],
+        logs_total: 1,
+        ..UsageSnapshot::default()
+    };
+
+    let all = all_text(&render_with_size(&app, &data, 180, 42));
+
+    assert!(all.contains("$1.250"), "{all}");
+    assert!(all.contains("1.8k"), "{all}");
+    assert!(all.contains("Demo Provider"), "{all}");
+    assert!(all.contains("06/05"), "{all}");
+}
+
+#[test]
+fn tui_usage_top_tables_follow_selected_range() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = UsageSnapshot {
+        top_providers_today: vec![UsageProviderStatsRow {
+            provider_id: "today".to_string(),
+            provider_name: Some("Today Provider".to_string()),
+            request_count: 2,
+            success_count: 2,
+            total_tokens: 200,
+            total_cost_usd: 0.2,
+            avg_latency_ms: Some(120),
+        }],
+        top_providers_7d: vec![UsageProviderStatsRow {
+            provider_id: "week".to_string(),
+            provider_name: Some("Week Provider".to_string()),
+            request_count: 8,
+            success_count: 7,
+            total_tokens: 800,
+            total_cost_usd: 0.8,
+            avg_latency_ms: Some(180),
+        }],
+        ..UsageSnapshot::default()
+    };
+
+    let week = all_text(&render_with_size(&app, &data, 160, 40));
+    assert!(week.contains("Week Provider"), "{week}");
+    assert!(!week.contains("Today Provider"), "{week}");
+
+    app.usage.range = UsageRangePreset::Today;
+    let today = all_text(&render_with_size(&app, &data, 160, 40));
+    assert!(today.contains("Today Provider"), "{today}");
+    assert!(!today.contains("Week Provider"), "{today}");
+}
+
+#[test]
+fn tui_usage_narrow_width_renders_without_losing_primary_sections() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        80,
+        28,
+    ));
+
+    assert!(all.contains("Usage Statistics"), "{all}");
+    assert!(all.contains("Overview"), "{all}");
+    assert!(all.contains("Usage Trend"), "{all}");
+    assert!(all.contains("Top Providers"), "{all}");
+}
+
+#[test]
+fn tui_pricing_renders_catalog_and_recent_usage_context() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Pricing;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.pricing = ModelPricingSnapshot {
+        rows: vec![
+            ModelPricingRow {
+                model_id: "gpt-5.4".to_string(),
+                display_name: "GPT 5.4".to_string(),
+                input_cost_per_million: "2".to_string(),
+                output_cost_per_million: "8".to_string(),
+                cache_read_cost_per_million: "0.125".to_string(),
+                cache_creation_cost_per_million: "1".to_string(),
+                recent_request_count: 12,
+                recent_total_tokens: 1_500,
+                recent_total_cost_usd: 0.42,
+                last_used_at: Some(1_780_617_600),
+            },
+            ModelPricingRow {
+                model_id: "claude-sonnet-4-5".to_string(),
+                display_name: "Claude Sonnet 4.5".to_string(),
+                input_cost_per_million: "3".to_string(),
+                output_cost_per_million: "15".to_string(),
+                cache_read_cost_per_million: "0.3".to_string(),
+                cache_creation_cost_per_million: "3.75".to_string(),
+                ..ModelPricingRow::default()
+            },
+        ],
+        recent_unknown_models: 1,
+        recent_unmatched_total_tokens: 500,
+        recent_unmatched_total_cost_usd: 0.12,
+    };
+
+    let all = all_text(&render_with_size(&app, &data, 180, 36));
+
+    assert!(all.contains("Model Pricing"), "{all}");
+    assert!(all.contains("2 catalog"), "{all}");
+    assert!(all.contains("1 used 30d"), "{all}");
+    assert!(all.contains("1 unmatched models 30d"), "{all}");
+    assert!(all.contains("2.0k tokens"), "{all}");
+    assert!(all.contains("$0.540 total"), "{all}");
+    assert!(all.contains("$0.120 unmatched"), "{all}");
+    assert!(all.contains("gpt-5.4"), "{all}");
+    assert!(all.contains("GPT 5.4"), "{all}");
+    assert!(all.contains("$2.00"), "{all}");
+    assert!(all.contains("$8.00"), "{all}");
+    assert!(all.contains("$0.420"), "{all}");
+}
+
+#[test]
+fn tui_pricing_detail_renders_full_price_breakdown() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::PricingDetail {
+        model_id: "gpt-5.4".to_string(),
+    };
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.pricing.rows.push(ModelPricingRow {
+        model_id: "gpt-5.4".to_string(),
+        display_name: "GPT 5.4".to_string(),
+        input_cost_per_million: "2".to_string(),
+        output_cost_per_million: "8".to_string(),
+        cache_read_cost_per_million: "0.125".to_string(),
+        cache_creation_cost_per_million: "1".to_string(),
+        recent_request_count: 12,
+        recent_total_tokens: 1_500,
+        recent_total_cost_usd: 0.42,
+        last_used_at: Some(1_780_617_600),
+    });
+
+    let all = all_text(&render_with_size(&app, &data, 140, 30));
+
+    assert!(all.contains("Model Pricing Detail"), "{all}");
+    assert!(all.contains("Input / 1M"), "{all}");
+    assert!(all.contains("$0.1250"), "{all}");
+    assert!(all.contains("30d Requests"), "{all}");
+    assert!(all.contains("1.5k"), "{all}");
+    assert!(all.contains("2026/06"), "{all}");
 }
 
 #[test]
@@ -1007,6 +1245,8 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
         config: ConfigSnapshot::default(),
         skills: SkillsSnapshot::default(),
         proxy: ProxySnapshot::default(),
+        usage: UsageSnapshot::default(),
+        pricing: Default::default(),
         quota: Default::default(),
     }
 }
@@ -5888,6 +6128,8 @@ fn workspace_openclaw_nav_uses_app_specific_labels_and_hides_generic_entries() {
     let expected = [
         NavItem::Main,
         NavItem::Providers,
+        NavItem::Usage,
+        NavItem::Pricing,
         NavItem::Sessions,
         NavItem::OpenClawWorkspace,
         NavItem::OpenClawEnv,
@@ -5922,6 +6164,8 @@ fn workspace_non_openclaw_nav_keeps_generic_labels() {
     let expected = [
         NavItem::Main,
         NavItem::Providers,
+        NavItem::Usage,
+        NavItem::Pricing,
         NavItem::Mcp,
         NavItem::Skills,
         NavItem::Sessions,

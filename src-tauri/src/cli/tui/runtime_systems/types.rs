@@ -111,6 +111,19 @@ pub(crate) enum QuotaMsg {
     },
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum UsagePricingReq {
+    Load { request_id: u64, app_type: AppType },
+}
+
+pub(crate) enum UsagePricingMsg {
+    Loaded {
+        request_id: u64,
+        app_type: AppType,
+        result: Result<crate::cli::tui::data::UsagePricingData, String>,
+    },
+}
+
 pub(crate) enum SkillsReq {
     Discover { query: String },
     Install { spec: String, app: AppType },
@@ -252,6 +265,12 @@ pub(crate) struct SessionSystem {
 pub(crate) struct QuotaSystem {
     pub(crate) req_tx: mpsc::Sender<QuotaReq>,
     pub(crate) result_rx: mpsc::Receiver<QuotaMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct UsagePricingSystem {
+    pub(crate) req_tx: mpsc::Sender<UsagePricingReq>,
+    pub(crate) result_rx: mpsc::Receiver<UsagePricingMsg>,
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 

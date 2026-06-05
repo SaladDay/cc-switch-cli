@@ -40,12 +40,15 @@ use crate::error::AppError;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 // DAO 方法通过 impl Database 提供，无需额外导出
 
 /// 数据库备份保留数量
 const DB_BACKUP_RETAIN: usize = 10;
+const USAGE_ROLLUP_RETAIN_DAYS: i64 = 30;
+const USAGE_MAINTENANCE_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
@@ -129,6 +132,7 @@ impl Database {
         db.create_tables()?;
         db.apply_schema_migrations()?;
         db.ensure_model_pricing_seeded()?;
+        db.run_usage_maintenance("startup");
 
         Ok(db)
     }
@@ -176,5 +180,69 @@ impl Database {
 
     pub(crate) fn runtime_key(&self) -> &str {
         &self.runtime_key
+    }
+
+    pub(crate) fn spawn_periodic_usage_maintenance(
+        db: Arc<Self>,
+        context: &'static str,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(USAGE_MAINTENANCE_INTERVAL_SECS));
+            interval.tick().await;
+
+            loop {
+                interval.tick().await;
+                let db = db.clone();
+                let task_context = context.to_string();
+                let log_context = task_context.clone();
+                match tokio::task::spawn_blocking(move || {
+                    db.run_usage_maintenance(&task_context);
+                })
+                .await
+                {
+                    Ok(()) => {}
+                    Err(error) => {
+                        log::warn!(
+                            "Periodic usage maintenance task failed ({log_context}): {error}"
+                        )
+                    }
+                }
+            }
+        })
+    }
+
+    fn run_usage_maintenance(&self, context: &str) {
+        match self.backfill_missing_usage_costs() {
+            Ok(updated) if updated > 0 => {
+                log::info!("Usage maintenance backfilled costs ({context}): updated={updated}");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!("Usage maintenance cost backfill failed ({context}): {error}");
+                return;
+            }
+        }
+
+        match self.rollup_and_prune(USAGE_ROLLUP_RETAIN_DAYS) {
+            Ok(deleted) if deleted > 0 => match self.conn.lock() {
+                Ok(conn) => {
+                    if let Err(error) = conn.execute_batch("PRAGMA incremental_vacuum;") {
+                        log::warn!(
+                            "Usage maintenance incremental vacuum failed ({context}): {error}"
+                        );
+                    }
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Usage maintenance incremental vacuum lock failed ({context}): {error}"
+                    )
+                }
+            },
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!("Usage maintenance rollup_and_prune failed ({context}): {error}")
+            }
+        }
     }
 }

@@ -91,6 +91,8 @@ pub async fn run(binary_path: PathBuf) -> Result<(), String> {
 
     let db =
         Arc::new(Database::init().map_err(|err| format!("daemon: open database failed: {err}"))?);
+    crate::services::session_usage::spawn_periodic_session_usage_sync(db.clone(), "daemon");
+    Database::spawn_periodic_usage_maintenance(db.clone(), "daemon");
     let supervisor = Supervisor::new(db, socket_path.clone(), binary_path);
 
     if let Err(err) = supervisor.recover_on_startup().await {

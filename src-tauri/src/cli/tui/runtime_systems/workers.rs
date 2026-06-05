@@ -5,15 +5,15 @@ use crate::error::AppError;
 use crate::services::{SkillService, StreamCheckService, WebDavSyncService};
 use crate::settings::{set_webdav_sync_settings, webdav_jianguoyun_preset};
 
-use super::super::data::load_state;
+use super::super::data::{load_state, load_usage_pricing_data};
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, LocalEnvMsg, LocalEnvReq,
     LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg,
     ModelFetchReq, ModelFetchSystem, ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq,
     QuotaSystem, SessionMsg, SessionReq, SessionSystem, SkillsMsg, SkillsReq, SkillsSystem,
     SpeedtestMsg, SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg,
-    UpdateReq, UpdateSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind,
-    WebDavSystem,
+    UpdateReq, UpdateSystem, UsagePricingMsg, UsagePricingReq, UsagePricingSystem, WebDavDone,
+    WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 pub(crate) fn start_proxy_system() -> Result<ProxySystem, AppError> {
@@ -778,6 +778,48 @@ fn quota_worker_loop(rx: mpsc::Receiver<QuotaReq>, tx: mpsc::Sender<QuotaMsg>) {
         let result = rt.block_on(crate::cli::provider_quota::query_quota(&target));
 
         let _ = tx.send(QuotaMsg::Finished { target, result });
+    }
+}
+
+pub(crate) fn start_usage_pricing_system() -> Result<UsagePricingSystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<UsagePricingMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<UsagePricingReq>();
+
+    let handle = std::thread::Builder::new()
+        .name("cc-switch-usage-pricing".to_string())
+        .spawn(move || usage_pricing_worker_loop(req_rx, result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn usage/pricing worker thread".to_string(),
+            source: e,
+        })?;
+
+    Ok(UsagePricingSystem {
+        req_tx,
+        result_rx,
+        _handle: handle,
+    })
+}
+
+fn usage_pricing_worker_loop(
+    rx: mpsc::Receiver<UsagePricingReq>,
+    tx: mpsc::Sender<UsagePricingMsg>,
+) {
+    while let Ok(mut req) = rx.recv() {
+        for next in rx.try_iter() {
+            req = next;
+        }
+
+        let UsagePricingReq::Load {
+            request_id,
+            app_type,
+        } = req;
+        let result = load_usage_pricing_data(&app_type).map_err(|err| err.to_string());
+
+        let _ = tx.send(UsagePricingMsg::Loaded {
+            request_id,
+            app_type,
+            result,
+        });
     }
 }
 

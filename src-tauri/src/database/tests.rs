@@ -457,6 +457,8 @@ fn startup_migration_repairs_legacy_request_logs_before_session_index() {
     assert!(index_exists(&conn, "idx_request_logs_model"));
     assert!(index_exists(&conn, "idx_request_logs_session"));
     assert!(index_exists(&conn, "idx_request_logs_status"));
+    assert!(index_exists(&conn, "idx_request_logs_app_created_at"));
+    assert!(index_exists(&conn, "idx_request_logs_dedup_lookup_expr"));
 }
 
 #[test]
@@ -513,6 +515,141 @@ fn schema_create_tables_include_usage_daily_rollups() {
     assert_eq!(
         normalize_default(&skill_enabled_hermes.default).as_deref(),
         Some("0")
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn init_runs_startup_usage_rollup() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+
+    {
+        let db = Database::init().expect("init db");
+        let old_ts = chrono::Utc::now().timestamp() - 40 * 86_400;
+        let conn = db.conn.lock().expect("lock db");
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model, request_model,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                total_cost_usd, latency_ms, status_code, created_at, data_source
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                "startup-rollup-old",
+                "anthropic",
+                "claude",
+                "claude-sonnet-4",
+                "claude-sonnet-4",
+                100,
+                50,
+                7,
+                3,
+                "0.25",
+                123,
+                200,
+                old_ts,
+                "proxy",
+            ],
+        )
+        .expect("seed old usage log");
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model, request_model,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd,
+                total_cost_usd, latency_ms, status_code, created_at, data_source
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5,
+                ?6, ?7, ?8, ?9,
+                '0', '0', '0', '0',
+                '0', ?10, ?11, ?12, ?13
+            )",
+            params![
+                "startup-rollup-zero-cost",
+                "_codex_session",
+                "codex",
+                "gpt-5.5",
+                "gpt-5.5",
+                1_000_000,
+                0,
+                0,
+                0,
+                0,
+                200,
+                old_ts,
+                "codex_session",
+            ],
+        )
+        .expect("seed old zero-cost usage log");
+    }
+
+    let db = Database::init().expect("reinit db");
+    let conn = db.conn.lock().expect("lock db");
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = 'startup-rollup-old'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count old request log");
+    assert_eq!(
+        remaining, 0,
+        "startup maintenance should prune rolled-up detail logs"
+    );
+
+    let rollup: (i64, i64, i64, i64, i64, i64, String, i64) = conn
+        .query_row(
+            "SELECT request_count, success_count, input_tokens, output_tokens,
+                    cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms
+             FROM usage_daily_rollups
+             WHERE app_type = 'claude'
+               AND provider_id = 'anthropic'
+               AND model = 'claude-sonnet-4'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .expect("read startup rollup");
+    assert_eq!(rollup, (1, 1, 100, 50, 7, 3, "0.25".to_string(), 123));
+
+    let zero_cost_remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = 'startup-rollup-zero-cost'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count old zero-cost request log");
+    assert_eq!(
+        zero_cost_remaining, 0,
+        "startup maintenance should prune old zero-cost details only after backfill"
+    );
+
+    let (zero_cost_requests, zero_cost_total): (i64, f64) = conn
+        .query_row(
+            "SELECT request_count, CAST(total_cost_usd AS REAL)
+             FROM usage_daily_rollups
+             WHERE app_type = 'codex'
+               AND provider_id = '_codex_session'
+               AND model = 'gpt-5.5'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read zero-cost startup rollup");
+    assert_eq!(zero_cost_requests, 1);
+    assert_eq!(
+        zero_cost_total, 5.0,
+        "startup maintenance should backfill costs before rolling up old details"
     );
 }
 

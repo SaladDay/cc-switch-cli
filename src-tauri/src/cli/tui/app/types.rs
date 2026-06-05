@@ -43,6 +43,47 @@ pub enum SessionsPane {
     Detail,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsagePane {
+    Providers,
+    Models,
+    Recent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageMetric {
+    Cost,
+    Tokens,
+    Requests,
+    Errors,
+}
+
+#[derive(Debug, Clone)]
+pub struct UsageState {
+    pub range: crate::cli::tui::data::UsageRangePreset,
+    pub metric: UsageMetric,
+    pub pane: UsagePane,
+    pub selected_idx: usize,
+    pub logs_idx: usize,
+}
+
+impl Default for UsageState {
+    fn default() -> Self {
+        Self {
+            range: crate::cli::tui::data::UsageRangePreset::SevenDays,
+            metric: UsageMetric::Cost,
+            pane: UsagePane::Providers,
+            selected_idx: 0,
+            logs_idx: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PricingState {
+    pub selected_idx: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionsState {
     pub provider_id: Option<String>,

@@ -460,6 +460,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_sessions_sync_usage_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "sessions",
+            "sync-usage",
+            "--provider",
+            "codex",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Sessions(super::commands::sessions::SessionsCommand::SyncUsage {
+                provider,
+                all,
+                json,
+            })) => {
+                assert_eq!(provider, Some(super::AppType::Codex));
+                assert!(!all);
+                assert!(json);
+            }
+            _ => panic!("expected sessions sync-usage command"),
+        }
+    }
+
+    #[test]
     fn parses_sessions_show_with_provider() {
         let cli = Cli::parse_from([
             "cc-switch",

@@ -4,6 +4,11 @@ use crate::app_config::AppType;
 pub enum Route {
     Main,
     Providers,
+    Usage,
+    UsageLogs,
+    UsageLogDetail { request_id: String },
+    Pricing,
+    PricingDetail { model_id: String },
     Sessions,
     ProviderDetail { id: String },
     Mcp,
@@ -29,6 +34,8 @@ pub enum Route {
 pub enum NavItem {
     Main,
     Providers,
+    Usage,
+    Pricing,
     Sessions,
     Mcp,
     Prompts,
@@ -44,19 +51,21 @@ pub enum NavItem {
 }
 
 impl NavItem {
-    pub const ALL: [NavItem; 9] = [
+    pub const ALL: [NavItem; 11] = [
         NavItem::Main,
         NavItem::Providers,
         NavItem::Mcp,
         NavItem::Skills,
         NavItem::Sessions,
         NavItem::Prompts,
+        NavItem::Usage,
+        NavItem::Pricing,
         NavItem::Config,
         NavItem::Settings,
         NavItem::Exit,
     ];
 
-    pub const OPENCLAW_ALL: [NavItem; 10] = [
+    pub const OPENCLAW_ALL: [NavItem; 12] = [
         NavItem::Main,
         NavItem::Providers,
         NavItem::Sessions,
@@ -64,18 +73,22 @@ impl NavItem {
         NavItem::OpenClawEnv,
         NavItem::OpenClawTools,
         NavItem::OpenClawAgents,
+        NavItem::Usage,
+        NavItem::Pricing,
         NavItem::Config,
         NavItem::Settings,
         NavItem::Exit,
     ];
 
-    pub const HERMES_ALL: [NavItem; 9] = [
+    pub const HERMES_ALL: [NavItem; 11] = [
         NavItem::Main,
         NavItem::Providers,
         NavItem::Mcp,
         NavItem::Skills,
         NavItem::Sessions,
         NavItem::HermesMemory,
+        NavItem::Usage,
+        NavItem::Pricing,
         NavItem::Config,
         NavItem::Settings,
         NavItem::Exit,
@@ -93,6 +106,8 @@ impl NavItem {
         match self {
             NavItem::Main => Some(Route::Main),
             NavItem::Providers => Some(Route::Providers),
+            NavItem::Usage => Some(Route::Usage),
+            NavItem::Pricing => Some(Route::Pricing),
             NavItem::Sessions => Some(Route::Sessions),
             NavItem::Mcp => Some(Route::Mcp),
             NavItem::Prompts => Some(Route::Prompts),
@@ -150,6 +165,42 @@ mod tests {
             .expect("prompts nav item should exist");
 
         assert!(mcp < sessions && skills < sessions && sessions < prompts);
+    }
+
+    #[test]
+    fn usage_appears_after_prompts_before_config_in_nav() {
+        let prompts = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Prompts))
+            .expect("prompts nav item should exist");
+        let usage = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Usage))
+            .expect("usage nav item should exist");
+        let config = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Config))
+            .expect("config nav item should exist");
+
+        assert!(prompts < usage && usage < config);
+    }
+
+    #[test]
+    fn pricing_appears_after_usage_before_config_in_nav() {
+        let usage = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Usage))
+            .expect("usage nav item should exist");
+        let pricing = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Pricing))
+            .expect("pricing nav item should exist");
+        let config = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Config))
+            .expect("config nav item should exist");
+
+        assert!(usage < pricing && pricing < config);
     }
 
     #[test]

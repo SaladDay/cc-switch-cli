@@ -13894,4 +13894,94 @@ mod tests {
         assert!(app.sessions.rows.is_empty());
         assert!(app.sessions.delete_active.is_empty());
     }
+
+    #[test]
+    fn usage_shortcuts_change_range_metric_and_pane() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Usage;
+        app.focus = Focus::Content;
+        let data = UiData::default();
+
+        app.on_key(key(KeyCode::Char('1')), &data);
+        assert!(matches!(app.usage.range, data::UsageRangePreset::Today));
+
+        app.on_key(key(KeyCode::Char('3')), &data);
+        assert!(matches!(
+            app.usage.range,
+            data::UsageRangePreset::ThirtyDays
+        ));
+
+        app.on_key(key(KeyCode::Char('m')), &data);
+        assert!(matches!(app.usage.metric, UsageMetric::Tokens));
+
+        app.on_key(key(KeyCode::Tab), &data);
+        assert!(matches!(app.usage.pane, UsagePane::Models));
+
+        app.on_key(key(KeyCode::Right), &data);
+        assert!(matches!(app.usage.pane, UsagePane::Recent));
+    }
+
+    #[test]
+    fn usage_logs_shortcut_and_detail_route_use_stack() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Usage;
+        app.focus = Focus::Content;
+        let mut data = UiData::default();
+        data.usage.recent_logs.push(data::UsageLogRow {
+            request_id: "req-usage-1".to_string(),
+            ..data::UsageLogRow::default()
+        });
+
+        let action = app.on_key(key(KeyCode::Char('L')), &data);
+        assert!(matches!(action, Action::SwitchRoute(Route::UsageLogs)));
+        assert!(matches!(app.route, Route::UsageLogs));
+        assert_eq!(app.route_stack, vec![Route::Usage]);
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::UsageLogDetail { request_id })
+                if request_id == "req-usage-1"
+        ));
+        assert!(matches!(
+            app.route,
+            Route::UsageLogDetail { ref request_id } if request_id == "req-usage-1"
+        ));
+        assert_eq!(app.route_stack, vec![Route::Usage, Route::UsageLogs]);
+    }
+
+    #[test]
+    fn pricing_shortcuts_select_and_open_detail_route() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Pricing;
+        app.focus = Focus::Content;
+        let mut data = UiData::default();
+        data.pricing.rows = vec![
+            data::ModelPricingRow {
+                model_id: "gpt-5.4".to_string(),
+                display_name: "GPT 5.4".to_string(),
+                ..data::ModelPricingRow::default()
+            },
+            data::ModelPricingRow {
+                model_id: "claude-sonnet-4-5".to_string(),
+                display_name: "Claude Sonnet 4.5".to_string(),
+                ..data::ModelPricingRow::default()
+            },
+        ];
+
+        app.on_key(key(KeyCode::Down), &data);
+        assert_eq!(app.pricing.selected_idx, 1);
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::PricingDetail { model_id })
+                if model_id == "claude-sonnet-4-5"
+        ));
+        assert!(matches!(
+            app.route,
+            Route::PricingDetail { ref model_id } if model_id == "claude-sonnet-4-5"
+        ));
+        assert_eq!(app.route_stack, vec![Route::Pricing]);
+    }
 }

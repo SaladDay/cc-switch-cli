@@ -12,6 +12,7 @@ mod text_edit;
 mod theme;
 mod ui;
 
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -22,7 +23,7 @@ use crate::cli::i18n::texts;
 use crate::error::AppError;
 
 use app::{Action, App, ToastKind};
-use runtime_actions::handle_action;
+use runtime_actions::{apply_preloaded_app_switch, handle_action};
 #[cfg(test)]
 use runtime_actions::{
     import_mcp_from_supported_apps_with, open_proxy_help_overlay_with, queue_managed_proxy_action,
@@ -37,7 +38,7 @@ pub(crate) use runtime_systems::build_stream_check_result_lines;
 use runtime_systems::{
     apply_webdav_jianguoyun_quick_setup, build_model_fetch_candidate_urls, drain_latest_webdav_req,
     model_fetch_strategy_for_field, parse_model_ids_from_response, update_webdav_last_error_with,
-    ProxyReq, UpdateMsg, WebDavReq, WebDavReqKind,
+    UpdateMsg, WebDavReqKind,
 };
 pub(crate) use runtime_systems::{fetch_provider_models_for_tui, ModelFetchStrategy};
 use runtime_systems::{
@@ -46,8 +47,9 @@ use runtime_systems::{
     handle_stream_check_msg, handle_update_msg, handle_webdav_msg, start_local_env_system,
     start_managed_auth_system, start_model_fetch_system, start_proxy_system, start_quota_system,
     start_session_system, start_skills_system, start_speedtest_system, start_stream_check_system,
-    start_update_system, start_webdav_system, LocalEnvReq, ManagedAuthReq, QuotaReq,
-    RequestTracker,
+    start_update_system, start_usage_pricing_system, start_webdav_system, LocalEnvReq,
+    ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq, SkillsReq,
+    StreamCheckReq, UpdateReq, UsagePricingMsg, UsagePricingReq, WebDavReq,
 };
 use terminal::{PanicRestoreHookGuard, TuiTerminal};
 
@@ -257,6 +259,226 @@ fn queue_provider_quota_refresh(
     queue_quota_refresh(app, data, quota_req_tx, target, true);
 }
 
+#[derive(Default)]
+struct UiDataByAppCache {
+    by_app: HashMap<AppType, data::UiData>,
+}
+
+impl UiDataByAppCache {
+    fn remember_current(&mut self, app_type: &AppType, data: &data::UiData) {
+        self.by_app.insert(app_type.clone(), data.clone());
+    }
+
+    fn update_usage_pricing(&mut self, app_type: &AppType, usage_pricing: data::UsagePricingData) {
+        if let Some(cached) = self.by_app.get_mut(app_type) {
+            cached.usage = usage_pricing.usage;
+            cached.pricing = usage_pricing.pricing;
+        }
+    }
+
+    fn switch_to(
+        &mut self,
+        app: &mut App,
+        data: &mut data::UiData,
+        next: AppType,
+    ) -> Result<(), AppError> {
+        if app.app_type == next {
+            return Ok(());
+        }
+
+        self.remember_current(&app.app_type, data);
+        let next_data = self
+            .by_app
+            .remove(&next)
+            .map(Ok)
+            .unwrap_or_else(|| data::UiData::load_fast(&next))?;
+        apply_preloaded_app_switch(app, data, next, next_data);
+        app.maybe_prompt_import_candidate(data);
+        Ok(())
+    }
+}
+
+fn queue_usage_pricing_refresh(
+    app: &mut App,
+    tracker: &mut RequestTracker,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+    app_type: &AppType,
+) {
+    let Some(tx) = usage_pricing_req_tx else {
+        return;
+    };
+
+    let request_id = tracker.start();
+    if let Err(err) = tx.send(UsagePricingReq::Load {
+        request_id,
+        app_type: app_type.clone(),
+    }) {
+        tracker.cancel();
+        app.push_toast(
+            format!("Usage/pricing refresh request failed: {err}"),
+            ToastKind::Warning,
+        );
+    }
+}
+
+fn handle_usage_pricing_msg(
+    app: &mut App,
+    data: &mut data::UiData,
+    data_cache: &mut UiDataByAppCache,
+    tracker: &mut RequestTracker,
+    msg: UsagePricingMsg,
+) {
+    match msg {
+        UsagePricingMsg::Loaded {
+            request_id,
+            app_type,
+            result,
+        } => {
+            if tracker.is_stale(request_id) {
+                return;
+            }
+            tracker.finish_if_active(request_id);
+
+            match result {
+                Ok(usage_pricing) => {
+                    if app.app_type == app_type {
+                        data.usage = usage_pricing.usage;
+                        data.pricing = usage_pricing.pricing;
+                        app.clamp_selections(data);
+                        data_cache.remember_current(&app.app_type, data);
+                    } else {
+                        data_cache.update_usage_pricing(&app_type, usage_pricing);
+                    }
+                }
+                Err(err) => {
+                    if app.app_type == app_type {
+                        app.push_toast(
+                            format!("Usage/pricing refresh failed: {err}"),
+                            ToastKind::Warning,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn handle_tui_action(
+    terminal: &mut TuiTerminal,
+    app: &mut App,
+    data: &mut data::UiData,
+    data_cache: &mut UiDataByAppCache,
+    speedtest_req_tx: Option<&mpsc::Sender<String>>,
+    stream_check_req_tx: Option<&mpsc::Sender<StreamCheckReq>>,
+    skills_req_tx: Option<&mpsc::Sender<SkillsReq>>,
+    proxy_req_tx: Option<&mpsc::Sender<ProxyReq>>,
+    proxy_loading: &mut RequestTracker,
+    local_env_req_tx: Option<&mpsc::Sender<LocalEnvReq>>,
+    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
+    webdav_req_tx: Option<&mpsc::Sender<WebDavReq>>,
+    webdav_loading: &mut RequestTracker,
+    update_req_tx: Option<&mpsc::Sender<UpdateReq>>,
+    update_check: &mut RequestTracker,
+    model_fetch_req_tx: Option<&mpsc::Sender<ModelFetchReq>>,
+    managed_auth_req_tx: Option<&mpsc::Sender<ManagedAuthReq>>,
+    quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+    usage_pricing_loading: &mut RequestTracker,
+    action: Action,
+) -> Result<(), AppError> {
+    match action {
+        Action::None => Ok(()),
+        Action::ProviderQuotaRefresh { id } => {
+            queue_provider_quota_refresh(app, data, quota_req_tx, &id);
+            Ok(())
+        }
+        Action::SetAppType(next) => {
+            data_cache.switch_to(app, data, next)?;
+            let current_app_type = app.app_type.clone();
+            queue_usage_pricing_refresh(
+                app,
+                usage_pricing_loading,
+                usage_pricing_req_tx,
+                &current_app_type,
+            );
+            queue_current_quota_refresh_if_due(app, data, quota_req_tx);
+            Ok(())
+        }
+        Action::ReloadData => {
+            handle_action(
+                terminal,
+                app,
+                data,
+                speedtest_req_tx,
+                stream_check_req_tx,
+                skills_req_tx,
+                proxy_req_tx,
+                proxy_loading,
+                local_env_req_tx,
+                session_req_tx,
+                webdav_req_tx,
+                webdav_loading,
+                update_req_tx,
+                update_check,
+                model_fetch_req_tx,
+                managed_auth_req_tx,
+                Action::ReloadData,
+            )?;
+            data_cache.by_app.clear();
+            data_cache.remember_current(&app.app_type, data);
+            queue_current_quota_refresh_if_due(app, data, quota_req_tx);
+            Ok(())
+        }
+        action @ (Action::SetVisibleApps { .. }
+        | Action::SetVisibleAppsMode { .. }
+        | Action::ConfirmVisibleAppsAutoDetection { .. }
+        | Action::SwitchVisibleAppsToManual { .. }) => {
+            handle_action(
+                terminal,
+                app,
+                data,
+                speedtest_req_tx,
+                stream_check_req_tx,
+                skills_req_tx,
+                proxy_req_tx,
+                proxy_loading,
+                local_env_req_tx,
+                session_req_tx,
+                webdav_req_tx,
+                webdav_loading,
+                update_req_tx,
+                update_check,
+                model_fetch_req_tx,
+                managed_auth_req_tx,
+                action,
+            )?;
+            data_cache.by_app.clear();
+            data_cache.remember_current(&app.app_type, data);
+            queue_current_quota_refresh_if_due(app, data, quota_req_tx);
+            Ok(())
+        }
+        other => handle_action(
+            terminal,
+            app,
+            data,
+            speedtest_req_tx,
+            stream_check_req_tx,
+            skills_req_tx,
+            proxy_req_tx,
+            proxy_loading,
+            local_env_req_tx,
+            session_req_tx,
+            webdav_req_tx,
+            webdav_loading,
+            update_req_tx,
+            update_check,
+            model_fetch_req_tx,
+            managed_auth_req_tx,
+            other,
+        ),
+    }
+}
+
 fn queue_sessions_refresh_if_needed(
     app: &mut App,
     session_req_tx: Option<&mpsc::Sender<runtime_systems::SessionReq>>,
@@ -313,6 +535,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let mut proxy_loading = RequestTracker::default();
     let mut webdav_loading = RequestTracker::default();
     let mut update_check = RequestTracker::default();
+    let mut usage_pricing_loading = RequestTracker::default();
 
     let speedtest = match start_speedtest_system() {
         Ok(system) => Some(system),
@@ -402,6 +625,17 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     };
     queue_current_quota_refresh_if_due(&mut app, &mut data, quota.as_ref().map(|s| &s.req_tx));
 
+    let usage_pricing = match start_usage_pricing_system() {
+        Ok(system) => Some(system),
+        Err(err) => {
+            app.push_toast(
+                format!("Usage/pricing worker unavailable: {err}"),
+                ToastKind::Warning,
+            );
+            None
+        }
+    };
+
     let webdav = match start_webdav_system() {
         Ok(system) => Some(system),
         Err(err) => {
@@ -449,6 +683,9 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             None
         }
     };
+
+    let mut data_cache = UiDataByAppCache::default();
+    data_cache.remember_current(&app.app_type, &data);
 
     loop {
         app.last_size = terminal.size()?;
@@ -499,6 +736,18 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         if let Some(quota) = quota.as_ref() {
             while let Ok(msg) = quota.result_rx.try_recv() {
                 handle_quota_msg(&mut app, &mut data, msg);
+            }
+        }
+
+        if let Some(usage_pricing) = usage_pricing.as_ref() {
+            while let Ok(msg) = usage_pricing.result_rx.try_recv() {
+                handle_usage_pricing_msg(
+                    &mut app,
+                    &mut data,
+                    &mut data_cache,
+                    &mut usage_pricing_loading,
+                    msg,
+                );
             }
         }
 
@@ -559,17 +808,11 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 event::Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let key = normalize_key_event(key);
                     let action = app.on_key(key, &data);
-                    if let Action::ProviderQuotaRefresh { id } = action {
-                        queue_provider_quota_refresh(
-                            &mut app,
-                            &mut data,
-                            quota.as_ref().map(|s| &s.req_tx),
-                            &id,
-                        );
-                    } else if let Err(err) = handle_action(
+                    if let Err(err) = handle_tui_action(
                         &mut terminal,
                         &mut app,
                         &mut data,
+                        &mut data_cache,
                         speedtest.as_ref().map(|s| &s.req_tx),
                         stream_check.as_ref().map(|s| &s.req_tx),
                         skills.as_ref().map(|s| &s.req_tx),
@@ -583,6 +826,9 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         &mut update_check,
                         model_fetch.as_ref().map(|s| &s.req_tx),
                         managed_auth.as_ref().map(|s| &s.req_tx),
+                        quota.as_ref().map(|s| &s.req_tx),
+                        usage_pricing.as_ref().map(|s| &s.req_tx),
+                        &mut usage_pricing_loading,
                         action,
                     ) {
                         if matches!(
@@ -603,17 +849,11 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         };
                         let key = event::KeyEvent::new(code, event::KeyModifiers::NONE);
                         let action = app.on_key(key, &data);
-                        if let Action::ProviderQuotaRefresh { id } = action {
-                            queue_provider_quota_refresh(
-                                &mut app,
-                                &mut data,
-                                quota.as_ref().map(|s| &s.req_tx),
-                                &id,
-                            );
-                        } else if let Err(err) = handle_action(
+                        if let Err(err) = handle_tui_action(
                             &mut terminal,
                             &mut app,
                             &mut data,
+                            &mut data_cache,
                             speedtest.as_ref().map(|s| &s.req_tx),
                             stream_check.as_ref().map(|s| &s.req_tx),
                             skills.as_ref().map(|s| &s.req_tx),
@@ -627,6 +867,9 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                             &mut update_check,
                             model_fetch.as_ref().map(|s| &s.req_tx),
                             managed_auth.as_ref().map(|s| &s.req_tx),
+                            quota.as_ref().map(|s| &s.req_tx),
+                            usage_pricing.as_ref().map(|s| &s.req_tx),
+                            &mut usage_pricing_loading,
                             action,
                         ) {
                             if matches!(

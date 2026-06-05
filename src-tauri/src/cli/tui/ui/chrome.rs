@@ -216,6 +216,8 @@ pub(super) fn nav_label(item: NavItem) -> &'static str {
     match item {
         NavItem::Main => texts::menu_home(),
         NavItem::Providers => texts::menu_manage_providers(),
+        NavItem::Usage => texts::menu_usage(),
+        NavItem::Pricing => texts::menu_pricing(),
         NavItem::Sessions => texts::menu_manage_sessions(),
         NavItem::Mcp => texts::menu_manage_mcp(),
         NavItem::Prompts => texts::menu_manage_prompts(),
@@ -235,6 +237,8 @@ pub(super) fn nav_label_variants(item: NavItem) -> (&'static str, &'static str) 
     match item {
         NavItem::Main => texts::menu_home_variants(),
         NavItem::Providers => texts::menu_manage_providers_variants(),
+        NavItem::Usage => texts::menu_usage_variants(),
+        NavItem::Pricing => texts::menu_pricing_variants(),
         NavItem::Sessions => texts::menu_manage_sessions_variants(),
         NavItem::Mcp => texts::menu_manage_mcp_variants(),
         NavItem::Prompts => texts::menu_manage_prompts_variants(),

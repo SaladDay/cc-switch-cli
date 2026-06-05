@@ -114,8 +114,16 @@ impl AppState {
 
         state.import_live_current_provider_configs_on_startup()?;
         state.migrate_codex_provider_buckets_on_startup();
+        state.sync_session_usage_on_startup();
 
         Ok(state)
+    }
+
+    fn sync_session_usage_on_startup(&self) {
+        crate::services::session_usage::run_session_usage_sync_cycle_best_effort(
+            &self.db,
+            "startup-recovery",
+        );
     }
 
     fn migrate_codex_provider_buckets_on_startup(&self) {

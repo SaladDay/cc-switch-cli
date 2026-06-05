@@ -1,12 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use chrono::{Days, Local, NaiveDate, TimeZone};
 use indexmap::IndexMap;
+use rusqlite::params;
+use rust_decimal::{prelude::ToPrimitive, Decimal};
 use serde_json::Value;
 
 use crate::app_config::{AppType, CommonConfigSnippets, McpServer};
-pub(crate) use crate::cli::provider_quota::{ProviderUsageQuota, QuotaTarget, QuotaTargetKind};
+#[cfg(test)]
+pub(crate) use crate::cli::provider_quota::QuotaTargetKind;
+pub(crate) use crate::cli::provider_quota::{ProviderUsageQuota, QuotaTarget};
 use crate::commands::workspace::{self, DailyMemoryFileInfo, ALLOWED_FILES};
+use crate::database::lock_conn;
 use crate::error::AppError;
 use crate::hermes_config::{HermesMemoryLimits, MemoryKind};
 use crate::openclaw_config::{
@@ -285,6 +291,259 @@ impl ProxySnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageRangePreset {
+    Today,
+    SevenDays,
+    ThirtyDays,
+}
+
+impl UsageRangePreset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Today => "Today",
+            Self::SevenDays => "7d",
+            Self::ThirtyDays => "30d",
+        }
+    }
+
+    fn days(self) -> u64 {
+        match self {
+            Self::Today => 1,
+            Self::SevenDays => 7,
+            Self::ThirtyDays => 30,
+        }
+    }
+}
+
+impl Default for UsageRangePreset {
+    fn default() -> Self {
+        Self::SevenDays
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UsageSummarySnapshot {
+    pub total_requests: u64,
+    pub success_count: u64,
+    pub total_cost_usd: f64,
+    pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub avg_latency_ms: Option<u64>,
+    pub avg_first_token_ms: Option<u64>,
+}
+
+impl UsageSummarySnapshot {
+    pub fn total_tokens(&self) -> u64 {
+        if self.total_tokens > 0 {
+            return self.total_tokens;
+        }
+
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_creation_tokens)
+    }
+
+    pub fn success_rate(&self) -> Option<f64> {
+        (self.total_requests > 0)
+            .then(|| self.success_count as f64 * 100.0 / self.total_requests as f64)
+    }
+
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        let denominator = self
+            .input_tokens
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_creation_tokens);
+        (denominator > 0).then(|| self.cache_read_tokens as f64 * 100.0 / denominator as f64)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UsageTrendBucket {
+    pub key: String,
+    pub label: String,
+    pub request_count: u64,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+    pub error_count: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UsageProviderStatsRow {
+    pub provider_id: String,
+    pub provider_name: Option<String>,
+    pub request_count: u64,
+    pub success_count: u64,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+    pub avg_latency_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UsageModelStatsRow {
+    pub model: String,
+    pub request_count: u64,
+    pub success_count: u64,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+    pub avg_latency_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UsageLogRow {
+    pub request_id: String,
+    pub created_at: i64,
+    pub app_type: String,
+    pub provider_id: String,
+    pub provider_name: Option<String>,
+    pub model: String,
+    pub request_model: Option<String>,
+    pub status_code: u16,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub total_cost_usd: f64,
+    pub latency_ms: u64,
+    pub first_token_ms: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub session_id: Option<String>,
+    pub provider_type: Option<String>,
+    pub is_streaming: bool,
+    pub error_message: Option<String>,
+    pub data_source: Option<String>,
+}
+
+impl UsageLogRow {
+    pub fn total_tokens(&self) -> u64 {
+        effective_total_tokens(
+            &self.app_type,
+            self.data_source.as_deref(),
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.cache_creation_tokens,
+        )
+    }
+
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status_code)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UsageSnapshot {
+    pub summary_today: UsageSummarySnapshot,
+    pub summary_7d: UsageSummarySnapshot,
+    pub summary_30d: UsageSummarySnapshot,
+    pub trends_today: Vec<UsageTrendBucket>,
+    pub trends_7d: Vec<UsageTrendBucket>,
+    pub trends_30d: Vec<UsageTrendBucket>,
+    pub top_providers_today: Vec<UsageProviderStatsRow>,
+    pub top_providers_7d: Vec<UsageProviderStatsRow>,
+    pub top_providers_30d: Vec<UsageProviderStatsRow>,
+    pub top_models_today: Vec<UsageModelStatsRow>,
+    pub top_models_7d: Vec<UsageModelStatsRow>,
+    pub top_models_30d: Vec<UsageModelStatsRow>,
+    pub recent_logs: Vec<UsageLogRow>,
+    pub logs_total: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelPricingRow {
+    pub model_id: String,
+    pub display_name: String,
+    pub input_cost_per_million: String,
+    pub output_cost_per_million: String,
+    pub cache_read_cost_per_million: String,
+    pub cache_creation_cost_per_million: String,
+    pub recent_request_count: u64,
+    pub recent_total_tokens: u64,
+    pub recent_total_cost_usd: f64,
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelPricingSnapshot {
+    pub rows: Vec<ModelPricingRow>,
+    pub recent_unknown_models: u64,
+    pub recent_unmatched_total_tokens: u64,
+    pub recent_unmatched_total_cost_usd: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UsagePricingData {
+    pub usage: UsageSnapshot,
+    pub pricing: ModelPricingSnapshot,
+}
+
+impl ModelPricingSnapshot {
+    pub fn total_models(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn recently_used_models(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| row.recent_request_count > 0)
+            .count()
+    }
+
+    pub fn recent_total_cost_usd(&self) -> f64 {
+        self.rows
+            .iter()
+            .map(|row| row.recent_total_cost_usd)
+            .sum::<f64>()
+            + self.recent_unmatched_total_cost_usd
+    }
+
+    pub fn recent_total_tokens(&self) -> u64 {
+        self.rows
+            .iter()
+            .fold(self.recent_unmatched_total_tokens, |total, row| {
+                total.saturating_add(row.recent_total_tokens)
+            })
+    }
+}
+
+impl UsageSnapshot {
+    pub fn summary_for(&self, range: UsageRangePreset) -> &UsageSummarySnapshot {
+        match range {
+            UsageRangePreset::Today => &self.summary_today,
+            UsageRangePreset::SevenDays => &self.summary_7d,
+            UsageRangePreset::ThirtyDays => &self.summary_30d,
+        }
+    }
+
+    pub fn trend_for(&self, range: UsageRangePreset) -> &[UsageTrendBucket] {
+        match range {
+            UsageRangePreset::Today => &self.trends_today,
+            UsageRangePreset::SevenDays => &self.trends_7d,
+            UsageRangePreset::ThirtyDays => &self.trends_30d,
+        }
+    }
+
+    pub fn top_providers_for(&self, range: UsageRangePreset) -> &[UsageProviderStatsRow] {
+        match range {
+            UsageRangePreset::Today => &self.top_providers_today,
+            UsageRangePreset::SevenDays => &self.top_providers_7d,
+            UsageRangePreset::ThirtyDays => &self.top_providers_30d,
+        }
+    }
+
+    pub fn top_models_for(&self, range: UsageRangePreset) -> &[UsageModelStatsRow] {
+        match range {
+            UsageRangePreset::Today => &self.top_models_today,
+            UsageRangePreset::SevenDays => &self.top_models_7d,
+            UsageRangePreset::ThirtyDays => &self.top_models_30d,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UiData {
     pub providers: ProvidersSnapshot,
@@ -293,6 +552,8 @@ pub struct UiData {
     pub config: ConfigSnapshot,
     pub skills: SkillsSnapshot,
     pub proxy: ProxySnapshot,
+    pub usage: UsageSnapshot,
+    pub pricing: ModelPricingSnapshot,
     pub(crate) quota: QuotaSnapshot,
 }
 
@@ -305,6 +566,8 @@ impl Default for UiData {
             config: ConfigSnapshot::default(),
             skills: SkillsSnapshot::default(),
             proxy: ProxySnapshot::default(),
+            usage: UsageSnapshot::default(),
+            pricing: ModelPricingSnapshot::default(),
             quota: QuotaSnapshot::default(),
         }
     }
@@ -318,10 +581,24 @@ impl UiData {
     pub fn load(app_type: &AppType) -> Result<Self, AppError> {
         let state = load_state()?;
 
-        let providers = load_providers(&state, app_type)?;
-        let mcp = load_mcp(&state)?;
-        let prompts = load_prompts(&state, app_type)?;
-        let config = load_config_snapshot(&state, app_type)?;
+        let mut data = Self::load_base_from_state(&state, app_type)?;
+        let usage_pricing = load_usage_pricing_data_from_state(&state, app_type)?;
+        data.usage = usage_pricing.usage;
+        data.pricing = usage_pricing.pricing;
+
+        Ok(data)
+    }
+
+    pub(crate) fn load_fast(app_type: &AppType) -> Result<Self, AppError> {
+        let state = load_state()?;
+        Self::load_base_from_state(&state, app_type)
+    }
+
+    fn load_base_from_state(state: &AppState, app_type: &AppType) -> Result<Self, AppError> {
+        let providers = load_providers(state, app_type)?;
+        let mcp = load_mcp(state)?;
+        let prompts = load_prompts(state, app_type)?;
+        let config = load_config_snapshot(state, app_type)?;
         let skills = load_skills_snapshot()?;
         let proxy = load_proxy_snapshot(app_type)?;
 
@@ -332,6 +609,8 @@ impl UiData {
             config,
             skills,
             proxy,
+            usage: UsageSnapshot::default(),
+            pricing: ModelPricingSnapshot::default(),
             quota: QuotaSnapshot::default(),
         })
     }
@@ -356,6 +635,21 @@ impl UiData {
         ids.extend(self.providers.live_ids.iter().cloned());
         ids.into_iter().collect()
     }
+}
+
+pub(crate) fn load_usage_pricing_data(app_type: &AppType) -> Result<UsagePricingData, AppError> {
+    let state = load_state()?;
+    load_usage_pricing_data_from_state(&state, app_type)
+}
+
+fn load_usage_pricing_data_from_state(
+    state: &AppState,
+    app_type: &AppType,
+) -> Result<UsagePricingData, AppError> {
+    Ok(UsagePricingData {
+        usage: load_usage_snapshot(state, app_type)?,
+        pricing: load_model_pricing_snapshot(state, app_type)?,
+    })
 }
 
 pub(crate) fn provider_display_name(app_type: &AppType, row: &ProviderRow) -> String {
@@ -910,6 +1204,685 @@ fn load_hermes_memory_snapshot(app_type: &AppType) -> Result<HermesMemorySnapsho
     })
 }
 
+fn load_usage_snapshot(state: &AppState, app_type: &AppType) -> Result<UsageSnapshot, AppError> {
+    let app_key = app_type.as_str();
+    let now = Local::now().timestamp();
+    let today_start = usage_range_start(UsageRangePreset::Today);
+    let seven_start = usage_range_start(UsageRangePreset::SevenDays);
+    let thirty_start = usage_range_start(UsageRangePreset::ThirtyDays);
+
+    let conn = lock_conn!(state.db.conn);
+    let summary_today = load_usage_summary(&conn, app_key, today_start, now)?;
+    let summary_7d = load_usage_summary(&conn, app_key, seven_start, now)?;
+    let summary_30d = load_usage_summary(&conn, app_key, thirty_start, now)?;
+    let trends_today = load_usage_trend(&conn, app_key, UsageRangePreset::Today, today_start, now)?;
+    let trends_7d = load_usage_trend(
+        &conn,
+        app_key,
+        UsageRangePreset::SevenDays,
+        seven_start,
+        now,
+    )?;
+    let trends_30d = load_usage_trend(
+        &conn,
+        app_key,
+        UsageRangePreset::ThirtyDays,
+        thirty_start,
+        now,
+    )?;
+    let top_providers_today = load_usage_top_providers(&conn, app_key, today_start, now)?;
+    let top_providers_7d = load_usage_top_providers(&conn, app_key, seven_start, now)?;
+    let top_providers_30d = load_usage_top_providers(&conn, app_key, thirty_start, now)?;
+    let top_models_today = load_usage_top_models(&conn, app_key, today_start, now)?;
+    let top_models_7d = load_usage_top_models(&conn, app_key, seven_start, now)?;
+    let top_models_30d = load_usage_top_models(&conn, app_key, thirty_start, now)?;
+    let recent_logs = load_usage_recent_logs(&conn, app_key, 100)?;
+    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let logs_total = conn.query_row(
+        &format!("SELECT COUNT(*) FROM proxy_request_logs l WHERE l.app_type = ?1 AND {effective_filter}"),
+        params![app_key],
+        |row| row.get::<_, i64>(0),
+    )?;
+
+    Ok(UsageSnapshot {
+        summary_today,
+        summary_7d,
+        summary_30d,
+        trends_today,
+        trends_7d,
+        trends_30d,
+        top_providers_today,
+        top_providers_7d,
+        top_providers_30d,
+        top_models_today,
+        top_models_7d,
+        top_models_30d,
+        recent_logs,
+        logs_total: non_negative_u64(logs_total),
+    })
+}
+
+fn load_model_pricing_snapshot(
+    state: &AppState,
+    app_type: &AppType,
+) -> Result<ModelPricingSnapshot, AppError> {
+    let app_key = app_type.as_str();
+    let now = Local::now().timestamp();
+    let thirty_start = usage_range_start(UsageRangePreset::ThirtyDays);
+
+    let conn = lock_conn!(state.db.conn);
+    load_model_pricing_snapshot_from_conn(&conn, app_key, thirty_start, now)
+}
+
+fn load_model_pricing_snapshot_from_conn(
+    conn: &rusqlite::Connection,
+    app_key: &str,
+    thirty_start: i64,
+    now: i64,
+) -> Result<ModelPricingSnapshot, AppError> {
+    let mut pricing_stmt = conn.prepare(
+        "SELECT
+            model_id,
+            display_name,
+            input_cost_per_million,
+            output_cost_per_million,
+            cache_read_cost_per_million,
+            cache_creation_cost_per_million
+         FROM model_pricing
+         ORDER BY LOWER(model_id)",
+    )?;
+
+    let rows = pricing_stmt.query_map([], |row| {
+        Ok(ModelPricingRow {
+            model_id: row.get(0)?,
+            display_name: row.get(1)?,
+            input_cost_per_million: row.get(2)?,
+            output_cost_per_million: row.get(3)?,
+            cache_read_cost_per_million: row.get(4)?,
+            cache_creation_cost_per_million: row.get(5)?,
+            recent_request_count: 0,
+            recent_total_tokens: 0,
+            recent_total_cost_usd: 0.0,
+            last_used_at: None,
+        })
+    })?;
+    let mut rows = rows.collect::<Result<Vec<_>, _>>()?;
+    let row_indices = rows
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| (row.model_id.clone(), idx))
+        .collect::<HashMap<_, _>>();
+
+    let total_tokens_expr = usage_real_total_tokens_sql(Some("l"));
+    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let mut recent_stmt = conn.prepare(&format!(
+        "SELECT
+            COALESCE(NULLIF(TRIM(l.model), ''), 'unknown') AS response_model,
+            NULLIF(TRIM(l.request_model), '') AS request_model,
+            COALESCE(NULLIF(TRIM(l.cost_multiplier), ''), '1') AS cost_multiplier,
+            COUNT(*) AS request_count,
+            COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
+            COALESCE(SUM(l.input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(l.output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(l.cache_read_tokens), 0) AS cache_read_tokens,
+            COALESCE(SUM(l.cache_creation_tokens), 0) AS cache_creation_tokens,
+            COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0) AS total_cost_usd,
+            MAX(l.created_at) AS last_used_at
+            FROM proxy_request_logs l
+            WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
+              AND {effective_filter}
+            GROUP BY response_model, request_model, cost_multiplier",
+    ))?;
+    let recent_rows = recent_stmt.query_map(params![app_key, thirty_start, now], |row| {
+        Ok(RecentPricingUsageRow {
+            response_model: row.get(0)?,
+            request_model: normalize_optional_string(row.get::<_, Option<String>>(1)?),
+            cost_multiplier: row.get(2)?,
+            request_count: non_negative_u64(row.get::<_, i64>(3)?),
+            total_tokens: non_negative_u64(row.get::<_, i64>(4)?),
+            input_tokens: non_negative_u64(row.get::<_, i64>(5)?),
+            output_tokens: non_negative_u64(row.get::<_, i64>(6)?),
+            cache_read_tokens: non_negative_u64(row.get::<_, i64>(7)?),
+            cache_creation_tokens: non_negative_u64(row.get::<_, i64>(8)?),
+            total_cost_usd: row.get::<_, f64>(9)?.max(0.0),
+            last_used_at: row.get::<_, Option<i64>>(10)?,
+        })
+    })?;
+
+    let mut recent_unknown_models = HashSet::new();
+    let mut recent_unmatched_total_tokens = 0u64;
+    let mut recent_unmatched_total_cost_usd = 0.0f64;
+    for recent in recent_rows {
+        let recent = recent?;
+        let Some(matched) = find_pricing_match_for_log(conn, app_key, &recent)? else {
+            recent_unknown_models.insert(unmatched_pricing_model_key(
+                &recent.response_model,
+                recent.request_model.as_deref(),
+            ));
+            recent_unmatched_total_tokens =
+                recent_unmatched_total_tokens.saturating_add(recent.total_tokens);
+            recent_unmatched_total_cost_usd += recent.total_cost_usd;
+            continue;
+        };
+        let Some(idx) = row_indices.get(&matched.model_id).copied() else {
+            recent_unknown_models.insert(unmatched_pricing_model_key(
+                &recent.response_model,
+                recent.request_model.as_deref(),
+            ));
+            recent_unmatched_total_tokens =
+                recent_unmatched_total_tokens.saturating_add(recent.total_tokens);
+            recent_unmatched_total_cost_usd += recent.total_cost_usd;
+            continue;
+        };
+        let row = &mut rows[idx];
+        row.recent_request_count = row
+            .recent_request_count
+            .saturating_add(recent.request_count);
+        row.recent_total_tokens = row.recent_total_tokens.saturating_add(recent.total_tokens);
+        row.recent_total_cost_usd += recent.total_cost_usd;
+        row.last_used_at = match (row.last_used_at, recent.last_used_at) {
+            (Some(current), Some(next)) => Some(current.max(next)),
+            (None, Some(next)) => Some(next),
+            (current, None) => current,
+        };
+    }
+
+    rows.sort_by(|a, b| {
+        let a_unused = a.recent_request_count == 0;
+        let b_unused = b.recent_request_count == 0;
+        a_unused
+            .cmp(&b_unused)
+            .then_with(|| b.recent_request_count.cmp(&a.recent_request_count))
+            .then_with(|| {
+                b.recent_total_cost_usd
+                    .partial_cmp(&a.recent_total_cost_usd)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                a.model_id
+                    .to_ascii_lowercase()
+                    .cmp(&b.model_id.to_ascii_lowercase())
+            })
+    });
+
+    Ok(ModelPricingSnapshot {
+        rows,
+        recent_unknown_models: recent_unknown_models.len() as u64,
+        recent_unmatched_total_tokens,
+        recent_unmatched_total_cost_usd,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct RecentPricingUsageRow {
+    response_model: String,
+    request_model: Option<String>,
+    cost_multiplier: String,
+    request_count: u64,
+    total_tokens: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    total_cost_usd: f64,
+    last_used_at: Option<i64>,
+}
+
+fn find_pricing_match_for_log(
+    conn: &rusqlite::Connection,
+    app_key: &str,
+    recent: &RecentPricingUsageRow,
+) -> Result<Option<crate::services::usage_stats::ModelPricingMatch>, AppError> {
+    let response_match =
+        crate::services::usage_stats::find_model_pricing_match(conn, &recent.response_model)?;
+
+    let request_match = match recent.request_model.as_deref() {
+        Some(request_model)
+            if !request_model
+                .trim()
+                .eq_ignore_ascii_case(recent.response_model.trim()) =>
+        {
+            crate::services::usage_stats::find_model_pricing_match(conn, request_model)?
+        }
+        _ => None,
+    };
+
+    match (response_match, request_match) {
+        (Some(response), Some(request)) => {
+            let response_score = pricing_match_cost_delta(&response.pricing, app_key, recent);
+            let request_score = pricing_match_cost_delta(&request.pricing, app_key, recent);
+            if request_score < response_score {
+                Ok(Some(request))
+            } else {
+                Ok(Some(response))
+            }
+        }
+        (Some(response), None) => Ok(Some(response)),
+        (None, Some(request)) => Ok(Some(request)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn pricing_match_cost_delta(
+    pricing: &crate::proxy::usage::calculator::ModelPricing,
+    app_key: &str,
+    recent: &RecentPricingUsageRow,
+) -> f64 {
+    let expected = expected_pricing_cost_usd(pricing, app_key, recent);
+    (expected - recent.total_cost_usd).abs()
+}
+
+fn expected_pricing_cost_usd(
+    pricing: &crate::proxy::usage::calculator::ModelPricing,
+    app_key: &str,
+    recent: &RecentPricingUsageRow,
+) -> f64 {
+    let million = Decimal::from(1_000_000u32);
+    let input_includes_cache_read = matches!(app_key, "codex" | "gemini");
+    let billable_input_tokens = if input_includes_cache_read {
+        recent.input_tokens.saturating_sub(recent.cache_read_tokens)
+    } else {
+        recent.input_tokens
+    };
+    let multiplier = recent
+        .cost_multiplier
+        .trim()
+        .parse::<Decimal>()
+        .unwrap_or(Decimal::ONE);
+    let total = ((Decimal::from(billable_input_tokens) * pricing.input_cost_per_million)
+        + (Decimal::from(recent.output_tokens) * pricing.output_cost_per_million)
+        + (Decimal::from(recent.cache_read_tokens) * pricing.cache_read_cost_per_million)
+        + (Decimal::from(recent.cache_creation_tokens) * pricing.cache_creation_cost_per_million))
+        / million
+        * multiplier;
+
+    total.to_f64().unwrap_or(f64::INFINITY)
+}
+
+fn unmatched_pricing_model_key(response_model: &str, request_model: Option<&str>) -> String {
+    let response_model = response_model.trim();
+    if !response_model.is_empty() && !matches!(response_model, "unknown" | "null" | "none") {
+        return response_model.to_string();
+    }
+
+    request_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(response_model)
+        .to_string()
+}
+
+fn usage_range_start(range: UsageRangePreset) -> i64 {
+    let today = Local::now().date_naive();
+    let start_date = today
+        .checked_sub_days(Days::new(range.days().saturating_sub(1)))
+        .unwrap_or(today);
+    local_midnight_timestamp(start_date)
+}
+
+fn local_midnight_timestamp(date: NaiveDate) -> i64 {
+    let Some(naive) = date.and_hms_opt(0, 0, 0) else {
+        return 0;
+    };
+    Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .map(|datetime| datetime.timestamp())
+        .unwrap_or(0)
+}
+
+fn load_usage_summary(
+    conn: &rusqlite::Connection,
+    app_key: &str,
+    start: i64,
+    end: i64,
+) -> Result<UsageSummarySnapshot, AppError> {
+    let total_tokens_expr = usage_real_total_tokens_sql(Some("l"));
+    let fresh_input_expr = crate::services::sql_helpers::fresh_input_sql("l");
+    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let sql = format!(
+        "SELECT
+            COUNT(*),
+            COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM({total_tokens_expr}), 0),
+            COALESCE(SUM({fresh_input_expr}), 0),
+            COALESCE(SUM(l.output_tokens), 0),
+            COALESCE(SUM(l.cache_read_tokens), 0),
+            COALESCE(SUM(l.cache_creation_tokens), 0),
+            COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0),
+            AVG(CASE WHEN l.latency_ms > 0 THEN l.latency_ms END),
+            AVG(l.first_token_ms)
+         FROM proxy_request_logs l
+         WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
+           AND {effective_filter}"
+    );
+    conn.query_row(&sql, params![app_key, start, end], |row| {
+        Ok(UsageSummarySnapshot {
+            total_requests: non_negative_u64(row.get::<_, i64>(0)?),
+            success_count: non_negative_u64(row.get::<_, i64>(1)?),
+            total_tokens: non_negative_u64(row.get::<_, i64>(2)?),
+            input_tokens: non_negative_u64(row.get::<_, i64>(3)?),
+            output_tokens: non_negative_u64(row.get::<_, i64>(4)?),
+            cache_read_tokens: non_negative_u64(row.get::<_, i64>(5)?),
+            cache_creation_tokens: non_negative_u64(row.get::<_, i64>(6)?),
+            total_cost_usd: row.get::<_, f64>(7)?,
+            avg_latency_ms: optional_average_u64(row.get::<_, Option<f64>>(8)?),
+            avg_first_token_ms: optional_average_u64(row.get::<_, Option<f64>>(9)?),
+        })
+    })
+    .map_err(AppError::from)
+}
+
+fn load_usage_trend(
+    conn: &rusqlite::Connection,
+    app_key: &str,
+    range: UsageRangePreset,
+    start: i64,
+    end: i64,
+) -> Result<Vec<UsageTrendBucket>, AppError> {
+    let mut buckets = empty_usage_trend(range);
+    let positions = buckets
+        .iter()
+        .enumerate()
+        .map(|(idx, bucket)| (bucket.key.clone(), idx))
+        .collect::<HashMap<_, _>>();
+
+    let bucket_expr = match range {
+        UsageRangePreset::Today => "strftime('%H', l.created_at, 'unixepoch', 'localtime')",
+        UsageRangePreset::SevenDays | UsageRangePreset::ThirtyDays => {
+            "date(l.created_at, 'unixepoch', 'localtime')"
+        }
+    };
+    let total_tokens_expr = usage_stats_total_tokens_sql(Some("l"));
+    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let sql = format!(
+        "SELECT
+            {bucket_expr} AS bucket,
+            COUNT(*),
+            COALESCE(SUM({total_tokens_expr}), 0),
+            COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0),
+            COALESCE(SUM(CASE WHEN l.status_code < 200 OR l.status_code >= 300 THEN 1 ELSE 0 END), 0)
+         FROM proxy_request_logs l
+         WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
+           AND {effective_filter}
+         GROUP BY bucket
+         ORDER BY bucket"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![app_key, start, end], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, f64>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+
+    for row in rows {
+        let (key, request_count, total_tokens, total_cost_usd, error_count) = row?;
+        let Some(idx) = positions.get(&key).copied() else {
+            continue;
+        };
+        buckets[idx].request_count = non_negative_u64(request_count);
+        buckets[idx].total_tokens = non_negative_u64(total_tokens);
+        buckets[idx].total_cost_usd = total_cost_usd.max(0.0);
+        buckets[idx].error_count = non_negative_u64(error_count);
+    }
+
+    Ok(buckets)
+}
+
+fn empty_usage_trend(range: UsageRangePreset) -> Vec<UsageTrendBucket> {
+    match range {
+        UsageRangePreset::Today => (0..24)
+            .map(|hour| UsageTrendBucket {
+                key: format!("{hour:02}"),
+                label: format!("{hour:02}"),
+                ..UsageTrendBucket::default()
+            })
+            .collect(),
+        UsageRangePreset::SevenDays | UsageRangePreset::ThirtyDays => {
+            let today = Local::now().date_naive();
+            let start = today
+                .checked_sub_days(Days::new(range.days().saturating_sub(1)))
+                .unwrap_or(today);
+            (0..range.days())
+                .map(|offset| {
+                    let date = start.checked_add_days(Days::new(offset)).unwrap_or(start);
+                    UsageTrendBucket {
+                        key: date.format("%Y-%m-%d").to_string(),
+                        label: date.format("%m/%d").to_string(),
+                        ..UsageTrendBucket::default()
+                    }
+                })
+                .collect()
+        }
+    }
+}
+
+fn load_usage_top_providers(
+    conn: &rusqlite::Connection,
+    app_key: &str,
+    start: i64,
+    end: i64,
+) -> Result<Vec<UsageProviderStatsRow>, AppError> {
+    let total_tokens_expr = usage_stats_total_tokens_sql(Some("l"));
+    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let provider_name_expr = usage_provider_name_sql("l", "p");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT
+            l.provider_id,
+            {provider_name_expr},
+            COUNT(*),
+            COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM({total_tokens_expr}), 0),
+            COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0),
+            AVG(CASE WHEN l.latency_ms > 0 THEN l.latency_ms END)
+         FROM proxy_request_logs l
+         LEFT JOIN providers p ON p.id = l.provider_id AND p.app_type = l.app_type
+         WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
+           AND {effective_filter}
+         GROUP BY l.provider_id, p.name
+         ORDER BY COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0) DESC, COUNT(*) DESC
+         LIMIT 8",
+    ))?;
+
+    let rows = stmt.query_map(params![app_key, start, end], |row| {
+        Ok(UsageProviderStatsRow {
+            provider_id: row.get(0)?,
+            provider_name: normalize_optional_string(row.get::<_, Option<String>>(1)?),
+            request_count: non_negative_u64(row.get::<_, i64>(2)?),
+            success_count: non_negative_u64(row.get::<_, i64>(3)?),
+            total_tokens: non_negative_u64(row.get::<_, i64>(4)?),
+            total_cost_usd: row.get::<_, f64>(5)?.max(0.0),
+            avg_latency_ms: optional_average_u64(row.get::<_, Option<f64>>(6)?),
+        })
+    })?;
+
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+fn load_usage_top_models(
+    conn: &rusqlite::Connection,
+    app_key: &str,
+    start: i64,
+    end: i64,
+) -> Result<Vec<UsageModelStatsRow>, AppError> {
+    let total_tokens_expr = usage_stats_total_tokens_sql(Some("l"));
+    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT
+            COALESCE(NULLIF(TRIM(l.model), ''), 'unknown') AS model_name,
+            COUNT(*),
+            COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM({total_tokens_expr}), 0),
+            COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0),
+            AVG(CASE WHEN l.latency_ms > 0 THEN l.latency_ms END)
+         FROM proxy_request_logs l
+         WHERE l.app_type = ?1 AND l.created_at >= ?2 AND l.created_at <= ?3
+           AND {effective_filter}
+         GROUP BY model_name
+         ORDER BY COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0.0) DESC, COUNT(*) DESC
+         LIMIT 8",
+    ))?;
+
+    let rows = stmt.query_map(params![app_key, start, end], |row| {
+        Ok(UsageModelStatsRow {
+            model: row.get(0)?,
+            request_count: non_negative_u64(row.get::<_, i64>(1)?),
+            success_count: non_negative_u64(row.get::<_, i64>(2)?),
+            total_tokens: non_negative_u64(row.get::<_, i64>(3)?),
+            total_cost_usd: row.get::<_, f64>(4)?.max(0.0),
+            avg_latency_ms: optional_average_u64(row.get::<_, Option<f64>>(5)?),
+        })
+    })?;
+
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+fn load_usage_recent_logs(
+    conn: &rusqlite::Connection,
+    app_key: &str,
+    limit: u16,
+) -> Result<Vec<UsageLogRow>, AppError> {
+    let effective_filter = crate::services::usage_stats::effective_usage_log_filter("l");
+    let provider_name_expr = usage_provider_name_sql("l", "p");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT
+            l.request_id,
+            l.created_at,
+            l.app_type,
+            l.provider_id,
+            {provider_name_expr},
+            l.model,
+            l.request_model,
+            l.status_code,
+            l.input_tokens,
+            l.output_tokens,
+            l.cache_read_tokens,
+            l.cache_creation_tokens,
+            CAST(l.total_cost_usd AS REAL),
+            l.latency_ms,
+            l.first_token_ms,
+            l.duration_ms,
+            l.session_id,
+            l.provider_type,
+            l.is_streaming,
+            l.error_message,
+            l.data_source
+         FROM proxy_request_logs l
+         LEFT JOIN providers p ON p.id = l.provider_id AND p.app_type = l.app_type
+         WHERE l.app_type = ?1
+           AND {effective_filter}
+         ORDER BY l.created_at DESC, l.request_id DESC
+         LIMIT ?2",
+    ))?;
+
+    let rows = stmt.query_map(params![app_key, limit], |row| {
+        Ok(UsageLogRow {
+            request_id: row.get(0)?,
+            created_at: row.get(1)?,
+            app_type: row.get(2)?,
+            provider_id: row.get(3)?,
+            provider_name: normalize_optional_string(row.get::<_, Option<String>>(4)?),
+            model: row.get(5)?,
+            request_model: normalize_optional_string(row.get::<_, Option<String>>(6)?),
+            status_code: clamp_u16(row.get::<_, i64>(7)?),
+            input_tokens: non_negative_u64(row.get::<_, i64>(8)?),
+            output_tokens: non_negative_u64(row.get::<_, i64>(9)?),
+            cache_read_tokens: non_negative_u64(row.get::<_, i64>(10)?),
+            cache_creation_tokens: non_negative_u64(row.get::<_, i64>(11)?),
+            total_cost_usd: row.get::<_, f64>(12)?.max(0.0),
+            latency_ms: non_negative_u64(row.get::<_, i64>(13)?),
+            first_token_ms: row.get::<_, Option<i64>>(14)?.map(non_negative_u64),
+            duration_ms: row.get::<_, Option<i64>>(15)?.map(non_negative_u64),
+            session_id: normalize_optional_string(row.get::<_, Option<String>>(16)?),
+            provider_type: normalize_optional_string(row.get::<_, Option<String>>(17)?),
+            is_streaming: row.get::<_, i64>(18)? != 0,
+            error_message: normalize_optional_string(row.get::<_, Option<String>>(19)?),
+            data_source: normalize_optional_string(row.get::<_, Option<String>>(20)?),
+        })
+    })?;
+
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+fn effective_total_tokens(
+    app_type: &str,
+    _data_source: Option<&str>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+) -> u64 {
+    let input_includes_cache_read = matches!(app_type, "codex" | "gemini");
+    let billable_input = if input_includes_cache_read {
+        input_tokens.saturating_sub(cache_read_tokens)
+    } else {
+        input_tokens
+    };
+
+    billable_input
+        .saturating_add(output_tokens)
+        .saturating_add(cache_read_tokens)
+        .saturating_add(cache_creation_tokens)
+}
+
+fn usage_stats_total_tokens_sql(alias: Option<&str>) -> String {
+    let column = |name: &str| match alias {
+        Some(alias) => format!("{alias}.{name}"),
+        None => name.to_string(),
+    };
+    let fresh_input = crate::services::sql_helpers::fresh_input_sql(alias.unwrap_or(""));
+    let output = column("output_tokens");
+
+    format!("{fresh_input} + {output}")
+}
+
+fn usage_real_total_tokens_sql(alias: Option<&str>) -> String {
+    let column = |name: &str| match alias {
+        Some(alias) => format!("{alias}.{name}"),
+        None => name.to_string(),
+    };
+    let stats_total = usage_stats_total_tokens_sql(alias);
+    let cache_read = column("cache_read_tokens");
+    let cache_creation = column("cache_creation_tokens");
+
+    format!("{stats_total} + {cache_read} + {cache_creation}")
+}
+
+fn usage_provider_name_sql(log_alias: &str, provider_alias: &str) -> String {
+    format!(
+        "COALESCE(NULLIF(TRIM({provider_alias}.name), ''), CASE {log_alias}.provider_id \
+         WHEN '_session' THEN 'Claude (Session)' \
+         WHEN '_codex_session' THEN 'Codex (Session)' \
+         WHEN '_gemini_session' THEN 'Gemini (Session)' \
+         WHEN '_opencode_session' THEN 'OpenCode (Session)' \
+         ELSE {log_alias}.provider_id END)"
+    )
+}
+
+fn non_negative_u64(value: i64) -> u64 {
+    value.max(0) as u64
+}
+
+fn clamp_u16(value: i64) -> u16 {
+    value.clamp(0, u16::MAX as i64) as u16
+}
+
+fn optional_average_u64(value: Option<f64>) -> Option<u64> {
+    value
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.round() as u64)
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 pub(crate) fn load_proxy_config() -> Result<Option<crate::proxy::ProxyConfig>, AppError> {
     let state = load_state()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1129,6 +2102,253 @@ mod tests {
                 updated_at,
             },
         }
+    }
+
+    fn insert_pricing_usage_log(
+        conn: &rusqlite::Connection,
+        request_id: &str,
+        provider_id: &str,
+        model: &str,
+        request_model: Option<&str>,
+        created_at: i64,
+    ) -> Result<(), AppError> {
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model, request_model,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                total_cost_usd, latency_ms, status_code, created_at
+             ) VALUES (?1, ?2, 'claude', ?3, ?4, 1000, 2000, 100, 50, '0.1234', 25, 200, ?5)",
+            params![request_id, provider_id, model, request_model, created_at],
+        )?;
+        Ok(())
+    }
+
+    fn insert_usage_log(
+        conn: &rusqlite::Connection,
+        request_id: &str,
+        app_type: &str,
+        provider_id: &str,
+        model: &str,
+        created_at: i64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+    ) -> Result<(), AppError> {
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                total_cost_usd, latency_ms, status_code, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '0.2500', 40, 200, ?9)",
+            params![
+                request_id,
+                provider_id,
+                app_type,
+                model,
+                input_tokens as i64,
+                output_tokens as i64,
+                cache_read_tokens as i64,
+                cache_creation_tokens as i64,
+                created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn pricing_row<'a>(snapshot: &'a ModelPricingSnapshot, model_id: &str) -> &'a ModelPricingRow {
+        snapshot
+            .rows
+            .iter()
+            .find(|row| row.model_id == model_id)
+            .unwrap_or_else(|| panic!("pricing row {model_id} should exist"))
+    }
+
+    #[test]
+    fn pricing_snapshot_matches_normalized_catalog_model() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let now = 1_800_000_000;
+        let start = now - 30 * 24 * 60 * 60;
+        let conn = db.conn.lock().expect("lock memory db");
+
+        insert_pricing_usage_log(
+            &conn,
+            "normalized-1",
+            "provider-1",
+            "openai/gpt-5.4-2026-03-05-high",
+            None,
+            now - 60,
+        )?;
+
+        let snapshot = load_model_pricing_snapshot_from_conn(&conn, "claude", start, now)?;
+        let row = pricing_row(&snapshot, "gpt-5.4");
+
+        assert_eq!(row.recent_request_count, 1);
+        assert_eq!(row.recent_total_tokens, 3150);
+        assert_eq!(row.recent_total_cost_usd, 0.1234);
+        assert_eq!(row.last_used_at, Some(now - 60));
+        assert_eq!(snapshot.recent_unknown_models, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn pricing_snapshot_counts_distinct_unknown_recent_models() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let now = 1_800_000_000;
+        let start = now - 30 * 24 * 60 * 60;
+        let conn = db.conn.lock().expect("lock memory db");
+
+        insert_pricing_usage_log(
+            &conn,
+            "unknown-1",
+            "provider-1",
+            "vendor/unknown-new-model",
+            None,
+            now - 90,
+        )?;
+        insert_pricing_usage_log(
+            &conn,
+            "unknown-2",
+            "provider-1",
+            "vendor/unknown-new-model",
+            None,
+            now - 30,
+        )?;
+
+        let snapshot = load_model_pricing_snapshot_from_conn(&conn, "claude", start, now)?;
+
+        assert_eq!(snapshot.recent_unknown_models, 1);
+        assert_eq!(snapshot.recent_unmatched_total_tokens, 6300);
+        assert!((snapshot.recent_unmatched_total_cost_usd - 0.2468).abs() < f64::EPSILON);
+        assert!((snapshot.recent_total_cost_usd() - 0.2468).abs() < f64::EPSILON);
+        assert_eq!(pricing_row(&snapshot, "gpt-5.4").recent_request_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn pricing_snapshot_falls_back_to_request_model_when_response_unknown() -> Result<(), AppError>
+    {
+        let db = crate::Database::memory()?;
+        let now = 1_800_000_000;
+        let start = now - 30 * 24 * 60 * 60;
+        let conn = db.conn.lock().expect("lock memory db");
+
+        insert_pricing_usage_log(
+            &conn,
+            "request-source-1",
+            "request-provider",
+            "response-only-model",
+            Some("openai/gpt-5.4-2026-03-05-high"),
+            now - 10,
+        )?;
+
+        let snapshot = load_model_pricing_snapshot_from_conn(&conn, "claude", start, now)?;
+        let row = pricing_row(&snapshot, "gpt-5.4");
+
+        assert_eq!(row.recent_request_count, 1);
+        assert_eq!(row.recent_total_tokens, 3150);
+        assert_eq!(snapshot.recent_unknown_models, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn pricing_snapshot_prefers_logged_response_model_over_current_provider_config(
+    ) -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let mut provider = Provider::with_id(
+            "request-provider".to_string(),
+            "Request Provider".to_string(),
+            json!({}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            pricing_model_source: Some("request".to_string()),
+            ..ProviderMeta::default()
+        });
+        db.save_provider("claude", &provider)?;
+
+        let now = 1_800_000_000;
+        let start = now - 30 * 24 * 60 * 60;
+        let conn = db.conn.lock().expect("lock memory db");
+
+        insert_pricing_usage_log(
+            &conn,
+            "response-source-1",
+            "request-provider",
+            "gpt-5.4",
+            Some("gpt-5.2"),
+            now - 10,
+        )?;
+
+        let snapshot = load_model_pricing_snapshot_from_conn(&conn, "claude", start, now)?;
+
+        assert_eq!(pricing_row(&snapshot, "gpt-5.4").recent_request_count, 1);
+        assert_eq!(pricing_row(&snapshot, "gpt-5.2").recent_request_count, 0);
+        assert_eq!(snapshot.recent_unknown_models, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn usage_snapshot_matches_backend_cache_and_total_token_semantics() -> Result<(), AppError> {
+        let db = crate::Database::memory()?;
+        let now = Local::now().timestamp();
+        let start = now - 60 * 60;
+        let conn = db.conn.lock().expect("lock memory db");
+
+        insert_usage_log(
+            &conn,
+            "codex-cache-inclusive",
+            "codex",
+            "_codex_session",
+            "gpt-5.4",
+            now - 60,
+            1_000,
+            200,
+            600,
+            50,
+        )?;
+
+        let summary = load_usage_summary(&conn, "codex", start, now)?;
+        assert_eq!(summary.input_tokens, 400);
+        assert_eq!(summary.output_tokens, 200);
+        assert_eq!(summary.cache_read_tokens, 600);
+        assert_eq!(summary.cache_creation_tokens, 50);
+        assert_eq!(summary.total_tokens(), 1_250);
+        let expected_hit_rate = 600.0 * 100.0 / 1_050.0;
+        assert!(
+            (summary.cache_hit_rate().expect("cache hit rate") - expected_hit_rate).abs() < 1e-9
+        );
+
+        let trends = load_usage_trend(&conn, "codex", UsageRangePreset::Today, start, now)?;
+        let active_bucket = trends
+            .iter()
+            .find(|bucket| bucket.request_count == 1)
+            .expect("active trend bucket");
+        assert_eq!(active_bucket.total_tokens, 600);
+
+        let providers = load_usage_top_providers(&conn, "codex", start, now)?;
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].provider_id, "_codex_session");
+        assert_eq!(
+            providers[0].provider_name.as_deref(),
+            Some("Codex (Session)")
+        );
+        assert_eq!(providers[0].total_tokens, 600);
+
+        let models = load_usage_top_models(&conn, "codex", start, now)?;
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model, "gpt-5.4");
+        assert_eq!(models[0].total_tokens, 600);
+
+        let recent_logs = load_usage_recent_logs(&conn, "codex", 10)?;
+        assert_eq!(recent_logs.len(), 1);
+        assert_eq!(
+            recent_logs[0].provider_name.as_deref(),
+            Some("Codex (Session)")
+        );
+        assert_eq!(recent_logs[0].total_tokens(), 1_250);
+
+        Ok(())
     }
 
     #[test]

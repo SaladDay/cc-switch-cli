@@ -738,6 +738,11 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
         route,
         Route::Providers
             | Route::ProviderDetail { .. }
+            | Route::Usage
+            | Route::UsageLogs
+            | Route::UsageLogDetail { .. }
+            | Route::Pricing
+            | Route::PricingDetail { .. }
             | Route::Sessions
             | Route::Mcp
             | Route::Prompts
@@ -1043,6 +1048,23 @@ pub(crate) fn visible_mcp<'a>(
             None => true,
             Some(q) => {
                 row.server.name.to_lowercase().contains(q) || row.id.to_lowercase().contains(q)
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn visible_pricing_rows<'a>(
+    filter: &FilterState,
+    data: &'a UiData,
+) -> Vec<&'a super::data::ModelPricingRow> {
+    let query = filter.query_lower();
+    data.pricing
+        .rows
+        .iter()
+        .filter(|row| match &query {
+            None => true,
+            Some(q) => {
+                filter_text_matches(&row.model_id, q) || filter_text_matches(&row.display_name, q)
             }
         })
         .collect()
