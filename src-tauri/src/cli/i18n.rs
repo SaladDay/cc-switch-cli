@@ -1226,6 +1226,30 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_provider_proxy() -> &'static str {
+        if is_chinese() {
+            "代理"
+        } else {
+            "Proxy"
+        }
+    }
+
+    pub fn tui_provider_needs_proxy_label() -> &'static str {
+        if is_chinese() {
+            "需要代理"
+        } else {
+            "Needs Proxy"
+        }
+    }
+
+    pub fn tui_provider_no_proxy_support_label() -> &'static str {
+        if is_chinese() {
+            "不支持代理"
+        } else {
+            "No Proxy Support"
+        }
+    }
+
     pub fn tui_quota_loading() -> &'static str {
         if is_chinese() {
             "查询中…"
