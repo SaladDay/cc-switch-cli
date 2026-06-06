@@ -7,9 +7,11 @@
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Claude Code、Codex、Gemini、OpenCode、Hermes 与 OpenClaw 的命令行管理工具**
+**支持 TUI + CLI 双模式的 Claude Code、Codex、Gemini、OpenCode、Hermes 与 OpenClaw 管理工具**
 
-统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes 与 OpenClaw 的供应商配置，并按应用提供 MCP 服务器、Skills 扩展、提示词、本地代理路由和环境检查等能力。
+日常切换、账号和会话管理可使用交互式 TUI；脚本化、自动化和终端工作流可使用 CLI。
+
+统一管理供应商配置、MCP 服务器、Skills 扩展、提示词、本地代理路由、用量统计和环境检查等能力。
 
 [English](README.md) | 中文
 
@@ -103,11 +105,11 @@
 
 ## 🚀 快速开始
 
-**交互模式（推荐）**
+**TUI 模式（推荐）**
 ```bash
 cc-switch
 ```
-🤩 按照屏幕菜单探索功能。
+使用全屏界面切换供应商、管理账号、查看会话并检查代理状态。
 
 **命令行模式**
 ```bash
@@ -117,6 +119,9 @@ cc-switch use <id>                   # 切换供应商（快捷命令）
 cc-switch provider export <id>       # 导出 Claude 供应商为独立 settings 文件
 cc-switch provider stream-check <id> # 检查供应商流式健康
 cc-switch start <claude|codex> <id> --dry-run # 预览启动配置
+cc-switch auth list                  # 查看托管的 ChatGPT/Codex OAuth 账号
+cc-switch sessions list --all        # 查看历史会话
+cc-switch sessions sync-usage --all  # 导入本地会话 token / cost 用量
 cc-switch config webdav show         # 查看 WebDAV 同步设置
 cc-switch env tools                  # 检查本地 CLI 工具
 cc-switch mcp sync                   # 同步 MCP 服务器
@@ -279,6 +284,20 @@ cc-switch provider fetch-models <id> # 拉取远端模型列表
 cc-switch provider export <id> --output ~/.claude/settings-demo.json # 自定义 settings 文件路径
 ```
 
+### 🔐 托管账号
+
+本地管理 ChatGPT/Codex OAuth 账号，并在供应商配置中复用；也可以通过本地代理将 Codex OAuth 账号作为 Claude Code 供应商使用。
+
+**功能：** 设备码登录、账号列表、默认账号选择、账号移除，以及无需在每个供应商里复制长期 token 的账号绑定。
+
+```bash
+cc-switch auth status                # 查看托管账号状态
+cc-switch auth login                 # 使用 ChatGPT/Codex OAuth 登录
+cc-switch auth list                  # 列出已登录账号
+cc-switch auth default <account-id>  # 设置默认账号
+cc-switch auth remove <account-id>   # 移除账号
+```
+
 ### 🛠️ MCP 服务器管理
 
 跨 Claude、Codex、Gemini、OpenCode 与 Hermes 管理模型上下文协议服务器。
@@ -340,6 +359,20 @@ cc-switch skills repos enable <repo> # 启用仓库但保留当前分支
 cc-switch skills repos disable <repo> # 禁用仓库但保留当前分支
 ```
 
+### 🕘 历史会话与用量统计
+
+查看历史会话，一键 resume，删除旧会话，并将本地会话日志导入 token / cost 统计，方便管理用量。
+
+**功能：** 跨应用扫描会话、消息预览、一键恢复、删除确认、JSON 输出，以及 Claude、Codex、Gemini、OpenCode 的用量同步。
+
+```bash
+cc-switch sessions list --all        # 列出支持应用的历史会话
+cc-switch sessions show <id>         # 查看会话信息和消息
+cc-switch sessions resume <id>       # 恢复会话
+cc-switch sessions delete <id>       # 删除会话
+cc-switch sessions sync-usage --all  # 同步本地日志到用量统计
+```
+
 ### ⚙️ 配置管理
 
 管理配置文件的备份、导入和导出。
@@ -382,11 +415,13 @@ cc-switch config webdav migrate-v1-to-v2
 cc-switch config reset               # 重置为默认配置
 ```
 
-### 🌉 代理管理
+### 🌉 代理管理与模型接入
 
 查看并控制由守护进程管理的按应用代理路由。
 
-**功能：** 每个应用可独立启用/禁用代理、每个应用可配置监听端口、由 daemon 管理 worker、当前路由检查、首页遥测，以及用于调试的前台运行模式。
+**功能：** 每个应用可独立启用/禁用代理、每个应用可配置监听端口、由 daemon 管理 worker、当前路由检查、首页遥测、token 统计，以及用于调试的前台运行模式。
+
+本地代理可将 Claude Code、Codex、Gemini 路由到 CC-Switch，适配 OpenAI Responses API 与 Chat Completions 供应商，并在目标应用支持的路径下接入 DeepSeek、Kimi、Qwen、OpenRouter、xAI、Groq、Mistral 等主流 OpenAI-compatible 模型。
 
 ```bash
 cc-switch proxy show                              # 显示代理配置、路由和 daemon worker 状态

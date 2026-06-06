@@ -9,9 +9,11 @@
 
 <a href="https://trendshift.io/repositories/22544" target="_blank"><img src="https://trendshift.io/api/badge/repositories/22544" alt="SaladDay%2Fcc-switch-cli | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 
-**Command-Line Management Tool for Claude Code, Codex, Gemini, OpenCode, Hermes & OpenClaw**
+**TUI + CLI dual-mode manager for Claude Code, Codex, Gemini, OpenCode, Hermes & OpenClaw**
 
-Unified management for Claude Code, Codex, Gemini, OpenCode, Hermes, and OpenClaw provider configurations, plus app-specific support for MCP servers, skills, prompts, local proxy routes, and environment checks.
+Use the interactive TUI for daily switching, account, and session work, or the CLI for scripts and repeatable terminal workflows.
+
+Unified management for provider configurations, MCP servers, skills, prompts, local proxy routes, usage statistics, and environment checks across supported AI coding assistants.
 
 English | [中文](README_ZH.md)
 
@@ -103,11 +105,11 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 ## 🚀 Quick Start
 
-**Interactive Mode (Recommended)**
+**TUI Mode (Recommended)**
 ```bash
 cc-switch
 ```
-🤩 Follow on-screen menus to explore features.
+Use the full-screen interface to switch providers, manage accounts, review sessions, and inspect proxy status.
 
 **Command-Line Mode**
 ```bash
@@ -117,6 +119,9 @@ cc-switch use <id>                   # Switch provider (shortcut)
 cc-switch provider export <id>       # Export a Claude provider to a standalone settings file
 cc-switch provider stream-check <id> # Check provider stream health
 cc-switch start <claude|codex> <id> --dry-run # Preview launch
+cc-switch auth list                  # List managed ChatGPT/Codex OAuth accounts
+cc-switch sessions list --all        # Review saved assistant sessions
+cc-switch sessions sync-usage --all  # Import local session token/cost usage
 cc-switch config webdav show         # Inspect WebDAV sync settings
 cc-switch env tools                  # Check local CLI tools
 cc-switch mcp sync                   # Sync MCP servers
@@ -275,6 +280,20 @@ cc-switch provider fetch-models <id> # Fetch remote model list
 cc-switch provider export <id> --output ~/.claude/settings-demo.json # Custom settings file path
 ```
 
+### 🔐 Managed Accounts
+
+Manage ChatGPT/Codex OAuth accounts locally and reuse them across provider profiles, including using a Codex OAuth account as a Claude Code provider through the local proxy.
+
+**Features:** device-flow login, account listing, default account selection, account removal, and provider binding without copying long-lived tokens into each provider.
+
+```bash
+cc-switch auth status                # Show managed account status
+cc-switch auth login                 # Sign in with ChatGPT/Codex OAuth
+cc-switch auth list                  # List signed-in accounts
+cc-switch auth default <account-id>  # Set the default account
+cc-switch auth remove <account-id>   # Remove an account
+```
+
 ### 🛠️ MCP Server Management
 
 Manage Model Context Protocol servers across Claude, Codex, Gemini, OpenCode, and Hermes.
@@ -336,6 +355,20 @@ cc-switch skills repos enable <repo> # Enable repo without changing branch
 cc-switch skills repos disable <repo> # Disable repo without changing branch
 ```
 
+### 🕘 Session History & Usage Statistics
+
+Review saved assistant sessions, resume a session with one command, delete old records, and import local session logs into token/cost statistics.
+
+**Features:** cross-app session scanning, message preview, one-command resume, safe delete confirmation, JSON output, and usage sync for Claude, Codex, Gemini, and OpenCode.
+
+```bash
+cc-switch sessions list --all        # List saved sessions across supported apps
+cc-switch sessions show <id>         # Show session metadata and messages
+cc-switch sessions resume <id>       # Resume a saved session
+cc-switch sessions delete <id>       # Delete a saved session
+cc-switch sessions sync-usage --all  # Sync local logs into usage statistics
+```
+
 ### ⚙️ Configuration Management
 
 Manage configuration backups, imports, and exports.
@@ -378,11 +411,13 @@ cc-switch config webdav migrate-v1-to-v2
 cc-switch config reset               # Reset to default configuration
 ```
 
-### 🌉 Proxy Management
+### 🌉 Proxy Management & Model Relay
 
 Inspect and control daemon-managed per-app proxy routes for supported apps.
 
-**Features:** independent enable/disable per app, per-app listen ports, daemon-managed workers, current route inspection, dashboard telemetry, and foreground serve mode for debugging.
+**Features:** independent enable/disable per app, per-app listen ports, daemon-managed workers, current route inspection, dashboard telemetry, token accounting, and foreground serve mode for debugging.
+
+The local proxy can route Claude Code, Codex, and Gemini through CC-Switch, adapt OpenAI Responses API and Chat Completions providers, and connect mainstream OpenAI-compatible models such as DeepSeek, Kimi, Qwen, OpenRouter, xAI, Groq, and Mistral where the target app supports that route.
 
 ```bash
 cc-switch proxy show                              # Show proxy configuration, routes, and daemon worker status
