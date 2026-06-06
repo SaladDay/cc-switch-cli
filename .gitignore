@@ -11,6 +11,7 @@ release/
 .npmrc
 AGENT.md
 AGENTS.md
+!/AGENTS.md
 plan.md
 GEMINI.md
 *.claude
