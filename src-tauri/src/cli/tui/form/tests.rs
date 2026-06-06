@@ -27,6 +27,10 @@ fn dds_template_index(app_type: AppType) -> usize {
     template_index_by_label(app_type, "* DDS")
 }
 
+fn deepseek_template_index(app_type: AppType) -> usize {
+    template_index_by_label(app_type, "DeepSeek")
+}
+
 fn normalize_template_provider_json(mut value: serde_json::Value) -> serde_json::Value {
     if let Some(obj) = value.as_object_mut() {
         obj.remove("inFailoverQueue");
@@ -104,6 +108,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "* AICodeMirror",
             "* Cubence",
             "* DDS",
+            "DeepSeek",
         ]
     );
 
@@ -172,6 +177,7 @@ fn cli_provider_templates_match_tui_serializer_output() {
             ProviderAddTemplate::Aicodemirror,
             "* AICodeMirror",
         ),
+        (AppType::Codex, ProviderAddTemplate::Deepseek, "DeepSeek"),
         (AppType::Gemini, ProviderAddTemplate::Cubence, "* Cubence"),
         (AppType::Claude, ProviderAddTemplate::Dds, "* DDS"),
         (
@@ -190,6 +196,84 @@ fn cli_provider_templates_match_tui_serializer_output() {
     ] {
         assert_cli_template_matches_tui_serializer(app_type, template, label);
     }
+}
+
+#[test]
+fn provider_add_form_codex_deepseek_template_matches_upstream_preset_values() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    let existing_ids = Vec::<String>::new();
+
+    form.apply_template(deepseek_template_index(AppType::Codex), &existing_ids);
+
+    assert_eq!(form.id.value, "deepseek");
+    assert_eq!(form.name.value, "DeepSeek");
+    assert_eq!(form.website_url.value, "https://platform.deepseek.com");
+    assert_eq!(form.codex_base_url.value, "https://api.deepseek.com");
+    assert_eq!(form.codex_model.value, "deepseek-v4-flash");
+    assert_eq!(form.codex_wire_api, CodexWireApi::Responses);
+    assert!(form.codex_requires_openai_auth);
+
+    let labels = ProviderAddFormState::new(AppType::Codex).template_labels();
+    assert_eq!(
+        labels.last().copied(),
+        Some("DeepSeek"),
+        "DeepSeek should stay after all partner presets"
+    );
+
+    let fields = form.fields();
+    assert!(fields.contains(&ProviderAddField::CodexBaseUrl));
+    assert!(fields.contains(&ProviderAddField::CodexModel));
+    assert!(fields.contains(&ProviderAddField::CodexApiKey));
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["category"], "cn_official");
+    assert_eq!(provider["icon"], "deepseek");
+    assert_eq!(provider["iconColor"], "#1E88E5");
+    assert_eq!(provider["meta"]["apiFormat"], "openai_chat");
+    assert_eq!(
+        provider["meta"]["codexChatReasoning"],
+        json!({
+            "supportsThinking": true,
+            "supportsEffort": true,
+            "thinkingParam": "thinking",
+            "effortParam": "reasoning_effort",
+            "effortValueMode": "deepseek",
+            "outputFormat": "reasoning_content",
+        })
+    );
+
+    let cfg = provider["settingsConfig"]["config"]
+        .as_str()
+        .expect("settingsConfig.config should be TOML string");
+    assert!(cfg.contains("model_provider = \"custom\""));
+    assert!(cfg.contains("model = \"deepseek-v4-flash\""));
+    assert!(cfg.contains("disable_response_storage = true"));
+    assert!(cfg.contains("[model_providers.custom]"));
+    assert!(cfg.contains("name = \"deepseek\""));
+    assert!(cfg.contains("base_url = \"https://api.deepseek.com\""));
+    assert!(cfg.contains("wire_api = \"responses\""));
+    assert!(cfg.contains("requires_openai_auth = true"));
+    assert!(
+        !cfg.contains("https://api.deepseek.com/v1"),
+        "DeepSeek Codex preset should match upstream base URL without /v1"
+    );
+    assert_eq!(
+        provider["settingsConfig"]["modelCatalog"],
+        json!({
+            "models": [
+                {
+                    "model": "deepseek-v4-flash",
+                    "displayName": "DeepSeek V4 Flash",
+                    "contextWindow": 1000000,
+                },
+                {
+                    "model": "deepseek-v4-pro",
+                    "displayName": "DeepSeek V4 Pro",
+                    "contextWindow": 1000000,
+                },
+            ],
+        })
+    );
 }
 
 #[test]

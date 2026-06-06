@@ -3,9 +3,20 @@ use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
 use serde_json::json;
 
 use super::{
-    ClaudeApiFormat, CodexModelCatalogField, CodexWireApi, FormMode, GeminiAuthType,
-    ProviderAddFormState, HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
+    ClaudeApiFormat, CodexModelCatalogField, CodexModelCatalogRow, CodexWireApi, FormMode,
+    GeminiAuthType, ProviderAddFormState, HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
 };
+
+const DEEPSEEK_CODEX_CONFIG: &str = r#"model_provider = "custom"
+model = "deepseek-v4-flash"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.custom]
+name = "deepseek"
+base_url = "https://api.deepseek.com"
+wire_api = "responses"
+requires_openai_auth = true"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderTemplateId {
@@ -13,6 +24,7 @@ enum ProviderTemplateId {
     ClaudeOfficial,
     CodexOAuth,
     OpenAiOfficial,
+    DeepSeek,
     GoogleOAuth,
 }
 
@@ -167,6 +179,12 @@ static PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 2] = [
     },
 ];
 
+static PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS: [ProviderTemplateDef; 1] =
+    [ProviderTemplateDef {
+        id: ProviderTemplateId::DeepSeek,
+        label: "DeepSeek",
+    }];
+
 static PROVIDER_TEMPLATE_DEFS_GEMINI: [ProviderTemplateDef; 2] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Custom,
@@ -215,10 +233,24 @@ pub(super) fn provider_sponsor_presets(app_type: &AppType) -> &'static [SponsorP
     }
 }
 
+pub(super) fn provider_after_sponsor_template_defs(
+    app_type: &AppType,
+) -> &'static [ProviderTemplateDef] {
+    match app_type {
+        AppType::Codex => &PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS,
+        AppType::Claude
+        | AppType::Gemini
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw => &[],
+    }
+}
+
 impl ProviderAddFormState {
     pub fn template_count(&self) -> usize {
         provider_builtin_template_defs(&self.app_type).len()
             + provider_sponsor_presets(&self.app_type).len()
+            + provider_after_sponsor_template_defs(&self.app_type).len()
     }
 
     pub fn template_labels(&self) -> Vec<&'static str> {
@@ -231,27 +263,42 @@ impl ProviderAddFormState {
                 .iter()
                 .map(|preset| preset.chip_label),
         );
+        labels.extend(
+            provider_after_sponsor_template_defs(&self.app_type)
+                .iter()
+                .map(|def| def.label),
+        );
         labels
     }
 
     pub fn apply_template(&mut self, idx: usize, existing_ids: &[String]) {
         let builtin_defs = provider_builtin_template_defs(&self.app_type);
         let sponsor_presets = provider_sponsor_presets(&self.app_type);
-        let total_templates = builtin_defs.len() + sponsor_presets.len();
+        let after_sponsor_defs = provider_after_sponsor_template_defs(&self.app_type);
+        let total_templates = builtin_defs.len() + sponsor_presets.len() + after_sponsor_defs.len();
         let idx = idx.min(total_templates.saturating_sub(1));
         self.template_idx = idx;
         self.id_is_manual = false;
 
-        if idx >= builtin_defs.len() {
+        if idx >= builtin_defs.len() && idx < builtin_defs.len() + sponsor_presets.len() {
             let sponsor_idx = idx.saturating_sub(builtin_defs.len());
             if let Some(preset) = sponsor_presets.get(sponsor_idx) {
                 self.apply_sponsor_preset(preset);
             }
         } else {
-            let template_id = builtin_defs
-                .get(idx)
-                .map(|def| def.id)
-                .unwrap_or(ProviderTemplateId::Custom);
+            let template_id = if idx < builtin_defs.len() {
+                builtin_defs
+                    .get(idx)
+                    .map(|def| def.id)
+                    .unwrap_or(ProviderTemplateId::Custom)
+            } else {
+                let after_sponsor_idx =
+                    idx.saturating_sub(builtin_defs.len() + sponsor_presets.len());
+                after_sponsor_defs
+                    .get(after_sponsor_idx)
+                    .map(|def| def.id)
+                    .unwrap_or(ProviderTemplateId::Custom)
+            };
 
             if template_id == ProviderTemplateId::Custom {
                 if matches!(self.mode, FormMode::Add) {
@@ -387,6 +434,73 @@ impl ProviderAddFormState {
                     self.codex_requires_openai_auth = true;
                     self.codex_env_key.set("");
                     self.reset_codex_local_routing_state();
+                }
+                ProviderTemplateId::DeepSeek => {
+                    self.extra = json!({
+                        "category": "cn_official",
+                        "icon": "deepseek",
+                        "iconColor": "#1E88E5",
+                        "meta": {
+                            "apiFormat": "openai_chat",
+                            "codexChatReasoning": {
+                                "supportsThinking": true,
+                                "supportsEffort": true,
+                                "thinkingParam": "thinking",
+                                "effortParam": "reasoning_effort",
+                                "effortValueMode": "deepseek",
+                                "outputFormat": "reasoning_content",
+                            },
+                        },
+                        "settingsConfig": {
+                            "config": DEEPSEEK_CODEX_CONFIG,
+                            "modelCatalog": {
+                                "models": [
+                                    {
+                                        "model": "deepseek-v4-flash",
+                                        "displayName": "DeepSeek V4 Flash",
+                                        "contextWindow": 1000000,
+                                    },
+                                    {
+                                        "model": "deepseek-v4-pro",
+                                        "displayName": "DeepSeek V4 Pro",
+                                        "contextWindow": 1000000,
+                                    },
+                                ],
+                            },
+                        },
+                    });
+                    self.name.set("DeepSeek");
+                    self.website_url.set("https://platform.deepseek.com");
+                    self.codex_api_key.set("");
+                    self.codex_base_url.set("https://api.deepseek.com");
+                    self.codex_model.set("deepseek-v4-flash");
+                    self.codex_wire_api = CodexWireApi::Responses;
+                    self.codex_requires_openai_auth = true;
+                    self.codex_env_key.set("");
+                    self.claude_api_format = ClaudeApiFormat::OpenAiChat;
+                    self.codex_chat_reasoning = CodexChatReasoningConfig {
+                        supports_thinking: Some(true),
+                        supports_effort: Some(true),
+                        thinking_param: Some("thinking".to_string()),
+                        effort_param: Some("reasoning_effort".to_string()),
+                        effort_value_mode: Some("deepseek".to_string()),
+                        output_format: Some("reasoning_content".to_string()),
+                    };
+                    self.codex_model_catalog = vec![
+                        CodexModelCatalogRow {
+                            model: "deepseek-v4-flash".to_string(),
+                            display_name: "DeepSeek V4 Flash".to_string(),
+                            context_window: "1000000".to_string(),
+                        },
+                        CodexModelCatalogRow {
+                            model: "deepseek-v4-pro".to_string(),
+                            display_name: "DeepSeek V4 Pro".to_string(),
+                            context_window: "1000000".to_string(),
+                        },
+                    ];
+                    self.codex_local_routing_field_idx = 0;
+                    self.codex_model_catalog_idx = 0;
+                    self.codex_model_catalog_field = CodexModelCatalogField::Model;
                 }
                 ProviderTemplateId::GoogleOAuth => {
                     self.extra = json!({

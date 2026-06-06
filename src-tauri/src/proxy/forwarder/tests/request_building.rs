@@ -1534,6 +1534,40 @@ async fn codex_chat_prepare_request_preserves_responses_compact_query() {
 }
 
 #[tokio::test]
+async fn codex_chat_prepare_request_uses_provider_chat_base_without_forcing_v1() {
+    let provider = codex_chat_provider("https://api.deepseek.com", "deepseek-v4-pro");
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    let request_body = json!({
+        "model": "gpt-5.4",
+        "input": "hello"
+    });
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Codex,
+            &provider,
+            "/v1/responses?foo=bar",
+            &request_body,
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare Codex Chat bridge request")
+        .build()
+        .expect("build Codex Chat bridge request");
+
+    assert_eq!(
+        request.url().as_str(),
+        "https://api.deepseek.com/chat/completions?foo=bar"
+    );
+}
+
+#[tokio::test]
 async fn codex_chat_prepare_request_preserves_full_chat_endpoint_base_url() {
     let provider = codex_chat_provider(
         "https://example.com/openai/v1/chat/completions",

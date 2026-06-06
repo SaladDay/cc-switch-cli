@@ -5,7 +5,10 @@ use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::cli::ui::info;
 use crate::error::AppError;
-use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
+use crate::provider::{
+    AuthBinding, AuthBindingSource, ClaudeApiKeyField, CodexChatReasoningConfig, Provider,
+    ProviderMeta,
+};
 use crate::services::ProviderService;
 use clap::ValueEnum;
 use colored::Colorize;
@@ -25,6 +28,7 @@ pub enum ProviderAddTemplate {
     Aicodemirror,
     Cubence,
     Dds,
+    Deepseek,
 }
 
 impl ProviderAddTemplate {
@@ -39,6 +43,7 @@ impl ProviderAddTemplate {
             Self::Aicodemirror => "aicodemirror",
             Self::Cubence => "cubence",
             Self::Dds => "dds",
+            Self::Deepseek => "deepseek",
         }
     }
 
@@ -49,10 +54,21 @@ impl ProviderAddTemplate {
     pub fn requires_settings_prompt(self) -> bool {
         matches!(
             self,
-            Self::Packycode | Self::Aicodemirror | Self::Cubence | Self::Dds
+            Self::Packycode | Self::Aicodemirror | Self::Cubence | Self::Dds | Self::Deepseek
         )
     }
 }
+
+const DEEPSEEK_CODEX_CONFIG: &str = r#"model_provider = "custom"
+model = "deepseek-v4-flash"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.custom]
+name = "deepseek"
+base_url = "https://api.deepseek.com"
+wire_api = "responses"
+requires_openai_auth = true"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderAddTemplateChoice {
@@ -238,7 +254,7 @@ const PROVIDER_TEMPLATE_CHOICES_CLAUDE: [ProviderAddTemplateChoice; 7] = [
     },
 ];
 
-const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 6] = [
+const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 7] = [
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Custom,
         label: "Custom",
@@ -262,6 +278,10 @@ const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 6] = [
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Dds,
         label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Deepseek,
+        label: "DeepSeek",
     },
 ];
 
@@ -408,6 +428,8 @@ pub fn build_provider_template_seed(
     let category = template_default_category(template).map(str::to_string);
     let meta = template_default_meta(app_type, template);
     let settings_config = build_provider_template_settings_config(app_type, template, &id)?;
+    let icon = template_default_icon(template).map(str::to_string);
+    let icon_color = template_default_icon_color(template).map(str::to_string);
 
     Ok(Provider {
         id,
@@ -418,8 +440,8 @@ pub fn build_provider_template_seed(
         created_at: None,
         sort_index: None,
         notes: None,
-        icon: None,
-        icon_color: None,
+        icon,
+        icon_color,
         meta,
         in_failover_queue: false,
     })
@@ -431,6 +453,7 @@ fn template_default_name(template: ProviderAddTemplate) -> Result<&'static str, 
         ProviderAddTemplate::CodexOauth => "Codex",
         ProviderAddTemplate::OpenaiOfficial => "OpenAI Official",
         ProviderAddTemplate::GoogleOauth => "Google OAuth",
+        ProviderAddTemplate::Deepseek => "DeepSeek",
         ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
@@ -447,6 +470,7 @@ fn template_default_website_url(template: ProviderAddTemplate) -> Option<&'stati
         ProviderAddTemplate::CodexOauth => Some("https://openai.com/chatgpt/pricing"),
         ProviderAddTemplate::OpenaiOfficial => Some("https://chatgpt.com/codex"),
         ProviderAddTemplate::GoogleOauth => Some("https://ai.google.dev"),
+        ProviderAddTemplate::Deepseek => Some("https://platform.deepseek.com"),
         ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
@@ -460,6 +484,7 @@ fn template_default_category(template: ProviderAddTemplate) -> Option<&'static s
         ProviderAddTemplate::ClaudeOfficial
         | ProviderAddTemplate::OpenaiOfficial
         | ProviderAddTemplate::GoogleOauth => Some("official"),
+        ProviderAddTemplate::Deepseek => Some("cn_official"),
         ProviderAddTemplate::Custom
         | ProviderAddTemplate::CodexOauth
         | ProviderAddTemplate::Packycode
@@ -489,6 +514,18 @@ fn template_default_meta(
             codex_official: Some(true),
             ..Default::default()
         }),
+        ProviderAddTemplate::Deepseek => Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            codex_chat_reasoning: Some(CodexChatReasoningConfig {
+                supports_thinking: Some(true),
+                supports_effort: Some(true),
+                thinking_param: Some("thinking".to_string()),
+                effort_param: Some("reasoning_effort".to_string()),
+                effort_value_mode: Some("deepseek".to_string()),
+                output_format: Some("reasoning_content".to_string()),
+            }),
+            ..Default::default()
+        }),
         ProviderAddTemplate::GoogleOauth => Some(ProviderMeta {
             partner_promotion_key: Some("google-official".to_string()),
             ..Default::default()
@@ -508,6 +545,36 @@ fn template_default_meta(
             meta
         }),
         ProviderAddTemplate::Custom | ProviderAddTemplate::ClaudeOfficial => None,
+    }
+}
+
+fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> {
+    match template {
+        ProviderAddTemplate::Deepseek => Some("deepseek"),
+        ProviderAddTemplate::Custom
+        | ProviderAddTemplate::ClaudeOfficial
+        | ProviderAddTemplate::CodexOauth
+        | ProviderAddTemplate::OpenaiOfficial
+        | ProviderAddTemplate::GoogleOauth
+        | ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Dds => None,
+    }
+}
+
+fn template_default_icon_color(template: ProviderAddTemplate) -> Option<&'static str> {
+    match template {
+        ProviderAddTemplate::Deepseek => Some("#1E88E5"),
+        ProviderAddTemplate::Custom
+        | ProviderAddTemplate::ClaudeOfficial
+        | ProviderAddTemplate::CodexOauth
+        | ProviderAddTemplate::OpenaiOfficial
+        | ProviderAddTemplate::GoogleOauth
+        | ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Dds => None,
     }
 }
 
@@ -533,6 +600,7 @@ fn build_provider_template_settings_config(
             }
         })),
         ProviderAddTemplate::OpenaiOfficial => build_codex_official_settings_config(None),
+        ProviderAddTemplate::Deepseek => Ok(build_codex_deepseek_settings_config()),
         ProviderAddTemplate::GoogleOauth => Ok(json!({ "env": {} })),
         ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
@@ -544,6 +612,26 @@ fn build_provider_template_settings_config(
         ),
         ProviderAddTemplate::Custom => Err(unsupported_template_error(template)),
     }
+}
+
+fn build_codex_deepseek_settings_config() -> Value {
+    json!({
+        "config": DEEPSEEK_CODEX_CONFIG,
+        "modelCatalog": {
+            "models": [
+                {
+                    "model": "deepseek-v4-flash",
+                    "displayName": "DeepSeek V4 Flash",
+                    "contextWindow": 1000000,
+                },
+                {
+                    "model": "deepseek-v4-pro",
+                    "displayName": "DeepSeek V4 Pro",
+                    "contextWindow": 1000000,
+                },
+            ],
+        },
+    })
 }
 
 fn build_sponsor_template_settings_config(
@@ -974,6 +1062,7 @@ requires_openai_auth = true
                 "* AICodeMirror",
                 "* Cubence",
                 "* DDS",
+                "DeepSeek",
             ]
         );
         assert_eq!(
@@ -1008,6 +1097,10 @@ requires_openai_auth = true
         );
         assert!(
             validate_provider_add_template(&AppType::Claude, ProviderAddTemplate::GoogleOauth)
+                .is_err()
+        );
+        assert!(
+            validate_provider_add_template(&AppType::Claude, ProviderAddTemplate::Deepseek)
                 .is_err()
         );
     }
@@ -1371,6 +1464,78 @@ requires_openai_auth = true
                 .as_ref()
                 .and_then(|meta| meta.partner_promotion_key.as_deref()),
             Some("google-official")
+        );
+    }
+
+    #[test]
+    fn cli_codex_deepseek_template_matches_upstream_preset_values() {
+        let provider =
+            build_provider_template_seed(&AppType::Codex, ProviderAddTemplate::Deepseek, &[])
+                .expect("build DeepSeek Codex provider");
+
+        assert_eq!(provider.id, "deepseek");
+        assert_eq!(provider.name, "DeepSeek");
+        assert_eq!(
+            provider.website_url.as_deref(),
+            Some("https://platform.deepseek.com")
+        );
+        assert_eq!(provider.category.as_deref(), Some("cn_official"));
+        assert_eq!(provider.icon.as_deref(), Some("deepseek"));
+        assert_eq!(provider.icon_color.as_deref(), Some("#1E88E5"));
+        assert!(
+            provider.settings_config.get("auth").is_none(),
+            "DeepSeek preset should not persist an empty API key snapshot"
+        );
+
+        let config = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("DeepSeek Codex config should be TOML string");
+        assert!(config.contains("model_provider = \"custom\""));
+        assert!(config.contains("model = \"deepseek-v4-flash\""));
+        assert!(config.contains("disable_response_storage = true"));
+        assert!(config.contains("[model_providers.custom]"));
+        assert!(config.contains("name = \"deepseek\""));
+        assert!(config.contains("base_url = \"https://api.deepseek.com\""));
+        assert!(config.contains("wire_api = \"responses\""));
+        assert!(config.contains("requires_openai_auth = true"));
+        assert!(
+            !config.contains("https://api.deepseek.com/v1"),
+            "DeepSeek Codex preset should match upstream base URL without /v1"
+        );
+
+        assert_eq!(
+            provider.settings_config["modelCatalog"],
+            json!({
+                "models": [
+                    {
+                        "model": "deepseek-v4-flash",
+                        "displayName": "DeepSeek V4 Flash",
+                        "contextWindow": 1000000,
+                    },
+                    {
+                        "model": "deepseek-v4-pro",
+                        "displayName": "DeepSeek V4 Pro",
+                        "contextWindow": 1000000,
+                    },
+                ],
+            })
+        );
+
+        let meta = provider.meta.expect("DeepSeek metadata should be present");
+        assert_eq!(meta.api_format.as_deref(), Some("openai_chat"));
+        let reasoning = meta
+            .codex_chat_reasoning
+            .expect("DeepSeek reasoning metadata should be present");
+        assert_eq!(reasoning.supports_thinking, Some(true));
+        assert_eq!(reasoning.supports_effort, Some(true));
+        assert_eq!(reasoning.thinking_param.as_deref(), Some("thinking"));
+        assert_eq!(reasoning.effort_param.as_deref(), Some("reasoning_effort"));
+        assert_eq!(reasoning.effort_value_mode.as_deref(), Some("deepseek"));
+        assert_eq!(
+            reasoning.output_format.as_deref(),
+            Some("reasoning_content")
         );
     }
 

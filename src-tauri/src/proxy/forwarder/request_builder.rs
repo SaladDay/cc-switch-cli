@@ -275,6 +275,7 @@ impl RequestForwarder {
                 .then_some(self.session_id.as_str()),
             force_identity_encoding,
             claude_api_format.as_deref(),
+            codex_responses_to_chat,
             copilot_optimization.as_ref(),
         )
         .await
@@ -400,6 +401,7 @@ async fn build_request(
     client_session_id: Option<&str>,
     force_identity_encoding: bool,
     claude_api_format: Option<&str>,
+    codex_responses_to_chat: bool,
     copilot_optimization: Option<&CopilotOptimization>,
 ) -> Result<reqwest::RequestBuilder, ProxyError> {
     let (endpoint_path, endpoint_query) = split_endpoint_and_query(endpoint);
@@ -424,6 +426,8 @@ async fn build_request(
         && endpoint_path.trim_matches('/') == "chat/completions"
     {
         append_query_to_url(base_url.trim_end_matches('/'), endpoint_query)
+    } else if codex_responses_to_chat {
+        append_endpoint_to_base_url(base_url, endpoint)
     } else {
         adapter.build_url(base_url, endpoint)
     };
@@ -713,6 +717,14 @@ fn append_query_to_url(url: &str, query: Option<&str>) -> String {
     } else {
         format!("{url}?{query}")
     }
+}
+
+fn append_endpoint_to_base_url(base_url: &str, endpoint: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        endpoint.trim_start_matches('/')
+    )
 }
 
 fn reject_proxy_placeholder_for_managed_account_upstream(
