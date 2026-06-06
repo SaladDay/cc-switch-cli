@@ -1020,11 +1020,19 @@ impl ProxyService {
     }
 
     pub async fn get_status(&self) -> ProxyStatus {
+        self.get_status_with_cleanup(true).await
+    }
+
+    pub async fn get_status_snapshot(&self) -> ProxyStatus {
+        self.get_status_with_cleanup(false).await
+    }
+
+    async fn get_status_with_cleanup(&self, cleanup_stale_sessions: bool) -> ProxyStatus {
         if let Some(server) = self.runtime.server.read().await.as_ref() {
             return server.get_status().await;
         }
 
-        let sessions = self.load_persisted_runtime_sessions();
+        let sessions = self.load_persisted_runtime_sessions_with_cleanup(cleanup_stale_sessions);
         if !sessions.is_empty()
             && sessions
                 .iter()
@@ -1068,7 +1076,7 @@ impl ProxyService {
                 }
             }
 
-            if !stale_app_keys.is_empty() {
+            if cleanup_stale_sessions && !stale_app_keys.is_empty() {
                 let _ = self.clear_persisted_runtime_sessions_for_app_keys(&stale_app_keys);
             }
 
@@ -1095,10 +1103,14 @@ impl ProxyService {
                 };
             }
 
-            let _ = self.clear_persisted_runtime_session();
+            if cleanup_stale_sessions {
+                let _ = self.clear_persisted_runtime_session();
+            }
         }
 
-        if let Some(status) = Self::daemon_status_snapshot().await {
+        if let Some(status) =
+            Self::daemon_status_snapshot_with_cleanup(cleanup_stale_sessions).await
+        {
             return status;
         }
 
@@ -1107,6 +1119,13 @@ impl ProxyService {
 
     #[cfg(unix)]
     async fn daemon_status_snapshot() -> Option<ProxyStatus> {
+        Self::daemon_status_snapshot_with_cleanup(true).await
+    }
+
+    #[cfg(unix)]
+    async fn daemon_status_snapshot_with_cleanup(
+        cleanup_stale_socket: bool,
+    ) -> Option<ProxyStatus> {
         use crate::daemon::ipc::{
             client,
             protocol::{Request, Response},
@@ -1142,7 +1161,9 @@ impl ProxyService {
                     ErrorKind::ConnectionRefused | ErrorKind::NotFound
                 ) =>
             {
-                let _ = std::fs::remove_file(socket_path);
+                if cleanup_stale_socket {
+                    let _ = std::fs::remove_file(socket_path);
+                }
                 None
             }
             Err(error) => {
@@ -1154,6 +1175,13 @@ impl ProxyService {
 
     #[cfg(not(unix))]
     async fn daemon_status_snapshot() -> Option<ProxyStatus> {
+        Self::daemon_status_snapshot_with_cleanup(true).await
+    }
+
+    #[cfg(not(unix))]
+    async fn daemon_status_snapshot_with_cleanup(
+        _cleanup_stale_socket: bool,
+    ) -> Option<ProxyStatus> {
         None
     }
 
@@ -2878,6 +2906,13 @@ impl ProxyService {
     }
 
     fn load_persisted_runtime_sessions(&self) -> Vec<PersistedProxyRuntimeSession> {
+        self.load_persisted_runtime_sessions_with_cleanup(true)
+    }
+
+    fn load_persisted_runtime_sessions_with_cleanup(
+        &self,
+        cleanup_invalid_session: bool,
+    ) -> Vec<PersistedProxyRuntimeSession> {
         let Some(raw) = self.load_raw_persisted_runtime_session() else {
             return Vec::new();
         };
@@ -2898,7 +2933,9 @@ impl ProxyService {
         match serde_json::from_str::<PersistedProxyRuntimeSession>(&raw) {
             Ok(session) => vec![session],
             Err(_) => {
-                let _ = self.clear_persisted_runtime_session();
+                if cleanup_invalid_session {
+                    let _ = self.clear_persisted_runtime_session();
+                }
                 Vec::new()
             }
         }
@@ -4845,6 +4882,33 @@ base_url = "https://api.openai.com/v1"
         assert!(
             service.load_legacy_persisted_runtime_session().is_none(),
             "daemon workers map must not be treated as legacy upgrade residue"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_status_snapshot_does_not_clear_invalid_runtime_session() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+
+        db.set_setting(PROXY_RUNTIME_SESSION_KEY, "not-json")
+            .expect("write invalid runtime session");
+
+        let status = service.get_status_snapshot().await;
+        assert!(!status.running);
+        assert_eq!(
+            db.get_setting(PROXY_RUNTIME_SESSION_KEY)
+                .expect("read runtime session after snapshot status")
+                .as_deref(),
+            Some("not-json"),
+            "snapshot status reads must not repair or clear persisted runtime state"
+        );
+
+        let _ = service.get_status().await;
+        assert!(
+            db.get_setting(PROXY_RUNTIME_SESSION_KEY)
+                .expect("read runtime session after normal status")
+                .is_none(),
+            "normal status keeps the existing cleanup behavior"
         );
     }
 

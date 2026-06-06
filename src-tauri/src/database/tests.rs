@@ -247,6 +247,85 @@ fn init_rejects_future_schema_before_creating_tables() {
 }
 
 #[test]
+#[serial_test::serial]
+fn readonly_snapshot_rejects_missing_database_without_creating_file() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+
+    let err = match Database::open_readonly_current_schema() {
+        Ok(_) => panic!("missing database should not open as a snapshot"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains("database is not initialized"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !db_path.exists(),
+        "readonly snapshot open should not create the database file"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn readonly_snapshot_rejects_old_schema_without_migrating() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    Database::set_user_version(&conn, SCHEMA_VERSION - 1).expect("set old version");
+    drop(conn);
+
+    let err = match Database::open_readonly_current_schema() {
+        Ok(_) => panic!("old schema should require initialization first"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains("requires initialization"),
+        "unexpected error: {err}"
+    );
+    let conn = Connection::open(&db_path).expect("reopen db");
+    assert!(
+        !Database::table_exists(&conn, "providers").expect("check providers table"),
+        "readonly snapshot open should not create or migrate tables"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn readonly_snapshot_opens_current_schema_without_allowing_writes() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+
+    let db = Database::init().expect("initialize database");
+    assert_eq!(
+        Database::get_user_version(&db.conn.lock().expect("lock db conn")).expect("read version"),
+        SCHEMA_VERSION
+    );
+    drop(db);
+
+    let snapshot =
+        Database::open_readonly_current_schema().expect("open readonly current schema snapshot");
+    assert!(
+        snapshot.get_all_providers("claude").is_ok(),
+        "readonly snapshot should support normal reads"
+    );
+    let err = snapshot
+        .set_setting("snapshot_write_probe", "1")
+        .expect_err("readonly snapshot should reject writes");
+    assert!(
+        err.to_string().contains("readonly") || err.to_string().contains("read-only"),
+        "unexpected write error: {err}"
+    );
+}
+
+#[test]
 fn schema_migration_adds_missing_columns_for_providers() {
     let conn = Connection::open_in_memory().expect("open memory db");
 

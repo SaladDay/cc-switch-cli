@@ -852,6 +852,10 @@ pub(crate) fn load_state() -> Result<AppState, AppError> {
     AppState::try_new()
 }
 
+pub(crate) fn load_snapshot_state() -> Result<AppState, AppError> {
+    AppState::try_open_snapshot()
+}
+
 impl UiData {
     pub fn load(app_type: &AppType) -> Result<Self, AppError> {
         let state = load_state()?;
@@ -866,19 +870,30 @@ impl UiData {
         Ok(data)
     }
 
-    pub(crate) fn load_fast_from_state(
+    pub(crate) fn load_fast_snapshot_from_state(
         state: &AppState,
         app_type: &AppType,
     ) -> Result<Self, AppError> {
-        Self::load_base_from_state(state, app_type)
+        Self::load_base_from_state_with_mode(state, app_type, ProviderLoadMode::SnapshotOnly)
     }
 
     fn load_base_from_state(state: &AppState, app_type: &AppType) -> Result<Self, AppError> {
-        let providers = load_providers(state, app_type)?;
+        Self::load_base_from_state_with_mode(state, app_type, ProviderLoadMode::SyncLive)
+    }
+
+    fn load_base_from_state_with_mode(
+        state: &AppState,
+        app_type: &AppType,
+        provider_load_mode: ProviderLoadMode,
+    ) -> Result<Self, AppError> {
+        let providers = load_providers_with_mode(state, app_type, provider_load_mode)?;
         let mcp = load_mcp(state)?;
         let prompts = load_prompts(state, app_type)?;
         let config = load_config_snapshot(state, app_type)?;
-        let skills = load_skills_snapshot()?;
+        let skills = match provider_load_mode {
+            ProviderLoadMode::SyncLive => load_skills_snapshot()?,
+            ProviderLoadMode::SnapshotOnly => load_skills_snapshot_from_state(state)?,
+        };
         let proxy = load_proxy_snapshot_from_state(state, app_type)?;
 
         Ok(Self {
@@ -935,6 +950,12 @@ impl UiData {
         ids.extend(self.providers.live_ids.iter().cloned());
         ids.into_iter().collect()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderLoadMode {
+    SyncLive,
+    SnapshotOnly,
 }
 
 pub(crate) fn load_usage_pricing_data_from_state(
@@ -1003,13 +1024,22 @@ pub(crate) fn quota_target_for_provider(
     crate::cli::provider_quota::quota_target_for_provider(app_type, &row.id, &row.provider)
 }
 
+#[cfg(test)]
 fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnapshot, AppError> {
-    if matches!(app_type, AppType::OpenClaw) {
+    load_providers_with_mode(state, app_type, ProviderLoadMode::SyncLive)
+}
+
+fn load_providers_with_mode(
+    state: &AppState,
+    app_type: &AppType,
+    mode: ProviderLoadMode,
+) -> Result<ProvidersSnapshot, AppError> {
+    if mode == ProviderLoadMode::SyncLive && matches!(app_type, AppType::OpenClaw) {
         ProviderService::sync_openclaw_providers_from_live(state)?;
     }
 
-    let current_id = ProviderService::current(state, app_type.clone())?;
     let providers = ProviderService::list(state, app_type.clone())?;
+    let current_id = current_provider_for_mode(state, app_type, mode, &providers)?;
     let sorted = sort_providers(&providers);
 
     let openclaw_live_providers = if matches!(app_type, AppType::OpenClaw) {
@@ -1055,7 +1085,7 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
         .and_then(|model| openclaw_default_model_ref_parts(&model.primary))
         .map(|(provider_id, _)| provider_id.to_string());
 
-    let rows = sorted
+    let mut rows = sorted
         .into_iter()
         .map(|(id, provider)| {
             let openclaw_live_provider = openclaw_live_providers
@@ -1092,6 +1122,43 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
         })
         .collect::<Vec<_>>();
 
+    if matches!(app_type, AppType::OpenClaw) && mode == ProviderLoadMode::SnapshotOnly {
+        let saved_ids = rows
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<HashSet<_>>();
+        let mut live_only_ids = openclaw_live_ids
+            .iter()
+            .filter(|id| !saved_ids.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        live_only_ids.sort();
+
+        for id in live_only_ids {
+            let Some(live_provider) = openclaw_live_providers.get(&id) else {
+                continue;
+            };
+            let provider = Provider::with_id(id.clone(), id.clone(), live_provider.clone(), None);
+
+            rows.push(ProviderRow {
+                api_url: extract_api_url(&provider.settings_config, app_type),
+                is_current: false,
+                is_in_config: true,
+                is_saved: false,
+                is_default_model: openclaw_primary_default_provider_id.as_deref()
+                    == Some(id.as_str()),
+                primary_model_id: extract_primary_model_id(
+                    &provider.settings_config,
+                    app_type,
+                    Some(live_provider),
+                ),
+                default_model_id: openclaw_default_model_ids.get(&id).cloned(),
+                id,
+                provider,
+            });
+        }
+    }
+
     let rows = if matches!(app_type, AppType::OpenClaw) {
         rows.into_iter()
             .filter(|row| !openclaw_live_providers.contains_key(&row.id) || row.is_in_config)
@@ -1112,6 +1179,34 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
         rows,
         live_ids,
     })
+}
+
+fn current_provider_for_mode(
+    state: &AppState,
+    app_type: &AppType,
+    mode: ProviderLoadMode,
+    providers: &IndexMap<String, Provider>,
+) -> Result<String, AppError> {
+    if mode == ProviderLoadMode::SyncLive {
+        return ProviderService::current(state, app_type.clone());
+    }
+
+    if matches!(app_type, AppType::Hermes) {
+        return crate::hermes_config::get_current_provider_id().map(|opt| opt.unwrap_or_default());
+    }
+    if app_type.is_additive_mode() {
+        return Ok(String::new());
+    }
+    if let Some(local_id) = crate::settings::get_current_provider(app_type) {
+        if providers.contains_key(&local_id) {
+            return Ok(local_id);
+        }
+    }
+
+    state
+        .db
+        .get_current_provider(app_type.as_str())
+        .map(|opt| opt.unwrap_or_default())
 }
 
 fn sort_providers(providers: &IndexMap<String, Provider>) -> Vec<(String, Provider)> {
@@ -2374,15 +2469,28 @@ fn load_proxy_snapshot_from_state(
         .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
 
     runtime.block_on(async {
-        let config = state.proxy_service.get_global_config().await?;
-        let app_proxy_config = state.db.get_proxy_config_for_app(app_type.as_str()).await?;
+        let config = state.db.get_global_proxy_config_or_default().await?;
+        let app_proxy_config = state
+            .db
+            .get_proxy_config_for_app_or_default(app_type.as_str())
+            .await?;
         let configured_listen_port = state.db.get_app_proxy_preferred_port(app_type.as_str())?;
-        let runtime_status = state.proxy_service.get_status().await;
-        let takeover = state
-            .proxy_service
-            .get_takeover_status()
-            .await
-            .map_err(AppError::Message)?;
+        let runtime_status = state.proxy_service.get_status_snapshot().await;
+        let claude_takeover = state
+            .db
+            .get_proxy_config_for_app_or_default("claude")
+            .await?
+            .enabled;
+        let codex_takeover = state
+            .db
+            .get_proxy_config_for_app_or_default("codex")
+            .await?
+            .enabled;
+        let gemini_takeover = state
+            .db
+            .get_proxy_config_for_app_or_default("gemini")
+            .await?
+            .enabled;
 
         let current_app_target = runtime_status
             .active_targets
@@ -2411,7 +2519,7 @@ fn load_proxy_snapshot_from_state(
             .unwrap_or(configured_listen_port);
         let default_cost_multiplier = state
             .db
-            .get_default_cost_multiplier(app_type.as_str())
+            .get_default_cost_multiplier_or_default(app_type.as_str())
             .await
             .ok()
             .map(|value| value.trim().to_string())
@@ -2424,9 +2532,9 @@ fn load_proxy_snapshot_from_state(
                 || !runtime_status.active_workers.is_empty(),
             active_worker_apps,
             auto_failover_enabled: app_proxy_config.auto_failover_enabled,
-            claude_takeover: takeover.claude,
-            codex_takeover: takeover.codex,
-            gemini_takeover: takeover.gemini,
+            claude_takeover,
+            codex_takeover,
+            gemini_takeover,
             default_cost_multiplier,
             configured_listen_address: config.listen_address.clone(),
             configured_listen_port,
@@ -2459,6 +2567,21 @@ fn load_skills_snapshot() -> Result<SkillsSnapshot, AppError> {
     Ok(SkillsSnapshot {
         installed: SkillService::list_installed()?,
         repos: SkillService::list_repos()?,
+        sync_method: SkillService::get_sync_method()?,
+    })
+}
+
+fn load_skills_snapshot_from_state(state: &AppState) -> Result<SkillsSnapshot, AppError> {
+    let mut installed = state
+        .db
+        .get_all_installed_skills()?
+        .into_values()
+        .collect::<Vec<_>>();
+    installed.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    Ok(SkillsSnapshot {
+        installed,
+        repos: state.db.get_skill_repos()?,
         sync_method: SkillService::get_sync_method()?,
     })
 }
@@ -3665,6 +3788,84 @@ mod tests {
         assert!(
             providers.contains_key("live-only"),
             "loading OpenClaw rows should mirror live providers into the local manager"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_fast_snapshot_openclaw_projects_live_only_provider_without_persisting() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        crate::openclaw_config::set_provider(
+            "live-only",
+            json!({
+                "baseUrl": "https://api.example.com/v1",
+                "models": [
+                    {"id": "openclaw-live-model", "name": "Live Only Model"}
+                ]
+            }),
+        )
+        .expect("seed live openclaw provider");
+
+        let state = load_state().expect("initialize database");
+        assert!(
+            ProviderService::list(&state, AppType::OpenClaw)
+                .expect("list providers before snapshot")
+                .is_empty(),
+            "precondition: live-only provider should not be persisted before snapshot load"
+        );
+        drop(state);
+
+        let snapshot_state = load_snapshot_state().expect("load readonly snapshot state");
+        let snapshot = UiData::load_fast_snapshot_from_state(&snapshot_state, &AppType::OpenClaw)
+            .expect("load OpenClaw snapshot rows");
+        let row = snapshot
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "live-only")
+            .expect("live-only provider should appear in snapshot rows");
+        assert!(row.is_in_config);
+        assert!(!row.is_saved);
+        assert_eq!(provider_display_name(&AppType::OpenClaw, row), "live-only");
+        assert_eq!(row.primary_model_id.as_deref(), Some("openclaw-live-model"));
+
+        drop(snapshot_state);
+        let reloaded_state = load_state().expect("reload state after snapshot load");
+        assert!(
+            ProviderService::list(&reloaded_state, AppType::OpenClaw)
+                .expect("list providers after snapshot")
+                .is_empty(),
+            "snapshot-only OpenClaw load must not persist live-only providers"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_fast_snapshot_does_not_clear_invalid_settings_current_provider() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let _home = HomeGuard::set(temp.path());
+        crate::settings::set_current_provider(&AppType::Claude, Some("missing-local-current"))
+            .expect("seed invalid local current provider");
+
+        let state = load_state().expect("initialize database");
+        drop(state);
+
+        let snapshot_state = load_snapshot_state().expect("load readonly snapshot state");
+        let snapshot = UiData::load_fast_snapshot_from_state(&snapshot_state, &AppType::Claude)
+            .expect("load Claude snapshot rows");
+
+        assert_eq!(snapshot.providers.current_id, "");
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+            Some("missing-local-current"),
+            "snapshot provider load must not repair or clear local settings"
         );
     }
 

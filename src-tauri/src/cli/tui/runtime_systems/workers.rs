@@ -12,7 +12,8 @@ use crate::services::{SkillService, StreamCheckService, WebDavSyncService};
 use crate::settings::{set_webdav_sync_settings, webdav_jianguoyun_preset};
 
 use super::super::data::{
-    load_state, load_usage_pricing_data_from_state_for_range, UiData, UsageRangePreset,
+    load_snapshot_state, load_state, load_usage_pricing_data_from_state_for_range, UiData,
+    UsageRangePreset,
 };
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataMsg, AppDataReq,
@@ -1215,7 +1216,7 @@ fn state_for_epoch(
         .as_ref()
         .is_none_or(|(cached_epoch, _)| *cached_epoch != epoch);
     if needs_reload {
-        *state_cache = Some((epoch, load_state()?));
+        *state_cache = Some((epoch, load_snapshot_state()?));
     }
     Ok(&state_cache.as_ref().expect("state cache initialized").1)
 }
@@ -1237,8 +1238,8 @@ fn handle_app_data_req(
     let result = state_for_epoch(state_cache, app_state_epoch)
         .and_then(|state| {
             state
-                .refresh_config_from_db()
-                .and_then(|()| UiData::load_fast_from_state(state, &app_type))
+                .reload_config_snapshot_from_db()
+                .and_then(|()| UiData::load_fast_snapshot_from_state(state, &app_type))
         })
         .map_err(|err| err.to_string());
 
@@ -1329,7 +1330,7 @@ fn handle_usage_pricing_uncached_req_with_cancel<F>(
     else {
         return;
     };
-    let result = load_state()
+    let result = load_snapshot_state()
         .and_then(|state| {
             let handle = {
                 let conn = state.db.conn.lock().map_err(AppError::from)?;
