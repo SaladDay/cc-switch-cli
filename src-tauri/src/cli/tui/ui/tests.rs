@@ -2080,7 +2080,7 @@ fn settings_page_shows_managed_accounts_summary() {
 }
 
 #[test]
-fn settings_managed_accounts_page_renders_chatgpt_left_and_details_right() {
+fn settings_managed_accounts_page_renders_multi_account_manager() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -2113,13 +2113,135 @@ fn settings_managed_accounts_page_renders_chatgpt_left_and_details_right() {
         "{all}"
     );
     assert!(all.contains("default@example.com"), "{all}");
-    assert!(!all.contains("alt@example.com"), "{all}");
+    assert!(all.contains("alt@example.com"), "{all}");
     assert!(all.contains("acc-default"), "{all}");
     assert!(all.contains(texts::tui_managed_accounts_default()), "{all}");
+    assert!(all.contains(texts::tui_key_add_account()), "{all}");
+    assert!(all.contains(texts::tui_key_switch()), "{all}");
     assert!(
-        all.contains(texts::tui_managed_accounts_login_idle()),
+        !all.contains(texts::tui_managed_accounts_login_status()),
         "{all}"
     );
+    assert!(
+        !all.contains(texts::tui_managed_accounts_login_waiting()),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_managed_accounts_login_idle()),
+        "{all}"
+    );
+}
+
+#[test]
+fn settings_managed_accounts_login_renders_only_toast() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SettingsManagedAccounts;
+    app.focus = Focus::Content;
+    app.managed_auth_login = Some(crate::cli::tui::app::ManagedAuthLoginState {
+        auth_provider: "codex_oauth".to_string(),
+        device_code: "device-1".to_string(),
+        expires_at_tick: 900,
+        poll_interval_ticks: 5,
+        next_poll_tick: 0,
+    });
+    app.push_persistent_toast(
+        texts::tui_toast_managed_auth_login_in_progress(
+            "USER-1",
+            "https://auth.example.test/device",
+        ),
+        crate::cli::tui::app::ToastKind::Info,
+    );
+
+    let buf = render(&app, &minimal_data(&app.app_type));
+    let all = all_text(&buf);
+
+    let rows = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .collect::<Vec<_>>();
+    let title_row = rows
+        .iter()
+        .position(|row| row.contains("ChatGPT login in progress"))
+        .expect("login toast should render title line");
+    let code_row = rows
+        .iter()
+        .position(|row| row.contains("Code: USER-1"))
+        .expect("login toast should render code line");
+    let url_row = rows
+        .iter()
+        .position(|row| row.contains("Verification URL: https://auth.example.test/device"))
+        .expect("login toast should render URL line");
+    let cancel_row = rows
+        .iter()
+        .position(|row| row.contains("Press Esc to cancel"))
+        .expect("login toast should render cancel hint line");
+    assert!(title_row < code_row && code_row < url_row && url_row < cancel_row);
+    assert!(!rows[title_row].contains("USER-1"), "{}", rows[title_row]);
+    assert!(all.contains("USER-1"), "{all}");
+    assert!(all.contains("Press Esc to cancel"), "{all}");
+    assert!(!all.contains("Esc/c"), "{all}");
+    assert!(
+        !all.contains(texts::tui_managed_accounts_login_status()),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_managed_accounts_login_waiting()),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_managed_accounts_login_idle()),
+        "{all}"
+    );
+}
+
+#[test]
+fn managed_auth_cancel_confirm_renders_above_login_toast() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SettingsManagedAccounts;
+    app.focus = Focus::Content;
+    app.managed_auth_login = Some(crate::cli::tui::app::ManagedAuthLoginState {
+        auth_provider: "codex_oauth".to_string(),
+        device_code: "device-1".to_string(),
+        expires_at_tick: 900,
+        poll_interval_ticks: 5,
+        next_poll_tick: 0,
+    });
+    app.push_persistent_toast(
+        texts::tui_toast_managed_auth_login_in_progress(
+            "USER-1",
+            "https://auth.example.test/device",
+        ),
+        crate::cli::tui::app::ToastKind::Info,
+    );
+    app.overlay = Overlay::Confirm(ConfirmOverlay {
+        title: texts::tui_confirm_managed_auth_cancel_title().to_string(),
+        message: texts::tui_confirm_managed_auth_cancel_message().to_string(),
+        action: ConfirmAction::ManagedAuthCancelLogin,
+    });
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_confirm_managed_auth_cancel_title()),
+        "{all}"
+    );
+    assert!(all.contains("Press Enter to cancel"), "{all}");
+    assert!(all.contains("Esc to keep waiting"), "{all}");
+
+    let key_bar_row = all
+        .lines()
+        .find(|line| line.contains("Enter cancel login"))
+        .expect("managed auth cancel confirm should render a specific key bar");
+    assert!(key_bar_row.contains("Esc keep waiting"), "{key_bar_row}");
+    assert!(!key_bar_row.contains("Enter confirm"), "{key_bar_row}");
+    assert!(!key_bar_row.contains("Esc cancel"), "{key_bar_row}");
 }
 
 #[test]

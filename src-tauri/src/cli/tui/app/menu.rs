@@ -254,10 +254,10 @@ impl App {
         self.tick = self.tick.wrapping_add(1);
         self.expire_managed_auth_login_if_needed();
         if let Some(toast) = &mut self.toast {
-            if toast.remaining_ticks > 0 {
+            if !toast.persistent && toast.remaining_ticks > 0 {
                 toast.remaining_ticks -= 1;
             }
-            if toast.remaining_ticks == 0 {
+            if !toast.persistent && toast.remaining_ticks == 0 {
                 self.toast = None;
             }
         }
@@ -279,6 +279,7 @@ impl App {
 
         self.managed_auth_login = None;
         self.managed_auth_loading = false;
+        self.clear_managed_auth_cancel_confirm();
         self.push_toast(
             texts::tui_toast_managed_auth_login_expired(),
             ToastKind::Warning,
@@ -366,6 +367,47 @@ impl App {
 
     pub fn push_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
         self.toast = Some(Toast::new(message, kind));
+    }
+
+    pub fn push_persistent_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
+        self.toast = Some(Toast::persistent(message, kind));
+    }
+
+    pub(crate) fn clear_managed_auth_login_toast(&mut self) {
+        if self.toast.as_ref().is_some_and(|toast| toast.persistent) {
+            self.toast = None;
+        }
+    }
+
+    pub(crate) fn clear_managed_auth_cancel_confirm(&mut self) {
+        if matches!(
+            &self.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ManagedAuthCancelLogin,
+                ..
+            })
+        ) {
+            self.close_overlay();
+        }
+    }
+
+    pub(crate) fn cancel_managed_auth_login(&mut self) {
+        if self.managed_auth_login.take().is_some() {
+            self.managed_auth_loading = false;
+            self.clear_managed_auth_login_toast();
+            self.push_toast(
+                texts::tui_toast_managed_auth_login_cancelled(),
+                ToastKind::Info,
+            );
+        }
+    }
+
+    fn confirm_managed_auth_login_cancel(&mut self) {
+        self.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_confirm_managed_auth_cancel_title().to_string(),
+            message: texts::tui_confirm_managed_auth_cancel_message().to_string(),
+            action: ConfirmAction::ManagedAuthCancelLogin,
+        });
     }
 
     pub(crate) fn prompt_visible_apps_auto_detection(&mut self) {
@@ -482,6 +524,15 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             self.should_quit = true;
             return Action::Quit;
+        }
+
+        if self.managed_auth_login.is_some()
+            && !self.overlay.is_active()
+            && !self.text_input_is_active()
+            && matches!(key.code, KeyCode::Esc)
+        {
+            self.confirm_managed_auth_login_cancel();
+            return Action::None;
         }
 
         if key.modifiers.contains(KeyModifiers::CONTROL)

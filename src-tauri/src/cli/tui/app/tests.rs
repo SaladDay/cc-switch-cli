@@ -19,7 +19,9 @@ mod tests {
     use crate::cli::tui::runtime_actions::{
         handle_action, run_external_editor_for_prompt_form_content,
     };
-    use crate::cli::tui::runtime_systems::RequestTracker;
+    use crate::cli::tui::runtime_systems::{
+        handle_managed_auth_msg, ManagedAuthMsg, RequestTracker,
+    };
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::commands::workspace::{DailyMemoryFileInfo, DailyMemorySearchResult, ALLOWED_FILES};
     use crate::error::AppError;
@@ -99,6 +101,17 @@ mod tests {
                     is_default: false,
                 },
             ],
+        }
+    }
+
+    fn managed_auth_device() -> crate::services::ManagedAuthDeviceCodeResponse {
+        crate::services::ManagedAuthDeviceCodeResponse {
+            provider: "codex_oauth".to_string(),
+            device_code: "device-1".to_string(),
+            user_code: "USER-1".to_string(),
+            verification_uri: "https://auth.example.test/device".to_string(),
+            expires_in: 900,
+            interval: 5,
         }
     }
 
@@ -9350,7 +9363,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_managed_accounts_page_uses_single_chatgpt_entry() {
+    fn settings_managed_accounts_page_supports_multi_account_actions() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::SettingsManagedAccounts;
         app.focus = Focus::Content;
@@ -9372,11 +9385,26 @@ mod tests {
             Action::ManagedAuthStartLogin { auth_provider } if auth_provider == "codex_oauth"
         ));
 
+        let action = app.on_key(key(KeyCode::Char('a')), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::ManagedAuthStartLogin { auth_provider } if auth_provider == "codex_oauth"
+        ));
+
         app.managed_auth_status = Some(managed_auth_status());
         app.settings_managed_accounts_idx = 0;
         let action = app.on_key(key(KeyCode::Down), &UiData::default());
         assert!(matches!(action, Action::None));
-        assert_eq!(app.settings_managed_accounts_idx, 0);
+        assert_eq!(app.settings_managed_accounts_idx, 1);
+
+        let action = app.on_key(key(KeyCode::Char(' ')), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::ManagedAuthSetDefault {
+                auth_provider,
+                account_id,
+            } if auth_provider == "codex_oauth" && account_id == "acc-alt"
+        ));
 
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
         assert!(matches!(action, Action::None));
@@ -9386,8 +9414,84 @@ mod tests {
                 auth_provider,
                 account_id,
                 selected: 0,
-            } if auth_provider == "codex_oauth" && account_id == "acc-default"
+            } if auth_provider == "codex_oauth" && account_id == "acc-alt"
         ));
+    }
+
+    #[test]
+    fn managed_auth_login_uses_toast_and_esc_confirmation() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsManagedAccounts;
+        app.focus = Focus::Content;
+
+        handle_managed_auth_msg(
+            &mut app,
+            ManagedAuthMsg::LoginStarted {
+                auth_provider: "codex_oauth".to_string(),
+                result: Ok(managed_auth_device()),
+            },
+        );
+
+        let toast = app.toast.as_ref().expect("login toast");
+        assert!(toast.persistent);
+        assert!(toast.message.contains("USER-1"), "{}", toast.message);
+        assert!(
+            toast.message.contains("Press Esc to cancel"),
+            "{}",
+            toast.message
+        );
+        assert!(!toast.message.contains("Esc/c"), "{}", toast.message);
+
+        let action = app.on_key(key(KeyCode::Char('c')), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(app.managed_auth_login.is_some());
+        assert!(matches!(app.overlay, Overlay::None));
+
+        let action = app.on_key(key(KeyCode::Esc), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(app.managed_auth_login.is_some());
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ManagedAuthCancelLogin,
+                ..
+            })
+        ));
+
+        let action = app.on_key(key(KeyCode::Esc), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(app.managed_auth_login.is_some());
+        assert!(matches!(app.overlay, Overlay::None));
+
+        let action = app.on_key(key(KeyCode::Esc), &UiData::default());
+        assert!(matches!(action, Action::None));
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(app.managed_auth_login.is_none());
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if !toast.persistent
+                    && toast.message == texts::tui_toast_managed_auth_login_cancelled()
+        ));
+
+        handle_managed_auth_msg(
+            &mut app,
+            ManagedAuthMsg::LoginPolled {
+                auth_provider: "codex_oauth".to_string(),
+                device_code: "device-1".to_string(),
+                result: Ok(Some(crate::services::ManagedAuthAccount {
+                    id: "acc-new".to_string(),
+                    provider: "codex_oauth".to_string(),
+                    login: "new@example.com".to_string(),
+                    avatar_url: None,
+                    authenticated_at: 3,
+                    is_default: true,
+                })),
+            },
+        );
+        assert!(app.managed_auth_status.is_none());
     }
 
     #[test]

@@ -102,8 +102,13 @@ pub fn render(frame: &mut Frame<'_>, app: &App, data: &UiData) {
     render_content(frame, app, data, body[1], &theme);
     render_footer(frame, app, data, root[2], &theme);
 
-    render_overlay(frame, app, data, &theme);
-    render_toast(frame, app, &theme);
+    if should_render_toast_below_overlay(app) {
+        render_toast(frame, app, &theme);
+        render_overlay(frame, app, data, &theme);
+    } else {
+        render_overlay(frame, app, data, &theme);
+        render_toast(frame, app, &theme);
+    }
 }
 
 pub(super) fn proxy_open_flash_effect(area: Rect) -> tachyonfx::Effect {
@@ -115,6 +120,15 @@ pub(super) fn proxy_open_flash_effect(area: Rect) -> tachyonfx::Effect {
         .with_area(area);
 
     fx::ping_pong(radial_hsl_xform)
+}
+
+fn should_render_toast_below_overlay(app: &App) -> bool {
+    app.toast.as_ref().is_some_and(|toast| toast.persistent)
+        && matches!(
+            &app.overlay,
+            Overlay::Confirm(confirm)
+                if matches!(confirm.action, ConfirmAction::ManagedAuthCancelLogin)
+        )
 }
 
 fn render_content(
