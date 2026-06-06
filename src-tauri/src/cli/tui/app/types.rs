@@ -376,6 +376,7 @@ pub struct Toast {
     pub message: String,
     pub kind: ToastKind,
     pub remaining_ticks: u16,
+    pub persistent: bool,
 }
 
 impl Toast {
@@ -384,6 +385,16 @@ impl Toast {
             message: message.into(),
             kind,
             remaining_ticks: 12,
+            persistent: false,
+        }
+    }
+
+    pub fn persistent(message: impl Into<String>, kind: ToastKind) -> Self {
+        Self {
+            message: message.into(),
+            kind,
+            remaining_ticks: 0,
+            persistent: true,
         }
     }
 }
@@ -443,6 +454,7 @@ pub enum ConfirmAction {
     ProviderApiFormatProxyNotice,
     CommonConfigNotice,
     UsageQueryNotice,
+    ManagedAuthCancelLogin,
     ProxyEnableAndAutoFailover {
         app_type: AppType,
     },
@@ -537,8 +549,6 @@ pub enum CommonSnippetViewSource {
 pub struct ManagedAuthLoginState {
     pub auth_provider: String,
     pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
     pub expires_at_tick: u64,
     pub poll_interval_ticks: u64,
     pub next_poll_tick: u64,

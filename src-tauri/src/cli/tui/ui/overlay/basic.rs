@@ -130,6 +130,16 @@ pub(super) fn render_confirm_overlay(
             theme,
             &[("Enter", texts::tui_key_close())],
         );
+    } else if matches!(confirm.action, ConfirmAction::ManagedAuthCancelLogin) {
+        render_key_bar_center(
+            frame,
+            chunks[0],
+            theme,
+            &[
+                ("Enter", texts::tui_key_cancel_login()),
+                ("Esc", texts::tui_key_keep_waiting()),
+            ],
+        );
     } else {
         render_key_bar_center(
             frame,

@@ -301,22 +301,27 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
                     let now = app.tick;
                     let expires_ticks = seconds_to_tui_ticks(device.expires_in).max(1);
                     let interval_ticks = seconds_to_tui_ticks(device.interval).max(1);
+                    let user_code = device.user_code.clone();
+                    let verification_uri = device.verification_uri.clone();
                     app.managed_auth_login = Some(crate::cli::tui::app::ManagedAuthLoginState {
                         auth_provider,
                         device_code: device.device_code,
-                        user_code: device.user_code,
-                        verification_uri: device.verification_uri,
                         expires_at_tick: now.saturating_add(expires_ticks),
                         poll_interval_ticks: interval_ticks,
                         next_poll_tick: now,
                     });
-                    app.push_toast(
-                        texts::tui_toast_managed_auth_login_started(),
+                    app.push_persistent_toast(
+                        texts::tui_toast_managed_auth_login_in_progress(
+                            &user_code,
+                            &verification_uri,
+                        ),
                         ToastKind::Info,
                     );
                 }
                 Err(err) => {
                     app.managed_auth_login = None;
+                    app.clear_managed_auth_login_toast();
+                    app.clear_managed_auth_cancel_confirm();
                     app.push_toast(
                         texts::tui_toast_managed_auth_login_failed(&err),
                         ToastKind::Error,
@@ -330,14 +335,17 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
             result,
         } => match result {
             Ok(Some(account)) => {
-                if app
+                if !app
                     .managed_auth_login
                     .as_ref()
                     .is_some_and(|login| login.device_code == device_code)
                 {
-                    app.managed_auth_login = None;
+                    return;
                 }
+                app.managed_auth_login = None;
                 app.managed_auth_loading = false;
+                app.clear_managed_auth_login_toast();
+                app.clear_managed_auth_cancel_confirm();
                 if let Some(status) = app.managed_auth_status.as_mut() {
                     if status.provider == auth_provider {
                         status.authenticated = true;
@@ -356,6 +364,7 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
                         accounts: vec![account.clone()],
                     });
                 }
+                app.settings_managed_accounts_idx = 0;
                 app.push_toast(
                     texts::tui_toast_managed_auth_login_finished(&account.login),
                     ToastKind::Success,
@@ -363,14 +372,17 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
             }
             Ok(None) => {}
             Err(err) => {
-                if app
+                if !app
                     .managed_auth_login
                     .as_ref()
                     .is_some_and(|login| login.device_code == device_code)
                 {
-                    app.managed_auth_login = None;
+                    return;
                 }
+                app.managed_auth_login = None;
                 app.managed_auth_loading = false;
+                app.clear_managed_auth_login_toast();
+                app.clear_managed_auth_cancel_confirm();
                 app.push_toast(
                     texts::tui_toast_managed_auth_login_failed(&err),
                     ToastKind::Error,

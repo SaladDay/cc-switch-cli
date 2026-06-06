@@ -2657,58 +2657,232 @@ pub(super) fn render_settings_managed_accounts(
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
         .split(inner);
 
     if app.focus == Focus::Content {
-        let key_label = managed_account_enter_label(app);
-        render_key_bar_center(frame, chunks[0], theme, &[("Enter", key_label)]);
+        let keys = managed_account_key_items(app);
+        render_key_bar_center(frame, chunks[0], theme, &keys);
     }
+
+    render_summary_bar(frame, chunks[1], theme, managed_accounts_page_summary(app));
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(28), Constraint::Min(0)])
-        .split(chunks[1]);
+        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .split(chunks[2]);
 
-    render_managed_account_services(frame, inset_left(columns[0], CONTENT_INSET_LEFT), theme);
+    render_managed_account_list(frame, app, columns[0], theme);
     render_managed_account_details(frame, app, columns[1], theme);
 }
 
-fn managed_account_enter_label(app: &App) -> &'static str {
-    if app.managed_auth_loading || app.managed_auth_login.is_some() {
-        return texts::tui_loading();
+fn managed_accounts_page_summary(app: &App) -> String {
+    if app.managed_auth_loading {
+        return texts::tui_managed_accounts_summary_loading().to_string();
     }
 
     let Some(status) = app.managed_auth_status.as_ref() else {
-        return texts::tui_key_refresh();
+        return texts::tui_managed_accounts_summary_not_loaded().to_string();
     };
 
-    if primary_managed_account(status).is_some() {
-        texts::tui_key_open()
-    } else {
-        texts::tui_key_login()
+    if status.accounts.is_empty() {
+        return texts::tui_managed_accounts_summary_empty().to_string();
     }
+
+    let default_account = status
+        .default_account_id
+        .as_ref()
+        .and_then(|default_id| {
+            status
+                .accounts
+                .iter()
+                .find(|account| &account.id == default_id)
+                .map(|account| account.login.as_str())
+        })
+        .or_else(|| {
+            status
+                .accounts
+                .iter()
+                .find(|account| account.is_default)
+                .map(|account| account.login.as_str())
+        })
+        .unwrap_or_else(|| texts::none());
+
+    texts::tui_managed_accounts_summary_loaded(status.accounts.len(), default_account)
 }
 
-fn render_managed_account_services(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
-    let header = Row::new(vec![Cell::from(
-        texts::tui_managed_accounts_provider_column(),
-    )])
-    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+fn managed_account_key_items(app: &App) -> Vec<(&'static str, &'static str)> {
+    if app.managed_auth_login.is_some() {
+        return vec![("Esc", texts::tui_key_cancel())];
+    }
 
-    let rows = [Row::new(vec![Cell::from(
-        texts::tui_managed_accounts_chatgpt_provider(),
-    )])];
+    let mut items = vec![
+        ("a", texts::tui_key_add_account()),
+        ("r", texts::tui_key_refresh()),
+    ];
 
-    let table = Table::new(rows, [Constraint::Min(10)])
-        .header(header)
-        .block(Block::default().borders(Borders::NONE))
-        .row_highlight_style(selection_style(theme))
+    if app.managed_auth_loading {
+        return items;
+    }
+
+    match app.managed_auth_status.as_ref() {
+        None => items.push(("Enter", texts::tui_key_refresh())),
+        Some(status) if status.accounts.is_empty() => {
+            items.push(("Enter", texts::tui_key_add_account()));
+        }
+        Some(_) => {
+            items.push(("Space", texts::tui_key_switch()));
+            items.push(("Enter", texts::tui_key_open()));
+        }
+    }
+
+    items
+}
+
+fn render_managed_account_list(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(if app.focus == Focus::Content {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.dim)
+        })
+        .title(texts::tui_managed_accounts_list_title());
+    frame.render_widget(block.clone(), area);
+    let inner = inset_left(block.inner(area), CONTENT_INSET_LEFT);
+
+    let status = app.managed_auth_status.as_ref();
+    if app.managed_auth_loading && status.is_none() {
+        render_managed_account_list_state(frame, inner, texts::tui_loading(), theme);
+        return;
+    }
+
+    let Some(status) = status else {
+        render_managed_account_list_state(
+            frame,
+            inner,
+            texts::tui_managed_accounts_not_loaded(),
+            theme,
+        );
+        return;
+    };
+
+    if status.accounts.is_empty() {
+        render_managed_account_list_state(
+            frame,
+            inner,
+            texts::tui_managed_accounts_not_authenticated(),
+            theme,
+        );
+        return;
+    }
+
+    let width = inner.width.saturating_sub(1);
+    let items = status
+        .accounts
+        .iter()
+        .map(|account| managed_account_list_item(account, width, theme));
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
         .highlight_symbol(highlight_symbol(theme));
 
-    let mut state = TableState::default();
-    state.select(Some(0));
-    frame.render_stateful_widget(table, area, &mut state);
+    let mut state = ListState::default();
+    state.select(Some(app.settings_managed_accounts_idx));
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
+fn render_managed_account_list_state(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    text: &'static str,
+    theme: &super::theme::Theme,
+) {
+    frame.render_widget(
+        Paragraph::new(Line::styled(text, Style::default().fg(theme.comment)))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn managed_account_list_item(
+    account: &crate::services::ManagedAuthAccount,
+    width: u16,
+    theme: &super::theme::Theme,
+) -> ListItem<'static> {
+    let marker_style = if account.is_default {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.dim)
+    };
+    let login_style = Style::default().add_modifier(Modifier::BOLD);
+    let default_label = texts::tui_managed_accounts_default();
+    let default_chip_width = UnicodeWidthStr::width(default_label) as u16 + 2;
+    let login_width = if account.is_default {
+        width
+            .saturating_sub(default_chip_width)
+            .saturating_sub(5)
+            .max(4)
+    } else {
+        width.saturating_sub(3).max(4)
+    };
+    let meta_width = width.saturating_sub(3).max(4);
+    let account_id = truncate_to_display_width(&account.id, meta_width.saturating_sub(12));
+    let meta = truncate_to_display_width(
+        &format!(
+            "{} · {} · {} {account_id}",
+            texts::tui_managed_accounts_chatgpt_provider(),
+            texts::tui_managed_accounts_authenticated(),
+            texts::tui_label_id()
+        ),
+        meta_width,
+    );
+
+    let mut title_spans = vec![
+        Span::styled(
+            if account.is_default {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            },
+            marker_style,
+        ),
+        Span::raw("  "),
+        Span::styled(
+            truncate_to_display_width(&account.login, login_width),
+            login_style,
+        ),
+    ];
+    if account.is_default {
+        title_spans.push(Span::raw("  "));
+        title_spans.push(Span::styled(
+            format!(" {default_label} "),
+            active_chip_style(theme),
+        ));
+    }
+
+    ListItem::new(vec![
+        Line::from(title_spans),
+        Line::from(vec![
+            Span::raw("   "),
+            Span::styled(meta, Style::default().fg(theme.comment)),
+        ]),
+    ])
 }
 
 fn render_managed_account_details(
@@ -2717,13 +2891,7 @@ fn render_managed_account_details(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    render_managed_account_detail_panel(frame, app, chunks[0], theme);
-    render_managed_auth_login_panel(frame, app, chunks[1], theme);
+    render_managed_account_detail_panel(frame, app, area, theme);
 }
 
 fn render_managed_account_detail_panel(
@@ -2740,72 +2908,182 @@ fn render_managed_account_detail_panel(
     frame.render_widget(block.clone(), area);
     let inner = inset_left(block.inner(area), CONTENT_INSET_LEFT);
 
-    let rows_data = managed_account_detail_rows(app);
-    let label_col_width =
-        field_label_column_width(rows_data.iter().map(|(label, _value)| label.as_str()), 0);
-    let rows = rows_data
-        .iter()
-        .map(|(label, value)| Row::new(vec![Cell::from(label.clone()), Cell::from(value.clone())]));
-
-    let table = Table::new(
-        rows,
-        [Constraint::Length(label_col_width), Constraint::Min(10)],
-    )
-    .block(Block::default().borders(Borders::NONE));
-    frame.render_widget(table, inner);
+    frame.render_widget(
+        Paragraph::new(managed_account_detail_lines(app, theme)).wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
-fn managed_account_detail_rows(app: &App) -> Vec<(String, String)> {
-    let mut rows = vec![(
-        texts::tui_managed_accounts_provider_column().to_string(),
-        texts::tui_managed_accounts_chatgpt_provider().to_string(),
-    )];
+fn managed_account_detail_lines(app: &App, theme: &super::theme::Theme) -> Vec<Line<'static>> {
+    let label_width = managed_account_detail_label_width();
+    let mut lines = Vec::new();
 
     if app.managed_auth_loading {
-        rows.push((
-            texts::tui_managed_accounts_auth_status_label().to_string(),
+        lines.push(managed_account_detail_field(
+            texts::tui_managed_accounts_auth_status_label(),
             texts::tui_loading().to_string(),
+            Style::default().fg(theme.comment),
+            label_width,
+            theme,
         ));
-        return rows;
+        return lines;
     }
 
     let Some(status) = app.managed_auth_status.as_ref() else {
-        rows.push((
-            texts::tui_managed_accounts_auth_status_label().to_string(),
+        lines.push(managed_account_detail_field(
+            texts::tui_managed_accounts_auth_status_label(),
             texts::tui_managed_accounts_not_loaded().to_string(),
+            Style::default().fg(theme.comment),
+            label_width,
+            theme,
         ));
-        return rows;
+        return lines;
     };
 
-    let Some(account) = primary_managed_account(status) else {
-        rows.push((
-            texts::tui_managed_accounts_auth_status_label().to_string(),
+    let default_account = status
+        .default_account_id
+        .as_ref()
+        .and_then(|default_id| {
+            status
+                .accounts
+                .iter()
+                .find(|account| &account.id == default_id)
+                .map(|account| account.login.clone())
+        })
+        .unwrap_or_else(|| texts::none().to_string());
+
+    let Some(account) = selected_managed_account(app, status) else {
+        lines.push(managed_account_detail_field(
+            texts::tui_managed_accounts_default_account_label(),
+            default_account,
+            Style::default(),
+            label_width,
+            theme,
+        ));
+        lines.push(managed_account_detail_field(
+            texts::tui_managed_accounts_account_label(),
+            texts::tui_managed_accounts_count(status.accounts.len()),
+            Style::default(),
+            label_width,
+            theme,
+        ));
+        lines.push(managed_account_detail_field(
+            texts::tui_managed_accounts_auth_status_label(),
             texts::tui_managed_accounts_not_authenticated().to_string(),
+            Style::default().fg(theme.comment),
+            label_width,
+            theme,
         ));
-        return rows;
+        return lines;
     };
 
-    rows.push((
-        texts::tui_managed_accounts_auth_status_label().to_string(),
-        texts::tui_managed_accounts_authenticated().to_string(),
+    lines.push(Line::from(vec![
+        Span::styled(
+            account.login.clone(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            if account.is_default {
+                format!(" {} ", texts::tui_managed_accounts_default())
+            } else {
+                format!(" {} ", texts::tui_managed_accounts_authenticated())
+            },
+            if account.is_default {
+                active_chip_style(theme)
+            } else {
+                inactive_chip_style(theme)
+            },
+        ),
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(managed_account_detail_field(
+        texts::tui_managed_accounts_provider_column(),
+        texts::tui_managed_accounts_chatgpt_provider().to_string(),
+        Style::default(),
+        label_width,
+        theme,
     ));
-    rows.push((
-        texts::tui_managed_accounts_account_label().to_string(),
-        account.login.clone(),
+    lines.push(managed_account_detail_field(
+        texts::tui_managed_accounts_default_account_label(),
+        default_account,
+        Style::default(),
+        label_width,
+        theme,
     ));
-    rows.push((
-        texts::tui_managed_accounts_account_id_label().to_string(),
+    lines.push(managed_account_detail_field(
+        texts::tui_managed_accounts_account_label(),
+        texts::tui_managed_accounts_count(status.accounts.len()),
+        Style::default(),
+        label_width,
+        theme,
+    ));
+    lines.push(Line::raw(""));
+    lines.push(managed_account_detail_field(
+        texts::tui_managed_accounts_account_id_label(),
         account.id.clone(),
+        Style::default().fg(theme.comment),
+        label_width,
+        theme,
     ));
-    rows.push((
-        texts::tui_managed_accounts_default_account_label().to_string(),
-        if account.is_default {
-            texts::tui_managed_accounts_default().to_string()
-        } else {
-            texts::none().to_string()
-        },
+    lines.push(managed_account_detail_field(
+        texts::tui_managed_accounts_authenticated_at_label(),
+        format_managed_account_authenticated_at(account.authenticated_at),
+        Style::default().fg(theme.comment),
+        label_width,
+        theme,
     ));
-    rows
+    lines
+}
+
+fn managed_account_detail_label_width() -> usize {
+    [
+        texts::tui_managed_accounts_provider_column(),
+        texts::tui_managed_accounts_default_account_label(),
+        texts::tui_managed_accounts_account_label(),
+        texts::tui_managed_accounts_auth_status_label(),
+        texts::tui_managed_accounts_account_id_label(),
+        texts::tui_managed_accounts_authenticated_at_label(),
+    ]
+    .into_iter()
+    .map(UnicodeWidthStr::width)
+    .max()
+    .unwrap_or(0)
+}
+
+fn managed_account_detail_field(
+    label: &'static str,
+    value: String,
+    value_style: Style,
+    label_width: usize,
+    theme: &super::theme::Theme,
+) -> Line<'static> {
+    kv_line(
+        theme,
+        label,
+        label_width,
+        vec![Span::styled(value, value_style)],
+    )
+}
+
+fn format_managed_account_authenticated_at(timestamp: i64) -> String {
+    if timestamp <= 0 {
+        return texts::tui_na().to_string();
+    }
+
+    format_sync_time_local_to_minute(timestamp).unwrap_or_else(|| texts::tui_na().to_string())
+}
+
+fn selected_managed_account<'a>(
+    app: &App,
+    status: &'a crate::services::ManagedAuthStatus,
+) -> Option<&'a crate::services::ManagedAuthAccount> {
+    status.accounts.get(
+        app.settings_managed_accounts_idx
+            .min(status.accounts.len().saturating_sub(1)),
+    )
 }
 
 fn primary_managed_account(
@@ -2816,40 +3094,6 @@ fn primary_managed_account(
         .iter()
         .find(|account| account.is_default)
         .or_else(|| status.accounts.first())
-}
-
-fn render_managed_auth_login_panel(
-    frame: &mut Frame<'_>,
-    app: &App,
-    area: Rect,
-    theme: &super::theme::Theme,
-) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(theme.dim))
-        .title(texts::tui_managed_accounts_login_status());
-    frame.render_widget(block.clone(), area);
-    let inner = block.inner(area);
-
-    let lines = if let Some(login) = app.managed_auth_login.as_ref() {
-        vec![
-            Line::raw(texts::tui_managed_accounts_login_waiting()),
-            Line::raw(texts::tui_managed_accounts_user_code(&login.user_code)),
-            Line::raw(texts::tui_managed_accounts_verification_url(
-                &login.verification_uri,
-            )),
-        ]
-    } else if app.managed_auth_loading {
-        vec![Line::raw(texts::tui_loading())]
-    } else {
-        vec![Line::styled(
-            texts::tui_managed_accounts_login_idle(),
-            Style::default().fg(theme.dim),
-        )]
-    };
-
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 pub(super) fn render_settings_proxy(

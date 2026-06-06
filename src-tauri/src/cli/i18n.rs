@@ -3302,6 +3302,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_add_account() -> &'static str {
+        if is_chinese() {
+            "新增账号"
+        } else {
+            "add account"
+        }
+    }
+
     pub fn tui_key_copy() -> &'static str {
         if is_chinese() {
             "复制"
@@ -3579,6 +3587,22 @@ pub mod texts {
             "取消"
         } else {
             "cancel"
+        }
+    }
+
+    pub fn tui_key_cancel_login() -> &'static str {
+        if is_chinese() {
+            "取消登录"
+        } else {
+            "cancel login"
+        }
+    }
+
+    pub fn tui_key_keep_waiting() -> &'static str {
+        if is_chinese() {
+            "继续等待"
+        } else {
+            "keep waiting"
         }
     }
 
@@ -3914,6 +3938,44 @@ pub mod texts {
         }
     }
 
+    pub fn tui_managed_accounts_summary_loading() -> &'static str {
+        if is_chinese() {
+            "ChatGPT · 正在加载"
+        } else {
+            "ChatGPT · loading"
+        }
+    }
+
+    pub fn tui_managed_accounts_summary_not_loaded() -> &'static str {
+        if is_chinese() {
+            "ChatGPT · 未加载"
+        } else {
+            "ChatGPT · not loaded"
+        }
+    }
+
+    pub fn tui_managed_accounts_summary_empty() -> &'static str {
+        if is_chinese() {
+            "ChatGPT · 未认证 · 按 a 新增账号"
+        } else {
+            "ChatGPT · not authenticated · press a to add account"
+        }
+    }
+
+    pub fn tui_managed_accounts_summary_loaded(count: usize, default_account: &str) -> String {
+        if is_chinese() {
+            format!(
+                "ChatGPT · {} · 默认: {default_account}",
+                tui_managed_accounts_count(count)
+            )
+        } else {
+            format!(
+                "ChatGPT · {} · default: {default_account}",
+                tui_managed_accounts_count(count)
+            )
+        }
+    }
+
     pub fn tui_managed_accounts_chatgpt_provider() -> &'static str {
         if is_chinese() {
             "ChatGPT"
@@ -3927,6 +3989,14 @@ pub mod texts {
             "服务"
         } else {
             "Service"
+        }
+    }
+
+    pub fn tui_managed_accounts_list_title() -> &'static str {
+        if is_chinese() {
+            "账号列表"
+        } else {
+            "Accounts"
         }
     }
 
@@ -3986,6 +4056,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_managed_accounts_authenticated_at_label() -> &'static str {
+        if is_chinese() {
+            "认证时间"
+        } else {
+            "Authenticated At"
+        }
+    }
+
     pub fn tui_managed_accounts_login_with_chatgpt() -> &'static str {
         if is_chinese() {
             "登录 ChatGPT"
@@ -4031,6 +4109,22 @@ pub mod texts {
             "未进行登录。"
         } else {
             "No login in progress."
+        }
+    }
+
+    pub fn tui_confirm_managed_auth_cancel_title() -> &'static str {
+        if is_chinese() {
+            "取消登录？"
+        } else {
+            "Cancel Login?"
+        }
+    }
+
+    pub fn tui_confirm_managed_auth_cancel_message() -> &'static str {
+        if is_chinese() {
+            "当前 ChatGPT 登录流程仍在等待浏览器确认。按 Enter 确认取消，按 Esc 返回继续等待。"
+        } else {
+            "The ChatGPT login flow is still waiting for browser confirmation. Press Enter to cancel, or Esc to keep waiting."
         }
     }
 
@@ -6587,6 +6681,22 @@ pub mod texts {
             "ChatGPT 登录已开始。"
         } else {
             "ChatGPT login started."
+        }
+    }
+
+    pub fn tui_toast_managed_auth_login_in_progress(code: &str, url: &str) -> String {
+        if is_chinese() {
+            format!("ChatGPT 登录中\n代码: {code}\n验证地址: {url}\n按 Esc 取消")
+        } else {
+            format!("ChatGPT login in progress\nCode: {code}\nVerification URL: {url}\nPress Esc to cancel")
+        }
+    }
+
+    pub fn tui_toast_managed_auth_login_cancelled() -> &'static str {
+        if is_chinese() {
+            "ChatGPT 登录已取消。"
+        } else {
+            "ChatGPT login cancelled."
         }
     }
 

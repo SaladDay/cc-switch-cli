@@ -489,9 +489,12 @@ pub(super) fn toast_rect(content_area: Rect, message: &str) -> Rect {
         .max(1)
         .min(TOAST_MAX_WIDTH);
     let min_width = TOAST_MIN_WIDTH.min(max_width);
-    let width = (UnicodeWidthStr::width(message) as u16)
-        .saturating_add(8)
-        .clamp(min_width, max_width);
+    let content_width = message
+        .lines()
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0) as u16;
+    let width = content_width.saturating_add(8).clamp(min_width, max_width);
 
     let inner_width = width.saturating_sub(2).max(1);
     let wrapped_lines = wrap_message_lines(message, inner_width).len() as u16;
