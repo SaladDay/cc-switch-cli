@@ -1278,8 +1278,10 @@ fn usage_custom_range_app_switch_does_not_show_stale_custom_cache() {
     app.usage.range = data::UsageRangePreset::Custom(active_range);
     data.usage.begin_custom_range(active_range);
 
-    let mut stale_usage = data::UsageSnapshot::default();
-    stale_usage.custom_range = Some(stale_range);
+    let mut stale_usage = data::UsageSnapshot {
+        custom_range: Some(stale_range),
+        ..Default::default()
+    };
     stale_usage.summary_custom.total_requests = 99;
     stale_usage.summary_custom.total_cost_usd = 12.34;
     cache.usage_pricing_by_key.insert(
@@ -1855,8 +1857,10 @@ fn update_check_finished_is_processed_when_request_id_matches() {
         title: texts::tui_update_checking_title().to_string(),
         message: texts::tui_loading().to_string(),
     };
-    let mut update_check = RequestTracker::default();
-    update_check.active = Some(7);
+    let mut update_check = RequestTracker {
+        active: Some(7),
+        ..Default::default()
+    };
 
     let info = crate::cli::commands::update::UpdateCheckInfo {
         current_version: "4.7.0".to_string(),
@@ -1894,8 +1898,10 @@ fn update_check_finished_for_homebrew_update_shows_brew_toast() {
         title: texts::tui_update_checking_title().to_string(),
         message: texts::tui_loading().to_string(),
     };
-    let mut update_check = RequestTracker::default();
-    update_check.active = Some(7);
+    let mut update_check = RequestTracker {
+        active: Some(7),
+        ..Default::default()
+    };
 
     let info = crate::cli::commands::update::UpdateCheckInfo {
         current_version: "4.7.0".to_string(),
@@ -1926,8 +1932,10 @@ fn update_check_finished_for_homebrew_update_shows_brew_toast() {
 fn update_check_finished_is_ignored_when_request_id_mismatch() {
     let mut app = App::new(None);
     app.overlay = Overlay::None;
-    let mut update_check = RequestTracker::default();
-    update_check.active = Some(2);
+    let mut update_check = RequestTracker {
+        active: Some(2),
+        ..Default::default()
+    };
 
     let stale = crate::cli::commands::update::UpdateCheckInfo {
         current_version: "4.7.0".to_string(),

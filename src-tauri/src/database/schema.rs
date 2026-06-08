@@ -231,6 +231,20 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 17. Proxy Failover Live Snapshots 表 (按供应商生成的故障转移 Live 配置)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS proxy_failover_live_snapshots (
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            PRIMARY KEY (app_type, provider_id),
+            FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+        )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS usage_daily_rollups (
                 date TEXT NOT NULL,
@@ -408,7 +422,7 @@ impl Database {
                     }
                     10 => {
                         log::info!(
-                            "迁移数据库从 v10 到 v11（usage_daily_rollups 保留请求/计价模型维度）"
+                            "迁移数据库从 v10 到 v11（usage_daily_rollups 保留请求/计价模型维度 + 故障转移 Live 配置快照）"
                         );
                         Self::migrate_v10_to_v11(conn)?;
                         Self::set_user_version(conn, 11)?;
@@ -807,27 +821,41 @@ impl Database {
             return Ok(());
         }
 
-        let changed = conn
-            .execute(
-                "UPDATE proxy_config
-                 SET auto_failover_enabled = 0
+        let stale_without_takeover: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM proxy_config
                  WHERE enabled = 0 AND auto_failover_enabled != 0",
                 [],
+                |row| row.get(0),
             )
-            .map_err(|e| AppError::Database(format!("清理无代理接管的故障转移状态失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("检查无代理接管的故障转移状态失败: {e}")))?;
 
-        if changed > 0 {
-            log::warn!("已清理 {changed} 个未启用代理接管的故障转移状态");
+        if stale_without_takeover > 0 {
+            let changed = conn
+                .execute(
+                    "UPDATE proxy_config
+                     SET auto_failover_enabled = 0
+                     WHERE enabled = 0 AND auto_failover_enabled != 0",
+                    [],
+                )
+                .map_err(|e| {
+                    AppError::Database(format!("清理无代理接管的故障转移状态失败: {e}"))
+                })?;
+
+            if changed > 0 {
+                log::warn!("已清理 {changed} 个未启用代理接管的故障转移状态");
+            }
         }
 
         if Self::table_exists(conn, "providers")?
             && Self::has_column(conn, "providers", "app_type")?
             && Self::has_column(conn, "providers", "in_failover_queue")?
         {
-            let changed = conn
-                .execute(
-                    "UPDATE proxy_config
-                     SET auto_failover_enabled = 0
+            let stale_empty_queue: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*)
+                     FROM proxy_config
                      WHERE auto_failover_enabled != 0
                        AND NOT EXISTS (
                            SELECT 1 FROM providers
@@ -835,11 +863,28 @@ impl Database {
                              AND providers.in_failover_queue = 1
                        )",
                     [],
+                    |row| row.get(0),
                 )
-                .map_err(|e| AppError::Database(format!("清理空队列故障转移状态失败: {e}")))?;
+                .map_err(|e| AppError::Database(format!("检查空队列故障转移状态失败: {e}")))?;
 
-            if changed > 0 {
-                log::warn!("已清理 {changed} 个空故障转移队列的自动故障转移状态");
+            if stale_empty_queue > 0 {
+                let changed = conn
+                    .execute(
+                        "UPDATE proxy_config
+                         SET auto_failover_enabled = 0
+                         WHERE auto_failover_enabled != 0
+                           AND NOT EXISTS (
+                               SELECT 1 FROM providers
+                               WHERE providers.app_type = proxy_config.app_type
+                                 AND providers.in_failover_queue = 1
+                           )",
+                        [],
+                    )
+                    .map_err(|e| AppError::Database(format!("清理空队列故障转移状态失败: {e}")))?;
+
+                if changed > 0 {
+                    log::warn!("已清理 {changed} 个空故障转移队列的自动故障转移状态");
+                }
             }
         }
 
@@ -1227,7 +1272,7 @@ impl Database {
         Ok(())
     }
 
-    /// v10 -> v11 迁移：保留请求模型与计价模型维度。
+    /// v10 -> v11 迁移：保留请求/计价模型维度并添加故障转移 Live 配置快照。
     ///
     /// WebDAV 同步会在不同分支之间交换 SQLite 快照；上游 v11 已经把
     /// `usage_daily_rollups` 的主键扩展为 `(model, request_model, pricing_model)`。
@@ -1238,54 +1283,67 @@ impl Database {
             Self::add_column_if_missing(conn, "proxy_request_logs", "pricing_model", "TEXT")?;
         }
 
-        if !Self::table_exists(conn, "usage_daily_rollups")? {
+        if Self::table_exists(conn, "usage_daily_rollups")? {
+            if Self::has_column(conn, "usage_daily_rollups", "request_model")?
+                && Self::has_column(conn, "usage_daily_rollups", "pricing_model")?
+            {
+                log::info!("v10 -> v11：usage_daily_rollups 已包含 v11 维度，跳过重建");
+            } else {
+                conn.execute_batch(
+                    "ALTER TABLE usage_daily_rollups RENAME TO usage_daily_rollups_v10;
+                     CREATE TABLE usage_daily_rollups (
+                         date TEXT NOT NULL,
+                         app_type TEXT NOT NULL,
+                         provider_id TEXT NOT NULL,
+                         model TEXT NOT NULL,
+                         request_model TEXT NOT NULL DEFAULT '',
+                         pricing_model TEXT NOT NULL DEFAULT '',
+                         request_count INTEGER NOT NULL DEFAULT 0,
+                         success_count INTEGER NOT NULL DEFAULT 0,
+                         input_tokens INTEGER NOT NULL DEFAULT 0,
+                         output_tokens INTEGER NOT NULL DEFAULT 0,
+                         cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                         cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                         total_cost_usd TEXT NOT NULL DEFAULT '0',
+                         avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+                         PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
+                     );
+                     INSERT INTO usage_daily_rollups
+                         (date, app_type, provider_id, model, request_model, pricing_model,
+                          request_count, success_count, input_tokens, output_tokens,
+                          cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms)
+                     SELECT date, app_type, provider_id, model, '', '',
+                          request_count, success_count, input_tokens, output_tokens,
+                          cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms
+                     FROM usage_daily_rollups_v10;
+                     DROP TABLE usage_daily_rollups_v10;",
+                )
+                .map_err(|e| {
+                    AppError::Database(format!("v10 -> v11 重建 usage_daily_rollups 失败: {e}"))
+                })?;
+
+                log::info!(
+                    "v10 -> v11 迁移完成：usage_daily_rollups 已保留 request_model/pricing_model 维度"
+                );
+            }
+        } else {
             log::info!("v10 -> v11：usage_daily_rollups 不存在，跳过重建");
-            return Ok(());
         }
 
-        if Self::has_column(conn, "usage_daily_rollups", "request_model")?
-            && Self::has_column(conn, "usage_daily_rollups", "pricing_model")?
-        {
-            log::info!("v10 -> v11：usage_daily_rollups 已包含 v11 维度，跳过重建");
-            return Ok(());
-        }
-
-        conn.execute_batch(
-            "ALTER TABLE usage_daily_rollups RENAME TO usage_daily_rollups_v10;
-             CREATE TABLE usage_daily_rollups (
-                 date TEXT NOT NULL,
-                 app_type TEXT NOT NULL,
-                 provider_id TEXT NOT NULL,
-                 model TEXT NOT NULL,
-                 request_model TEXT NOT NULL DEFAULT '',
-                 pricing_model TEXT NOT NULL DEFAULT '',
-                 request_count INTEGER NOT NULL DEFAULT 0,
-                 success_count INTEGER NOT NULL DEFAULT 0,
-                 input_tokens INTEGER NOT NULL DEFAULT 0,
-                 output_tokens INTEGER NOT NULL DEFAULT 0,
-                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-                 total_cost_usd TEXT NOT NULL DEFAULT '0',
-                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
-                 PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
-             );
-             INSERT INTO usage_daily_rollups
-                 (date, app_type, provider_id, model, request_model, pricing_model,
-                  request_count, success_count, input_tokens, output_tokens,
-                  cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms)
-             SELECT date, app_type, provider_id, model, '', '',
-                  request_count, success_count, input_tokens, output_tokens,
-                  cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms
-             FROM usage_daily_rollups_v10;
-             DROP TABLE usage_daily_rollups_v10;",
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS proxy_failover_live_snapshots (
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            PRIMARY KEY (app_type, provider_id),
+            FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+        )",
+            [],
         )
-        .map_err(|e| {
-            AppError::Database(format!("v10 -> v11 重建 usage_daily_rollups 失败: {e}"))
-        })?;
+        .map_err(|e| AppError::Database(format!("创建故障转移 Live 配置快照表失败: {e}")))?;
 
-        log::info!(
-            "v10 -> v11 迁移完成：usage_daily_rollups 已保留 request_model/pricing_model 维度"
-        );
+        log::info!("v10 -> v11 迁移完成：已添加故障转移 Live 配置快照表");
         Ok(())
     }
 

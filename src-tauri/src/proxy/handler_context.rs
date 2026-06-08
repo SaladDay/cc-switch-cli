@@ -9,7 +9,6 @@ use crate::provider::Provider;
 use super::{
     error::ProxyError,
     provider_router::ProviderRouter,
-    providers::gemini_shadow::GeminiShadowStore,
     server::ProxyServerState,
     session::extract_session_id,
     types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
@@ -138,6 +137,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::RwLock;
 
+    use crate::proxy::providers::gemini_shadow::GeminiShadowStore;
     use crate::{database::Database, proxy::types::ProxyConfig};
 
     struct TempHome {

@@ -546,6 +546,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "test serializes global proxy client state"
+    )]
     async fn send_http_request_http_error_preview_handles_multibyte_truncation() {
         let _guard = proxy_test_lock();
         crate::proxy::http_client::apply_proxy(None).expect("reset proxy to direct");
@@ -583,6 +587,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "test serializes global proxy client state"
+    )]
     async fn send_http_request_uses_shared_proxy_aware_client() {
         let _guard = proxy_test_lock();
 
@@ -619,6 +627,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "test serializes global proxy client state"
+    )]
     async fn execute_usage_script_custom_template_skips_same_origin_check() {
         let _guard = proxy_test_lock();
         crate::proxy::http_client::apply_proxy(None).expect("reset proxy to direct");

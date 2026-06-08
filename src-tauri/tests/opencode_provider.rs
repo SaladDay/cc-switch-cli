@@ -92,8 +92,22 @@ fn opencode_add_syncs_all_providers_to_live_config() {
     assert!(providers.contains_key("anthropic"));
 }
 
+fn assert_live_conflict(err: AppError, paths: &[&str]) {
+    let message = err.to_string();
+    assert!(
+        message.contains("Live configuration has conflicting local changes"),
+        "expected live conflict summary, got: {message}"
+    );
+    for path in paths {
+        assert!(
+            message.contains(path),
+            "expected conflict path {path}, got: {message}"
+        );
+    }
+}
+
 #[test]
-fn opencode_update_live_backed_provider_rewrites_live_config() {
+fn opencode_update_live_backed_provider_conflicts_on_changed_live_field() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -133,7 +147,7 @@ fn opencode_update_live_backed_provider_rewrites_live_config() {
     .expect("seed opencode live config");
 
     let state = state_from_config(config);
-    ProviderService::update(
+    let err = ProviderService::update(
         &state,
         AppType::OpenCode,
         opencode_provider(
@@ -142,12 +156,13 @@ fn opencode_update_live_backed_provider_rewrites_live_config() {
             "https://new.example.com/v1",
         ),
     )
-    .expect("updating live-backed opencode provider should rewrite live config");
+    .expect_err("changed live opencode field should conflict by default");
+    assert_live_conflict(err, &["options.baseURL"]);
 
     let live = read_opencode_live(&opencode_path);
     assert_eq!(
         live["provider"]["live-provider"]["options"]["baseURL"],
-        json!("https://new.example.com/v1")
+        json!("https://old.example.com/v1")
     );
 }
 
@@ -294,7 +309,7 @@ fn opencode_remove_from_live_config_marks_db_only_until_readded() {
         );
     }
 
-    ProviderService::update(
+    let err = ProviderService::update(
         &state,
         AppType::OpenCode,
         opencode_provider(
@@ -303,10 +318,11 @@ fn opencode_remove_from_live_config_marks_db_only_until_readded() {
             "https://toggle.new.example.com/v1",
         ),
     )
-    .expect("re-added opencode provider edit should update live config");
+    .expect_err("re-added opencode provider edit should conflict on changed live field");
+    assert_live_conflict(err, &["options.baseURL"]);
     assert_eq!(
         read_opencode_live(&opencode_path)["provider"]["toggle"]["options"]["baseURL"],
-        json!("https://toggle.new.example.com/v1")
+        json!("https://toggle.old.example.com/v1")
     );
 }
 

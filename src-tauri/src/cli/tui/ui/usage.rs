@@ -1073,7 +1073,7 @@ fn render_usage_detail_body(
         detail_line(usage_text("Request", "请求"), &row.request_id, theme),
         detail_line(
             usage_text("Time", "时间"),
-            &format_log_time(row.created_at, true),
+            format_log_time(row.created_at, true),
             theme,
         ),
         detail_line(usage_text("App", "应用"), &row.app_type, theme),
@@ -1091,42 +1091,42 @@ fn render_usage_detail_body(
         ),
         detail_line(
             usage_text("Status", "状态"),
-            &status_label(row.status_code),
+            status_label(row.status_code),
             theme,
         ),
         detail_line(
             usage_text("Tokens", "Token"),
-            &format!("{}", row.total_tokens()),
+            format!("{}", row.total_tokens()),
             theme,
         ),
         detail_line(
             usage_text("Input", "输入"),
-            &row.input_tokens.to_string(),
+            row.input_tokens.to_string(),
             theme,
         ),
         detail_line(
             usage_text("Output", "输出"),
-            &row.output_tokens.to_string(),
+            row.output_tokens.to_string(),
             theme,
         ),
         detail_line(
             usage_text("Cache Read", "缓存读取"),
-            &row.cache_read_tokens.to_string(),
+            row.cache_read_tokens.to_string(),
             theme,
         ),
         detail_line(
             usage_text("Cache Create", "缓存创建"),
-            &row.cache_creation_tokens.to_string(),
+            row.cache_creation_tokens.to_string(),
             theme,
         ),
         detail_line(
             usage_text("Cost", "费用"),
-            &format_money(row.total_cost_usd),
+            format_money(row.total_cost_usd),
             theme,
         ),
         detail_line(
             usage_text("Latency", "延迟"),
-            &format!("{}ms", row.latency_ms),
+            format!("{}ms", row.latency_ms),
             theme,
         ),
         detail_line(usage_text("First Token", "首字"), &first_token, theme),
@@ -1320,7 +1320,7 @@ fn format_metric_value(value: f64, metric: UsageMetric) -> String {
     }
 }
 
-fn fit_trend_points<'a>(trend: &'a [UsageTrendBucket], width: u16) -> Vec<&'a UsageTrendBucket> {
+fn fit_trend_points(trend: &[UsageTrendBucket], width: u16) -> Vec<&UsageTrendBucket> {
     let point_budget = if width < 44 {
         width.saturating_sub(4).max(6) as usize
     } else {

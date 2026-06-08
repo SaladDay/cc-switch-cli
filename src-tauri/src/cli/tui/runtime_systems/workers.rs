@@ -664,7 +664,6 @@ fn handle_session_req(req: SessionReq, tx: &mpsc::Sender<SessionMsg>) -> Result<
                 crate::session_manager::scan_sessions_for_provider(&provider_id)
             })
             .map_err(|_| "session scan panicked".to_string());
-            let result = result;
             tx.send(SessionMsg::ScanFinished { request_id, result })
                 .map_err(|_| ())
         }

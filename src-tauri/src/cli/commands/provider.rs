@@ -1,7 +1,7 @@
 use clap::{Subcommand, ValueEnum};
-use std::{collections::HashSet, path::PathBuf};
+use std::{cell::RefCell, collections::HashSet, path::PathBuf};
 
-use super::{provider_inspect, provider_usage_query};
+use super::{live_conflict::PromptConflictResolver, provider_inspect, provider_usage_query};
 use crate::app_config::AppType;
 use crate::cli::commands::provider_input::{
     build_provider_from_add_template, common_snippet_has_effective_config, current_timestamp,
@@ -15,7 +15,7 @@ use crate::cli::i18n::texts;
 use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
 use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
-use crate::services::{AuthService, ManagedAuthAccount, ProviderService};
+use crate::services::{provider::live_merge, AuthService, ManagedAuthAccount, ProviderService};
 use crate::store::AppState;
 use inquire::{Confirm, Select};
 
@@ -683,6 +683,14 @@ fn get_state() -> Result<AppState, AppError> {
     AppState::try_new()
 }
 
+fn with_prompt_conflict_resolution<T>(
+    f: impl FnOnce(live_merge::ConflictResolution<'_>) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let mut resolver = PromptConflictResolver;
+    let resolver = RefCell::new(&mut resolver as &mut dyn live_merge::ConflictResolver);
+    f(live_merge::ConflictResolution::Resolver(&resolver))
+}
+
 fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let state = get_state()?;
     let app_str = app_type.as_str().to_string();
@@ -695,7 +703,9 @@ fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     };
 
     // 执行切换
-    ProviderService::switch(&state, app_type.clone(), id)?;
+    with_prompt_conflict_resolution(|resolution| {
+        ProviderService::switch_with_resolution(&state, app_type.clone(), id, resolution)
+    })?;
     if let Err(err) =
         crate::claude_plugin::sync_claude_plugin_on_provider_switch(&app_type, &provider)
     {
@@ -899,7 +909,9 @@ fn add_provider(app_type: AppType, template: Option<ProviderAddTemplate>) -> Res
 
     // 7. 调用 Service 层
     let provider_id = provider.id.clone();
-    ProviderService::add(&state, app_type.clone(), provider)?;
+    with_prompt_conflict_resolution(|resolution| {
+        ProviderService::add_with_resolution(&state, app_type.clone(), provider, resolution)
+    })?;
 
     // 8. 成功消息
     println!(
@@ -1017,7 +1029,9 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     }
 
     // 8. 调用 Service 层
-    ProviderService::update(&state, app_type.clone(), updated)?;
+    with_prompt_conflict_resolution(|resolution| {
+        ProviderService::update_with_resolution(&state, app_type.clone(), updated, resolution)
+    })?;
 
     // 9. 成功消息
     println!(
@@ -1026,6 +1040,342 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     );
     if is_current {
         println!("{}", warning(texts::current_provider_synced_warning()));
+    }
+
+    Ok(())
+}
+
+fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
+    let base_id = format!("{}-copy", original_id.trim());
+    if !existing_ids.iter().any(|id| id == &base_id) {
+        return base_id;
+    }
+
+    let mut counter = 2;
+    loop {
+        let candidate = format!("{base_id}-{counter}");
+        if !existing_ids.iter().any(|id| id == &candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+fn existing_provider_ids_for_duplicate(
+    app_type: &AppType,
+    manager_ids: impl IntoIterator<Item = String>,
+) -> Result<Vec<String>, AppError> {
+    let mut ids = manager_ids.into_iter().collect::<HashSet<_>>();
+    if app_type.is_additive_mode() {
+        let live_ids = match app_type {
+            AppType::OpenCode => crate::opencode_config::get_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            AppType::Hermes => crate::hermes_config::get_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            AppType::OpenClaw => crate::openclaw_config::get_providers()?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        ids.extend(live_ids);
+    }
+    Ok(ids.into_iter().collect())
+}
+
+fn provider_duplicate_draft(source: &Provider, existing_ids: &[String]) -> Provider {
+    let mut draft = source.clone();
+    draft.id = provider_copy_id(&source.id, existing_ids);
+    draft.name = format!("{} copy", source.name.trim());
+    draft.created_at = None;
+    draft.in_failover_queue = false;
+    draft
+}
+
+fn duplicate_provider(app_type: AppType, id: &str, edit: bool) -> Result<(), AppError> {
+    if edit {
+        return duplicate_provider_interactive(app_type, id);
+    }
+
+    let state = AppState::try_new()?;
+    let duplicate = ProviderService::duplicate(&state, app_type, id, None)?;
+
+    println!(
+        "{}",
+        success(&texts::provider_duplicated_success(id, &duplicate.id))
+    );
+    Ok(())
+}
+
+fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), AppError> {
+    crate::cli::terminal::disable_bracketed_paste_mode_best_effort();
+
+    println!("{}", highlight(&format!("Duplicate Provider: {}", id)));
+    println!("{}", "=".repeat(50));
+
+    let state = AppState::try_new()?;
+    let config = state.config.read().unwrap();
+    let manager = config
+        .get_manager(&app_type)
+        .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
+    let source = manager
+        .providers
+        .get(id)
+        .ok_or_else(|| {
+            let msg = texts::entity_not_found(texts::entity_provider(), id);
+            AppError::localized("provider.not_found", msg.clone(), msg)
+        })?
+        .clone();
+    let existing_ids =
+        existing_provider_ids_for_duplicate(&app_type, manager.providers.keys().cloned())?;
+    let common_snippet = config.common_config_snippets.get(&app_type).cloned();
+    drop(config);
+
+    let draft = provider_duplicate_draft(&source, &existing_ids);
+
+    println!("\n{}", highlight(texts::current_config_header()));
+    display_provider_summary(&draft, &app_type);
+    println!();
+    println!("{}", info(texts::edit_fields_instruction()));
+
+    let (name, website_url) = prompt_basic_fields(Some(&draft))?;
+    let settings_prompt_result = if Confirm::new(texts::modify_provider_config_prompt())
+        .with_default(false)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    {
+        Some(prompt_settings_config(
+            &app_type,
+            Some(&draft.settings_config),
+            draft.meta.as_ref(),
+            matches!(app_type, AppType::Codex) && source.is_codex_official(),
+        )?)
+    } else {
+        None
+    };
+    let settings_config = settings_prompt_result
+        .as_ref()
+        .map(|result| result.settings_config.clone())
+        .unwrap_or_else(|| draft.settings_config.clone());
+
+    let optional = if Confirm::new(texts::modify_optional_fields_prompt())
+        .with_default(false)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    {
+        prompt_optional_fields(Some(&draft))?
+    } else {
+        OptionalFields::from_provider(&draft)
+    };
+
+    let mut copied = Provider {
+        id: draft.id.clone(),
+        name: name.trim().to_string(),
+        settings_config,
+        website_url,
+        category: source.category.clone(),
+        created_at: None,
+        sort_index: optional.sort_index,
+        notes: optional.notes,
+        icon: source.icon.clone(),
+        icon_color: source.icon_color.clone(),
+        meta: source.meta.clone(),
+        in_failover_queue: false,
+    };
+    apply_settings_prompt_result_metadata(&app_type, &mut copied, settings_prompt_result.as_ref());
+    prompt_and_apply_provider_api_format(&app_type, &mut copied)?;
+    prompt_and_apply_codex_oauth_provider_options(&app_type, &mut copied)?;
+    if let Some(enabled) =
+        prompt_common_config_enabled(&app_type, common_snippet.as_deref(), Some(&copied))?
+    {
+        set_provider_common_config_meta(&mut copied, enabled);
+    }
+
+    println!("\n{}", highlight(texts::updated_config_header()));
+    display_provider_summary(&copied, &app_type);
+    if !Confirm::new(&texts::confirm_create_entity(texts::entity_provider()))
+        .with_default(false)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
+    {
+        println!("{}", info(texts::cancelled()));
+        return Ok(());
+    }
+
+    let duplicate = ProviderService::duplicate(&state, app_type, id, Some(copied))?;
+    println!(
+        "{}",
+        success(&texts::provider_duplicated_success(id, &duplicate.id))
+    );
+    Ok(())
+}
+
+fn import_live_config(app_type: AppType) -> Result<(), AppError> {
+    let state = get_state()?;
+    let imported = ProviderService::import_live_config(&state, app_type.clone())?;
+    if imported > 0 {
+        println!(
+            "{}",
+            success(&format!(
+                "✓ Imported {imported} provider(s) from {} live config",
+                app_type.as_str()
+            ))
+        );
+    } else {
+        println!(
+            "{}",
+            info(&format!(
+                "No providers imported from {} live config.",
+                app_type.as_str()
+            ))
+        );
+    }
+    Ok(())
+}
+
+fn remove_from_config(app_type: AppType, id: &str) -> Result<(), AppError> {
+    let state = get_state()?;
+    ProviderService::remove_from_live_config(&state, app_type.clone(), id)?;
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Removed provider '{}' from {} live config",
+            id,
+            app_type.as_str()
+        ))
+    );
+    Ok(())
+}
+
+fn set_default_provider(app_type: AppType, id: &str, model: Option<&str>) -> Result<(), AppError> {
+    let state = get_state()?;
+    let default = ProviderService::set_default_model(&state, app_type.clone(), id, model)?;
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Set '{}' as default for {}",
+            default,
+            app_type.as_str()
+        ))
+    );
+    Ok(())
+}
+
+fn export_provider(app_type: AppType, id: &str, output: Option<PathBuf>) -> Result<(), AppError> {
+    if !matches!(app_type, AppType::Claude) {
+        return Err(AppError::Message(format!(
+            "Provider export currently supports only Claude standalone settings files. Use --app claude (current app: {}).",
+            app_type.as_str()
+        )));
+    }
+
+    let state = get_state()?;
+
+    // Single lock scope: get provider AND common_config_snippet together
+    let (provider, common_config_snippet) = {
+        let config = state.config.read().map_err(AppError::from)?;
+        let manager = config
+            .get_manager(&app_type)
+            .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
+
+        let provider = manager
+            .providers
+            .get(id)
+            .ok_or_else(|| {
+                let msg = texts::provider_not_found(id);
+                AppError::localized("provider.not_found", msg.clone(), msg)
+            })?
+            .clone();
+
+        (
+            provider,
+            config.common_config_snippets.get(&app_type).cloned(),
+        )
+    };
+
+    let apply_common_config = ProviderService::provider_uses_common_config_for_app(
+        &app_type,
+        &provider,
+        common_config_snippet.as_deref(),
+    );
+
+    let output_path = match output {
+        None => {
+            // Default: {cwd}/.claude/settings.local.json (auto-loaded by Claude CLI)
+            std::env::current_dir()
+                .map_err(|e| AppError::Message(format!("无法获取当前工作目录: {}", e)))?
+                .join(".claude")
+                .join("settings.local.json")
+        }
+        Some(path) => {
+            // If path looks like a directory (no .json extension), append settings-{name}.json
+            let path_str = path.to_string_lossy();
+            if path_str.ends_with('/') || path_str.ends_with('\\') || !path_str.ends_with(".json") {
+                path.join(format!(
+                    "settings-{}.json",
+                    crate::config::sanitize_provider_name(&provider.name)
+                ))
+            } else {
+                path
+            }
+        }
+    };
+
+    if output_path.exists() {
+        let confirm = Confirm::new(&format!(
+            "File '{}' already exists. Overwrite?",
+            output_path.display()
+        ))
+        .with_default(false)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+        if !confirm {
+            println!("{}", info(texts::cancelled()));
+            return Ok(());
+        }
+    }
+
+    let settings_content = ProviderService::build_live_backup_snapshot(
+        &app_type,
+        &provider,
+        common_config_snippet.as_deref(),
+        apply_common_config,
+    )?;
+
+    crate::config::write_json_file(&output_path, &settings_content)?;
+
+    println!(
+        "{}",
+        success(&format!(
+            "✓ Exported provider '{}' to {}",
+            id,
+            output_path.display()
+        ))
+    );
+
+    // If output is settings.local.json, Claude CLI will auto-load it
+    if output_path
+        .file_name()
+        .map(|n| n.to_string_lossy() == "settings.local.json")
+        .unwrap_or(false)
+    {
+        println!(
+            "{}",
+            info("Claude CLI will auto-load this config. Just run: claude")
+        );
+    } else {
+        println!(
+            "{}",
+            info(&format!(
+                "Use it with: claude --settings {}",
+                output_path.display()
+            ))
+        );
     }
 
     Ok(())
@@ -1510,340 +1860,4 @@ wire_api = "chat"
             "sk-demo"
         );
     }
-}
-
-fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
-    let base_id = format!("{}-copy", original_id.trim());
-    if !existing_ids.iter().any(|id| id == &base_id) {
-        return base_id;
-    }
-
-    let mut counter = 2;
-    loop {
-        let candidate = format!("{base_id}-{counter}");
-        if !existing_ids.iter().any(|id| id == &candidate) {
-            return candidate;
-        }
-        counter += 1;
-    }
-}
-
-fn existing_provider_ids_for_duplicate(
-    app_type: &AppType,
-    manager_ids: impl IntoIterator<Item = String>,
-) -> Result<Vec<String>, AppError> {
-    let mut ids = manager_ids.into_iter().collect::<HashSet<_>>();
-    if app_type.is_additive_mode() {
-        let live_ids = match app_type {
-            AppType::OpenCode => crate::opencode_config::get_providers()?
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>(),
-            AppType::Hermes => crate::hermes_config::get_providers()?
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>(),
-            AppType::OpenClaw => crate::openclaw_config::get_providers()?
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        };
-        ids.extend(live_ids);
-    }
-    Ok(ids.into_iter().collect())
-}
-
-fn provider_duplicate_draft(source: &Provider, existing_ids: &[String]) -> Provider {
-    let mut draft = source.clone();
-    draft.id = provider_copy_id(&source.id, existing_ids);
-    draft.name = format!("{} copy", source.name.trim());
-    draft.created_at = None;
-    draft.in_failover_queue = false;
-    draft
-}
-
-fn duplicate_provider(app_type: AppType, id: &str, edit: bool) -> Result<(), AppError> {
-    if edit {
-        return duplicate_provider_interactive(app_type, id);
-    }
-
-    let state = AppState::try_new()?;
-    let duplicate = ProviderService::duplicate(&state, app_type, id, None)?;
-
-    println!(
-        "{}",
-        success(&texts::provider_duplicated_success(id, &duplicate.id))
-    );
-    Ok(())
-}
-
-fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), AppError> {
-    crate::cli::terminal::disable_bracketed_paste_mode_best_effort();
-
-    println!("{}", highlight(&format!("Duplicate Provider: {}", id)));
-    println!("{}", "=".repeat(50));
-
-    let state = AppState::try_new()?;
-    let config = state.config.read().unwrap();
-    let manager = config
-        .get_manager(&app_type)
-        .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
-    let source = manager
-        .providers
-        .get(id)
-        .ok_or_else(|| {
-            let msg = texts::entity_not_found(texts::entity_provider(), id);
-            AppError::localized("provider.not_found", msg.clone(), msg)
-        })?
-        .clone();
-    let existing_ids =
-        existing_provider_ids_for_duplicate(&app_type, manager.providers.keys().cloned())?;
-    let common_snippet = config.common_config_snippets.get(&app_type).cloned();
-    drop(config);
-
-    let draft = provider_duplicate_draft(&source, &existing_ids);
-
-    println!("\n{}", highlight(texts::current_config_header()));
-    display_provider_summary(&draft, &app_type);
-    println!();
-    println!("{}", info(texts::edit_fields_instruction()));
-
-    let (name, website_url) = prompt_basic_fields(Some(&draft))?;
-    let settings_prompt_result = if Confirm::new(texts::modify_provider_config_prompt())
-        .with_default(false)
-        .prompt()
-        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    {
-        Some(prompt_settings_config(
-            &app_type,
-            Some(&draft.settings_config),
-            draft.meta.as_ref(),
-            matches!(app_type, AppType::Codex) && source.is_codex_official(),
-        )?)
-    } else {
-        None
-    };
-    let settings_config = settings_prompt_result
-        .as_ref()
-        .map(|result| result.settings_config.clone())
-        .unwrap_or_else(|| draft.settings_config.clone());
-
-    let optional = if Confirm::new(texts::modify_optional_fields_prompt())
-        .with_default(false)
-        .prompt()
-        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    {
-        prompt_optional_fields(Some(&draft))?
-    } else {
-        OptionalFields::from_provider(&draft)
-    };
-
-    let mut copied = Provider {
-        id: draft.id.clone(),
-        name: name.trim().to_string(),
-        settings_config,
-        website_url,
-        category: source.category.clone(),
-        created_at: None,
-        sort_index: optional.sort_index,
-        notes: optional.notes,
-        icon: source.icon.clone(),
-        icon_color: source.icon_color.clone(),
-        meta: source.meta.clone(),
-        in_failover_queue: false,
-    };
-    apply_settings_prompt_result_metadata(&app_type, &mut copied, settings_prompt_result.as_ref());
-    prompt_and_apply_provider_api_format(&app_type, &mut copied)?;
-    prompt_and_apply_codex_oauth_provider_options(&app_type, &mut copied)?;
-    if let Some(enabled) =
-        prompt_common_config_enabled(&app_type, common_snippet.as_deref(), Some(&copied))?
-    {
-        set_provider_common_config_meta(&mut copied, enabled);
-    }
-
-    println!("\n{}", highlight(texts::updated_config_header()));
-    display_provider_summary(&copied, &app_type);
-    if !Confirm::new(&texts::confirm_create_entity(texts::entity_provider()))
-        .with_default(false)
-        .prompt()
-        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    {
-        println!("{}", info(texts::cancelled()));
-        return Ok(());
-    }
-
-    let duplicate = ProviderService::duplicate(&state, app_type, id, Some(copied))?;
-    println!(
-        "{}",
-        success(&texts::provider_duplicated_success(id, &duplicate.id))
-    );
-    Ok(())
-}
-
-fn import_live_config(app_type: AppType) -> Result<(), AppError> {
-    let state = get_state()?;
-    let imported = ProviderService::import_live_config(&state, app_type.clone())?;
-    if imported > 0 {
-        println!(
-            "{}",
-            success(&format!(
-                "✓ Imported {imported} provider(s) from {} live config",
-                app_type.as_str()
-            ))
-        );
-    } else {
-        println!(
-            "{}",
-            info(&format!(
-                "No providers imported from {} live config.",
-                app_type.as_str()
-            ))
-        );
-    }
-    Ok(())
-}
-
-fn remove_from_config(app_type: AppType, id: &str) -> Result<(), AppError> {
-    let state = get_state()?;
-    ProviderService::remove_from_live_config(&state, app_type.clone(), id)?;
-    println!(
-        "{}",
-        success(&format!(
-            "✓ Removed provider '{}' from {} live config",
-            id,
-            app_type.as_str()
-        ))
-    );
-    Ok(())
-}
-
-fn set_default_provider(app_type: AppType, id: &str, model: Option<&str>) -> Result<(), AppError> {
-    let state = get_state()?;
-    let default = ProviderService::set_default_model(&state, app_type.clone(), id, model)?;
-    println!(
-        "{}",
-        success(&format!(
-            "✓ Set '{}' as default for {}",
-            default,
-            app_type.as_str()
-        ))
-    );
-    Ok(())
-}
-
-fn export_provider(app_type: AppType, id: &str, output: Option<PathBuf>) -> Result<(), AppError> {
-    if !matches!(app_type, AppType::Claude) {
-        return Err(AppError::Message(format!(
-            "Provider export currently supports only Claude standalone settings files. Use --app claude (current app: {}).",
-            app_type.as_str()
-        )));
-    }
-
-    let state = get_state()?;
-
-    // Single lock scope: get provider AND common_config_snippet together
-    let (provider, common_config_snippet) = {
-        let config = state.config.read().map_err(AppError::from)?;
-        let manager = config
-            .get_manager(&app_type)
-            .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
-
-        let provider = manager
-            .providers
-            .get(id)
-            .ok_or_else(|| {
-                let msg = texts::provider_not_found(id);
-                AppError::localized("provider.not_found", msg.clone(), msg)
-            })?
-            .clone();
-
-        (
-            provider,
-            config.common_config_snippets.get(&app_type).cloned(),
-        )
-    };
-
-    let apply_common_config = ProviderService::provider_uses_common_config_for_app(
-        &app_type,
-        &provider,
-        common_config_snippet.as_deref(),
-    );
-
-    let output_path = match output {
-        None => {
-            // Default: {cwd}/.claude/settings.local.json (auto-loaded by Claude CLI)
-            std::env::current_dir()
-                .map_err(|e| AppError::Message(format!("无法获取当前工作目录: {}", e)))?
-                .join(".claude")
-                .join("settings.local.json")
-        }
-        Some(path) => {
-            // If path looks like a directory (no .json extension), append settings-{name}.json
-            let path_str = path.to_string_lossy();
-            if path_str.ends_with('/') || path_str.ends_with('\\') || !path_str.ends_with(".json") {
-                path.join(format!(
-                    "settings-{}.json",
-                    crate::config::sanitize_provider_name(&provider.name)
-                ))
-            } else {
-                path
-            }
-        }
-    };
-
-    if output_path.exists() {
-        let confirm = Confirm::new(&format!(
-            "File '{}' already exists. Overwrite?",
-            output_path.display()
-        ))
-        .with_default(false)
-        .prompt()
-        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
-
-        if !confirm {
-            println!("{}", info(texts::cancelled()));
-            return Ok(());
-        }
-    }
-
-    let settings_content = ProviderService::build_live_backup_snapshot(
-        &app_type,
-        &provider,
-        common_config_snippet.as_deref(),
-        apply_common_config,
-    )?;
-
-    crate::config::write_json_file(&output_path, &settings_content)?;
-
-    println!(
-        "{}",
-        success(&format!(
-            "✓ Exported provider '{}' to {}",
-            id,
-            output_path.display()
-        ))
-    );
-
-    // If output is settings.local.json, Claude CLI will auto-load it
-    if output_path
-        .file_name()
-        .map(|n| n.to_string_lossy() == "settings.local.json")
-        .unwrap_or(false)
-    {
-        println!(
-            "{}",
-            info("Claude CLI will auto-load this config. Just run: claude")
-        );
-    } else {
-        println!(
-            "{}",
-            info(&format!(
-                "Use it with: claude --settings {}",
-                output_path.display()
-            ))
-        );
-    }
-
-    Ok(())
 }

@@ -283,11 +283,9 @@ pub fn sync_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppE
                     existing.id = id.clone();
                     provider_changed = true;
                 }
-                if is_auto_mirrored_openclaw_snapshot(existing) {
-                    if existing.name != id {
-                        existing.name = id.clone();
-                        provider_changed = true;
-                    }
+                if is_auto_mirrored_openclaw_snapshot(existing) && existing.name != id {
+                    existing.name = id.clone();
+                    provider_changed = true;
                 }
                 if existing.settings_config != live_provider {
                     existing.settings_config = live_provider;
@@ -323,7 +321,7 @@ pub(super) fn is_auto_mirrored_openclaw_snapshot(provider: &Provider) -> bool {
         && provider
             .meta
             .as_ref()
-            .map_or(true, is_default_openclaw_common_config_marker)
+            .is_none_or(is_default_openclaw_common_config_marker)
         && provider.icon.is_none()
         && provider.icon_color.is_none()
         && !provider.in_failover_queue

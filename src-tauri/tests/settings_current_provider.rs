@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use serial_test::serial;
 use std::ffi::OsString;
 use tempfile::TempDir;

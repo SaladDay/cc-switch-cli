@@ -261,6 +261,8 @@ fn init_rejects_unsafe_config_dir() {
         "unexpected error: {err}"
     );
 }
+#[test]
+#[serial_test::serial]
 fn readonly_snapshot_rejects_missing_database_without_creating_file() {
     let _lock = crate::test_support::lock_test_home_and_settings();
     let temp = tempfile::tempdir().expect("create temp dir");
@@ -1704,6 +1706,66 @@ fn migration_from_v3_8_schema_v1_to_current_schema_v3() {
 }
 
 #[test]
+fn schema_migration_v10_adds_failover_live_snapshots() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE providers (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            settings_config TEXT NOT NULL,
+            meta TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE mcp_servers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            server_config TEXT NOT NULL,
+            enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+            enabled_codex BOOLEAN NOT NULL DEFAULT 0,
+            enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
+            enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            enabled_hermes BOOLEAN NOT NULL DEFAULT 0
+        );
+        CREATE TABLE skills (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+            enabled_codex BOOLEAN NOT NULL DEFAULT 0,
+            enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
+            enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            enabled_hermes BOOLEAN NOT NULL DEFAULT 0,
+            installed_at INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE proxy_config (app_type TEXT PRIMARY KEY);
+        CREATE TABLE proxy_live_backup (
+            app_type TEXT PRIMARY KEY,
+            original_config TEXT NOT NULL,
+            backed_up_at TEXT NOT NULL
+        );
+        "#,
+    )
+    .expect("seed v10 schema");
+    Database::set_user_version(&conn, 10).expect("set user_version=10");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert!(
+        Database::table_exists(&conn, "proxy_failover_live_snapshots").expect("check table"),
+        "proxy_failover_live_snapshots should exist after v10 migration"
+    );
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn schema_dry_run_does_not_write_to_disk() {
     // Create minimal valid config for migration
     let mut apps = HashMap::new();
@@ -2223,6 +2285,7 @@ fn init_does_not_silently_fix_existing_dir_permissions() {
         "init should not silently change existing dir permissions"
     );
 }
+#[test]
 fn model_pricing_delete_survives_reseed_until_user_upserts() {
     let db = Database::memory().expect("create memory db");
 

@@ -551,19 +551,48 @@ fn set_codex_model_catalog_json_field(
     Ok(doc.to_string())
 }
 
-pub fn prepare_codex_config_text_with_model_catalog(
+#[derive(Clone, Debug)]
+pub struct PreparedCodexConfigText {
+    pub config_text: String,
+    pub model_catalog: Option<Value>,
+}
+
+pub fn prepare_codex_config_text_with_model_catalog_payload(
     settings: &Value,
     config_text: &str,
-) -> Result<String, AppError> {
+) -> Result<PreparedCodexConfigText, AppError> {
     let catalog_path = get_codex_model_catalog_path();
 
     if let Some(catalog) = codex_model_catalog_from_settings(settings, config_text)? {
         let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
-        write_json_file(&catalog_path, &catalog)?;
-        Ok(config_text)
+        Ok(PreparedCodexConfigText {
+            config_text,
+            model_catalog: Some(catalog),
+        })
     } else {
-        set_codex_model_catalog_json_field(config_text, None)
+        Ok(PreparedCodexConfigText {
+            config_text: set_codex_model_catalog_json_field(config_text, None)?,
+            model_catalog: None,
+        })
     }
+}
+
+pub fn write_prepared_codex_model_catalog(
+    prepared: &PreparedCodexConfigText,
+) -> Result<(), AppError> {
+    if let Some(catalog) = &prepared.model_catalog {
+        write_json_file(&get_codex_model_catalog_path(), catalog)?;
+    }
+    Ok(())
+}
+
+pub fn prepare_codex_config_text_with_model_catalog(
+    settings: &Value,
+    config_text: &str,
+) -> Result<String, AppError> {
+    let prepared = prepare_codex_config_text_with_model_catalog_payload(settings, config_text)?;
+    write_prepared_codex_model_catalog(&prepared)?;
+    Ok(prepared.config_text)
 }
 
 pub fn read_codex_model_catalog_simplified_from_live() -> Result<Option<Value>, AppError> {

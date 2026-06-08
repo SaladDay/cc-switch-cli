@@ -147,11 +147,7 @@ impl EditorState {
             current_width = current_width.saturating_add(ch_width);
         }
 
-        if segments.is_empty() {
-            segments.push(current);
-        } else {
-            segments.push(current);
-        }
+        segments.push(current);
 
         segments
     }

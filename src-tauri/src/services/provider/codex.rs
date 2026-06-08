@@ -421,13 +421,68 @@ impl ProviderService {
     /// Aligned with upstream: the stored `settings_config.config` is the full config.toml text.
     /// We write it directly to `~/.codex/config.toml`, optionally merging the common config snippet.
     /// Auth is handled separately via auth.json.
+    #[expect(
+        dead_code,
+        reason = "kept for direct Codex live writes without custom resolution"
+    )]
     pub(super) fn write_codex_live(
         provider: &Provider,
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
-        if !crate::sync_policy::should_sync_live(&AppType::Codex) {
-            return Ok(());
+        Self::write_codex_live_with_resolution(
+            provider,
+            common_config_snippet,
+            None,
+            apply_common_config,
+            live_merge::ConflictPolicy::Fail.into(),
+        )
+    }
+
+    pub(super) fn write_codex_live_with_resolution(
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        previous_common_config_snippet: Option<&str>,
+        apply_common_config: bool,
+        resolution: live_merge::ConflictResolution<'_>,
+    ) -> Result<(), AppError> {
+        let prepared = Self::prepare_codex_live_write(
+            provider,
+            common_config_snippet,
+            previous_common_config_snippet,
+            apply_common_config,
+            false,
+            resolution,
+        )?;
+        Self::apply_codex_live_write(&prepared)
+    }
+
+    pub(crate) fn write_codex_live_force(
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        apply_common_config: bool,
+    ) -> Result<(), AppError> {
+        let prepared = Self::prepare_codex_live_write(
+            provider,
+            common_config_snippet,
+            None,
+            apply_common_config,
+            true,
+            live_merge::ConflictPolicy::PreferIncoming.into(),
+        )?;
+        Self::apply_codex_live_write(&prepared)
+    }
+
+    pub(super) fn prepare_codex_live_write(
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        previous_common_config_snippet: Option<&str>,
+        apply_common_config: bool,
+        force_sync: bool,
+        resolution: live_merge::ConflictResolution<'_>,
+    ) -> Result<PreparedLiveWrite, AppError> {
+        if !force_sync && !crate::sync_policy::should_sync_live(&AppType::Codex) {
+            return Ok(PreparedLiveWrite::Noop);
         }
 
         let effective = Self::build_effective_live_snapshot(
@@ -450,12 +505,147 @@ impl ProviderService {
                 AppError::Config("Codex 供应商配置缺少 'config' 字段或不是字符串".to_string())
             })?;
 
-        crate::codex_config::write_codex_provider_live_with_catalog(
-            &provider.settings_config,
-            Self::codex_live_write_category(provider),
-            auth,
-            Some(cfg_text),
+        let prepared_config =
+            crate::codex_config::prepare_codex_config_text_with_model_catalog_payload(
+                &provider.settings_config,
+                cfg_text,
+            )?;
+        let category = Self::codex_live_write_category(provider);
+        let should_write_auth = category == Some("official")
+            || (!force_sync && !crate::settings::preserve_codex_official_auth_on_switch());
+        let incoming_config = if should_write_auth {
+            prepared_config.config_text.clone()
+        } else {
+            crate::codex_config::prepare_codex_provider_live_config(
+                auth,
+                &prepared_config.config_text,
+            )?
+        };
+
+        let local_config = {
+            let local_config = crate::codex_config::read_codex_config_text()?;
+            let local_settings = json!({ "config": local_config });
+            let local_settings =
+                common_config::strip_common_config_snippet_from_live_settings_or_provider_snapshot(
+                    &AppType::Codex,
+                    provider,
+                    local_settings,
+                    previous_common_config_snippet,
+                );
+            let should_strip_current_snippet = !apply_common_config
+                && previous_common_config_snippet == common_config_snippet
+                && common_config_snippet.is_some();
+            let local_settings = if should_strip_current_snippet {
+                common_config::strip_common_config_snippet_from_live_settings_or_provider_snapshot(
+                    &AppType::Codex,
+                    provider,
+                    local_settings,
+                    common_config_snippet,
+                )
+            } else {
+                local_settings
+            };
+            local_settings
+                .get("config")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let merged_config = live_merge::merge_toml_live(
+            &AppType::Codex,
+            "config.toml",
+            &local_config,
+            &incoming_config,
+            resolution,
         )?;
+
+        let auth = if should_write_auth {
+            let auth_path = get_codex_auth_path();
+            if crate::codex_config::codex_auth_has_login_material(auth) {
+                let local_auth = if auth_path.exists() {
+                    read_json_file::<Value>(&auth_path)?
+                } else {
+                    json!({})
+                };
+                PreparedCodexAuthWrite::Write(live_merge::merge_json_live(
+                    &AppType::Codex,
+                    "auth.json",
+                    local_auth,
+                    auth,
+                    resolution,
+                )?)
+            } else if auth_path.exists() {
+                let local_auth = read_json_file::<Value>(&auth_path)?;
+                if local_auth == *auth {
+                    if auth.is_null() || auth.as_object().is_some_and(serde_json::Map::is_empty) {
+                        PreparedCodexAuthWrite::Delete
+                    } else {
+                        PreparedCodexAuthWrite::Write(local_auth)
+                    }
+                } else {
+                    let local = serde_json::to_string(&local_auth)
+                        .unwrap_or_else(|_| local_auth.to_string());
+                    let incoming = serde_json::to_string(auth).unwrap_or_else(|_| auth.to_string());
+                    let conflict = live_merge::ConfigConflict {
+                        app_type: AppType::Codex,
+                        target: "auth.json".to_string(),
+                        path: "<root>".to_string(),
+                        local,
+                        incoming,
+                    };
+                    match live_merge::resolve_conflict_choice(conflict, resolution)? {
+                        live_merge::ConflictChoice::KeepLocal => {
+                            PreparedCodexAuthWrite::Write(local_auth)
+                        }
+                        live_merge::ConflictChoice::UseIncoming => {
+                            if auth.is_null()
+                                || auth.as_object().is_some_and(serde_json::Map::is_empty)
+                            {
+                                PreparedCodexAuthWrite::Delete
+                            } else {
+                                PreparedCodexAuthWrite::Write(auth.clone())
+                            }
+                        }
+                    }
+                }
+            } else if auth.is_null() || auth.as_object().is_some_and(serde_json::Map::is_empty) {
+                PreparedCodexAuthWrite::Delete
+            } else {
+                PreparedCodexAuthWrite::Write(auth.clone())
+            }
+        } else {
+            PreparedCodexAuthWrite::Preserve
+        };
+
+        Ok(PreparedLiveWrite::Codex {
+            auth,
+            config: crate::codex_config::PreparedCodexConfigText {
+                config_text: merged_config,
+                model_catalog: prepared_config.model_catalog,
+            },
+        })
+    }
+
+    pub(super) fn apply_codex_live_write(prepared: &PreparedLiveWrite) -> Result<(), AppError> {
+        let PreparedLiveWrite::Codex { auth, config } = prepared else {
+            return Ok(());
+        };
+
+        crate::codex_config::write_prepared_codex_model_catalog(config)?;
+        match auth {
+            PreparedCodexAuthWrite::Preserve => {
+                crate::codex_config::write_codex_live_config_atomic(Some(&config.config_text))?
+            }
+            PreparedCodexAuthWrite::Write(auth) => {
+                crate::codex_config::write_codex_live_atomic(auth, Some(&config.config_text))?
+            }
+            PreparedCodexAuthWrite::Delete => {
+                crate::codex_config::write_codex_live_atomic_optional_auth(
+                    None,
+                    Some(&config.config_text),
+                )?
+            }
+        }
 
         Ok(())
     }

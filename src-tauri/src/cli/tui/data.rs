@@ -327,9 +327,10 @@ impl ProxySnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum UsageRangePreset {
     Today,
+    #[default]
     SevenDays,
     ThirtyDays,
     Custom(UsageCustomRange),
@@ -389,12 +390,6 @@ impl UsageCustomRange {
             }
             _ => 1,
         }
-    }
-}
-
-impl Default for UsageRangePreset {
-    fn default() -> Self {
-        Self::SevenDays
     }
 }
 
@@ -828,7 +823,7 @@ impl UsageSnapshot {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UiData {
     pub providers: ProvidersSnapshot,
     pub mcp: McpSnapshot,
@@ -840,23 +835,6 @@ pub struct UiData {
     pub pricing: ModelPricingSnapshot,
     pub(crate) quota: QuotaSnapshot,
     pub(crate) reload_token: UiDataReloadToken,
-}
-
-impl Default for UiData {
-    fn default() -> Self {
-        Self {
-            providers: ProvidersSnapshot::default(),
-            mcp: McpSnapshot::default(),
-            prompts: PromptsSnapshot::default(),
-            config: ConfigSnapshot::default(),
-            skills: SkillsSnapshot::default(),
-            proxy: ProxySnapshot::default(),
-            usage: UsageSnapshot::default(),
-            pricing: ModelPricingSnapshot::default(),
-            quota: QuotaSnapshot::default(),
-            reload_token: UiDataReloadToken::default(),
-        }
-    }
 }
 
 pub(crate) fn load_state() -> Result<AppState, AppError> {
@@ -2686,16 +2664,20 @@ mod tests {
     impl SettingsGuard {
         fn with_opencode_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.opencode_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                opencode_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set opencode override dir");
             Self { previous }
         }
 
         fn with_openclaw_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.openclaw_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                openclaw_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set openclaw override dir");
             Self { previous }
         }
@@ -2755,6 +2737,10 @@ mod tests {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper mirrors usage log columns"
+    )]
     fn insert_usage_log(
         conn: &rusqlite::Connection,
         request_id: &str,

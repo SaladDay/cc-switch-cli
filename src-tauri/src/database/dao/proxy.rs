@@ -1030,6 +1030,122 @@ impl Database {
         Ok(())
     }
 
+    // ==================== Failover Live Snapshots ====================
+
+    pub async fn save_failover_live_snapshot(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+        config_json: &str,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        conn.execute(
+            "INSERT OR REPLACE INTO proxy_failover_live_snapshots
+             (app_type, provider_id, config_json, generated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![app_type, provider_id, config_json, now],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub async fn get_failover_live_snapshot(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<Option<FailoverLiveSnapshot>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let result = conn.query_row(
+            "SELECT app_type, provider_id, config_json, generated_at
+             FROM proxy_failover_live_snapshots
+             WHERE app_type = ?1 AND provider_id = ?2",
+            rusqlite::params![app_type, provider_id],
+            |row| {
+                Ok(FailoverLiveSnapshot {
+                    app_type: row.get(0)?,
+                    provider_id: row.get(1)?,
+                    config_json: row.get(2)?,
+                    generated_at: row.get(3)?,
+                })
+            },
+        );
+
+        match result {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(AppError::Database(e.to_string())),
+        }
+    }
+
+    pub async fn list_failover_live_snapshots(
+        &self,
+        app_type: &str,
+    ) -> Result<Vec<FailoverLiveSnapshot>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut stmt = conn
+            .prepare(
+                "SELECT app_type, provider_id, config_json, generated_at
+                 FROM proxy_failover_live_snapshots
+                 WHERE app_type = ?1
+                 ORDER BY provider_id",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![app_type], |row| {
+                Ok(FailoverLiveSnapshot {
+                    app_type: row.get(0)?,
+                    provider_id: row.get(1)?,
+                    config_json: row.get(2)?,
+                    generated_at: row.get(3)?,
+                })
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let mut snapshots = Vec::new();
+        for row in rows {
+            snapshots.push(row.map_err(|e| AppError::Database(e.to_string()))?);
+        }
+        Ok(snapshots)
+    }
+
+    pub async fn delete_failover_live_snapshot(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "DELETE FROM proxy_failover_live_snapshots WHERE app_type = ?1 AND provider_id = ?2",
+            rusqlite::params![app_type, provider_id],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn delete_failover_live_snapshots_for_app(
+        &self,
+        app_type: &str,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "DELETE FROM proxy_failover_live_snapshots WHERE app_type = ?1",
+            rusqlite::params![app_type],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn delete_all_failover_live_snapshots(&self) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute("DELETE FROM proxy_failover_live_snapshots", [])
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     // ==================== Sync Methods for Tray Menu ====================
 
     /// 同步获取应用的 proxy 启用状态和自动故障转移状态

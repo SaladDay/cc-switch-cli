@@ -214,7 +214,7 @@ pub(super) fn render_update_downloading_overlay(
 
     let progress_text = if let Some(t) = total {
         if t > 0 {
-            let pct = ((downloaded.saturating_mul(100) / t).min(100)) as u64;
+            let pct = (downloaded.saturating_mul(100) / t).min(100);
             texts::tui_update_downloading_progress(pct, downloaded / 1024, t / 1024)
         } else {
             texts::tui_update_downloading_kb(downloaded / 1024)

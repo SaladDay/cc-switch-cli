@@ -129,7 +129,7 @@ impl ProviderService {
             }
 
             let (api_key, base_url) =
-                Self::resolve_usage_script_credentials(&provider, &app_type, usage_script)?;
+                Self::resolve_usage_script_credentials(provider, &app_type, usage_script)?;
 
             (
                 usage_script.code.clone(),

@@ -50,6 +50,14 @@ pub(crate) fn render_overlay(
             provider_id,
             *selected,
         ),
+        Overlay::ProviderSwitchLiveConflicts { conflicts, .. } => {
+            super::basic::render_provider_switch_live_conflicts_overlay(
+                frame,
+                content_area,
+                theme,
+                conflicts,
+            )
+        }
         Overlay::FailoverQueueManager { selected } => {
             super::pickers::render_failover_queue_manager_overlay(
                 frame,

@@ -119,7 +119,7 @@ impl ClaudeApiFormat {
         Self::choices_for_app(app_type)
             .get(index)
             .copied()
-            .unwrap_or_else(|| {
+            .unwrap_or({
                 if matches!(app_type, AppType::Codex) {
                     ClaudeApiFormat::OpenAiResponses
                 } else {
@@ -549,6 +549,10 @@ impl PromptMetaFormState {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "form state variants are short-lived UI state"
+)]
 #[derive(Debug, Clone)]
 pub enum FormState {
     ProviderAdd(ProviderAddFormState),

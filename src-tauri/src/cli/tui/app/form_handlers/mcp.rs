@@ -73,10 +73,7 @@ impl App {
     }
 
     fn handle_mcp_fields_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let (fields, selected, editing) = match self.prepare_mcp_field_selection() {
-            Some(state) => state,
-            None => return None,
-        };
+        let (fields, selected, editing) = self.prepare_mcp_field_selection()?;
 
         if editing {
             self.handle_mcp_field_editing(selected, key)
@@ -96,9 +93,7 @@ impl App {
                 Some(Action::None)
             }
             _ => {
-                if TextEditCommand::from_key(key).is_none() {
-                    return None;
-                }
+                TextEditCommand::from_key(key)?;
                 if let Some(input) = mcp.input_mut(selected) {
                     input.apply_key(key);
                 }

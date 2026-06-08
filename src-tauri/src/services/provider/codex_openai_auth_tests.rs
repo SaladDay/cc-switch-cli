@@ -4,6 +4,10 @@ use tempfile::TempDir;
 
 use crate::test_support::TestEnvGuard;
 
+fn prefer_incoming_conflicts() -> live_merge::ConflictResolution<'static> {
+    live_merge::ConflictPolicy::PreferIncoming.into()
+}
+
 #[test]
 #[serial]
 fn switch_codex_provider_writes_stored_config_directly() {
@@ -33,7 +37,13 @@ fn switch_codex_provider_writes_stored_config_directly() {
     }
 
     let state = state_from_config(config);
-    ProviderService::switch(&state, AppType::Codex, "p1").expect("switch should succeed");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p1",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch should succeed");
 
     let config_text =
         std::fs::read_to_string(get_codex_config_path()).expect("read codex config.toml");
@@ -89,7 +99,13 @@ fn switch_codex_provider_migrates_legacy_flat_config() {
         .insert("custom1".to_string(), provider);
 
     let state = state_from_config(config);
-    ProviderService::switch(&state, AppType::Codex, "custom1").expect("switch should succeed");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "custom1",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch should succeed");
 
     let config_text =
         std::fs::read_to_string(get_codex_config_path()).expect("read codex config.toml");

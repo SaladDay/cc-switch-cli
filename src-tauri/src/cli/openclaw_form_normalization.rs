@@ -249,7 +249,7 @@ pub(crate) fn preserved_non_string_runtime_seed<'a>(
     value
         .trim()
         .is_empty()
-        .then(|| seed)
+        .then_some(seed)
         .flatten()
         .filter(|seed| should_preserve_non_string_numeric_seed(Some(seed)))
 }

@@ -38,6 +38,7 @@ pub struct SessionSyncResult {
 }
 
 /// 数据来源分布
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataSourceSummary {
@@ -616,6 +617,7 @@ fn find_model_pricing_for_session(
 }
 
 /// 查询数据来源分布统计
+#[allow(dead_code)]
 pub fn get_data_source_breakdown(db: &Database) -> Result<Vec<DataSourceSummary>, AppError> {
     let conn = lock_conn!(db.conn);
 

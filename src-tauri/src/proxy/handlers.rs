@@ -1376,7 +1376,7 @@ mod tests {
                 .expect("converted SSE should yield before upstream EOF")
                 .expect("stream should yield a chunk")
                 .expect("stream chunk should be ok");
-            output.push_str(&String::from_utf8(chunk.to_vec()).expect("SSE should be UTF-8"));
+            output.push_str(core::str::from_utf8(&chunk).expect("SSE should be UTF-8"));
 
             if output.contains("event: response.output_text.delta") {
                 break;

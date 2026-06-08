@@ -1,3 +1,8 @@
+#![expect(
+    clippy::await_holding_lock,
+    reason = "tests serialize global auth/config state while exercising async request preparation"
+)]
+
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 

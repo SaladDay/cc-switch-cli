@@ -544,7 +544,7 @@ impl App {
                         })
                     } else {
                         let options = form.available_fallback_options(&model_options);
-                        (!options.is_empty()).then(|| (row, 0, options))
+                        (!options.is_empty()).then_some((row, 0, options))
                     }
                 }
                 OpenClawAgentsSection::Runtime => None,

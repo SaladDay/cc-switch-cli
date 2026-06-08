@@ -12,6 +12,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tempfile::NamedTempFile;
 
 const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- CC Switch SQLite 导出";
@@ -20,6 +21,7 @@ const SYNC_IMPORT_RESTORE_TABLES: &[&str] = &[
     "proxy_request_logs",
     "stream_check_logs",
     "proxy_live_backup",
+    "proxy_failover_live_snapshots",
     "usage_daily_rollups",
 ];
 
@@ -180,7 +182,7 @@ impl Database {
             let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             backup
-                .step(-1)
+                .run_to_completion(5, Duration::from_millis(25), None)
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
 
@@ -214,7 +216,7 @@ impl Database {
             let backup =
                 Backup::new(&conn, &mut snapshot).map_err(|e| AppError::Database(e.to_string()))?;
             backup
-                .step(-1)
+                .run_to_completion(5, Duration::from_millis(25), None)
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
 
@@ -493,7 +495,7 @@ impl Database {
                 let backup = Backup::new(&conn, &mut dest_conn)
                     .map_err(|e| AppError::Database(e.to_string()))?;
                 backup
-                    .step(-1)
+                    .run_to_completion(5, Duration::from_millis(25), None)
                     .map_err(|e| AppError::Database(e.to_string()))?;
             }
             backup_path

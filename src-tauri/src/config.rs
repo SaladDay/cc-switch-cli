@@ -1349,6 +1349,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o600)
             .open(&db_path)
             .expect("create db file");
@@ -1397,6 +1398,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o644)
             .open(&db_path)
             .expect("create db file");
@@ -1427,6 +1429,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o644)
             .open(&db_path)
             .expect("create db file");
@@ -1484,6 +1487,7 @@ mod tests {
             std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .mode(0o644)
                 .open(path)
                 .expect("create sensitive file");
@@ -1519,6 +1523,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o644)
             .open(&plugin_json)
             .expect("create skill metadata");
@@ -1571,6 +1576,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o644)
             .open(&json_path)
             .expect("create json file");
@@ -1651,6 +1657,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o644)
             .open(&db_path)
             .expect("create db file");

@@ -5,7 +5,6 @@ use crate::error::AppError;
 use crate::provider::Provider;
 use crate::store::AppState;
 use chrono::Utc;
-use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -309,47 +308,24 @@ impl ConfigService {
             provider,
             common_config_snippet.as_deref(),
         );
-        let effective = ProviderService::build_effective_live_snapshot(
-            &AppType::Codex,
+        ProviderService::write_codex_live_force(
             provider,
             common_config_snippet.as_deref(),
             apply_common_config,
         )?;
-        let settings = effective.as_object().ok_or_else(|| {
-            AppError::Config(format!("供应商 {provider_id} 的 Codex 配置必须是对象"))
-        })?;
-        let auth = settings.get("auth").ok_or_else(|| {
-            AppError::Config(format!("供应商 {provider_id} 的 Codex 配置缺少 auth 字段"))
-        })?;
-        if !auth.is_object() {
-            return Err(AppError::Config(format!(
-                "供应商 {provider_id} 的 Codex auth 配置必须是 JSON 对象"
-            )));
-        }
-        let cfg_text = settings.get("config").and_then(Value::as_str);
-
-        let category = ProviderService::codex_live_write_category(provider);
-        if category == Some("official") {
-            crate::codex_config::write_codex_provider_live_with_catalog(
-                &provider.settings_config,
-                category,
-                auth,
-                cfg_text,
-            )?;
-        } else {
-            crate::codex_config::write_codex_provider_live_config_only_with_catalog(
-                &provider.settings_config,
-                auth,
-                cfg_text,
-            )?;
-        }
         crate::mcp::sync_enabled_to_codex(config)?;
 
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        let auth_after = if auth_path.exists() {
+            crate::config::read_json_file(&auth_path)?
+        } else {
+            serde_json::json!({})
+        };
         let cfg_text_after = crate::codex_config::read_and_validate_codex_config_text()?;
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
                 let mut restored = serde_json::json!({
-                    "auth": auth.clone(),
+                    "auth": auth_after,
                     "config": cfg_text_after,
                 });
                 let restore_provider_token =
@@ -379,29 +355,20 @@ impl ConfigService {
         provider_id: &str,
         provider: &Provider,
     ) -> Result<(), AppError> {
-        use crate::config::{read_json_file, write_json_file};
-
-        let settings_path = crate::config::get_claude_settings_path();
-        if let Some(parent) = settings_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-        }
-
         let common_config_snippet = config.common_config_snippets.claude.clone();
         let apply_common_config = ProviderService::provider_uses_common_config_for_app(
             &AppType::Claude,
             provider,
             common_config_snippet.as_deref(),
         );
-        let effective = ProviderService::build_effective_live_snapshot(
-            &AppType::Claude,
+        ProviderService::write_claude_live_force(
             provider,
             common_config_snippet.as_deref(),
             apply_common_config,
         )?;
 
-        write_json_file(&settings_path, &effective)?;
-
-        let live_after = read_json_file::<serde_json::Value>(&settings_path)?;
+        let settings_path = crate::config::get_claude_settings_path();
+        let live_after = crate::config::read_json_file::<serde_json::Value>(&settings_path)?;
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
                 target.settings_config = ProviderService::normalize_settings_config_for_storage(

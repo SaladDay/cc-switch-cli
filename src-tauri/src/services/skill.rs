@@ -562,7 +562,6 @@ impl SkillService {
 
                 // Prefer looking in apps where this skill is enabled; fallback to all apps.
                 let mut candidates: Vec<AppType> = Self::supported_skill_apps()
-                    .into_iter()
                     .filter(|app| record.apps.is_enabled_for(app))
                     .collect();
                 if candidates.is_empty() {

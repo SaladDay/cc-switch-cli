@@ -86,10 +86,7 @@ impl App {
     }
 
     fn handle_prompt_meta_fields_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let (fields, selected, editing) = match self.prepare_prompt_meta_field_selection() {
-            Some(state) => state,
-            None => return None,
-        };
+        let (fields, selected, editing) = self.prepare_prompt_meta_field_selection()?;
 
         if editing {
             self.handle_prompt_meta_field_editing(selected, key)
@@ -113,9 +110,7 @@ impl App {
                 Some(Action::None)
             }
             _ => {
-                if TextEditCommand::from_key(key).is_none() {
-                    return None;
-                }
+                TextEditCommand::from_key(key)?;
                 prompt.input_mut(selected).apply_key(key);
                 Some(Action::None)
             }

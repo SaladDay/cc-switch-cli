@@ -28,8 +28,10 @@ fn switch_non_additive_updates_local_settings_current_provider() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let mut settings = AppSettings::default();
-    settings.current_provider_codex = Some("old-provider".to_string());
+    let settings = AppSettings {
+        current_provider_codex: Some("old-provider".to_string()),
+        ..Default::default()
+    };
     update_settings(settings).expect("seed local settings current provider");
 
     let mut config = MultiAppConfig::default();

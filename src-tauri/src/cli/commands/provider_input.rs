@@ -2536,6 +2536,10 @@ fn prompt_opencode_config(current: Option<&Value>) -> Result<Value, AppError> {
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "OpenCode settings builder maps flat form fields into nested JSON"
+)]
 fn build_opencode_settings_config(
     current: Option<&Value>,
     npm: &str,
@@ -2648,9 +2652,7 @@ fn opencode_primary_model_id(model_id: &str, model_name: &str) -> Option<String>
     None
 }
 
-fn opencode_selected_model_from_models<'a>(
-    models: &'a Map<String, Value>,
-) -> Option<(&'a String, &'a Value)> {
+fn opencode_selected_model_from_models(models: &Map<String, Value>) -> Option<(&String, &Value)> {
     models.iter().max_by(|(id_a, model_a), (id_b, model_b)| {
         opencode_model_rank(model_a)
             .cmp(&opencode_model_rank(model_b))
@@ -2897,10 +2899,7 @@ fn build_hermes_settings_config(
 
 fn normalize_hermes_api_mode(api_mode: &str) -> String {
     let api_mode = api_mode.trim();
-    if crate::hermes_config::HERMES_API_MODES
-        .iter()
-        .any(|candidate| *candidate == api_mode)
-    {
+    if crate::hermes_config::HERMES_API_MODES.contains(&api_mode) {
         api_mode.to_string()
     } else {
         crate::hermes_config::HERMES_DEFAULT_API_MODE.to_string()
@@ -3284,8 +3283,6 @@ pub fn generate_provider_id(name: &str, existing_ids: &[String]) -> String {
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
                 c
-            } else if c.is_whitespace() {
-                '-'
             } else {
                 '-'
             }

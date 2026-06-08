@@ -183,6 +183,10 @@ mod tests {
     use crate::test_support::lock_test_home_and_settings;
 
     #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "test serializes global auth manager state"
+    )]
     async fn auth_status_marks_default_account() {
         let _lock = lock_test_home_and_settings();
         let _manager = CodexOAuthService::test_manager_with_account(

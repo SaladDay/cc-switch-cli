@@ -683,8 +683,10 @@ mod tests {
             config: RwLock::new(MultiAppConfig::default()),
             proxy_service: ProxyService::new(db.clone()),
         };
-        let mut config = crate::ProxyConfig::default();
-        config.listen_port = 15721;
+        let config = crate::ProxyConfig {
+            listen_port: 15721,
+            ..Default::default()
+        };
         db.set_proxy_flags_sync("claude", true, false)
             .expect("enable claude proxy route");
         db.set_app_proxy_preferred_port("codex", 15722)

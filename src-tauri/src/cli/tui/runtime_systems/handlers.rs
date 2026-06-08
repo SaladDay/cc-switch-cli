@@ -335,10 +335,10 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
             result,
         } => match result {
             Ok(Some(account)) => {
-                if !app
+                if app
                     .managed_auth_login
                     .as_ref()
-                    .is_some_and(|login| login.device_code == device_code)
+                    .is_none_or(|login| login.device_code != device_code)
                 {
                     return;
                 }
@@ -372,10 +372,10 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
             }
             Ok(None) => {}
             Err(err) => {
-                if !app
+                if app
                     .managed_auth_login
                     .as_ref()
-                    .is_some_and(|login| login.device_code == device_code)
+                    .is_none_or(|login| login.device_code != device_code)
                 {
                     return;
                 }

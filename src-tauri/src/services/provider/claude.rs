@@ -214,13 +214,68 @@ impl ProviderService {
         Ok(())
     }
 
+    #[expect(
+        dead_code,
+        reason = "kept for direct Claude live writes without custom resolution"
+    )]
     pub(super) fn write_claude_live(
         provider: &Provider,
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
-        if !crate::sync_policy::should_sync_live(&AppType::Claude) {
-            return Ok(());
+        Self::write_claude_live_with_resolution(
+            provider,
+            common_config_snippet,
+            None,
+            apply_common_config,
+            live_merge::ConflictPolicy::Fail.into(),
+        )
+    }
+
+    pub(super) fn write_claude_live_with_resolution(
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        previous_common_config_snippet: Option<&str>,
+        apply_common_config: bool,
+        resolution: live_merge::ConflictResolution<'_>,
+    ) -> Result<(), AppError> {
+        let prepared = Self::prepare_claude_live_write(
+            provider,
+            common_config_snippet,
+            previous_common_config_snippet,
+            apply_common_config,
+            false,
+            resolution,
+        )?;
+        Self::apply_claude_live_write(&prepared)
+    }
+
+    pub(crate) fn write_claude_live_force(
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        apply_common_config: bool,
+    ) -> Result<(), AppError> {
+        let prepared = Self::prepare_claude_live_write(
+            provider,
+            common_config_snippet,
+            None,
+            apply_common_config,
+            true,
+            live_merge::ConflictPolicy::Fail.into(),
+        )?;
+        Self::apply_claude_live_write(&prepared)
+    }
+
+    pub(super) fn prepare_claude_live_write(
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        previous_common_config_snippet: Option<&str>,
+        apply_common_config: bool,
+        force_sync: bool,
+        resolution: live_merge::ConflictResolution<'_>,
+    ) -> Result<PreparedLiveWrite, AppError> {
+        if !force_sync && !crate::sync_policy::should_sync_live(&AppType::Claude) {
+            return Ok(PreparedLiveWrite::Noop);
         }
 
         let settings_path = get_claude_settings_path();
@@ -230,8 +285,43 @@ impl ProviderService {
             common_config_snippet,
             apply_common_config,
         )?;
+        let local = if settings_path.exists() {
+            let local = read_json_file::<Value>(&settings_path)?;
+            let local =
+                common_config::strip_common_config_snippet_from_live_settings_or_provider_snapshot(
+                    &AppType::Claude,
+                    provider,
+                    local,
+                    previous_common_config_snippet,
+                );
+            if apply_common_config {
+                local
+            } else {
+                common_config::strip_common_config_snippet_from_live_settings_or_provider_snapshot(
+                    &AppType::Claude,
+                    provider,
+                    local,
+                    common_config_snippet,
+                )
+            }
+        } else {
+            json!({})
+        };
+        let settings = live_merge::merge_json_live(
+            &AppType::Claude,
+            "settings.json",
+            local,
+            &content_to_write,
+            resolution,
+        )?;
 
-        write_json_file(&settings_path, &content_to_write)?;
-        Ok(())
+        Ok(PreparedLiveWrite::Claude { settings })
+    }
+
+    pub(super) fn apply_claude_live_write(prepared: &PreparedLiveWrite) -> Result<(), AppError> {
+        let PreparedLiveWrite::Claude { settings } = prepared else {
+            return Ok(());
+        };
+        write_json_file(&get_claude_settings_path(), settings)
     }
 }

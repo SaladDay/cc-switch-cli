@@ -113,10 +113,10 @@ fn initialize_startup_state_if_needed(command: &Option<Commands>) -> Result<(), 
 }
 
 fn database_access_required(command: &Option<Commands>) -> bool {
-    match command {
-        Some(Commands::Completions(_)) | Some(Commands::Update(_)) => false,
-        _ => true,
-    }
+    !matches!(
+        command,
+        Some(Commands::Completions(_)) | Some(Commands::Update(_))
+    )
 }
 
 #[cfg(test)]

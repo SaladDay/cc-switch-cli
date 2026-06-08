@@ -313,6 +313,20 @@ async fn streaming_success_syncs_failover_state_after_body_drains() {
         backup_snapshot
             .get("base_url")
             .and_then(serde_json::Value::as_str),
+        Some("https://current.example")
+    );
+
+    let snapshot = db
+        .get_failover_live_snapshot("claude", "claude-failover")
+        .await
+        .expect("read failover snapshot")
+        .expect("failover snapshot should exist");
+    let snapshot_value: serde_json::Value =
+        serde_json::from_str(&snapshot.config_json).expect("parse failover snapshot");
+    assert_eq!(
+        snapshot_value
+            .get("base_url")
+            .and_then(serde_json::Value::as_str),
         Some("https://failover.example")
     );
 }

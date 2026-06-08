@@ -1375,16 +1375,12 @@ fn cell_column_of(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
         return Some(0);
     }
 
-    for x in 0..buf.area.width {
-        if cells.iter().enumerate().all(|(offset, symbol)| {
+    (0..buf.area.width).find(|&x| {
+        cells.iter().enumerate().all(|(offset, symbol)| {
             let cell_x = x.saturating_add(offset as u16);
             cell_x < buf.area.width && buf[(cell_x, y)].symbol() == symbol
-        }) {
-            return Some(x);
-        }
-    }
-
-    None
+        })
+    })
 }
 
 fn all_text(buf: &Buffer) -> String {

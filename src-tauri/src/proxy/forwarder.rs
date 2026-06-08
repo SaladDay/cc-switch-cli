@@ -151,6 +151,10 @@ impl RequestForwarder {
     }
 
     #[cfg(test)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper mirrors proxy forwarding inputs"
+    )]
     pub async fn forward_response(
         &self,
         app_type: &AppType,
@@ -174,6 +178,10 @@ impl RequestForwarder {
         .map_err(|failure| failure.error)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "forwarding requires request, provider, and retry options"
+    )]
     pub async fn forward_response_detailed(
         &self,
         app_type: &AppType,
@@ -388,6 +396,11 @@ impl RequestForwarder {
         }
     }
 
+    #[allow(dead_code)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "forwarding requires request, provider, and retry options"
+    )]
     pub async fn forward_buffered_response(
         &self,
         app_type: &AppType,
@@ -411,6 +424,10 @@ impl RequestForwarder {
         .map_err(|failure| failure.error)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "forwarding requires request, provider, and retry options"
+    )]
     pub async fn forward_buffered_response_detailed(
         &self,
         app_type: &AppType,
@@ -625,6 +642,10 @@ impl RequestForwarder {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "request execution needs provider, endpoint, headers, and retry options"
+    )]
     async fn send_streaming_request(
         &self,
         app_type: &AppType,
@@ -685,7 +706,6 @@ impl RequestForwarder {
                         tokio::time::timeout(remaining_timeout, request.send())
                             .await
                             .map_err(|_| ())
-                            .map(|result| result)
                     }
                     None => Ok(request.send().await),
                 } {
@@ -774,6 +794,10 @@ impl RequestForwarder {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "request execution needs provider, endpoint, headers, and retry options"
+    )]
     async fn send_buffered_request(
         &self,
         app_type: &AppType,
@@ -834,7 +858,6 @@ impl RequestForwarder {
                         tokio::time::timeout(remaining_timeout, request.send())
                             .await
                             .map_err(|_| ())
-                            .map(|result| result)
                     }
                     None => Ok(request.send().await),
                 } {

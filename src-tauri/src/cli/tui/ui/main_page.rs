@@ -322,6 +322,10 @@ pub(super) fn render_main(
     );
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dashboard renderer receives precomputed proxy display metrics"
+)]
 fn render_proxy_activity_dashboard(
     frame: &mut Frame<'_>,
     area: Rect,

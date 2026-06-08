@@ -1317,19 +1317,7 @@ pub(crate) fn provider_field_editor_line(
     };
 
     if let Some(input) = provider.input(field) {
-        let shown = if matches!(
-            field,
-            ProviderAddField::ClaudeApiKey
-                | ProviderAddField::CodexApiKey
-                | ProviderAddField::GeminiApiKey
-                | ProviderAddField::OpenCodeApiKey
-                | ProviderAddField::HermesApiKey
-        ) {
-            input.value.clone()
-        } else {
-            input.value.clone()
-        };
-        (Line::raw(shown), input.cursor)
+        (Line::raw(input.value.clone()), input.cursor)
     } else {
         let text = match field {
             ProviderAddField::ClaudeApiFormat => {

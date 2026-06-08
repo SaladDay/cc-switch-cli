@@ -54,7 +54,19 @@ impl ProviderService {
         GeminiAuthType::ApiKey
     }
 
-    /// 确保 Google 官方 Gemini 供应商的安全标志正确设置（OAuth 模式）
+    pub(super) fn gemini_security_selected_type(auth_type: GeminiAuthType) -> &'static str {
+        match auth_type {
+            GeminiAuthType::GoogleOfficial => Self::GOOGLE_OAUTH_SECURITY_SELECTED_TYPE,
+            GeminiAuthType::ApiKey => Self::API_KEY_SECURITY_SELECTED_TYPE,
+        }
+    }
+
+    pub(super) fn ensure_gemini_app_security_flag(
+        auth_type: GeminiAuthType,
+    ) -> Result<(), AppError> {
+        settings::ensure_security_auth_selected_type(Self::gemini_security_selected_type(auth_type))
+    }
+
     ///
     /// Google 官方 Gemini 使用 OAuth 个人认证，不需要 API Key。
     ///
@@ -89,6 +101,10 @@ impl ProviderService {
     /// 3. 用户首次使用 Gemini CLI 时，会自动打开浏览器进行 OAuth 登录
     /// 4. 登录成功后，凭证保存在 Gemini 的 credential store 中
     /// 5. 后续请求自动使用保存的凭证
+    #[expect(
+        dead_code,
+        reason = "kept for explicit Gemini OAuth security flag updates"
+    )]
     pub(crate) fn ensure_google_oauth_security_flag(provider: &Provider) -> Result<(), AppError> {
         // 检测是否为 Google 官方
         let auth_type = Self::detect_gemini_auth_type(provider);
@@ -127,6 +143,10 @@ impl ProviderService {
     ///   }
     /// }
     /// ```
+    #[expect(
+        dead_code,
+        reason = "kept for explicit Gemini API-key security flag updates"
+    )]
     pub(crate) fn ensure_api_key_security_flag(_provider: &Provider) -> Result<(), AppError> {
         // 写入应用级别的 settings.json (~/.cc-switch/settings.json)
         settings::ensure_security_auth_selected_type(Self::API_KEY_SECURITY_SELECTED_TYPE)?;

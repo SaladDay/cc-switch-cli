@@ -113,14 +113,10 @@ mod tests {
     use crate::cli::tui::data::{ProviderRow, ProvidersSnapshot, UiData};
     use crate::cli::tui::runtime_systems::RequestTracker;
     use crate::provider::Provider;
-    use crate::test_support::{
-        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
-    };
+    use crate::test_support::TestEnvGuard;
     use serde_json::{json, Value};
     use serial_test::serial;
     use std::cell::Cell;
-    use std::ffi::OsString;
-    use std::path::Path;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -171,44 +167,6 @@ mod tests {
                 model_fetch_req_tx: None,
                 managed_auth_req_tx: None,
             }
-        }
-    }
-
-    struct EnvGuard {
-        _lock: TestHomeSettingsLock,
-        old_home: Option<OsString>,
-        old_userprofile: Option<OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_home(home: &Path) -> Self {
-            let lock = lock_test_home_and_settings();
-            let old_home = std::env::var_os("HOME");
-            let old_userprofile = std::env::var_os("USERPROFILE");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            set_test_home_override(Some(home));
-            crate::settings::reload_test_settings();
-            Self {
-                _lock: lock,
-                old_home,
-                old_userprofile,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            set_test_home_override(self.old_home.as_deref().map(Path::new));
-            crate::settings::reload_test_settings();
         }
     }
 
@@ -415,7 +373,7 @@ mod tests {
     #[serial]
     fn launch_uses_effective_snapshot_from_realtime_state() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
         std::fs::create_dir_all(crate::config::get_claude_config_dir())
             .expect("create ~/.claude (initialized)");
 

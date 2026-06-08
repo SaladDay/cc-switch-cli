@@ -247,9 +247,7 @@ pub(super) fn quota_compact_line(
     theme: &super::theme::Theme,
     quiet_missing: bool,
 ) -> Option<Line<'static>> {
-    let Some(state) = state else {
-        return None;
-    };
+    let state = state?;
 
     if state.loading && state.quota.is_none() {
         return Some(Line::from(Span::styled(

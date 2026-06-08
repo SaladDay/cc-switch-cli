@@ -318,7 +318,8 @@ impl App {
     }
 
     pub(crate) fn should_poll_proxy_activity(&self) -> bool {
-        matches!(self.route, Route::Main) && self.tick % PROXY_ACTIVITY_POLL_INTERVAL_TICKS == 0
+        matches!(self.route, Route::Main)
+            && self.tick.is_multiple_of(PROXY_ACTIVITY_POLL_INTERVAL_TICKS)
     }
 
     pub(crate) fn reset_proxy_activity(&mut self, input_tokens: u64, output_tokens: u64) {

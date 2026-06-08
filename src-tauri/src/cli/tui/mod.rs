@@ -973,6 +973,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ConfigWebDavMigrateV1ToV2 => CacheInvalidation::AppStateRecreated,
 
         Action::ProviderSwitch { .. }
+        | Action::ProviderSwitchResolveLiveConflicts { .. }
         | Action::ProviderRemoveFromConfig { .. }
         | Action::ProviderSetDefaultModel { .. }
         | Action::ProviderImportLiveConfig
@@ -1071,6 +1072,35 @@ fn drop_cached_worker_state(
     Ok(())
 }
 
+fn apply_current_app_data_changed(
+    app: &mut App,
+    data: &mut data::UiData,
+    data_cache: &mut UiDataByAppCache,
+    quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
+    app_data_req_tx: Option<&mpsc::Sender<AppDataReq>>,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+) -> Result<(), AppError> {
+    let app_type = app.app_type.clone();
+    data_cache.remove_app_snapshot(&app_type);
+    data_cache.remove_usage_pricing_for_app(&app_type);
+
+    match data_cache.queue_current_app_data_refresh(app_data_req_tx, &app_type) {
+        AppDataLoadQueued::Queued | AppDataLoadQueued::AlreadyPending => Ok(()),
+        AppDataLoadQueued::Unavailable | AppDataLoadQueued::SendFailed => {
+            *data = data::UiData::load(&app_type)?;
+            data_cache.mark_app_data_loaded(&app_type);
+            apply_loaded_data_cache_invalidation(
+                app,
+                data,
+                data_cache,
+                quota_req_tx,
+                usage_pricing_req_tx,
+                CacheInvalidation::DataReloaded,
+            )
+        }
+    }
+}
+
 fn apply_cache_invalidation(
     app: &mut App,
     data: &mut data::UiData,
@@ -1145,35 +1175,10 @@ fn apply_loaded_data_cache_invalidation(
     Ok(())
 }
 
-fn apply_current_app_data_changed(
-    app: &mut App,
-    data: &mut data::UiData,
-    data_cache: &mut UiDataByAppCache,
-    quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
-    app_data_req_tx: Option<&mpsc::Sender<AppDataReq>>,
-    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
-) -> Result<(), AppError> {
-    let current_app_type = app.app_type.clone();
-    data_cache.remove_app_snapshot(&current_app_type);
-    data_cache.remove_usage_pricing_for_app(&current_app_type);
-
-    match data_cache.queue_current_app_data_refresh(app_data_req_tx, &current_app_type) {
-        AppDataLoadQueued::Queued | AppDataLoadQueued::AlreadyPending => Ok(()),
-        AppDataLoadQueued::Unavailable | AppDataLoadQueued::SendFailed => {
-            data_cache.remove_app_snapshot(&current_app_type);
-            *data = data::UiData::load(&current_app_type)?;
-            apply_loaded_data_cache_invalidation(
-                app,
-                data,
-                data_cache,
-                quota_req_tx,
-                usage_pricing_req_tx,
-                CacheInvalidation::DataReloaded,
-            )
-        }
-    }
-}
-
+#[expect(
+    clippy::too_many_arguments,
+    reason = "top-level TUI dispatcher coordinates worker channels, cache, and trackers"
+)]
 fn handle_tui_action(
     terminal: &mut TuiTerminal,
     app: &mut App,

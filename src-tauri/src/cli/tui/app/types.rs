@@ -609,6 +609,10 @@ pub enum Overlay {
         provider_id: String,
         selected: usize,
     },
+    ProviderSwitchLiveConflicts {
+        provider_id: String,
+        conflicts: Vec<crate::services::provider::live_merge::ConfigConflict>,
+    },
     FailoverQueueManager {
         selected: usize,
     },
@@ -736,6 +740,7 @@ impl Overlay {
                 | Overlay::TextView(_)
                 | Overlay::CommonSnippetPicker { .. }
                 | Overlay::ProviderTestMenu { .. }
+                | Overlay::ProviderSwitchLiveConflicts { .. }
                 | Overlay::FailoverQueueManager { .. }
                 | Overlay::ClaudeApiFormatPicker { .. }
                 | Overlay::UsageQueryTemplatePicker { .. }
@@ -775,6 +780,7 @@ impl Overlay {
             | Overlay::TextView(_)
             | Overlay::CommonSnippetPicker { .. }
             | Overlay::ProviderTestMenu { .. }
+            | Overlay::ProviderSwitchLiveConflicts { .. }
             | Overlay::FailoverQueueManager { .. }
             | Overlay::ClaudeApiFormatPicker { .. }
             | Overlay::UsageQueryTemplatePicker { .. }

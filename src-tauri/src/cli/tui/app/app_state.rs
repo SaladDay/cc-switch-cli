@@ -72,6 +72,10 @@ pub enum Action {
     ProviderSwitch {
         id: String,
     },
+    ProviderSwitchResolveLiveConflicts {
+        id: String,
+        policy: crate::services::provider::live_merge::ConflictPolicy,
+    },
     ProviderRemoveFromConfig {
         id: String,
     },

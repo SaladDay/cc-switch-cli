@@ -866,8 +866,10 @@ mod tests {
         crate::test_support::set_test_home_override(Some(home));
         crate::settings::reload_test_settings();
 
-        let mut settings = crate::settings::AppSettings::default();
-        settings.gemini_config_dir = Some(stale_gemini_dir.to_string_lossy().into_owned());
+        let settings = crate::settings::AppSettings {
+            gemini_config_dir: Some(stale_gemini_dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
         settings.save().expect("save stale settings");
         crate::settings::reload_test_settings();
 

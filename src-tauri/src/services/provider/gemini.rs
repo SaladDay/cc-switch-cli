@@ -180,42 +180,68 @@ impl ProviderService {
         Ok(())
     }
 
+    #[expect(
+        dead_code,
+        reason = "kept for direct Gemini live writes without custom resolution"
+    )]
     pub(crate) fn write_gemini_live(
         provider: &Provider,
         common_config_snippet: Option<&str>,
     ) -> Result<(), AppError> {
-        Self::write_gemini_live_impl(provider, common_config_snippet, false)
+        Self::write_gemini_live_with_resolution(
+            provider,
+            common_config_snippet,
+            None,
+            false,
+            live_merge::ConflictPolicy::Fail.into(),
+        )
     }
 
     pub(crate) fn write_gemini_live_force(
         provider: &Provider,
         common_config_snippet: Option<&str>,
     ) -> Result<(), AppError> {
-        Self::write_gemini_live_impl(provider, common_config_snippet, true)
+        Self::write_gemini_live_with_resolution(
+            provider,
+            common_config_snippet,
+            None,
+            true,
+            live_merge::ConflictPolicy::Fail.into(),
+        )
     }
 
-    pub(super) fn write_gemini_live_impl(
+    pub(super) fn write_gemini_live_with_resolution(
         provider: &Provider,
         common_config_snippet: Option<&str>,
+        previous_common_config_snippet: Option<&str>,
         force_sync: bool,
+        resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<(), AppError> {
+        let prepared = Self::prepare_gemini_live_write(
+            provider,
+            common_config_snippet,
+            previous_common_config_snippet,
+            force_sync,
+            resolution,
+        )?;
+        Self::apply_gemini_live_write(&prepared)
+    }
+
+    pub(super) fn prepare_gemini_live_write(
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        previous_common_config_snippet: Option<&str>,
+        force_sync: bool,
+        resolution: live_merge::ConflictResolution<'_>,
+    ) -> Result<PreparedLiveWrite, AppError> {
         use crate::gemini_config::{
-            get_gemini_settings_path, json_to_env, validate_gemini_settings_strict,
-            write_gemini_env_atomic,
+            env_to_json, get_gemini_settings_path, json_to_env, read_gemini_env,
+            validate_gemini_settings_strict,
         };
 
-        // 一次性检测认证类型，避免重复检测
         let auth_type = Self::detect_gemini_auth_type(provider);
-
         if !force_sync && !crate::sync_policy::should_sync_live(&AppType::Gemini) {
-            // still update CC-Switch app-level settings, but do not create any ~/.gemini files
-            match auth_type {
-                GeminiAuthType::GoogleOfficial => {
-                    Self::ensure_google_oauth_security_flag(provider)?
-                }
-                GeminiAuthType::ApiKey => Self::ensure_api_key_security_flag(provider)?,
-            }
-            return Ok(());
+            return Ok(PreparedLiveWrite::GeminiSecurityFlag { auth_type });
         }
 
         let content_to_write = Self::build_effective_live_snapshot(
@@ -225,81 +251,128 @@ impl ProviderService {
             common_config_snippet.is_some(),
         )?;
 
-        let mut env_map = json_to_env(&content_to_write)?;
-
-        // 准备要写入 ~/.gemini/settings.json 的配置（缺省时保留现有文件内容）
-        let settings_path = get_gemini_settings_path();
-        let mut config_to_write = if let Some(config_value) = content_to_write.get("config") {
-            if config_value.is_null() {
-                None // null → 保留现有文件
-            } else if let Some(provider_config) = config_value.as_object() {
-                if provider_config.is_empty() {
-                    None // 空对象 {} → 保留现有文件
-                } else {
-                    // 有内容 → 合并到现有 settings.json（保留现有 key，如 mcpServers），供应商优先
-                    let mut merged = if settings_path.exists() {
-                        read_json_file(&settings_path)?
-                    } else {
-                        json!({})
-                    };
-
-                    if !merged.is_object() {
-                        merged = json!({});
-                    }
-
-                    let merged_map = merged.as_object_mut().ok_or_else(|| {
-                        AppError::localized(
-                            "gemini.validation.invalid_settings",
-                            "Gemini 现有 settings.json 格式错误: 必须是对象",
-                            "Gemini existing settings.json invalid: must be a JSON object",
-                        )
-                    })?;
-                    for (key, value) in provider_config {
-                        merged_map.insert(key.clone(), value.clone());
-                    }
-
-                    Some(merged)
-                }
-            } else {
-                return Err(AppError::localized(
-                    "gemini.validation.invalid_config",
-                    "Gemini 配置格式错误: config 必须是对象或 null",
-                    "Gemini config invalid: config must be an object or null",
-                ));
+        let incoming_env = match auth_type {
+            GeminiAuthType::GoogleOfficial => std::collections::HashMap::new(),
+            GeminiAuthType::ApiKey => {
+                validate_gemini_settings_strict(&content_to_write)?;
+                json_to_env(&content_to_write)?
             }
-        } else {
-            None
+        };
+        let mut local_env = {
+            let local_env = read_gemini_env()?;
+            let local_settings = env_to_json(&local_env);
+            let stripped_settings =
+                common_config::strip_common_config_snippet_from_live_settings_or_provider_snapshot(
+                    &AppType::Gemini,
+                    provider,
+                    local_settings,
+                    previous_common_config_snippet,
+                );
+            json_to_env(&stripped_settings)?
+        };
+        if matches!(auth_type, GeminiAuthType::GoogleOfficial) {
+            for key in [
+                "GEMINI_API_KEY",
+                "GOOGLE_GEMINI_BASE_URL",
+                "GEMINI_BASE_URL",
+                "GEMINI_MODEL",
+            ] {
+                local_env.remove(key);
+            }
+        }
+        let env = live_merge::merge_env_live(
+            &AppType::Gemini,
+            ".env",
+            local_env,
+            &incoming_env,
+            resolution,
+        )?;
+
+        let mut incoming_config = match content_to_write.get("config") {
+            Some(Value::Null) | None => json!({}),
+            Some(config_value) => {
+                if let Some(provider_config) = config_value.as_object() {
+                    Value::Object(provider_config.clone())
+                } else {
+                    return Err(AppError::localized(
+                        "gemini.validation.invalid_config",
+                        "Gemini 配置格式错误: config 必须是对象或 null",
+                        "Gemini config invalid: config must be an object or null",
+                    ));
+                }
+            }
         };
 
-        if config_to_write.is_none() {
-            if settings_path.exists() {
-                config_to_write = Some(read_json_file(&settings_path)?);
-            } else {
-                config_to_write = Some(json!({})); // 新建空配置
-            }
-        }
+        let config_obj = incoming_config.as_object_mut().ok_or_else(|| {
+            AppError::localized(
+                "gemini.validation.invalid_config",
+                "Gemini 配置格式错误: config 必须是对象或 null",
+                "Gemini config invalid: config must be an object or null",
+            )
+        })?;
+        let security = config_obj
+            .entry("security".to_string())
+            .or_insert_with(|| json!({}));
+        let security_obj = security.as_object_mut().ok_or_else(|| {
+            AppError::localized(
+                "gemini.validation.invalid_security",
+                "Gemini 配置格式错误: security 必须是对象",
+                "Gemini config invalid: security must be an object",
+            )
+        })?;
+        let auth = security_obj
+            .entry("auth".to_string())
+            .or_insert_with(|| json!({}));
+        let auth_obj = auth.as_object_mut().ok_or_else(|| {
+            AppError::localized(
+                "gemini.validation.invalid_security_auth",
+                "Gemini 配置格式错误: security.auth 必须是对象",
+                "Gemini config invalid: security.auth must be an object",
+            )
+        })?;
+        auth_obj.insert(
+            "selectedType".to_string(),
+            Value::String(Self::gemini_security_selected_type(auth_type).to_string()),
+        );
 
-        match auth_type {
-            GeminiAuthType::GoogleOfficial => {
-                // Google 官方使用 OAuth，清空 env
-                env_map.clear();
-                write_gemini_env_atomic(&env_map)?;
-            }
-            GeminiAuthType::ApiKey => {
-                // API Key 供应商（所有第三方服务）
-                // 统一处理：验证配置 + 写入 .env 文件
-                validate_gemini_settings_strict(&content_to_write)?;
-                write_gemini_env_atomic(&env_map)?;
-            }
-        }
+        let settings_path = get_gemini_settings_path();
+        let local_config = if settings_path.exists() {
+            read_json_file(&settings_path)?
+        } else {
+            json!({})
+        };
+        let settings = live_merge::merge_json_live(
+            &AppType::Gemini,
+            "settings.json",
+            local_config,
+            &incoming_config,
+            resolution,
+        )?;
 
-        if let Some(config_value) = config_to_write {
-            write_json_file(&settings_path, &config_value)?;
-        }
+        Ok(PreparedLiveWrite::Gemini {
+            env,
+            settings,
+            auth_type,
+        })
+    }
 
-        match auth_type {
-            GeminiAuthType::GoogleOfficial => Self::ensure_google_oauth_security_flag(provider)?,
-            GeminiAuthType::ApiKey => Self::ensure_api_key_security_flag(provider)?,
+    pub(super) fn apply_gemini_live_write(prepared: &PreparedLiveWrite) -> Result<(), AppError> {
+        use crate::gemini_config::{get_gemini_settings_path, write_gemini_env_atomic};
+
+        match prepared {
+            PreparedLiveWrite::Gemini {
+                env,
+                settings,
+                auth_type,
+            } => {
+                write_gemini_env_atomic(env)?;
+                write_json_file(&get_gemini_settings_path(), settings)?;
+                Self::ensure_gemini_app_security_flag(*auth_type)?;
+            }
+            PreparedLiveWrite::GeminiSecurityFlag { auth_type } => {
+                Self::ensure_gemini_app_security_flag(*auth_type)?;
+            }
+            _ => {}
         }
 
         Ok(())

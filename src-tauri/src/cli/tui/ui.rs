@@ -213,21 +213,6 @@ fn split_filter_area(area: Rect, app: &App) -> (Option<Rect>, Rect) {
     (Some(chunks[0]), chunks[1])
 }
 
-#[cfg(test)]
-mod effect_tests {
-    use super::*;
-
-    #[test]
-    fn proxy_open_flash_uses_ping_pong_sine_in_out_once() {
-        let effect = proxy_open_flash_effect(Rect::new(0, 0, 80, 24));
-        let dsl = effect.to_dsl().unwrap().to_string();
-
-        assert!(dsl.contains("fx::ping_pong("), "{dsl}");
-        assert!(dsl.contains("SineInOut"), "{dsl}");
-        assert!(!dsl.contains("fx::repeating("), "{dsl}");
-    }
-}
-
 fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::theme::Theme) {
     let input = app.displayed_filter_input();
     let outer = Block::default()
@@ -267,5 +252,20 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super
         let cursor_x = input_inner.x + cursor_x.min(input_inner.width.saturating_sub(1));
         let cursor_y = input_inner.y;
         frame.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+
+    #[test]
+    fn proxy_open_flash_uses_ping_pong_sine_in_out_once() {
+        let effect = proxy_open_flash_effect(Rect::new(0, 0, 80, 24));
+        let dsl = effect.to_dsl().unwrap().to_string();
+
+        assert!(dsl.contains("fx::ping_pong("), "{dsl}");
+        assert!(dsl.contains("SineInOut"), "{dsl}");
+        assert!(!dsl.contains("fx::repeating("), "{dsl}");
     }
 }

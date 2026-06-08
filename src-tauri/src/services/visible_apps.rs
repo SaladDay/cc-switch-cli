@@ -229,8 +229,7 @@ fn detection_would_change(apps: &VisibleApps, detection: &VisibleAppsDetection) 
 fn detection_string_map(detection: &VisibleAppsDetection) -> HashMap<String, bool> {
     CONTROLLED_APPS
         .iter()
-        .cloned()
-        .map(|app| (app.as_str().to_string(), detection.is_installed(&app)))
+        .map(|app| (app.as_str().to_string(), detection.is_installed(app)))
         .collect()
 }
 

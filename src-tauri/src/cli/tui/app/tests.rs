@@ -1,6 +1,10 @@
 use super::*;
 
 #[cfg(test)]
+#[expect(
+    clippy::module_inception,
+    reason = "test module mirrors the file layout"
+)]
 mod tests {
     use super::types::{McpEnvEditorField, McpEnvEntryEditorState};
     use super::*;
@@ -37,8 +41,10 @@ mod tests {
     impl SettingsGuard {
         fn with_openclaw_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.openclaw_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                openclaw_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set openclaw override dir");
             Self { previous }
         }
@@ -911,7 +917,7 @@ mod tests {
         assert!(imports[0].apps.claude);
         assert!(imports[0].apps.opencode);
         assert!(
-            imports[0].apps.is_empty() == false,
+            !imports[0].apps.is_empty(),
             "supported app targets should be preserved"
         );
         assert!(
@@ -1271,9 +1277,9 @@ mod tests {
     #[test]
     fn filter_mode_updates_buffer_and_exits() {
         let mut app = App::new(Some(AppType::Claude));
-        assert_eq!(app.filter.active, false);
+        assert!(!app.filter.active);
         app.on_key(key(KeyCode::Char('/')), &data());
-        assert_eq!(app.filter.active, true);
+        assert!(app.filter.active);
         app.on_key(key(KeyCode::Char('a')), &data());
         app.on_key(key(KeyCode::Char('b')), &data());
         app.on_key(key(KeyCode::Char('j')), &data());
@@ -1282,7 +1288,7 @@ mod tests {
         app.on_key(key(KeyCode::Backspace), &data());
         assert_eq!(app.filter.input.value, "abj");
         app.on_key(key(KeyCode::Enter), &data());
-        assert_eq!(app.filter.active, false);
+        assert!(!app.filter.active);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use crate::error::AppError;
 #[cfg(test)]
 use crate::openclaw_config::OpenClawDefaultModel;
 use crate::proxy::providers::get_claude_api_format;
+use crate::services::provider::live_merge::ConflictPolicy;
 use crate::services::provider::ProviderSortUpdate;
 use crate::services::ProviderService;
 
@@ -98,7 +99,27 @@ fn refresh_provider_data_after_write_with_config(
 }
 
 pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
-    do_switch(ctx, id)
+    let state = load_state()?;
+    let conflicts =
+        ProviderService::preview_switch_live_conflicts(&state, ctx.app.app_type.clone(), &id)?;
+    if !conflicts.is_empty() {
+        ctx.app.overlay = Overlay::ProviderSwitchLiveConflicts {
+            provider_id: id,
+            conflicts,
+        };
+        return Ok(());
+    }
+
+    do_switch(ctx, state, id, ConflictPolicy::Fail)
+}
+
+pub(super) fn switch_with_conflict_policy(
+    ctx: &mut RuntimeActionContext<'_>,
+    id: String,
+    policy: ConflictPolicy,
+) -> Result<(), AppError> {
+    let state = load_state()?;
+    do_switch(ctx, state, id, policy)
 }
 
 pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
@@ -120,8 +141,12 @@ pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(
     Ok(())
 }
 
-fn do_switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
-    let state = load_state()?;
+fn do_switch(
+    ctx: &mut RuntimeActionContext<'_>,
+    state: crate::store::AppState,
+    id: String,
+    policy: ConflictPolicy,
+) -> Result<(), AppError> {
     let switched_provider = ctx
         .data
         .providers
@@ -129,7 +154,7 @@ fn do_switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppEr
         .iter()
         .find(|row| row.id == id)
         .map(|row| row.provider.clone());
-    ProviderService::switch(&state, ctx.app.app_type.clone(), &id)?;
+    ProviderService::switch_with_resolution(&state, ctx.app.app_type.clone(), &id, policy.into())?;
     if let Some(provider) = switched_provider.as_ref() {
         if let Err(err) =
             crate::claude_plugin::sync_claude_plugin_on_provider_switch(&ctx.app.app_type, provider)
@@ -453,7 +478,7 @@ pub(super) fn model_fetch(
 
     ctx.app.overlay = Overlay::ModelFetchPicker {
         request_id,
-        field: field.clone(),
+        field,
         claude_idx,
         input: TextInput::new(""),
         query: String::new(),
@@ -506,13 +531,15 @@ mod tests {
     use crate::test_support::{
         lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
     };
-    use crate::{AppType, MultiAppConfig};
+    use crate::{AppState, AppType, MultiAppConfig};
 
     struct EnvGuard {
         _lock: TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
         old_config_dir: Option<OsString>,
+        old_claude_config_dir: Option<OsString>,
+        old_codex_home: Option<OsString>,
     }
 
     impl EnvGuard {
@@ -521,9 +548,13 @@ mod tests {
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
             let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+            let old_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+            let old_codex_home = std::env::var_os("CODEX_HOME");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
             std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+            std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
+            std::env::set_var("CODEX_HOME", home.join(".codex"));
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
@@ -531,6 +562,8 @@ mod tests {
                 old_home,
                 old_userprofile,
                 old_config_dir,
+                old_claude_config_dir,
+                old_codex_home,
             }
         }
     }
@@ -549,6 +582,14 @@ mod tests {
                 Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
                 None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
             }
+            match &self.old_claude_config_dir {
+                Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+            match &self.old_codex_home {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
         }
@@ -561,24 +602,30 @@ mod tests {
     impl SettingsGuard {
         fn with_opencode_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.opencode_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                opencode_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set opencode override dir");
             Self { previous }
         }
 
         fn with_openclaw_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.openclaw_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                openclaw_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set openclaw override dir");
             Self { previous }
         }
 
         fn with_hermes_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.hermes_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                hermes_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set hermes override dir");
             Self { previous }
         }
@@ -711,6 +758,8 @@ mod tests {
         data: UiData,
     }
 
+    const MATCHING_CODEX_LIVE_CONFIG: &str = "model_provider = \"latest\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.latest]\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n\n[projects.local]\ntrust_level = \"trusted\"\n";
+
     fn run_codex_switch(
         current_id: &str,
         config_text: Option<&str>,
@@ -782,7 +831,9 @@ mod tests {
         if seed_live {
             seed_claude_live_settings(json!({
                 "env": {
-                    "ANTHROPIC_API_KEY": "live-key"
+                    "ANTHROPIC_BASE_URL": "https://example.com",
+                    "ANTHROPIC_API_KEY": "sk-new",
+                    "LOCAL_ONLY": "preserve-me"
                 },
                 "permissions": {
                     "allow": ["Bash"]
@@ -834,6 +885,16 @@ mod tests {
             json!({"env":{"ANTHROPIC_BASE_URL":format!("https://{id}.example.com")}}),
             None,
         )
+    }
+
+    fn add_claude_queue_provider(state: &AppState, id: &str) -> Result<(), AppError> {
+        seed_claude_live_settings(json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": format!("https://{id}.example.com"),
+                "LOCAL_ONLY": "preserve-me"
+            }
+        }))?;
+        ProviderService::add(state, AppType::Claude, claude_queue_provider(id)).map(|_| ())
     }
 
     fn reload_fixture_data(fixture: &mut RuntimeActionFixture) {
@@ -890,8 +951,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
-            .expect("add provider");
+        add_claude_queue_provider(&state, "p1").expect("add provider");
         state
             .db
             .add_to_failover_queue("claude", "p1")
@@ -929,8 +989,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
-            .expect("add provider");
+        add_claude_queue_provider(&state, "p1").expect("add provider");
         state
             .db
             .add_to_failover_queue("claude", "p1")
@@ -968,10 +1027,8 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
-            .expect("add first provider");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p2"))
-            .expect("add second provider");
+        add_claude_queue_provider(&state, "p1").expect("add first provider");
+        add_claude_queue_provider(&state, "p2").expect("add second provider");
         state
             .db
             .add_to_failover_queue("claude", "p1")
@@ -1016,10 +1073,8 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
-            .expect("add first provider");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p2"))
-            .expect("add second provider");
+        add_claude_queue_provider(&state, "p1").expect("add first provider");
+        add_claude_queue_provider(&state, "p2").expect("add second provider");
         state
             .db
             .add_to_failover_queue("claude", "p1")
@@ -1059,8 +1114,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
-        ProviderService::add(&state, AppType::Claude, claude_queue_provider("p1"))
-            .expect("add provider");
+        add_claude_queue_provider(&state, "p1").expect("add provider");
         state
             .db
             .add_to_failover_queue("claude", "p1")
@@ -1101,6 +1155,13 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
 
         let state = load_state().expect("load state");
+        seed_claude_live_settings(json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://example.com",
+                "LOCAL_ONLY": "preserve-me"
+            }
+        }))
+        .expect("seed live settings");
         ProviderService::add(
             &state,
             AppType::Claude,
@@ -1184,7 +1245,21 @@ mod tests {
             None,
         );
         second.sort_index = Some(1);
+        seed_claude_live_settings(json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://first.example.com",
+                "LOCAL_ONLY": "preserve-me"
+            }
+        }))
+        .expect("seed first live settings");
         ProviderService::add(&state, AppType::Claude, first).expect("add first provider");
+        seed_claude_live_settings(json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://second.example.com",
+                "LOCAL_ONLY": "preserve-me"
+            }
+        }))
+        .expect("seed second live settings");
         ProviderService::add(&state, AppType::Claude, second).expect("add second provider");
         state
             .db
@@ -1242,8 +1317,8 @@ mod tests {
     fn provider_switch_does_not_show_restart_toast_when_live_sync_succeeds() {
         let fixture = run_codex_switch(
             "old-provider",
-            Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
-            Some(json!({"OPENAI_API_KEY": "legacy-key"})),
+            Some(MATCHING_CODEX_LIVE_CONFIG),
+            Some(json!({"OPENAI_API_KEY": "fresh-key", "LOCAL_ONLY": "preserve-me"})),
         )
         .expect("switch should succeed");
 
@@ -1269,12 +1344,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn provider_switch_overwrites_existing_codex_settings_without_prompt() {
-        let fixture = run_codex_switch(
-            "",
-            Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
-            None,
-        )
-        .expect("switch should succeed");
+        let fixture = run_codex_switch("", Some(MATCHING_CODEX_LIVE_CONFIG), None)
+            .expect("switch should succeed");
 
         assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(matches!(fixture.app.overlay, Overlay::None));
@@ -1292,8 +1363,12 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn provider_switch_codex_auth_only_state_switches_normally() {
-        let fixture = run_codex_switch("", None, Some(json!({"OPENAI_API_KEY": "legacy-key"})))
-            .expect("switch should succeed");
+        let fixture = run_codex_switch(
+            "",
+            None,
+            Some(json!({"OPENAI_API_KEY": "fresh-key", "LOCAL_ONLY": "preserve-me"})),
+        )
+        .expect("switch should succeed");
 
         assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(matches!(fixture.app.overlay, Overlay::None));
@@ -1391,7 +1466,7 @@ mod tests {
                 .and_then(|meta| meta.live_config_managed),
             Some(true)
         );
-        assert!(matches!(ctx.app.toast, Some(_)));
+        assert!(ctx.app.toast.is_some());
 
         remove_from_config(&mut ctx, "p1".to_string())
             .expect("remove opencode provider from config");
@@ -1567,12 +1642,8 @@ mod tests {
     #[test]
     #[serial(home_settings)]
     fn provider_switch_existing_codex_install_with_current_provider_switches_normally() {
-        let fixture = run_codex_switch(
-            "old-provider",
-            Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
-            None,
-        )
-        .expect("switch should succeed");
+        let fixture = run_codex_switch("old-provider", Some(MATCHING_CODEX_LIVE_CONFIG), None)
+            .expect("switch should succeed");
 
         assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(matches!(fixture.app.overlay, Overlay::None));
@@ -1586,7 +1657,7 @@ mod tests {
 
         seed_codex_live_files(
             Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
-            Some(json!({"OPENAI_API_KEY": "legacy-key"})),
+            Some(json!({"OPENAI_API_KEY": "fresh-key", "LOCAL_ONLY": "preserve-me"})),
         )
         .expect("seed codex live files");
         let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
@@ -2249,7 +2320,7 @@ mod tests {
 
         remove_from_config(&mut ctx, "p2".to_string())
             .expect("fallback-only default reference should be removable");
-        assert!(matches!(ctx.app.toast, Some(_)));
+        assert!(ctx.app.toast.is_some());
         assert!(!crate::openclaw_config::get_providers()
             .expect("read providers after successful remove")
             .contains_key("p2"));

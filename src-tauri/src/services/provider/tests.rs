@@ -21,6 +21,10 @@ fn with_common_enabled(mut provider: Provider) -> Provider {
     provider
 }
 
+fn prefer_incoming_conflicts() -> live_merge::ConflictResolution<'static> {
+    live_merge::ConflictPolicy::PreferIncoming.into()
+}
+
 #[test]
 fn extract_codex_common_config_excludes_profile_model_selection() {
     let extracted = ProviderService::extract_codex_common_config_from_config_toml(
@@ -203,14 +207,12 @@ fn setup_switched_codex_state_with_managed_mcp() -> (TempDir, EnvGuard, AppState
 
     std::fs::write(
         get_codex_config_path(),
-        r#"model_provider = "azure"
+        r#"model_provider = "second"
 model = "gpt-4"
 disable_response_storage = true
 
-[model_providers.azure]
-name = "Azure OpenAI"
-base_url = "https://azure.example/v1"
-wire_api = "responses"
+[model_providers.second]
+base_url = "https://api.two.example/v1"
 
 [mcp_servers.my_server]
 command = "npx"
@@ -219,7 +221,13 @@ command = "npx"
     .expect("seed live config.toml");
 
     let state = state_from_config(config);
-    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p2",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch should succeed");
 
     (temp_home, env, state)
 }
@@ -558,8 +566,13 @@ fn codex_switch_overwrites_existing_auth_json_for_openai_official_provider() {
 
     let state = state_from_config(config);
 
-    ProviderService::switch(&state, AppType::Codex, "p2")
-        .expect("switch to official should succeed");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p2",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch to official should succeed");
 
     let live_auth: Value = crate::config::read_json_file(&auth_path).expect("read auth.json");
     assert_eq!(
@@ -622,8 +635,13 @@ fn codex_switch_removes_empty_auth_json_for_openai_official_provider() {
 
     let state = state_from_config(config);
 
-    ProviderService::switch(&state, AppType::Codex, "codex-official")
-        .expect("switch to official should succeed without saved auth");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "codex-official",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch to official should succeed without saved auth");
 
     assert!(
         !auth_path.exists(),
@@ -676,8 +694,20 @@ fn codex_switch_preserves_base_url_and_wire_api_across_multiple_switches() {
 
     // Seed initial live config for p1, then switch to p2, then back to p1.
     ProviderService::switch(&state, AppType::Codex, "p1").expect("seed p1 live");
-    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
-    ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p2",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch to p2");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p1",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch back to p1");
 
     let live_text =
         std::fs::read_to_string(get_codex_config_path()).expect("read live config.toml");
@@ -776,7 +806,13 @@ trust_level = "trusted"
     )
     .expect("seed live config.toml with runtime project trust");
 
-    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p2",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch to p2");
 
     let cfg = state.config.read().expect("read config after switch");
     let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
@@ -823,11 +859,17 @@ trust_level = "trusted"
 
     let p2_live = std::fs::read_to_string(get_codex_config_path()).expect("read p2 live config");
     assert!(
-        !p2_live.contains("/tmp/codex-project-a"),
-        "target provider live config should not absorb source provider runtime project trust"
+        p2_live.contains("/tmp/codex-project-a"),
+        "target provider live config should preserve local runtime project trust during merge"
     );
 
-    ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p1",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch back to p1");
     let p1_live = std::fs::read_to_string(get_codex_config_path()).expect("read p1 live config");
     assert!(
         p1_live.contains("[projects.\"/tmp/codex-project-a\"]"),
@@ -883,7 +925,13 @@ fn codex_switch_backfill_migrates_existing_common_meta_for_current_provider() {
     )
     .expect("seed live config.toml");
 
-    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch away from p1");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p2",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch away from p1");
 
     {
         let cfg = state.config.read().expect("read config after switch");
@@ -909,7 +957,13 @@ fn codex_switch_backfill_migrates_existing_common_meta_for_current_provider() {
         );
     }
 
-    ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p1",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch back to p1");
     let live_config = std::fs::read_to_string(get_codex_config_path()).expect("read live config");
     assert!(
         live_config.contains("disable_response_storage = true"),
@@ -999,8 +1053,26 @@ async fn switch_updates_running_proxy_takeover_target_without_restart() {
             .and_then(Value::as_object)
             .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
             .and_then(Value::as_str),
+        Some("https://api.one.example"),
+        "hot-switch should preserve the original live backup used for restore"
+    );
+
+    let snapshot = state
+        .db
+        .get_failover_live_snapshot("claude", "p2")
+        .await
+        .expect("get failover snapshot")
+        .expect("failover snapshot should exist");
+    let snapshot_value: Value =
+        serde_json::from_str(&snapshot.config_json).expect("parse failover snapshot");
+    assert_eq!(
+        snapshot_value
+            .get("env")
+            .and_then(Value::as_object)
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .and_then(Value::as_str),
         Some("https://api.two.example"),
-        "hot-switch should also refresh the restore backup to the newly selected provider"
+        "hot-switch should generate a provider-specific live snapshot"
     );
 
     state
@@ -1522,7 +1594,7 @@ fn sync_current_to_live_prefers_effective_current_from_local_settings() {
     crate::settings::set_current_provider(&AppType::Claude, Some("p2"))
         .expect("set local effective current override");
 
-    ProviderService::sync_current_to_live(&state)
+    ProviderService::sync_current_to_live_with_resolution(&state, prefer_incoming_conflicts())
         .expect("sync_current_to_live should use effective current provider");
 
     let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
@@ -1599,12 +1671,13 @@ fn updating_common_snippet_uses_db_current_without_fallback_healing_config() {
         &get_claude_settings_path(),
         &json!({
             "env": {
-                "ANTHROPIC_AUTH_TOKEN": "stale-token",
-                "ANTHROPIC_BASE_URL": "https://stale.example"
+                "ANTHROPIC_AUTH_TOKEN": "token1",
+                "ANTHROPIC_BASE_URL": "https://claude.one",
+                "LOCAL_ONLY": "preserve-me"
             }
         }),
     )
-    .expect("seed stale live settings");
+    .expect("seed live settings");
 
     let state = state_from_config(config);
     state
@@ -1713,12 +1786,13 @@ fn updating_common_snippet_uses_db_current_when_config_snapshot_is_missing_curre
         &get_claude_settings_path(),
         &json!({
             "env": {
-                "ANTHROPIC_AUTH_TOKEN": "stale-token",
-                "ANTHROPIC_BASE_URL": "https://stale.example"
+                "ANTHROPIC_AUTH_TOKEN": "token1",
+                "ANTHROPIC_BASE_URL": "https://claude.one",
+                "LOCAL_ONLY": "preserve-me"
             }
         }),
     )
-    .expect("seed stale live settings");
+    .expect("seed live settings");
 
     let state = state_from_config(config);
     state
@@ -2424,7 +2498,13 @@ fn provider_update_strips_common_snippet_before_claude_snapshot_persist() {
         None,
     ));
 
-    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
+    ProviderService::update_with_resolution(
+        &state,
+        AppType::Claude,
+        provider,
+        prefer_incoming_conflicts(),
+    )
+    .expect("update should succeed");
 
     let cfg = state.config.read().expect("read config after update");
     let provider = cfg
@@ -2507,7 +2587,13 @@ fn provider_update_does_not_infer_claude_common_config_opt_in() {
         None,
     );
 
-    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
+    ProviderService::update_with_resolution(
+        &state,
+        AppType::Claude,
+        provider,
+        prefer_incoming_conflicts(),
+    )
+    .expect("update should succeed");
 
     let cfg = state.config.read().expect("read config after update");
     let provider = cfg
@@ -2607,7 +2693,13 @@ fn provider_update_treats_settings_effective_current_as_current_for_live_write()
         None,
     );
 
-    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
+    ProviderService::update_with_resolution(
+        &state,
+        AppType::Claude,
+        provider,
+        prefer_incoming_conflicts(),
+    )
+    .expect("update should succeed");
 
     let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
     let live_env = live
@@ -2699,7 +2791,13 @@ fn provider_update_clears_invalid_local_current_override_and_falls_back_to_store
         None,
     );
 
-    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
+    ProviderService::update_with_resolution(
+        &state,
+        AppType::Claude,
+        provider,
+        prefer_incoming_conflicts(),
+    )
+    .expect("update should succeed");
 
     assert_eq!(
         crate::settings::get_current_provider(&AppType::Claude),
@@ -2765,7 +2863,13 @@ fn common_config_snippet_is_not_persisted_into_provider_snapshot_on_switch() {
     ProviderService::add(&state, AppType::Claude, p1).expect("add p1");
     ProviderService::add(&state, AppType::Claude, p2).expect("add p2");
 
-    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Claude,
+        "p2",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch to p2");
 
     let cfg = state.config.read().expect("read config");
     let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
@@ -2851,7 +2955,13 @@ fn switch_backfill_preserves_matching_common_fields_when_meta_missing() {
     )
     .expect("seed live settings with provider-owned fields matching common snippet");
 
-    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Claude,
+        "p2",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch to p2");
 
     let cfg = state.config.read().expect("read config");
     let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
@@ -3791,7 +3901,13 @@ base_url = "http://localhost:8080"
     }
     std::fs::write(&config_path, config_toml).expect("seed config.toml");
 
-    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p2",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch should succeed");
 
     let cfg = state.config.read().expect("read config after switch");
     let extracted = cfg
@@ -4106,7 +4222,13 @@ fn codex_switch_auto_extracted_common_normalizes_other_existing_provider_snapsho
     )
     .expect("seed config.toml");
 
-    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p2",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch should succeed");
 
     let cfg = state.config.read().expect("read config after switch");
     assert_eq!(
@@ -4211,8 +4333,13 @@ fn codex_switch_auto_extracted_common_skips_unparseable_other_provider_snapshots
     )
     .expect("seed config.toml");
 
-    ProviderService::switch(&state, AppType::Codex, "p2")
-        .expect("switch should skip broken legacy snapshots");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p2",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch should skip broken legacy snapshots");
 
     let cfg = state.config.read().expect("read config after switch");
     assert_eq!(
@@ -4290,7 +4417,13 @@ fn common_config_snippet_can_be_disabled_per_provider_for_codex() {
 
     let state = state_from_config(config);
 
-    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
+    ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "p2",
+        prefer_incoming_conflicts(),
+    )
+    .expect("switch should succeed");
 
     let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert!(
@@ -5048,6 +5181,99 @@ fn common_config_snippet_is_not_persisted_into_gemini_provider_snapshot_on_switc
         env.get("GEMINI_API_KEY").and_then(Value::as_str),
         Some("token1"),
         "provider-specific env should remain in snapshot"
+    );
+}
+
+#[test]
+#[serial]
+fn switching_google_official_gemini_clears_stale_api_key_env() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
+        .expect("create ~/.gemini (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Gemini);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Gemini)
+            .expect("gemini manager");
+        manager.current = "api-key".to_string();
+        manager.providers.insert(
+            "api-key".to_string(),
+            Provider::with_id(
+                "api-key".to_string(),
+                "API Key".to_string(),
+                json!({
+                    "env": {
+                        "GEMINI_API_KEY": "token1",
+                        "GOOGLE_GEMINI_BASE_URL": "https://api.example.com",
+                        "GEMINI_BASE_URL": "https://legacy.example.com",
+                        "GEMINI_MODEL": "gemini-test"
+                    }
+                }),
+                None,
+            ),
+        );
+        let mut google = Provider::with_id(
+            "google-official".to_string(),
+            "Google".to_string(),
+            json!({ "env": {} }),
+            Some("https://ai.google.dev".to_string()),
+        );
+        google.meta = Some(crate::provider::ProviderMeta {
+            partner_promotion_key: Some("google-official".to_string()),
+            ..crate::provider::ProviderMeta::default()
+        });
+        manager
+            .providers
+            .insert("google-official".to_string(), google);
+    }
+
+    crate::gemini_config::write_gemini_env_atomic(&std::collections::HashMap::from([
+        ("GEMINI_API_KEY".to_string(), "token1".to_string()),
+        (
+            "GOOGLE_GEMINI_BASE_URL".to_string(),
+            "https://api.example.com".to_string(),
+        ),
+        (
+            "GEMINI_BASE_URL".to_string(),
+            "https://legacy.example.com".to_string(),
+        ),
+        ("GEMINI_MODEL".to_string(), "gemini-test".to_string()),
+        ("USER_DEFINED_ENV".to_string(), "keep-me".to_string()),
+    ]))
+    .expect("seed current gemini env");
+
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Gemini, "google-official")
+        .expect("switch to Google official Gemini");
+
+    let live_env = crate::gemini_config::read_gemini_env().expect("read gemini env");
+    for key in [
+        "GEMINI_API_KEY",
+        "GOOGLE_GEMINI_BASE_URL",
+        "GEMINI_BASE_URL",
+        "GEMINI_MODEL",
+    ] {
+        assert!(
+            !live_env.contains_key(key),
+            "Google official Gemini should clear stale {key} from .env"
+        );
+    }
+    assert_eq!(
+        live_env.get("USER_DEFINED_ENV").map(String::as_str),
+        Some("keep-me"),
+        "unrelated local Gemini env keys should be preserved"
+    );
+
+    let settings: Value = read_json_file(&crate::gemini_config::get_gemini_settings_path())
+        .expect("read gemini settings");
+    assert_eq!(
+        settings
+            .pointer("/security/auth/selectedType")
+            .and_then(Value::as_str),
+        Some("oauth-personal")
     );
 }
 

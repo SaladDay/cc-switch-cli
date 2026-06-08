@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashMap;
@@ -30,6 +32,8 @@ mod error {
             #[source]
             source: serde_json::Error,
         },
+        #[error("{0}")]
+        Message(String),
         #[error("锁获取失败: {0}")]
         Lock(String),
         #[error("{zh} ({en})")]
@@ -206,6 +210,42 @@ mod settings {
             .backup_retain_count
             .map(|count| usize::try_from(count).unwrap_or(usize::MAX).max(1))
             .unwrap_or(10)
+    }
+}
+
+mod app_config {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum AppType {
+        Claude,
+        Codex,
+        Gemini,
+        OpenCode,
+        Hermes,
+        OpenClaw,
+    }
+
+    impl AppType {
+        pub fn as_str(&self) -> &'static str {
+            match self {
+                Self::Claude => "claude",
+                Self::Codex => "codex",
+                Self::Gemini => "gemini",
+                Self::OpenCode => "opencode",
+                Self::Hermes => "hermes",
+                Self::OpenClaw => "openclaw",
+            }
+        }
+    }
+}
+
+#[path = "../src/services/provider/live_merge.rs"]
+pub mod live_merge;
+
+mod services {
+    pub mod provider {
+        pub use crate::live_merge;
     }
 }
 

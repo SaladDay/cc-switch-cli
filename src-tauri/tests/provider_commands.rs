@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashMap;
@@ -1626,10 +1628,12 @@ fn switch_provider_updates_claude_live_and_state() {
     }
     let legacy_live = json!({
         "env": {
-            "ANTHROPIC_API_KEY": "legacy-key"
+            "ANTHROPIC_API_KEY": "fresh-key",
+            "LOCAL_ONLY": "preserve-me"
         },
         "workspace": {
-            "path": "/tmp/workspace"
+            "path": "/tmp/new-workspace",
+            "localOnly": true
         }
     });
     std::fs::write(
@@ -1784,7 +1788,7 @@ fn switch_provider_codex_rejects_missing_auth() {
 
 #[tokio::test]
 #[serial]
-async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_updates_restore_backup(
+async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_preserves_restore_backup(
 ) {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -1797,10 +1801,12 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
 
     let legacy_live = json!({
         "env": {
-            "ANTHROPIC_API_KEY": "legacy-key"
+            "ANTHROPIC_API_KEY": "fresh-key",
+            "LOCAL_ONLY": "preserve-me"
         },
         "workspace": {
-            "path": "/tmp/workspace"
+            "path": "/tmp/new-workspace",
+            "localOnly": true
         }
     });
     std::fs::write(
@@ -1901,10 +1907,35 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
     assert_eq!(
         backup_after_switch
             .get("env")
+            .and_then(|env| env.get("LOCAL_ONLY"))
+            .and_then(|value| value.as_str()),
+        Some("preserve-me"),
+        "takeover-time switch should preserve the original live backup used for restore"
+    );
+    assert_eq!(
+        backup_after_switch
+            .get("env")
+            .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .and_then(|value| value.as_str()),
+        None,
+        "provider common config belongs in generated failover snapshots, not the restore backup"
+    );
+
+    let failover_snapshot = state
+        .db
+        .get_failover_live_snapshot("claude", "new-provider")
+        .await
+        .expect("read generated failover snapshot after takeover-time switch")
+        .expect("new provider failover snapshot should exist after switch");
+    let failover_snapshot: serde_json::Value = serde_json::from_str(&failover_snapshot.config_json)
+        .expect("parse generated failover snapshot after takeover-time switch");
+    assert_eq!(
+        failover_snapshot
+            .get("env")
             .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             .and_then(|value| value.as_str()),
         Some("1"),
-        "takeover-time switch should refresh the stored backup with the same Claude common snippet semantics"
+        "takeover-time switch should generate a provider snapshot with normal Claude common snippet semantics"
     );
 
     state
@@ -1921,14 +1952,22 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
             .and_then(|env| env.get("ANTHROPIC_API_KEY"))
             .and_then(|value| value.as_str()),
         Some("fresh-key"),
-        "restore after a takeover-time switch should recover the new provider config, not the pre-switch one"
+        "restore after a takeover-time switch should recover the original local live config"
+    );
+    assert_eq!(
+        restored_live
+            .get("env")
+            .and_then(|env| env.get("LOCAL_ONLY"))
+            .and_then(|value| value.as_str()),
+        Some("preserve-me"),
+        "restore after a takeover-time switch should keep local-only live config values"
     );
     assert_eq!(
         restored_live
             .get("env")
             .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             .and_then(|value| value.as_str()),
-        Some("1"),
-        "restore after a takeover-time switch should keep the normal Claude common snippet semantics"
+        None,
+        "restore after takeover should not write provider common config into the preserved local backup"
     );
 }

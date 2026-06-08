@@ -379,6 +379,69 @@ pub(super) fn render_common_snippet_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+pub(super) fn render_provider_switch_live_conflicts_overlay(
+    frame: &mut Frame<'_>,
+    content_area: Rect,
+    theme: &theme::Theme,
+    conflicts: &[crate::services::provider::live_merge::ConfigConflict],
+) {
+    let area = centered_rect_fixed(OVERLAY_FIXED_LG.0, OVERLAY_FIXED_LG.1, content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, true))
+        .title("Live configuration conflicts");
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("L", "Keep local"),
+            ("C", "Use cc-switch"),
+            ("Esc", texts::tui_key_cancel()),
+        ],
+    );
+
+    let body_area = inset_top(chunks[1], 1);
+    let mut lines = vec![
+        Line::raw("Choose which values should be written before cc-switch saves this switch."),
+        Line::raw(""),
+    ];
+    let max_conflicts = body_area.height.saturating_sub(4) as usize / 6;
+    for conflict in conflicts.iter().take(max_conflicts.max(1)) {
+        lines.push(Line::styled(
+            format!(
+                "{} {} {}",
+                conflict.app_type.as_str(),
+                conflict.target,
+                conflict.path
+            ),
+            Style::default().fg(theme.accent),
+        ));
+        lines.push(Line::raw(format!("local: {}", conflict.local)));
+        lines.push(Line::raw(format!("cc-switch: {}", conflict.incoming)));
+        lines.push(Line::raw(""));
+    }
+    if conflicts.len() > max_conflicts.max(1) {
+        lines.push(Line::raw(format!(
+            "... and {} more conflict(s)",
+            conflicts.len() - max_conflicts.max(1)
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
+}
+
 fn render_scrolling_lines(frame: &mut Frame<'_>, area: Rect, lines: &[String], scroll: usize) {
     let height = area.height as usize;
     let start = scroll.min(lines.len());
