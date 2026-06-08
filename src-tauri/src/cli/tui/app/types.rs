@@ -616,7 +616,7 @@ pub enum Overlay {
         selected: usize,
         editing: bool,
     },
-    ClaudeApiFormatPicker {
+    ApiFormatPicker {
         selected: usize,
     },
     UsageQueryTemplatePicker {
@@ -737,7 +737,7 @@ impl Overlay {
                 | Overlay::CommonSnippetPicker { .. }
                 | Overlay::ProviderTestMenu { .. }
                 | Overlay::FailoverQueueManager { .. }
-                | Overlay::ClaudeApiFormatPicker { .. }
+                | Overlay::ApiFormatPicker { .. }
                 | Overlay::UsageQueryTemplatePicker { .. }
                 | Overlay::ManagedAccountPicker { .. }
                 | Overlay::ManagedAccountActionPicker { .. }
@@ -776,7 +776,7 @@ impl Overlay {
             | Overlay::CommonSnippetPicker { .. }
             | Overlay::ProviderTestMenu { .. }
             | Overlay::FailoverQueueManager { .. }
-            | Overlay::ClaudeApiFormatPicker { .. }
+            | Overlay::ApiFormatPicker { .. }
             | Overlay::UsageQueryTemplatePicker { .. }
             | Overlay::ManagedAccountPicker { .. }
             | Overlay::ManagedAccountActionPicker { .. }

@@ -84,8 +84,8 @@ fn current_help_target(app: &App) -> HelpTarget {
             Overlay::UsageQueryTemplatePicker { .. } => {
                 provider_usage_query_overlay_target(app, UsageQueryField::Template)
             }
-            Overlay::ClaudeApiFormatPicker { .. } => {
-                provider_field_overlay_target(app, ProviderAddField::ClaudeApiFormat)
+            Overlay::ApiFormatPicker { .. } => {
+                provider_field_overlay_target(app, ProviderAddField::ApiFormat)
             }
             Overlay::ClaudeModelPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::ClaudeModelConfig)
@@ -285,8 +285,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Configures Claude model tiers. Role-specific models are written into the live config for the client to select by task.",
             ),
         ),
-        ProviderAddField::ClaudeApiFormat => HelpContent::new(
-            texts::tui_label_claude_api_format(),
+        ProviderAddField::ApiFormat => HelpContent::new(
+            texts::tui_label_api_format(),
             help_lines(
                 "选择供应商的协议格式。非 Anthropic 协议通常需要本地路由做格式转换。",
                 "Selects the provider protocol. Non-Anthropic formats usually need local routing for conversion.",

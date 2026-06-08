@@ -9,7 +9,7 @@ impl App {
         if let Some(action) = self.handle_sync_method_picker_key(key, data) {
             return Some(action);
         }
-        if let Some(action) = self.handle_claude_api_format_picker_key(key, data) {
+        if let Some(action) = self.handle_api_format_picker_key(key, data) {
             return Some(action);
         }
         if let Some(action) = self.handle_usage_query_template_picker_key(key) {
@@ -194,11 +194,7 @@ impl App {
         })
     }
 
-    fn handle_claude_api_format_picker_key(
-        &mut self,
-        key: KeyEvent,
-        data: &UiData,
-    ) -> Option<Action> {
+    fn handle_api_format_picker_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
         let app_type = self
             .form
             .as_ref()
@@ -207,7 +203,7 @@ impl App {
                 _ => None,
             })
             .unwrap_or_else(|| self.app_type.clone());
-        let Overlay::ClaudeApiFormatPicker { selected } = &mut self.overlay else {
+        let Overlay::ApiFormatPicker { selected } = &mut self.overlay else {
             return None;
         };
 
@@ -222,14 +218,14 @@ impl App {
             }
             KeyCode::Down => {
                 *selected = (*selected + 1).min(
-                    crate::cli::tui::form::ClaudeApiFormat::choices_for_app(&app_type)
+                    crate::cli::tui::form::ApiFormat::choices_for_app(&app_type)
                         .len()
                         .saturating_sub(1),
                 );
                 Action::None
             }
             KeyCode::Enter => {
-                let next_format = crate::cli::tui::form::ClaudeApiFormat::from_picker_index_for_app(
+                let picker_format = crate::cli::tui::form::ApiFormat::from_picker_index_for_app(
                     *selected, &app_type,
                 );
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
@@ -237,24 +233,26 @@ impl App {
                     return Some(Action::None);
                 };
 
-                let changed = provider.claude_api_format != next_format;
-                provider.claude_api_format = next_format;
+                let changed = provider.api_format != picker_format;
+                provider.api_format = picker_format;
                 self.overlay = Overlay::None;
 
                 let proxy_ready = data
                     .proxy
                     .routes_current_app_through_proxy(&provider.app_type)
                     .unwrap_or(false);
-                if changed && next_format.requires_proxy_for_app(&provider.app_type) && !proxy_ready
+                if changed
+                    && picker_format.requires_proxy_for_app(&provider.app_type)
+                    && !proxy_ready
                 {
                     let message = if matches!(provider.app_type, crate::app_config::AppType::Codex)
                     {
-                        texts::tui_codex_api_format_requires_proxy_message(next_format.as_str())
+                        texts::tui_codex_api_format_requires_proxy_message(picker_format.as_str())
                     } else {
-                        texts::tui_claude_api_format_requires_proxy_message(next_format.as_str())
+                        texts::tui_claude_api_format_requires_proxy_message(picker_format.as_str())
                     };
                     self.overlay = Overlay::Confirm(ConfirmOverlay {
-                        title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+                        title: texts::tui_api_format_requires_proxy_title().to_string(),
                         message,
                         action: ConfirmAction::ProviderApiFormatProxyNotice,
                     });

@@ -8,7 +8,7 @@ use super::codex_config::{
     build_codex_provider_config_toml, clean_codex_provider_key, update_codex_config_snippet,
 };
 use super::{
-    parse_codex_model_catalog_context_window, ClaudeApiFormat, GeminiAuthType,
+    parse_codex_model_catalog_context_window, ApiFormat, CodexWireApi, GeminiAuthType,
     ProviderAddFormState, UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
     OPENCLAW_DEFAULT_USER_AGENT,
 };
@@ -153,7 +153,7 @@ impl ProviderAddFormState {
                             &provider_key,
                             base_url,
                             model,
-                            self.codex_wire_api,
+                            CodexWireApi::Responses,
                         )
                     } else {
                         existing_config.to_string()
@@ -162,7 +162,7 @@ impl ProviderAddFormState {
                         &base_config,
                         base_url,
                         model,
-                        self.codex_wire_api,
+                        CodexWireApi::Responses,
                         self.codex_requires_openai_auth,
                         self.codex_env_key.value.trim(),
                     );
@@ -505,10 +505,8 @@ impl ProviderAddFormState {
     fn update_provider_meta(&self, provider_obj: &mut serde_json::Map<String, Value>) {
         let should_write_common_config_meta = self.should_write_common_config_meta();
         let should_write_claude_api_format = matches!(
-            self.claude_api_format,
-            ClaudeApiFormat::OpenAiChat
-                | ClaudeApiFormat::OpenAiResponses
-                | ClaudeApiFormat::GeminiNative
+            self.api_format,
+            ApiFormat::OpenAiChat | ApiFormat::OpenAiResponses | ApiFormat::GeminiNative
         ) && matches!(self.app_type, AppType::Claude)
             && !self.is_claude_official_provider();
         let should_write_codex_api_format =
@@ -552,23 +550,23 @@ impl ProviderAddFormState {
         }
 
         if matches!(self.app_type, AppType::Claude) {
-            match self.claude_api_format {
+            match self.api_format {
                 _ if self.is_claude_official_provider() && !is_codex_oauth => {
                     meta_obj.remove("apiFormat");
                 }
-                ClaudeApiFormat::Anthropic if is_codex_oauth => {
+                ApiFormat::Anthropic if is_codex_oauth => {
                     meta_obj.insert("apiFormat".to_string(), json!("openai_responses"));
                 }
-                ClaudeApiFormat::Anthropic => {
+                ApiFormat::Anthropic => {
                     meta_obj.remove("apiFormat");
                 }
-                ClaudeApiFormat::OpenAiChat => {
+                ApiFormat::OpenAiChat => {
                     meta_obj.insert("apiFormat".to_string(), json!("openai_chat"));
                 }
-                ClaudeApiFormat::OpenAiResponses => {
+                ApiFormat::OpenAiResponses => {
                     meta_obj.insert("apiFormat".to_string(), json!("openai_responses"));
                 }
-                ClaudeApiFormat::GeminiNative => {
+                ApiFormat::GeminiNative => {
                     meta_obj.insert("apiFormat".to_string(), json!("gemini_native"));
                 }
             }
@@ -588,8 +586,8 @@ impl ProviderAddFormState {
                 meta_obj.remove("apiFormat");
                 meta_obj.remove("codexChatReasoning");
             } else {
-                let api_format = match self.claude_api_format {
-                    ClaudeApiFormat::OpenAiChat => "openai_chat",
+                let api_format = match self.api_format {
+                    ApiFormat::OpenAiChat => "openai_chat",
                     _ => "openai_responses",
                 };
                 meta_obj.insert("apiFormat".to_string(), json!(api_format));
@@ -647,9 +645,9 @@ impl ProviderAddFormState {
 
         self.update_usage_script_meta(meta_obj);
 
-        if meta_obj.is_empty() {
-            provider_obj.remove("meta");
-        }
+        // 即使 meta 为空对象也保留 meta 键，这样反序列化后得到
+        // Some(ProviderMeta::default()) 而非 None，确保 ProviderService::update()
+        // 的 merge 逻辑将表单输出视为权威来源，而不是保留旧的 meta。
     }
 
     fn update_usage_script_meta(&self, meta_obj: &mut serde_json::Map<String, Value>) {

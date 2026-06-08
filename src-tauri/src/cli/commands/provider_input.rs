@@ -4092,7 +4092,7 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                 let api_format = crate::proxy::providers::get_claude_api_format(provider);
                 println!(
                     "  {}: {}",
-                    texts::tui_label_claude_api_format(),
+                    texts::tui_label_api_format(),
                     texts::tui_claude_api_format_value(api_format)
                 );
             }
@@ -4148,7 +4148,7 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                     };
                 println!(
                     "  {}: {}",
-                    texts::tui_label_claude_api_format(),
+                    texts::tui_label_api_format(),
                     texts::tui_codex_api_format_value(api_format)
                 );
             }

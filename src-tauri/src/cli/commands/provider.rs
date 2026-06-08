@@ -304,7 +304,7 @@ fn prompt_api_format(
         .map(|api_format| value_label(api_format).to_string())
         .collect::<Vec<_>>();
 
-    let selected = Select::new(texts::tui_label_claude_api_format(), labels.clone())
+    let selected = Select::new(texts::tui_label_api_format(), labels.clone())
         .with_starting_cursor(default_index)
         .prompt()
         .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;

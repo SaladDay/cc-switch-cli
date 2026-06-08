@@ -302,8 +302,8 @@ fn provider_add_form_codex_oauth_template_matches_upstream_contract() {
         "https://chatgpt.com/backend-api/codex"
     );
     assert_eq!(
-        form.claude_api_format,
-        crate::cli::tui::form::ClaudeApiFormat::OpenAiResponses
+        form.api_format,
+        crate::cli::tui::form::ApiFormat::OpenAiResponses
     );
     assert_eq!(form.claude_model.value, "gpt-5.4");
     assert_eq!(form.claude_haiku_model.value, "gpt-5.4-mini");
@@ -316,7 +316,7 @@ fn provider_add_form_codex_oauth_template_matches_upstream_contract() {
     assert!(fields.contains(&ProviderAddField::ClaudeModelConfig));
     assert!(fields.contains(&ProviderAddField::ClaudeHideAttribution));
     assert!(!fields.contains(&ProviderAddField::ClaudeBaseUrl));
-    assert!(!fields.contains(&ProviderAddField::ClaudeApiFormat));
+    assert!(!fields.contains(&ProviderAddField::ApiFormat));
     assert!(!fields.contains(&ProviderAddField::ClaudeApiKey));
 
     let provider = form.to_provider_json_value();
@@ -375,8 +375,8 @@ fn provider_edit_form_codex_oauth_loads_account_and_fast_mode() {
     assert_eq!(form.codex_oauth_account_id.as_deref(), Some("acc-123"));
     assert!(form.codex_fast_mode);
     assert_eq!(
-        form.claude_api_format,
-        crate::cli::tui::form::ClaudeApiFormat::OpenAiResponses
+        form.api_format,
+        crate::cli::tui::form::ApiFormat::OpenAiResponses
     );
 }
 
@@ -872,7 +872,7 @@ fn provider_add_form_claude_official_keeps_hide_attribution_field_visible() {
     let fields = form.fields();
 
     assert!(!fields.contains(&ProviderAddField::ClaudeBaseUrl));
-    assert!(!fields.contains(&ProviderAddField::ClaudeApiFormat));
+    assert!(!fields.contains(&ProviderAddField::ApiFormat));
     assert!(!fields.contains(&ProviderAddField::ClaudeApiKey));
     assert!(!fields.contains(&ProviderAddField::ClaudeModelConfig));
     assert!(fields.contains(&ProviderAddField::ClaudeHideAttribution));
@@ -1030,7 +1030,7 @@ fn provider_add_form_packycode_template_codex_sets_partner_meta_and_base_url() {
 #[test]
 fn provider_add_form_codex_template_switch_clears_local_routing_state() {
     let mut form = ProviderAddFormState::new(AppType::Codex);
-    form.claude_api_format = ClaudeApiFormat::OpenAiChat;
+    form.api_format = ApiFormat::OpenAiChat;
     form.codex_chat_reasoning.supports_thinking = Some(true);
     form.codex_chat_reasoning.supports_effort = Some(true);
     form.codex_local_routing_field_idx = 3;
@@ -1055,7 +1055,7 @@ fn provider_add_form_codex_template_switch_clears_local_routing_state() {
     assert!(provider["meta"].get("codexChatReasoning").is_none());
     assert!(provider["settingsConfig"].get("modelCatalog").is_none());
 
-    form.claude_api_format = ClaudeApiFormat::OpenAiChat;
+    form.api_format = ApiFormat::OpenAiChat;
     form.codex_chat_reasoning.supports_thinking = Some(true);
     form.apply_codex_model_catalog_value(json!([{ "model": "qwen-coder" }]))
         .expect("catalog should apply");
@@ -1193,7 +1193,7 @@ fn provider_add_form_claude_api_format_writes_openai_chat_meta() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     form.id.set("p1");
     form.name.set("Provider One");
-    form.claude_api_format = ClaudeApiFormat::OpenAiChat;
+    form.api_format = ApiFormat::OpenAiChat;
 
     let provider = form.to_provider_json_value();
     assert_eq!(provider["meta"]["apiFormat"], "openai_chat");
@@ -1217,7 +1217,7 @@ fn provider_add_form_claude_api_format_restores_openai_chat_meta() {
     });
 
     let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
-    assert_eq!(form.claude_api_format, ClaudeApiFormat::OpenAiChat);
+    assert_eq!(form.api_format, ApiFormat::OpenAiChat);
 }
 
 #[test]
@@ -1238,7 +1238,7 @@ fn provider_add_form_claude_api_format_round_trips_openai_responses_meta() {
     });
 
     let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
-    assert_eq!(form.claude_api_format.as_str(), "openai_responses");
+    assert_eq!(form.api_format.as_str(), "openai_responses");
 
     let saved = form.to_provider_json_value();
     assert_eq!(saved["meta"]["apiFormat"], "openai_responses");
@@ -1266,7 +1266,7 @@ fn provider_add_form_claude_api_format_round_trips_gemini_native_meta() {
     });
 
     let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
-    assert_eq!(form.claude_api_format, ClaudeApiFormat::GeminiNative);
+    assert_eq!(form.api_format, ApiFormat::GeminiNative);
 
     let saved = form.to_provider_json_value();
     assert_eq!(saved["meta"]["apiFormat"], "gemini_native");
@@ -1515,8 +1515,8 @@ fn provider_add_form_codex_custom_includes_api_key_and_hides_advanced_fields() {
         "custom Codex provider should expose Local Routing on its secondary page"
     );
     assert!(
-        !fields.contains(&ProviderAddField::ClaudeApiFormat),
-        "custom Codex provider should not expose the old API Format selector"
+        fields.contains(&ProviderAddField::ApiFormat),
+        "custom Codex provider should expose the API Format selector"
     );
     assert!(
         !fields.contains(&ProviderAddField::CodexWireApi),
@@ -1539,7 +1539,7 @@ fn provider_add_form_codex_local_routing_writes_meta_without_chat_wire_api() {
     form.name.set("Custom");
     form.codex_base_url.set("https://api.example.com/v1");
     form.codex_model.set("deepseek-chat");
-    form.claude_api_format = ClaudeApiFormat::OpenAiChat;
+    form.api_format = ApiFormat::OpenAiChat;
 
     let provider = form.to_provider_json_value();
     let config = provider["settingsConfig"]["config"]
@@ -1636,7 +1636,7 @@ fn provider_add_form_codex_local_routing_saves_normalized_reasoning() {
     form.id.set("custom");
     form.name.set("Custom");
     form.codex_base_url.set("https://api.example.com/v1");
-    form.claude_api_format = ClaudeApiFormat::OpenAiChat;
+    form.api_format = ApiFormat::OpenAiChat;
 
     form.toggle_codex_reasoning_effort();
 
@@ -1702,7 +1702,7 @@ fn provider_add_form_codex_model_catalog_saves_normalized_models_and_syncs_prima
     form.name.set("Custom");
     form.codex_base_url.set("https://api.example.com/v1");
     form.codex_model.set("fallback-model");
-    form.claude_api_format = ClaudeApiFormat::OpenAiChat;
+    form.api_format = ApiFormat::OpenAiChat;
     form.apply_codex_model_catalog_value(json!([
         { "model": " deepseek-chat ", "displayName": " DeepSeek Chat ", "contextWindow": "128000 tokens" },
         { "model": "deepseek-chat", "displayName": "Duplicate" },
@@ -1777,7 +1777,7 @@ fn provider_add_form_claude_official_sets_upstream_website_and_hides_non_officia
         "official Claude provider should not show Base URL input"
     );
     assert!(
-        !fields.contains(&ProviderAddField::ClaudeApiFormat),
+        !fields.contains(&ProviderAddField::ApiFormat),
         "official Claude provider should not show API format input"
     );
     assert!(
@@ -1859,7 +1859,7 @@ fn provider_add_form_claude_without_official_category_keeps_third_party_fields_v
     let fields = form.fields();
 
     assert!(fields.contains(&ProviderAddField::ClaudeBaseUrl));
-    assert!(fields.contains(&ProviderAddField::ClaudeApiFormat));
+    assert!(fields.contains(&ProviderAddField::ApiFormat));
     assert!(fields.contains(&ProviderAddField::ClaudeApiKey));
     assert!(fields.contains(&ProviderAddField::ClaudeModelConfig));
 }
@@ -4260,4 +4260,188 @@ fn provider_add_form_usage_query_numeric_fields_match_upstream_normalization() {
 
     assert_eq!(script["timeout"], 10);
     assert_eq!(script["autoQueryInterval"], 0);
+}
+
+/// End-to-end test: exercises the actual `ProviderAddFormState` TUI form edit flow
+/// for a Claude provider with `meta.apiFormat = "openai_chat"`.
+///
+/// Flow:
+/// 1. Create a test home and file-based DB with a realistic Claude provider
+///    (id="default", name="leihuo-idc", meta.apiFormat="openai_chat", settingsConfig
+///    with env, permissions, model, etc.)
+/// 2. Load the provider from the state
+/// 3. Create a `ProviderAddFormState` via `from_provider_with_common_snippet()`
+/// 4. Change `form.api_format` to `ApiFormat::Anthropic`
+/// 5. Call `form.to_provider_json_value()` to get the JSON
+/// 6. Print the JSON to verify it has `meta: {}` (no apiFormat key)
+/// 7. Deserialize the JSON back to Provider
+/// 8. Print `provider.meta` to verify api_format is None
+/// 9. Call `ProviderService::update()` with the deserialized provider
+/// 10. Verify the DB state (raw DB read)
+/// 11. Re-create AppState via `try_new()`
+/// 12. Re-read the provider and verify meta.api_format is None
+/// 13. Check what `get_provider_api_format` returns
+#[test]
+fn test_exact_tui_form_api_format_roundtrip() {
+    use std::sync::Arc;
+
+    use crate::app_config::AppType;
+    use crate::database::Database;
+    use crate::provider::{Provider, ProviderMeta};
+    use crate::proxy::providers::get_provider_api_format;
+    use crate::services::ProviderService;
+    use crate::store::AppState;
+    use crate::test_support::TestEnvGuard;
+
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = TestEnvGuard::isolated(temp.path());
+
+    // Build a Claude provider with apiFormat = "openai_chat"
+    let mut claude_provider = Provider::with_id(
+        "default".to_string(),
+        "leihuo-idc".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "sk-test-key",
+                "ANTHROPIC_BASE_URL": "https://example.com/v1"
+            }
+        }),
+        None,
+    );
+    claude_provider.meta = Some(ProviderMeta {
+        api_format: Some("openai_chat".to_string()),
+        ..Default::default()
+    });
+
+    let mut initial_config = crate::app_config::MultiAppConfig::default();
+    {
+        let claude_manager = initial_config.get_manager_mut(&AppType::Claude).unwrap();
+        claude_manager.current = "default".to_string();
+        claude_manager
+            .providers
+            .insert("default".to_string(), claude_provider.clone());
+    }
+
+    let db = Arc::new(Database::init().unwrap());
+    db.migrate_from_json(&initial_config).unwrap();
+    let mut config = initial_config;
+    ProviderService::migrate_common_config_upstream_semantics_if_needed(&db, &mut config).unwrap();
+    let state = AppState {
+        db: db.clone(),
+        config: std::sync::RwLock::new(config),
+        proxy_service: crate::ProxyService::new(db.clone()),
+    };
+
+    // Load the provider and create a form
+    let loaded_provider = {
+        let guard = state.config.read().unwrap();
+        guard
+            .get_manager(&AppType::Claude)
+            .unwrap()
+            .providers
+            .get("default")
+            .unwrap()
+            .clone()
+    };
+
+    let mut form = ProviderAddFormState::from_provider_with_common_snippet(
+        AppType::Claude,
+        &loaded_provider,
+        "",
+    );
+
+    // Change api_format to Anthropic (simulating user changing the dropdown)
+    assert_eq!(form.api_format, ApiFormat::OpenAiChat);
+    form.api_format = ApiFormat::Anthropic;
+
+    let form_output_json = form.to_provider_json_value();
+
+    // Verify: meta.apiFormat should be absent, but meta key should be present
+    assert!(
+        form_output_json
+            .get("meta")
+            .and_then(|m| m.get("apiFormat"))
+            .is_none(),
+        "form output should NOT have meta.apiFormat when api_format is Anthropic"
+    );
+    assert!(
+        form_output_json.get("meta").is_some(),
+        "form output should have meta key (even if empty) to signal explicit meta update"
+    );
+
+    // Deserialize and update
+    let deserialized_provider: Provider =
+        serde_json::from_value(form_output_json).expect("deserialize form output");
+    assert!(
+        deserialized_provider.meta.is_some(),
+        "deserialized provider should have Some(meta)"
+    );
+    assert!(
+        deserialized_provider
+            .meta
+            .as_ref()
+            .and_then(|m| m.api_format.as_deref())
+            .is_none(),
+        "deserialized provider meta.api_format should be None"
+    );
+
+    ProviderService::update(&state, AppType::Claude, deserialized_provider).unwrap();
+
+    // Verify in-memory state
+    {
+        let guard = state.config.read().unwrap();
+        let provider = guard
+            .get_manager(&AppType::Claude)
+            .unwrap()
+            .providers
+            .get("default")
+            .unwrap();
+        assert_eq!(
+            provider.meta.as_ref().and_then(|m| m.api_format.as_deref()),
+            None,
+            "in-memory meta.api_format should be None after update"
+        );
+    }
+
+    // Verify DB state
+    {
+        let db_provider = state
+            .db
+            .get_all_providers(AppType::Claude.as_str())
+            .unwrap()
+            .get("default")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            db_provider
+                .meta
+                .as_ref()
+                .and_then(|m| m.api_format.as_deref()),
+            None,
+            "DB meta.api_format should be None after update"
+        );
+    }
+
+    // Verify state survives reload
+    drop(state);
+    let reloaded_state = AppState::try_new().unwrap();
+    {
+        let guard = reloaded_state.config.read().unwrap();
+        let provider = guard
+            .get_manager(&AppType::Claude)
+            .unwrap()
+            .providers
+            .get("default")
+            .unwrap();
+        assert_eq!(
+            provider.meta.as_ref().and_then(|m| m.api_format.as_deref()),
+            None,
+            "meta.api_format should remain None after reload"
+        );
+        assert_eq!(
+            get_provider_api_format(provider),
+            "anthropic",
+            "get_provider_api_format should return 'anthropic'"
+        );
+    }
 }

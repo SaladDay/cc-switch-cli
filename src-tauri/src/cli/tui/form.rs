@@ -64,40 +64,37 @@ impl CodexWireApi {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaudeApiFormat {
+pub enum ApiFormat {
     Anthropic,
     OpenAiChat,
     OpenAiResponses,
     GeminiNative,
 }
 
-impl ClaudeApiFormat {
+impl ApiFormat {
     pub const ALL: [Self; 4] = [
-        ClaudeApiFormat::Anthropic,
-        ClaudeApiFormat::OpenAiChat,
-        ClaudeApiFormat::OpenAiResponses,
-        ClaudeApiFormat::GeminiNative,
+        ApiFormat::Anthropic,
+        ApiFormat::OpenAiChat,
+        ApiFormat::OpenAiResponses,
+        ApiFormat::GeminiNative,
     ];
-    pub const CODEX: [Self; 2] = [
-        ClaudeApiFormat::OpenAiResponses,
-        ClaudeApiFormat::OpenAiChat,
-    ];
+    pub const CODEX: [Self; 2] = [ApiFormat::OpenAiResponses, ApiFormat::OpenAiChat];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            ClaudeApiFormat::Anthropic => "anthropic",
-            ClaudeApiFormat::OpenAiChat => "openai_chat",
-            ClaudeApiFormat::OpenAiResponses => "openai_responses",
-            ClaudeApiFormat::GeminiNative => "gemini_native",
+            ApiFormat::Anthropic => "anthropic",
+            ApiFormat::OpenAiChat => "openai_chat",
+            ApiFormat::OpenAiResponses => "openai_responses",
+            ApiFormat::GeminiNative => "gemini_native",
         }
     }
 
     pub fn from_raw(value: &str) -> Self {
         match value {
-            "openai_chat" => ClaudeApiFormat::OpenAiChat,
-            "openai_responses" => ClaudeApiFormat::OpenAiResponses,
-            "gemini_native" => ClaudeApiFormat::GeminiNative,
-            _ => ClaudeApiFormat::Anthropic,
+            "openai_chat" => ApiFormat::OpenAiChat,
+            "openai_responses" => ApiFormat::OpenAiResponses,
+            "gemini_native" => ApiFormat::GeminiNative,
+            _ => ApiFormat::Anthropic,
         }
     }
 
@@ -121,22 +118,22 @@ impl ClaudeApiFormat {
             .copied()
             .unwrap_or_else(|| {
                 if matches!(app_type, AppType::Codex) {
-                    ClaudeApiFormat::OpenAiResponses
+                    ApiFormat::OpenAiResponses
                 } else {
-                    ClaudeApiFormat::Anthropic
+                    ApiFormat::Anthropic
                 }
             })
     }
 
     pub fn requires_proxy_for_app(self, app_type: &AppType) -> bool {
         match app_type {
-            AppType::Codex => matches!(self, ClaudeApiFormat::OpenAiChat),
+            AppType::Codex => matches!(self, ApiFormat::OpenAiChat),
             _ => self.requires_proxy(),
         }
     }
 
     pub fn requires_proxy(self) -> bool {
-        !matches!(self, ClaudeApiFormat::Anthropic)
+        !matches!(self, ApiFormat::Anthropic)
     }
 }
 
@@ -183,7 +180,7 @@ pub enum ProviderAddField {
     WebsiteUrl,
     Notes,
     ClaudeBaseUrl,
-    ClaudeApiFormat,
+    ApiFormat,
     ClaudeApiKey,
     ClaudeModelConfig,
     ClaudeHideAttribution,
@@ -441,7 +438,7 @@ pub struct ProviderAddFormState {
     pub claude_api_key: TextInput,
     pub claude_api_key_field: ClaudeApiKeyField,
     pub claude_base_url: TextInput,
-    pub claude_api_format: ClaudeApiFormat,
+    pub api_format: ApiFormat,
     pub claude_model: TextInput,
     pub claude_reasoning_model: TextInput,
     pub claude_haiku_model: TextInput,

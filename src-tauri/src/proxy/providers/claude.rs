@@ -14,7 +14,7 @@ const ANTHROPIC_THINKING_PLACEHOLDER: &str = "tool call";
 const ANTHROPIC_REDACTED_THINKING_PLACEHOLDER: &str = "[redacted thinking]";
 const REASONING_VENDOR_HINTS: &[&str] = &["moonshot", "kimi", "deepseek", "mimo", "xiaomimimo"];
 
-pub fn get_claude_api_format(provider: &Provider) -> &'static str {
+pub fn get_provider_api_format(provider: &Provider) -> &'static str {
     if let Some(meta) = provider.meta.as_ref() {
         if meta.provider_type.as_deref() == Some("codex_oauth") {
             return "openai_responses";
@@ -63,7 +63,7 @@ pub fn get_claude_api_format(provider: &Provider) -> &'static str {
     }
 }
 
-pub fn claude_api_format_needs_transform(api_format: &str) -> bool {
+pub fn api_format_needs_transform(api_format: &str) -> bool {
     matches!(
         api_format,
         "openai_chat" | "openai_responses" | "gemini_native"
@@ -330,7 +330,7 @@ impl ClaudeAdapter {
     }
 
     fn get_api_format(&self, provider: &Provider) -> &'static str {
-        get_claude_api_format(provider)
+        get_provider_api_format(provider)
     }
 
     fn is_bearer_only_mode(&self, provider: &Provider) -> bool {
@@ -600,7 +600,7 @@ impl ProviderAdapter for ClaudeAdapter {
             return true;
         }
 
-        claude_api_format_needs_transform(self.get_api_format(provider))
+        api_format_needs_transform(self.get_api_format(provider))
     }
 
     fn transform_request(
@@ -744,7 +744,7 @@ mod tests {
         }))
         .expect("provider should deserialize");
 
-        assert_eq!(get_claude_api_format(&provider), "openai_responses");
+        assert_eq!(get_provider_api_format(&provider), "openai_responses");
         assert_eq!(
             format!("{:?}", adapter.provider_type(&provider)),
             "CodexOAuth"

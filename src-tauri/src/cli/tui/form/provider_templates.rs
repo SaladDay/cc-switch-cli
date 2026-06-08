@@ -3,7 +3,7 @@ use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
 use serde_json::{json, Value};
 
 use super::{
-    ClaudeApiFormat, CodexModelCatalogField, CodexModelCatalogRow, CodexWireApi, FormMode,
+    ApiFormat, CodexModelCatalogField, CodexModelCatalogRow, CodexWireApi, FormMode,
     GeminiAuthType, ProviderAddFormState, HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
@@ -404,7 +404,7 @@ impl ProviderAddFormState {
                     self.claude_api_key = defaults.claude_api_key;
                     self.claude_api_key_field = defaults.claude_api_key_field;
                     self.claude_base_url = defaults.claude_base_url;
-                    self.claude_api_format = defaults.claude_api_format;
+                    self.api_format = defaults.api_format;
                     self.claude_model = defaults.claude_model;
                     self.claude_reasoning_model = defaults.claude_reasoning_model;
                     self.claude_haiku_model = defaults.claude_haiku_model;
@@ -461,7 +461,7 @@ impl ProviderAddFormState {
                     self.claude_api_key.set("");
                     self.claude_api_key_field = ClaudeApiKeyField::AuthToken;
                     self.claude_base_url.set("");
-                    self.claude_api_format = ClaudeApiFormat::Anthropic;
+                    self.api_format = ApiFormat::Anthropic;
                     self.claude_model.set("");
                     self.claude_reasoning_model.set("");
                     self.claude_haiku_model.set("");
@@ -489,7 +489,7 @@ impl ProviderAddFormState {
                     self.claude_api_key_field = ClaudeApiKeyField::AuthToken;
                     self.claude_base_url
                         .set("https://chatgpt.com/backend-api/codex");
-                    self.claude_api_format = ClaudeApiFormat::OpenAiResponses;
+                    self.api_format = ApiFormat::OpenAiResponses;
                     self.claude_model.set("gpt-5.4");
                     self.claude_reasoning_model.set("gpt-5.4");
                     self.claude_haiku_model.set("gpt-5.4-mini");
@@ -560,7 +560,7 @@ impl ProviderAddFormState {
                     self.codex_wire_api = CodexWireApi::Responses;
                     self.codex_requires_openai_auth = true;
                     self.codex_env_key.set("");
-                    self.claude_api_format = ClaudeApiFormat::OpenAiChat;
+                    self.api_format = ApiFormat::OpenAiChat;
                     self.codex_chat_reasoning = CodexChatReasoningConfig {
                         supports_thinking: Some(true),
                         supports_effort: Some(true),
@@ -762,7 +762,7 @@ impl ProviderAddFormState {
     }
 
     fn reset_codex_local_routing_state(&mut self) {
-        self.claude_api_format = ClaudeApiFormat::OpenAiResponses;
+        self.api_format = ApiFormat::OpenAiResponses;
         self.codex_chat_reasoning = CodexChatReasoningConfig::default();
         self.codex_model_catalog.clear();
         self.codex_local_routing_field_idx = 0;

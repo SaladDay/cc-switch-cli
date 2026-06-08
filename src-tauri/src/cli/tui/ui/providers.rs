@@ -63,8 +63,8 @@ fn provider_proxy_badge(app_type: &AppType, row: &ProviderRow) -> Option<Provide
             Some(ProviderProxyBadge::NoProxySupport)
         }
         AppType::Claude => {
-            let api_format = crate::proxy::providers::get_claude_api_format(&row.provider);
-            crate::proxy::providers::claude_api_format_needs_transform(api_format)
+            let api_format = crate::proxy::providers::get_provider_api_format(&row.provider);
+            crate::proxy::providers::api_format_needs_transform(api_format)
                 .then_some(ProviderProxyBadge::NeedsProxy)
         }
         AppType::Codex if provider_category_is(row, "official") => {
@@ -517,11 +517,11 @@ pub(super) fn render_provider_detail(
                 Span::raw(": "),
                 Span::raw(base_url),
             ]));
-            let api_format = crate::proxy::providers::get_claude_api_format(&row.provider);
+            let api_format = crate::proxy::providers::get_provider_api_format(&row.provider);
 
             lines.push(Line::from(vec![
                 Span::styled(
-                    texts::tui_label_claude_api_format(),
+                    texts::tui_label_api_format(),
                     Style::default().fg(theme.accent),
                 ),
                 Span::raw(": "),

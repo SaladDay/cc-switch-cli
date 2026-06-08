@@ -1,9 +1,9 @@
 use crate::cli::i18n::texts;
-use crate::cli::tui::form::ClaudeApiFormat;
+use crate::cli::tui::form::ApiFormat;
 use crate::error::AppError;
 #[cfg(test)]
 use crate::openclaw_config::OpenClawDefaultModel;
-use crate::proxy::providers::get_claude_api_format;
+use crate::proxy::providers::get_provider_api_format;
 use crate::services::provider::ProviderSortUpdate;
 use crate::services::ProviderService;
 
@@ -137,7 +137,7 @@ fn provider_switch_proxy_notice_overlay(
 ) -> Option<Overlay> {
     provider_switch_proxy_notice_api_format(app_type, provider, proxy_ready).map(|api_format| {
         Overlay::Confirm(ConfirmOverlay {
-            title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+            title: texts::tui_api_format_requires_proxy_title().to_string(),
             message: texts::tui_claude_api_format_requires_proxy_message(api_format),
             action: ConfirmAction::ProviderApiFormatProxyNotice,
         })
@@ -152,8 +152,8 @@ fn provider_requires_local_proxy(
         return None;
     }
 
-    let api_format = get_claude_api_format(provider);
-    ClaudeApiFormat::from_raw(api_format)
+    let api_format = get_provider_api_format(provider);
+    ApiFormat::from_raw(api_format)
         .requires_proxy()
         .then_some(api_format)
 }
@@ -1596,7 +1596,7 @@ mod tests {
         assert!(matches!(
             fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay { title, message, action })
-                if title == texts::tui_claude_api_format_requires_proxy_title()
+                if title == texts::tui_api_format_requires_proxy_title()
                     && message == texts::tui_claude_api_format_requires_proxy_message("openai_chat")
                     && matches!(action, ConfirmAction::ProviderApiFormatProxyNotice)
         ));
@@ -1612,7 +1612,7 @@ mod tests {
         assert!(matches!(
             fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay { title, message, action })
-                if title == texts::tui_claude_api_format_requires_proxy_title()
+                if title == texts::tui_api_format_requires_proxy_title()
                     && message == texts::tui_claude_api_format_requires_proxy_message("openai_responses")
                     && matches!(action, ConfirmAction::ProviderApiFormatProxyNotice)
         ));

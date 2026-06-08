@@ -1468,7 +1468,7 @@ pub fn tui_codex_api_format_value(api_format: &str) -> &'static str {
     }
 }
 
-pub fn tui_claude_api_format_requires_proxy_title() -> &'static str {
+pub fn tui_api_format_requires_proxy_title() -> &'static str {
     if is_chinese() {
         "需开启代理"
     } else {

@@ -1052,11 +1052,11 @@ fn redact_sensitive_json_keeps_non_secret_token_count_fields_visible() {
 #[test]
 fn provider_field_label_and_value_renders_claude_api_format() {
     let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
-    form.claude_api_format = crate::cli::tui::form::ClaudeApiFormat::OpenAiChat;
+    form.api_format = crate::cli::tui::form::ApiFormat::OpenAiChat;
 
     let (label, value) = super::provider_field_label_and_value(
         &form,
-        crate::cli::tui::form::ProviderAddField::ClaudeApiFormat,
+        crate::cli::tui::form::ProviderAddField::ApiFormat,
     );
     assert!(label.contains("API"));
     assert!(value.contains("OpenAI Chat Completions"));
@@ -1066,11 +1066,11 @@ fn provider_field_label_and_value_renders_claude_api_format() {
 #[test]
 fn provider_field_label_and_value_renders_claude_responses_api_format() {
     let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
-    form.claude_api_format = crate::cli::tui::form::ClaudeApiFormat::OpenAiResponses;
+    form.api_format = crate::cli::tui::form::ApiFormat::OpenAiResponses;
 
     let (_label, value) = super::provider_field_label_and_value(
         &form,
-        crate::cli::tui::form::ProviderAddField::ClaudeApiFormat,
+        crate::cli::tui::form::ProviderAddField::ApiFormat,
     );
     assert!(value.contains("OpenAI Responses API"));
     assert!(value.contains("代理") || value.contains("proxy"));
@@ -4383,7 +4383,7 @@ fn claude_api_format_picker_overlay_is_compact_and_padded() {
     app.form = Some(crate::cli::tui::form::FormState::ProviderAdd(
         crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude),
     ));
-    app.overlay = Overlay::ClaudeApiFormatPicker { selected: 1 };
+    app.overlay = Overlay::ApiFormatPicker { selected: 1 };
 
     let data = minimal_data(&app.app_type);
     let buf = render(&app, &data);
@@ -4443,7 +4443,7 @@ fn provider_api_format_proxy_notice_overlay_uses_close_actions() {
     app.route = Route::Providers;
     app.focus = Focus::Content;
     app.overlay = Overlay::Confirm(ConfirmOverlay {
-        title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+        title: texts::tui_api_format_requires_proxy_title().to_string(),
         message: texts::tui_claude_api_format_requires_proxy_message("openai_chat"),
         action: ConfirmAction::ProviderApiFormatProxyNotice,
     });

@@ -9,7 +9,7 @@ use super::provider_json::{
 };
 use super::provider_state_loading::populate_form_from_provider;
 use super::{
-    ClaudeApiFormat, CodexLocalRoutingField, CodexModelCatalogField, CodexModelCatalogRow,
+    ApiFormat, CodexLocalRoutingField, CodexModelCatalogField, CodexModelCatalogRow,
     CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType, HermesModelField,
     ProviderAddField, ProviderAddFormState, ProviderFormPage, TextInput, UsageQueryField,
     UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
@@ -142,10 +142,10 @@ impl ProviderAddFormState {
             claude_api_key: TextInput::new(""),
             claude_api_key_field: ClaudeApiKeyField::AuthToken,
             claude_base_url: TextInput::new(""),
-            claude_api_format: if is_codex {
-                ClaudeApiFormat::OpenAiResponses
+            api_format: if is_codex {
+                ApiFormat::OpenAiResponses
             } else {
-                ClaudeApiFormat::Anthropic
+                ApiFormat::Anthropic
             },
             claude_model: TextInput::new(""),
             claude_reasoning_model: TextInput::new(""),
@@ -361,7 +361,7 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::ClaudeModelConfig);
                 } else if !self.is_claude_official_provider() {
                     fields.push(ProviderAddField::ClaudeBaseUrl);
-                    fields.push(ProviderAddField::ClaudeApiFormat);
+                    fields.push(ProviderAddField::ApiFormat);
                     fields.push(ProviderAddField::ClaudeApiKey);
                     fields.push(ProviderAddField::ClaudeModelConfig);
                 }
@@ -371,6 +371,7 @@ impl ProviderAddFormState {
                 if !self.is_codex_official_provider() {
                     fields.push(ProviderAddField::CodexBaseUrl);
                     fields.push(ProviderAddField::CodexModel);
+                    fields.push(ProviderAddField::ApiFormat);
                     fields.push(ProviderAddField::CodexLocalRouting);
                     fields.push(ProviderAddField::CodexApiKey);
                 }
@@ -514,7 +515,7 @@ impl ProviderAddFormState {
             | ProviderAddField::CodexLocalRouting
             | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
-            | ProviderAddField::ClaudeApiFormat
+            | ProviderAddField::ApiFormat
             | ProviderAddField::ClaudeModelConfig
             | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::GeminiAuthType
@@ -566,7 +567,7 @@ impl ProviderAddFormState {
             | ProviderAddField::CodexLocalRouting
             | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
-            | ProviderAddField::ClaudeApiFormat
+            | ProviderAddField::ApiFormat
             | ProviderAddField::ClaudeModelConfig
             | ProviderAddField::ClaudeHideAttribution
             | ProviderAddField::GeminiAuthType
@@ -812,11 +813,12 @@ impl ProviderAddFormState {
     }
 
     pub fn toggle_codex_local_routing_enabled(&mut self) {
-        self.claude_api_format = if self.codex_local_routing_enabled() {
-            ClaudeApiFormat::OpenAiResponses
+        let was_enabled = self.codex_local_routing_enabled();
+        if was_enabled {
+            self.api_format = ApiFormat::OpenAiResponses;
         } else {
-            ClaudeApiFormat::OpenAiChat
-        };
+            self.api_format = ApiFormat::OpenAiChat;
+        }
         let len = self.codex_local_routing_fields().len();
         self.codex_local_routing_field_idx = self
             .codex_local_routing_field_idx
@@ -1404,7 +1406,7 @@ impl ProviderAddFormState {
     pub fn codex_local_routing_enabled(&self) -> bool {
         matches!(self.app_type, AppType::Codex)
             && !self.is_codex_official_provider()
-            && matches!(self.claude_api_format, ClaudeApiFormat::OpenAiChat)
+            && matches!(self.api_format, ApiFormat::OpenAiChat)
     }
 
     pub fn apply_provider_json_to_fields(&mut self, provider: &Provider) {

@@ -3,10 +3,11 @@ use serde_json::json;
 use std::collections::BTreeSet;
 
 fn provider_api_format_label(provider: &super::form::ProviderAddFormState) -> String {
-    let api_format = provider.claude_api_format.as_str();
     if matches!(provider.app_type, AppType::Codex) {
+        let api_format = provider.api_format.as_str();
         texts::tui_codex_api_format_value(api_format).to_string()
     } else {
+        let api_format = provider.api_format.as_str();
         texts::tui_claude_api_format_value(api_format).to_string()
     }
 }
@@ -1166,7 +1167,7 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::Notes => strip_trailing_colon(texts::notes_label()).to_string(),
         ProviderAddField::ClaudeBaseUrl => texts::tui_label_base_url().to_string(),
-        ProviderAddField::ClaudeApiFormat => texts::tui_label_claude_api_format().to_string(),
+        ProviderAddField::ApiFormat => texts::tui_label_api_format().to_string(),
         ProviderAddField::ClaudeApiKey => texts::tui_label_api_key().to_string(),
         ProviderAddField::ClaudeModelConfig => texts::tui_label_claude_model_config().to_string(),
         ProviderAddField::ClaudeHideAttribution => {
@@ -1225,7 +1226,7 @@ pub(crate) fn provider_field_label_and_value(
     };
 
     let value = match field {
-        ProviderAddField::ClaudeApiFormat => provider_api_format_label(provider),
+        ProviderAddField::ApiFormat => provider_api_format_label(provider),
         ProviderAddField::CodexWireApi => provider.codex_wire_api.as_str().to_string(),
         ProviderAddField::CodexRequiresOpenaiAuth => {
             if provider.codex_requires_openai_auth {
@@ -1332,11 +1333,11 @@ pub(crate) fn provider_field_editor_line(
         (Line::raw(shown), input.cursor)
     } else {
         let text = match field {
-            ProviderAddField::ClaudeApiFormat => {
+            ProviderAddField::ApiFormat => {
                 let value = if matches!(provider.app_type, AppType::Codex) {
-                    texts::tui_codex_api_format_value(provider.claude_api_format.as_str())
+                    texts::tui_codex_api_format_value(provider.api_format.as_str())
                 } else {
-                    texts::tui_claude_api_format_value(provider.claude_api_format.as_str())
+                    texts::tui_claude_api_format_value(provider.api_format.as_str())
                 };
                 format!("api_format = {}", value)
             }

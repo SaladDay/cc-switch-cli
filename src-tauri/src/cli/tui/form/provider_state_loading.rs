@@ -2,8 +2,8 @@ use super::codex_config::parse_codex_config_snippet;
 use super::provider_state::codex_model_catalog_row_from_value;
 use super::{
     claude_hide_attribution_enabled, detect_balance_provider_for_usage_query,
-    detect_coding_plan_provider_for_usage_query, ClaudeApiFormat, CodexWireApi,
-    ProviderAddFormState, UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
+    detect_coding_plan_provider_for_usage_query, ApiFormat, CodexWireApi, ProviderAddFormState,
+    UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 use crate::app_config::AppType;
 use crate::provider::Provider;
@@ -82,7 +82,7 @@ fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provide
 }
 
 fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
-    form.claude_api_format = parse_claude_api_format(provider);
+    form.api_format = parse_claude_api_format(provider);
     form.claude_api_key_field = crate::provider::ClaudeApiKeyField::from_meta_and_settings(
         provider.meta.as_ref(),
         &provider.settings_config,
@@ -94,7 +94,7 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
         .and_then(|meta| meta.provider_type.as_deref())
         == Some("codex_oauth")
     {
-        form.claude_api_format = ClaudeApiFormat::OpenAiResponses;
+        form.api_format = ApiFormat::OpenAiResponses;
         form.codex_oauth_account_id = provider
             .meta
             .as_ref()
@@ -201,7 +201,7 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
             form.codex_api_key.set(key);
         }
     }
-    form.claude_api_format = parse_codex_api_format(provider, parsed_wire_api);
+    form.api_format = parse_codex_api_format(provider, parsed_wire_api);
     form.codex_wire_api = CodexWireApi::Responses;
     form.codex_chat_reasoning = provider
         .meta
@@ -399,13 +399,13 @@ fn populate_openclaw_form(form: &mut ProviderAddFormState, provider: &Provider) 
     }
 }
 
-fn parse_claude_api_format(provider: &Provider) -> ClaudeApiFormat {
+fn parse_claude_api_format(provider: &Provider) -> ApiFormat {
     if let Some(api_format) = provider
         .meta
         .as_ref()
         .and_then(|meta| meta.api_format.as_deref())
     {
-        return ClaudeApiFormat::from_raw(api_format);
+        return ApiFormat::from_raw(api_format);
     }
 
     if let Some(api_format) = provider
@@ -413,7 +413,7 @@ fn parse_claude_api_format(provider: &Provider) -> ClaudeApiFormat {
         .get("api_format")
         .and_then(|value| value.as_str())
     {
-        return ClaudeApiFormat::from_raw(api_format);
+        return ApiFormat::from_raw(api_format);
     }
 
     let compat_enabled = match provider.settings_config.get("openrouter_compat_mode") {
@@ -427,13 +427,13 @@ fn parse_claude_api_format(provider: &Provider) -> ClaudeApiFormat {
     };
 
     if compat_enabled {
-        ClaudeApiFormat::OpenAiChat
+        ApiFormat::OpenAiChat
     } else {
-        ClaudeApiFormat::Anthropic
+        ApiFormat::Anthropic
     }
 }
 
-fn parse_codex_api_format(provider: &Provider, wire_api: Option<CodexWireApi>) -> ClaudeApiFormat {
+fn parse_codex_api_format(provider: &Provider, wire_api: Option<CodexWireApi>) -> ApiFormat {
     if let Some(api_format) = provider
         .meta
         .as_ref()
@@ -452,14 +452,14 @@ fn parse_codex_api_format(provider: &Provider, wire_api: Option<CodexWireApi>) -
         })
     {
         return match api_format {
-            "openai_chat" => ClaudeApiFormat::OpenAiChat,
-            _ => ClaudeApiFormat::OpenAiResponses,
+            "openai_chat" => ApiFormat::OpenAiChat,
+            _ => ApiFormat::OpenAiResponses,
         };
     }
 
     match wire_api {
-        Some(CodexWireApi::Chat) => ClaudeApiFormat::OpenAiChat,
-        _ => ClaudeApiFormat::OpenAiResponses,
+        Some(CodexWireApi::Chat) => ApiFormat::OpenAiChat,
+        _ => ApiFormat::OpenAiResponses,
     }
 }
 

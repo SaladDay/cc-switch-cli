@@ -155,7 +155,7 @@ pub(super) fn render_claude_model_picker_overlay(
     }
 }
 
-pub(super) fn render_claude_api_format_picker_overlay(
+pub(super) fn render_api_format_picker_overlay(
     frame: &mut Frame<'_>,
     app: &App,
     content_area: Rect,
@@ -169,7 +169,7 @@ pub(super) fn render_claude_api_format_picker_overlay(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(overlay_border_style(theme, false))
-        .title(texts::tui_claude_api_format_popup_title());
+        .title(texts::tui_api_format_popup_title());
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
@@ -200,18 +200,18 @@ pub(super) fn render_claude_api_format_picker_overlay(
         .as_ref()
         .and_then(|form| match form {
             FormState::ProviderAdd(provider) => {
-                Some((provider.app_type.clone(), provider.claude_api_format))
+                Some((provider.app_type.clone(), provider.api_format))
             }
             _ => None,
         })
         .unwrap_or_else(|| {
             (
                 app.app_type.clone(),
-                crate::cli::tui::form::ClaudeApiFormat::Anthropic,
+                crate::cli::tui::form::ApiFormat::Anthropic,
             )
         });
 
-    let choices = crate::cli::tui::form::ClaudeApiFormat::choices_for_app(&app_type);
+    let choices = crate::cli::tui::form::ApiFormat::choices_for_app(&app_type);
     let items = choices.into_iter().copied().map(|api_format| {
         let marker = if api_format == current {
             texts::tui_marker_active()

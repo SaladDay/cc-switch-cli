@@ -229,14 +229,12 @@ impl App {
         data: &UiData,
     ) -> Action {
         match selected {
-            ProviderAddField::ClaudeApiFormat => {
+            ProviderAddField::ApiFormat => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
                     return Action::None;
                 };
-                self.overlay = Overlay::ClaudeApiFormatPicker {
-                    selected: provider
-                        .claude_api_format
-                        .picker_index_for_app(&provider.app_type),
+                self.overlay = Overlay::ApiFormatPicker {
+                    selected: provider.api_format.picker_index_for_app(&provider.app_type),
                 };
                 Action::None
             }
@@ -481,7 +479,7 @@ impl App {
                         .unwrap_or(false)
                 {
                     self.overlay = Overlay::Confirm(ConfirmOverlay {
-                        title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+                        title: texts::tui_api_format_requires_proxy_title().to_string(),
                         message: texts::tui_codex_api_format_requires_proxy_message("openai_chat"),
                         action: ConfirmAction::ProviderApiFormatProxyNotice,
                     });

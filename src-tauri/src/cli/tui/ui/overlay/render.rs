@@ -69,15 +69,13 @@ pub(crate) fn render_overlay(
                 *editing,
             )
         }
-        Overlay::ClaudeApiFormatPicker { selected } => {
-            super::pickers::render_claude_api_format_picker_overlay(
-                frame,
-                app,
-                content_area,
-                theme,
-                *selected,
-            )
-        }
+        Overlay::ApiFormatPicker { selected } => super::pickers::render_api_format_picker_overlay(
+            frame,
+            app,
+            content_area,
+            theme,
+            *selected,
+        ),
         Overlay::UsageQueryTemplatePicker { selected } => {
             super::pickers::render_usage_query_template_picker_overlay(
                 frame,

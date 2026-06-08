@@ -28,11 +28,14 @@ pub use adapter::ProviderAdapter;
 pub use auth::{AuthInfo, AuthStrategy};
 #[allow(unused_imports)]
 pub use claude::{
-    claude_api_format_needs_transform, get_claude_api_format,
+    api_format_needs_transform, get_provider_api_format,
     normalize_anthropic_tool_thinking_history_for_provider,
     transform_claude_request_for_api_format, transform_claude_request_for_api_format_with_shadow,
     transform_gemini_response_for_provider, ClaudeAdapter,
 };
+/// Backward-compatible aliases for callers that still reference the old names.
+pub use api_format_needs_transform as claude_api_format_needs_transform;
+pub use get_provider_api_format as get_claude_api_format;
 pub use codex::CodexAdapter;
 #[allow(unused_imports)]
 pub use codex::{

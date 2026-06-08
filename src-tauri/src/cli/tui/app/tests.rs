@@ -12073,8 +12073,8 @@ mod tests {
             form.field_idx = form
                 .fields()
                 .iter()
-                .position(|field| *field == ProviderAddField::ClaudeApiFormat)
-                .expect("ClaudeApiFormat field should exist");
+                .position(|field| *field == ProviderAddField::ApiFormat)
+                .expect("ApiFormat field should exist");
         } else {
             panic!("expected ProviderAdd form");
         }
@@ -12083,33 +12083,33 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(
             app.overlay,
-            Overlay::ClaudeApiFormatPicker { selected: 0 }
+            Overlay::ApiFormatPicker { selected: 0 }
         ));
 
         let format = match app.form.as_ref() {
-            Some(super::super::form::FormState::ProviderAdd(form)) => form.claude_api_format,
+            Some(super::super::form::FormState::ProviderAdd(form)) => form.api_format,
             other => panic!("expected ProviderAdd form, got: {other:?}"),
         };
-        assert_eq!(format, super::super::form::ClaudeApiFormat::Anthropic);
+        assert_eq!(format, super::super::form::ApiFormat::Anthropic);
     }
 
     #[test]
     fn provider_claude_api_format_overlay_jk_navigates_options() {
         let mut app = App::new(Some(AppType::Claude));
-        app.overlay = Overlay::ClaudeApiFormatPicker { selected: 0 };
+        app.overlay = Overlay::ApiFormatPicker { selected: 0 };
 
         let action = app.on_key(key(KeyCode::Char('j')), &data());
         assert!(matches!(action, Action::None));
         assert!(matches!(
             app.overlay,
-            Overlay::ClaudeApiFormatPicker { selected: 1 }
+            Overlay::ApiFormatPicker { selected: 1 }
         ));
 
         let action = app.on_key(key(KeyCode::Char('k')), &data());
         assert!(matches!(action, Action::None));
         assert!(matches!(
             app.overlay,
-            Overlay::ClaudeApiFormatPicker { selected: 0 }
+            Overlay::ApiFormatPicker { selected: 0 }
         ));
     }
 
@@ -12184,10 +12184,10 @@ mod tests {
             })
         ));
         let format = match app.form.as_ref() {
-            Some(super::super::form::FormState::ProviderAdd(form)) => form.claude_api_format,
+            Some(super::super::form::FormState::ProviderAdd(form)) => form.api_format,
             other => panic!("expected ProviderAdd form, got: {other:?}"),
         };
-        assert_eq!(format, super::super::form::ClaudeApiFormat::OpenAiChat);
+        assert_eq!(format, super::super::form::ApiFormat::OpenAiChat);
     }
 
     #[test]
@@ -12222,10 +12222,10 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(app.overlay, Overlay::None));
         let format = match app.form.as_ref() {
-            Some(super::super::form::FormState::ProviderAdd(form)) => form.claude_api_format,
+            Some(super::super::form::FormState::ProviderAdd(form)) => form.api_format,
             other => panic!("expected ProviderAdd form, got: {other:?}"),
         };
-        assert_eq!(format, super::super::form::ClaudeApiFormat::OpenAiChat);
+        assert_eq!(format, super::super::form::ApiFormat::OpenAiChat);
     }
 
     #[test]
@@ -12540,8 +12540,8 @@ mod tests {
             form.field_idx = form
                 .fields()
                 .iter()
-                .position(|field| *field == ProviderAddField::ClaudeApiFormat)
-                .expect("ClaudeApiFormat field should exist");
+                .position(|field| *field == ProviderAddField::ApiFormat)
+                .expect("ApiFormat field should exist");
         } else {
             panic!("expected ProviderAdd form");
         }
@@ -12560,10 +12560,10 @@ mod tests {
         ));
 
         let format = match app.form.as_ref() {
-            Some(super::super::form::FormState::ProviderAdd(form)) => form.claude_api_format,
+            Some(super::super::form::FormState::ProviderAdd(form)) => form.api_format,
             other => panic!("expected ProviderAdd form, got: {other:?}"),
         };
-        assert_eq!(format, super::super::form::ClaudeApiFormat::OpenAiChat);
+        assert_eq!(format, super::super::form::ApiFormat::OpenAiChat);
     }
 
     #[test]
@@ -12582,8 +12582,8 @@ mod tests {
             form.field_idx = form
                 .fields()
                 .iter()
-                .position(|field| *field == ProviderAddField::ClaudeApiFormat)
-                .expect("ClaudeApiFormat field should exist");
+                .position(|field| *field == ProviderAddField::ApiFormat)
+                .expect("ApiFormat field should exist");
         } else {
             panic!("expected ProviderAdd form");
         }
@@ -12615,8 +12615,8 @@ mod tests {
             form.field_idx = form
                 .fields()
                 .iter()
-                .position(|field| *field == ProviderAddField::ClaudeApiFormat)
-                .expect("ClaudeApiFormat field should exist");
+                .position(|field| *field == ProviderAddField::ApiFormat)
+                .expect("ApiFormat field should exist");
         } else {
             panic!("expected ProviderAdd form");
         }
@@ -12628,10 +12628,10 @@ mod tests {
         assert!(matches!(app.overlay, Overlay::None));
 
         let format = match app.form.as_ref() {
-            Some(super::super::form::FormState::ProviderAdd(form)) => form.claude_api_format,
+            Some(super::super::form::FormState::ProviderAdd(form)) => form.api_format,
             other => panic!("expected ProviderAdd form, got: {other:?}"),
         };
-        assert_eq!(format, super::super::form::ClaudeApiFormat::OpenAiChat);
+        assert_eq!(format, super::super::form::ApiFormat::OpenAiChat);
     }
 
     fn failover_provider_row(

@@ -1578,7 +1578,7 @@ pub mod texts {
         }
     }
 
-    pub fn tui_label_claude_api_format() -> &'static str {
+    pub fn tui_label_api_format() -> &'static str {
         if is_chinese() {
             "API 格式"
         } else {
@@ -1638,7 +1638,7 @@ pub mod texts {
         }
     }
 
-    pub fn tui_claude_api_format_requires_proxy_title() -> &'static str {
+    pub fn tui_api_format_requires_proxy_title() -> &'static str {
         if is_chinese() {
             "需开启代理"
         } else {
@@ -1793,7 +1793,7 @@ pub mod texts {
         }
     }
 
-    pub fn tui_claude_api_format_popup_title() -> &'static str {
+    pub fn tui_api_format_popup_title() -> &'static str {
         if is_chinese() {
             "API 格式"
         } else {
