@@ -49,6 +49,26 @@
   </tr>
   <tr>
     <td width="180">
+      <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
+        <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>Cubence</b> 赞助本项目！Cubence 是一家致力为客户提供稳定、高效的API中转服务商。从25年9月运营至今，提供了Claude code、Codex、Gemini等多种模型支持。通过<a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">此链接</a>注册，并在充值时使用 <code>CCSCLI</code> 优惠码享受9折优惠。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://runapi.co/register?aff=kTlB">
+        <img src="assets/partners/logos/runapi.png" alt="RunAPI" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>RunAPI</b> 赞助本项目！<a href="https://runapi.co/register?aff=kTlB"><b>RunAPI</b></a> 是高效稳定的 API 平台和 OpenRouter 平替，一个 API Key 即可访问 OpenAI、Claude、Gemini、DeepSeek、Grok 等 150+ 主流模型，低至 1 折，极其稳定，可以无缝兼容 Claude Code、OpenClaw 等工具。cc-switch-cli 用户专属福利：注册联系管理员即可领取 ￥7 的免费额度。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">
         <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
       </a>
@@ -56,16 +76,6 @@
     <td>
       感谢 <b>AICodeMirror</b> 赞助本项目！<b>AICodeMirror</b> 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级并发、快速开票与 7x24 专属技术支持。Claude Code / Codex / Gemini 官方通道价格低至原价的 <b>38% / 2% / 9%</b>，充值另有折上折！<br/>
       <b>AICodeMirror</b> 为 cc-switch-cli 用户提供专属福利：通过<a href="https://www.aicodemirror.com/register?invitecode=77V9EA">此链接</a>注册，首充可享 <b>8 折</b>，即 <b>20% off</b>，企业客户最高可享 <b>75 折</b>，即 <b>25% off</b>。
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
-        <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
-      </a>
-    </td>
-    <td>
-      感谢 <b>Cubence</b> 赞助本项目！Cubence 是一家致力为客户提供稳定、高效的API中转服务商。从25年9月运营至今，提供了Claude code、Codex、Gemini等多种模型支持。通过<a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">此链接</a>注册，并在充值时使用 <code>CCSCLI</code> 优惠码享受9折优惠。
     </td>
   </tr>
   <tr>

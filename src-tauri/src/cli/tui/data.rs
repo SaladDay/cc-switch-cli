@@ -311,8 +311,19 @@ impl ProxySnapshot {
     }
 
     pub fn routes_current_app_through_proxy(&self, app_type: &AppType) -> Option<bool> {
-        self.takeover_enabled_for(app_type)
-            .map(|takeover_enabled| self.running && takeover_enabled)
+        let takeover_enabled = self.takeover_enabled_for(app_type)?;
+        if !self.running || !takeover_enabled {
+            return Some(false);
+        }
+
+        if self.managed_runtime && !self.active_worker_apps.is_empty() {
+            return Some(
+                self.active_worker_apps
+                    .contains(&app_type.as_str().to_ascii_lowercase()),
+            );
+        }
+
+        Some(true)
     }
 }
 
@@ -2475,7 +2486,10 @@ fn load_proxy_snapshot_from_state(
             .get_proxy_config_for_app_or_default(app_type.as_str())
             .await?;
         let configured_listen_port = state.db.get_app_proxy_preferred_port(app_type.as_str())?;
-        let runtime_status = state.proxy_service.get_status_snapshot().await;
+        let runtime_status = state
+            .proxy_service
+            .get_status_snapshot_for_app(app_type)
+            .await;
         let claude_takeover = state
             .db
             .get_proxy_config_for_app_or_default("claude")
@@ -3444,7 +3458,7 @@ mod tests {
             running: true,
             managed_runtime: true,
             active_worker_apps: HashSet::from([AppType::Codex.as_str().to_string()]),
-            claude_takeover: false,
+            claude_takeover: true,
             ..ProxySnapshot::default()
         };
         assert_eq!(

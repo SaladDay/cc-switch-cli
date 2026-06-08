@@ -84,6 +84,35 @@ pub struct WorkerState {
     pub pid: Option<u32>,
     #[serde(default)]
     pub started_at: Option<String>,
+    #[serde(default)]
+    pub runtime_status: Option<WorkerRuntimeStatus>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerRuntimeStatus {
+    pub active_connections: usize,
+    pub total_requests: u64,
+    #[serde(default)]
+    pub estimated_input_tokens_total: u64,
+    #[serde(default)]
+    pub estimated_output_tokens_total: u64,
+    pub success_requests: u64,
+    pub failed_requests: u64,
+    pub uptime_seconds: u64,
+    pub current_provider: Option<String>,
+    pub current_provider_id: Option<String>,
+    pub last_request_at: Option<String>,
+    pub last_error: Option<String>,
+    pub failover_count: u64,
+    #[serde(default)]
+    pub active_targets: Vec<WorkerTargetState>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerTargetState {
+    pub app_type: String,
+    pub provider_name: String,
+    pub provider_id: String,
 }
 
 /// Encode a request as a single JSON line (no trailing newline).
@@ -204,8 +233,37 @@ mod tests {
                 port: 15721,
                 pid: Some(9999),
                 started_at: Some("2026-05-15T12:34:56Z".to_string()),
+                runtime_status: Some(WorkerRuntimeStatus {
+                    active_connections: 1,
+                    total_requests: 7,
+                    estimated_input_tokens_total: 1200,
+                    estimated_output_tokens_total: 340,
+                    success_requests: 6,
+                    failed_requests: 1,
+                    uptime_seconds: 12,
+                    current_provider: Some("MiniMax".to_string()),
+                    current_provider_id: Some("minimax".to_string()),
+                    last_request_at: Some("2026-05-15T12:35:00Z".to_string()),
+                    last_error: None,
+                    failover_count: 2,
+                    active_targets: vec![WorkerTargetState {
+                        app_type: "claude".to_string(),
+                        provider_name: "MiniMax".to_string(),
+                        provider_id: "minimax".to_string(),
+                    }],
+                }),
             }],
         });
+    }
+
+    #[test]
+    fn worker_state_decodes_legacy_without_runtime_status() {
+        let decoded: WorkerState = serde_json::from_str(
+            r#"{"app_type":"claude","running":true,"address":"127.0.0.1","port":15721,"pid":9999,"started_at":"2026-05-15T12:34:56Z"}"#,
+        )
+        .expect("decode legacy worker state");
+
+        assert!(decoded.runtime_status.is_none());
     }
 
     #[test]

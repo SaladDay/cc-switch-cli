@@ -50,22 +50,32 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
   </tr>
   <tr>
     <td width="180">
-      <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">
-        <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
-      </a>
-    </td>
-    <td>
-      Thanks to <b>AICodeMirror</b> for sponsoring this project! <b>AICodeMirror</b> provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at <b>38% / 2% / 9%</b> of original price, with extra discounts on top-ups! <b>AICodeMirror</b> offers special benefits for cc-switch-cli users: register via <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">this link</a> to enjoy <b>20% off</b> your first top-up, and enterprise customers can get up to <b>25% off</b>!
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
       <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
         <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
       </a>
     </td>
     <td>
       Thanks to <b>Cubence</b> for sponsoring this project! Cubence is an API relay service provider dedicated to offering stable and efficient services to its customers. Operating since September 2025, it has provided support for various models such as Claude code, Codex, and Gemini. Register via <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">this link</a> and use the <code>CCSCLI</code> discount code when topping up to enjoy a 10% discount.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://runapi.co/register?aff=kTlB">
+        <img src="assets/partners/logos/runapi.png" alt="RunAPI" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>RunAPI</b> for sponsoring this project! <a href="https://runapi.co/register?aff=kTlB"><b>RunAPI</b></a> is a fast, stable API platform and OpenRouter alternative. One API key gives access to 150+ mainstream models, including OpenAI, Claude, Gemini, DeepSeek, and Grok, with prices as low as 10% of the original cost. It works with tools such as Claude Code and OpenClaw. Exclusive benefit for cc-switch-cli users: register and contact the admin to claim CNY 7 in free credits.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">
+        <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>AICodeMirror</b> for sponsoring this project! <b>AICodeMirror</b> provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at <b>38% / 2% / 9%</b> of original price, with extra discounts on top-ups! <b>AICodeMirror</b> offers special benefits for cc-switch-cli users: register via <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">this link</a> to enjoy <b>20% off</b> your first top-up, and enterprise customers can get up to <b>25% off</b>!
     </td>
   </tr>
   <tr>

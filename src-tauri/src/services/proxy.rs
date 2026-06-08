@@ -22,7 +22,7 @@ use crate::{
     provider::Provider,
     proxy::{
         switch_lock::SwitchLockManager,
-        types::{GlobalProxyConfig, ProxyTakeoverStatus},
+        types::{ActiveTarget, GlobalProxyConfig, ProxyTakeoverStatus},
         ProxyConfig, ProxyServer, ProxyServerInfo, ProxyStatus,
     },
     AppError,
@@ -1027,7 +1027,21 @@ impl ProxyService {
         self.get_status_with_cleanup(false).await
     }
 
+    pub async fn get_status_snapshot_for_app(&self, app_type: &AppType) -> ProxyStatus {
+        self.get_status_with_cleanup_for_app(false, Some(app_type))
+            .await
+    }
+
     async fn get_status_with_cleanup(&self, cleanup_stale_sessions: bool) -> ProxyStatus {
+        self.get_status_with_cleanup_for_app(cleanup_stale_sessions, None)
+            .await
+    }
+
+    async fn get_status_with_cleanup_for_app(
+        &self,
+        cleanup_stale_sessions: bool,
+        app_type: Option<&AppType>,
+    ) -> ProxyStatus {
         if let Some(server) = self.runtime.server.read().await.as_ref() {
             return server.get_status().await;
         }
@@ -1039,7 +1053,7 @@ impl ProxyService {
                 .all(|session| session.kind.is_managed_external())
         {
             let mut workers = Vec::new();
-            let mut primary_status = None;
+            let mut matched_statuses = Vec::new();
             let mut stale_app_keys = Vec::new();
 
             for session in sessions {
@@ -1063,9 +1077,7 @@ impl ProxyService {
                         if status.uptime_seconds == 0 {
                             status.uptime_seconds = Self::uptime_seconds_since(&session.started_at);
                         }
-                        if primary_status.is_none() {
-                            primary_status = Some(status);
-                        }
+                        matched_statuses.push((session.app_type.clone(), status));
                     }
                     ExternalProxyStatusProbe::Mismatched => {
                         stale_app_keys.push(session.app_type.clone());
@@ -1080,16 +1092,45 @@ impl ProxyService {
                 let _ = self.clear_persisted_runtime_sessions_for_app_keys(&stale_app_keys);
             }
 
-            if let Some(mut status) = primary_status {
+            let selected_status = if let Some(app_type) = app_type {
+                matched_statuses
+                    .into_iter()
+                    .find(|(session_app, _)| {
+                        session_app
+                            .as_deref()
+                            .is_none_or(|value| value.eq_ignore_ascii_case(app_type.as_str()))
+                    })
+                    .map(|(_, status)| status)
+            } else {
+                matched_statuses
+                    .into_iter()
+                    .next()
+                    .map(|(_, status)| status)
+            };
+
+            if let Some(mut status) = selected_status {
                 status.running = !workers.is_empty();
                 if status.uptime_seconds == 0 {
-                    status.uptime_seconds = Self::uptime_seconds_from_active_workers(&workers);
+                    let scoped_workers = Self::workers_for_status_scope(&workers, app_type);
+                    status.uptime_seconds =
+                        Self::uptime_seconds_from_active_workers(&scoped_workers);
                 }
                 status.active_workers = workers;
                 return status;
             }
 
-            return ProxyStatus::default();
+            let scoped_workers = Self::workers_for_status_scope(&workers, app_type);
+            let primary = scoped_workers.first();
+            return ProxyStatus {
+                running: !workers.is_empty(),
+                address: primary
+                    .map(|worker| worker.address.clone())
+                    .unwrap_or_default(),
+                port: primary.map(|worker| worker.port).unwrap_or_default(),
+                uptime_seconds: Self::uptime_seconds_from_active_workers(&scoped_workers),
+                active_workers: workers,
+                ..ProxyStatus::default()
+            };
         }
 
         if let Some(session) = sessions.into_iter().next() {
@@ -1109,7 +1150,8 @@ impl ProxyService {
         }
 
         if let Some(status) =
-            Self::daemon_status_snapshot_with_cleanup(cleanup_stale_sessions).await
+            Self::daemon_status_snapshot_with_cleanup_for_app(cleanup_stale_sessions, app_type)
+                .await
         {
             return status;
         }
@@ -1125,6 +1167,14 @@ impl ProxyService {
     #[cfg(unix)]
     async fn daemon_status_snapshot_with_cleanup(
         cleanup_stale_socket: bool,
+    ) -> Option<ProxyStatus> {
+        Self::daemon_status_snapshot_with_cleanup_for_app(cleanup_stale_socket, None).await
+    }
+
+    #[cfg(unix)]
+    async fn daemon_status_snapshot_with_cleanup_for_app(
+        cleanup_stale_socket: bool,
+        app_type: Option<&AppType>,
     ) -> Option<ProxyStatus> {
         use crate::daemon::ipc::{
             client,
@@ -1145,7 +1195,7 @@ impl ProxyService {
 
         match response {
             Ok(response @ Response::Status { .. }) => {
-                Self::proxy_status_from_daemon_response(response)
+                Self::proxy_status_from_daemon_response_for_app(response, app_type)
             }
             Ok(Response::Error { message }) => {
                 log::debug!("daemon status returned error: {message}");
@@ -1185,9 +1235,18 @@ impl ProxyService {
         None
     }
 
+    #[cfg(not(unix))]
+    async fn daemon_status_snapshot_with_cleanup_for_app(
+        _cleanup_stale_socket: bool,
+        _app_type: Option<&AppType>,
+    ) -> Option<ProxyStatus> {
+        None
+    }
+
     #[cfg(unix)]
-    fn proxy_status_from_daemon_response(
+    fn proxy_status_from_daemon_response_for_app(
         response: crate::daemon::ipc::protocol::Response,
+        app_type: Option<&AppType>,
     ) -> Option<ProxyStatus> {
         let crate::daemon::ipc::protocol::Response::Status {
             running,
@@ -1200,36 +1259,147 @@ impl ProxyService {
             return None;
         };
 
-        let active_workers = workers
-            .into_iter()
-            .filter(|worker| worker.running)
-            .map(|worker| crate::proxy::types::ActiveWorker {
+        let mut active_workers = Vec::new();
+        let mut active_connections = 0usize;
+        let mut total_requests = 0u64;
+        let mut estimated_input_tokens_total = 0u64;
+        let mut estimated_output_tokens_total = 0u64;
+        let mut success_requests = 0u64;
+        let mut failed_requests = 0u64;
+        let mut runtime_uptime_seconds = 0u64;
+        let mut current_provider = None;
+        let mut current_provider_id = None;
+        let mut last_request_at = None::<String>;
+        let mut last_error = None;
+        let mut failover_count = 0u64;
+        let mut active_targets = Vec::new();
+        let mut scoped_workers = Vec::new();
+
+        for worker in workers.into_iter().filter(|worker| worker.running) {
+            let runtime_status = worker.runtime_status;
+            let matches_scope = app_type
+                .is_none_or(|app_type| worker.app_type.eq_ignore_ascii_case(app_type.as_str()));
+            let active_worker = crate::proxy::types::ActiveWorker {
                 app_type: worker.app_type,
                 address: worker.address,
                 port: worker.port,
                 pid: worker.pid,
                 started_at: worker.started_at,
-            })
-            .collect::<Vec<_>>();
-        let primary = active_workers.first();
-        let address = if address.trim().is_empty() {
+            };
+            if matches_scope {
+                scoped_workers.push(active_worker.clone());
+            }
+            active_workers.push(active_worker);
+
+            let Some(runtime_status) = runtime_status else {
+                continue;
+            };
+            if !matches_scope {
+                continue;
+            }
+
+            active_connections =
+                active_connections.saturating_add(runtime_status.active_connections);
+            total_requests = total_requests.saturating_add(runtime_status.total_requests);
+            estimated_input_tokens_total = estimated_input_tokens_total
+                .saturating_add(runtime_status.estimated_input_tokens_total);
+            estimated_output_tokens_total = estimated_output_tokens_total
+                .saturating_add(runtime_status.estimated_output_tokens_total);
+            success_requests = success_requests.saturating_add(runtime_status.success_requests);
+            failed_requests = failed_requests.saturating_add(runtime_status.failed_requests);
+            runtime_uptime_seconds = runtime_uptime_seconds.max(runtime_status.uptime_seconds);
+            failover_count = failover_count.saturating_add(runtime_status.failover_count);
+            if current_provider.is_none() {
+                current_provider = runtime_status.current_provider.clone();
+            }
+            if current_provider_id.is_none() {
+                current_provider_id = runtime_status.current_provider_id.clone();
+            }
+            if let Some(value) = runtime_status.last_request_at {
+                if last_request_at
+                    .as_ref()
+                    .is_none_or(|current| value > *current)
+                {
+                    last_request_at = Some(value);
+                }
+            }
+            if last_error.is_none() {
+                last_error = runtime_status.last_error;
+            }
+            active_targets.extend(
+                runtime_status
+                    .active_targets
+                    .into_iter()
+                    .filter(|target| {
+                        app_type.is_none_or(|app_type| {
+                            target.app_type.eq_ignore_ascii_case(app_type.as_str())
+                        })
+                    })
+                    .map(|target| ActiveTarget {
+                        app_type: target.app_type,
+                        provider_name: target.provider_name,
+                        provider_id: target.provider_id,
+                    }),
+            );
+        }
+        let primary = if app_type.is_some() {
+            scoped_workers.first()
+        } else {
+            active_workers.first()
+        };
+        let address = if app_type.is_some() {
+            primary
+                .map(|worker| worker.address.clone())
+                .unwrap_or_default()
+        } else if address.trim().is_empty() {
             primary
                 .map(|worker| worker.address.clone())
                 .unwrap_or_default()
         } else {
             address
         };
-        let port = if port == 0 {
+        let port = if app_type.is_some() {
+            primary.map(|worker| worker.port).unwrap_or_default()
+        } else if port == 0 {
             primary.map(|worker| worker.port).unwrap_or_default()
         } else {
             port
+        };
+        let started_at_workers = if app_type.is_some() {
+            scoped_workers.as_slice()
+        } else {
+            active_workers.as_slice()
+        };
+        let started_at_uptime = Self::uptime_seconds_from_active_workers(started_at_workers);
+        let uptime_seconds = if runtime_uptime_seconds > 0 {
+            runtime_uptime_seconds
+        } else {
+            started_at_uptime
+        };
+        let success_rate = if total_requests > 0 {
+            (success_requests as f32 / total_requests as f32) * 100.0
+        } else {
+            0.0
         };
 
         Some(ProxyStatus {
             running: running || !active_workers.is_empty(),
             address,
             port,
-            uptime_seconds: Self::uptime_seconds_from_active_workers(&active_workers),
+            active_connections,
+            total_requests,
+            estimated_input_tokens_total,
+            estimated_output_tokens_total,
+            success_requests,
+            failed_requests,
+            success_rate,
+            uptime_seconds,
+            current_provider,
+            current_provider_id,
+            last_request_at,
+            last_error,
+            failover_count,
+            active_targets,
             active_workers,
             ..ProxyStatus::default()
         })
@@ -1249,6 +1419,20 @@ impl ProxyService {
             .map(Self::uptime_seconds_since)
             .max()
             .unwrap_or(0)
+    }
+
+    fn workers_for_status_scope(
+        workers: &[crate::proxy::types::ActiveWorker],
+        app_type: Option<&AppType>,
+    ) -> Vec<crate::proxy::types::ActiveWorker> {
+        match app_type {
+            Some(app_type) => workers
+                .iter()
+                .filter(|worker| worker.app_type.eq_ignore_ascii_case(app_type.as_str()))
+                .cloned()
+                .collect(),
+            None => workers.to_vec(),
+        }
     }
 
     fn uptime_seconds_since(started_at: &str) -> u64 {
@@ -3484,7 +3668,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn daemon_status_snapshot_maps_workers_to_proxy_status() {
-        let status = ProxyService::proxy_status_from_daemon_response(
+        let status = ProxyService::proxy_status_from_daemon_response_for_app(
             crate::daemon::ipc::protocol::Response::Status {
                 running: false,
                 address: String::new(),
@@ -3501,6 +3685,7 @@ mod tests {
                         port: 15722,
                         pid: Some(4242),
                         started_at: Some("2026-03-10T00:00:00Z".to_string()),
+                        runtime_status: None,
                     },
                     crate::daemon::ipc::protocol::WorkerState {
                         app_type: "codex".to_string(),
@@ -3509,9 +3694,11 @@ mod tests {
                         port: 15723,
                         pid: Some(4343),
                         started_at: Some("2026-03-10T00:00:00Z".to_string()),
+                        runtime_status: None,
                     },
                 ],
             },
+            None,
         )
         .expect("status response should map");
 
@@ -3529,6 +3716,199 @@ mod tests {
             status.uptime_seconds > 0,
             "daemon worker started_at should drive uptime"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_snapshot_maps_worker_runtime_totals_to_proxy_status() {
+        use crate::daemon::ipc::protocol::{
+            Response, TakeoverFlags, WorkerRuntimeStatus, WorkerState, WorkerTargetState,
+        };
+
+        let status = ProxyService::proxy_status_from_daemon_response_for_app(
+            Response::Status {
+                running: true,
+                address: String::new(),
+                port: 0,
+                worker_pid: None,
+                takeovers: TakeoverFlags::default(),
+                restart_count: 0,
+                last_restart_at: None,
+                workers: vec![WorkerState {
+                    app_type: "claude".to_string(),
+                    running: true,
+                    address: "127.0.0.1".to_string(),
+                    port: 15721,
+                    pid: Some(4242),
+                    started_at: Some("2026-03-10T00:00:00Z".to_string()),
+                    runtime_status: Some(WorkerRuntimeStatus {
+                        active_connections: 1,
+                        total_requests: 7,
+                        estimated_input_tokens_total: 52_726_211,
+                        estimated_output_tokens_total: 454_466,
+                        success_requests: 6,
+                        failed_requests: 1,
+                        uptime_seconds: 91_381,
+                        current_provider: Some("MiniMax My".to_string()),
+                        current_provider_id: Some("minimax-my".to_string()),
+                        last_request_at: Some("2026-06-01T02:58:44.732068565+00:00".to_string()),
+                        last_error: None,
+                        failover_count: 2,
+                        active_targets: vec![WorkerTargetState {
+                            app_type: "claude".to_string(),
+                            provider_name: "MiniMax My".to_string(),
+                            provider_id: "minimax-my".to_string(),
+                        }],
+                    }),
+                }],
+            },
+            None,
+        )
+        .expect("status response should map");
+
+        assert_eq!(status.total_requests, 7);
+        assert_eq!(status.estimated_input_tokens_total, 52_726_211);
+        assert_eq!(status.estimated_output_tokens_total, 454_466);
+        assert_eq!(status.success_requests, 6);
+        assert_eq!(status.failed_requests, 1);
+        assert_eq!(status.uptime_seconds, 91_381);
+        assert_eq!(status.current_provider.as_deref(), Some("MiniMax My"));
+        assert_eq!(status.current_provider_id.as_deref(), Some("minimax-my"));
+        assert_eq!(status.failover_count, 2);
+        assert_eq!(status.active_targets.len(), 1);
+        assert_eq!(status.active_targets[0].provider_id, "minimax-my");
+        assert!((status.success_rate - 85.71429).abs() < 0.001);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_snapshot_selects_worker_runtime_for_requested_app() {
+        use crate::daemon::ipc::protocol::{
+            Response, TakeoverFlags, WorkerRuntimeStatus, WorkerState, WorkerTargetState,
+        };
+
+        fn worker(
+            app_type: &str,
+            port: u16,
+            provider_name: &str,
+            provider_id: &str,
+            total_requests: u64,
+            input_tokens: u64,
+            output_tokens: u64,
+            uptime_seconds: u64,
+        ) -> WorkerState {
+            WorkerState {
+                app_type: app_type.to_string(),
+                running: true,
+                address: "127.0.0.1".to_string(),
+                port,
+                pid: Some(u32::from(port)),
+                started_at: Some("2026-03-10T00:00:00Z".to_string()),
+                runtime_status: Some(WorkerRuntimeStatus {
+                    active_connections: 0,
+                    total_requests,
+                    estimated_input_tokens_total: input_tokens,
+                    estimated_output_tokens_total: output_tokens,
+                    success_requests: total_requests.saturating_sub(1),
+                    failed_requests: 1,
+                    uptime_seconds,
+                    current_provider: Some(provider_name.to_string()),
+                    current_provider_id: Some(provider_id.to_string()),
+                    last_request_at: Some(format!("2026-06-01T00:00:{:02}Z", port % 60)),
+                    last_error: Some(format!("{app_type} last error")),
+                    failover_count: 1,
+                    active_targets: vec![WorkerTargetState {
+                        app_type: app_type.to_string(),
+                        provider_name: provider_name.to_string(),
+                        provider_id: provider_id.to_string(),
+                    }],
+                }),
+            }
+        }
+
+        fn status_response() -> Response {
+            Response::Status {
+                running: true,
+                address: String::new(),
+                port: 0,
+                worker_pid: None,
+                takeovers: TakeoverFlags::default(),
+                restart_count: 0,
+                last_restart_at: None,
+                workers: vec![
+                    worker(
+                        "claude",
+                        15721,
+                        "Claude Provider",
+                        "claude-provider",
+                        2,
+                        100,
+                        20,
+                        12,
+                    ),
+                    worker(
+                        "codex",
+                        15722,
+                        "Codex Provider",
+                        "codex-provider",
+                        9,
+                        900,
+                        300,
+                        34,
+                    ),
+                ],
+            }
+        }
+
+        let claude_status = ProxyService::proxy_status_from_daemon_response_for_app(
+            status_response(),
+            Some(&AppType::Claude),
+        )
+        .expect("claude app status should map");
+
+        assert!(claude_status.running);
+        assert_eq!(claude_status.address, "127.0.0.1");
+        assert_eq!(claude_status.port, 15721);
+        assert_eq!(claude_status.total_requests, 2);
+        assert_eq!(claude_status.estimated_input_tokens_total, 100);
+        assert_eq!(claude_status.estimated_output_tokens_total, 20);
+        assert_eq!(claude_status.success_requests, 1);
+        assert_eq!(claude_status.failed_requests, 1);
+        assert_eq!(claude_status.uptime_seconds, 12);
+        assert_eq!(
+            claude_status.current_provider.as_deref(),
+            Some("Claude Provider")
+        );
+        assert_eq!(
+            claude_status.current_provider_id.as_deref(),
+            Some("claude-provider")
+        );
+        assert_eq!(claude_status.active_workers.len(), 2);
+        assert_eq!(claude_status.active_targets.len(), 1);
+        assert_eq!(claude_status.active_targets[0].app_type, "claude");
+        assert_eq!(
+            claude_status.active_targets[0].provider_id,
+            "claude-provider"
+        );
+        assert!((claude_status.success_rate - 50.0).abs() < 0.001);
+
+        let gemini_status = ProxyService::proxy_status_from_daemon_response_for_app(
+            status_response(),
+            Some(&AppType::Gemini),
+        )
+        .expect("gemini app status should map");
+
+        assert!(gemini_status.running);
+        assert_eq!(gemini_status.address, "");
+        assert_eq!(gemini_status.port, 0);
+        assert_eq!(gemini_status.total_requests, 0);
+        assert_eq!(gemini_status.estimated_input_tokens_total, 0);
+        assert_eq!(gemini_status.estimated_output_tokens_total, 0);
+        assert_eq!(gemini_status.uptime_seconds, 0);
+        assert!(gemini_status.current_provider.is_none());
+        assert!(gemini_status.current_provider_id.is_none());
+        assert!(gemini_status.active_targets.is_empty());
+        assert_eq!(gemini_status.active_workers.len(), 2);
     }
 
     #[test]
