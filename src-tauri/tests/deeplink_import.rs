@@ -227,87 +227,52 @@ fn deeplink_import_openclaw_provider_preserves_canonical_inline_config() {
 }
 
 #[test]
-fn deeplink_import_openclaw_provider_rejects_legacy_alias_config_shapes() {
+fn deeplink_import_openclaw_provider_rejects_invalid_inline_config() {
     let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
 
-    let config_json = r#"{"api_key":"sk-legacy-openclaw","base_url":"https://legacy.openclaw.example/v1","options":{"apiKey":"sk-opencode-alias","baseURL":"https://opencode-shape.example/v1"},"models":[{"id":"config-model","context_window":128000}]}"#;
-    let config_b64 = BASE64_URL_SAFE_NO_PAD.encode(config_json.as_bytes());
+    let cases: &[(&str, &str, &str)] = &[
+        // (case label, invalid config JSON, expected error fragment)
+        (
+            "legacy alias fields (api_key, base_url, options)",
+            r#"{"api_key":"sk-legacy","base_url":"https://legacy.example/v1","options":{"apiKey":"sk-alias","baseURL":"https://alias.example/v1"},"models":[{"id":"m"}]}"#,
+            "api_key",
+        ),
+        (
+            "legacy context_window alias on model",
+            r#"{"apiKey":"sk","baseUrl":"https://example.com/v1","models":[{"id":"m","context_window":128000}]}"#,
+            "context_window",
+        ),
+        (
+            "models field is object instead of array",
+            r#"{"apiKey":"sk","baseUrl":"https://example.com/v1","models":{"id":"m"}}"#,
+            "invalid OpenClaw provider schema",
+        ),
+    ];
 
-    let url = format!(
-        "ccswitch://v1/import?resource=provider&app=openclaw&name=Legacy%20OpenClaw&config={config_b64}&configFormat=json"
-    );
-    let request = parse_deeplink_url(&url).expect("parse deeplink url");
+    for (label, config_json, expected_err) in cases {
+        reset_test_fs();
+        let _home = ensure_test_home();
 
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::OpenClaw);
+        let config_b64 = BASE64_URL_SAFE_NO_PAD.encode(config_json.as_bytes());
+        let url = format!(
+            "ccswitch://v1/import?resource=provider&app=openclaw&name=BadConfig&config={config_b64}&configFormat=json"
+        );
+        let request =
+            parse_deeplink_url(&url).unwrap_or_else(|e| panic!("[{label}] parse failed: {e}"));
 
-    let state = state_from_config(config);
+        let mut config = MultiAppConfig::default();
+        config.ensure_app(&AppType::OpenClaw);
+        let state = state_from_config(config);
 
-    let err = import_provider_from_deeplink(&state, request)
-        .expect_err("legacy OpenClaw alias shapes should be rejected");
-    assert!(
-        err.to_string().contains("api_key")
-            && err.to_string().contains("base_url")
-            && err.to_string().contains("options"),
-        "expected explicit legacy-alias rejection, got {err:?}"
-    );
-}
-
-#[test]
-fn deeplink_import_openclaw_provider_rejects_legacy_context_window_alias() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let config_json = r#"{"apiKey":"sk-config-openclaw","baseUrl":"https://config.openclaw.example/v1","models":[{"id":"config-model","context_window":128000}]}"#;
-    let config_b64 = BASE64_URL_SAFE_NO_PAD.encode(config_json.as_bytes());
-
-    let url = format!(
-        "ccswitch://v1/import?resource=provider&app=openclaw&name=Legacy%20Context%20Window&config={config_b64}&configFormat=json"
-    );
-    let request = parse_deeplink_url(&url).expect("parse deeplink url");
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::OpenClaw);
-
-    let state = state_from_config(config);
-
-    let err = import_provider_from_deeplink(&state, request)
-        .expect_err("legacy OpenClaw model aliases should be rejected");
-    assert!(
-        err.to_string().contains("context_window"),
-        "expected explicit legacy model-alias rejection, got {err:?}"
-    );
-}
-
-#[test]
-fn deeplink_import_openclaw_provider_rejects_invalid_canonical_config_shape() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let config_json = r#"{"apiKey":"sk-config-openclaw","baseUrl":"https://config.openclaw.example/v1","models":{"id":"config-model"}}"#;
-    let config_b64 = BASE64_URL_SAFE_NO_PAD.encode(config_json.as_bytes());
-
-    let url = format!(
-        "ccswitch://v1/import?resource=provider&app=openclaw&name=Invalid%20Canonical%20Shape&config={config_b64}&configFormat=json"
-    );
-    let request = parse_deeplink_url(&url).expect("parse deeplink url");
-
-    let mut config = MultiAppConfig::default();
-    config.ensure_app(&AppType::OpenClaw);
-
-    let state = state_from_config(config);
-
-    let err = import_provider_from_deeplink(&state, request)
-        .expect_err("invalid canonical OpenClaw config shape should be rejected");
-    assert!(
-        err.to_string().contains("invalid OpenClaw provider schema")
-            || err.to_string().contains("models"),
-        "expected canonical-schema validation error, got {err:?}"
-    );
+        let err = match import_provider_from_deeplink(&state, request) {
+            Err(e) => e,
+            Ok(_) => panic!("[{label}] should have rejected config but succeeded"),
+        };
+        assert!(
+            err.to_string().contains(expected_err),
+            "[{label}] expected error containing '{expected_err}', got: {err}"
+        );
+    }
 }
 
 #[test]
@@ -372,6 +337,32 @@ fn deeplink_import_mcp_server_persists_with_app_flags() {
 }
 
 #[test]
+fn deeplink_import_mcp_apps_openclaw_only_fails_with_apps_required() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let config_json = r#"{"mcpServers":{"test-server":{"command":"echo","args":["hi"]}}}"#;
+    let config_b64 = BASE64_URL_SAFE_NO_PAD.encode(config_json.as_bytes());
+    let url = format!("ccswitch://v1/import?resource=mcp&apps=openclaw&config={config_b64}");
+    let request = parse_deeplink_url(&url).expect("openclaw passes parser-level app validation");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    let state = state_from_config(config);
+
+    let err = match import_mcp_from_deeplink(&state, request) {
+        Err(e) => e,
+        Ok(_) => panic!("openclaw-only apps should have failed"),
+    };
+    assert!(
+        err.to_string()
+            .contains("At least one app must be specified"),
+        "expected late error about no apps, got: {err}"
+    );
+}
+
+#[test]
 fn deeplink_import_prompt_persists_and_enables() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -421,6 +412,32 @@ fn deeplink_import_prompt_without_enabled_stays_disabled() {
 }
 
 #[test]
+fn deeplink_import_prompt_for_non_claude_app() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let content_b64 = BASE64_URL_SAFE_NO_PAD.encode(b"codex prompt content");
+    let url = format!(
+        "ccswitch://v1/import?resource=prompt&app=codex&name=CodexPrompt&content={content_b64}&description=codex-desc"
+    );
+    let request = parse_deeplink_url(&url).expect("parse deeplink url");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    let state = state_from_config(config);
+
+    let prompt_id = import_prompt_from_deeplink(&state, request).expect("import prompt for codex");
+
+    let prompts = state.db.get_prompts("codex").expect("read codex prompts");
+    let prompt = prompts.get(&prompt_id).expect("prompt persisted for codex");
+    assert_eq!(prompt.name, "CodexPrompt");
+    assert_eq!(prompt.content, "codex prompt content");
+    assert_eq!(prompt.description.as_deref(), Some("codex-desc"));
+    assert!(!prompt.enabled, "should default to disabled");
+}
+
+#[test]
 fn deeplink_import_skill_repo_persists() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -456,5 +473,114 @@ fn deeplink_import_skill_rejects_malformed_repo() {
     assert!(
         err.to_string().contains("Invalid repo format"),
         "expected repo format error, got {err:?}"
+    );
+}
+
+#[test]
+fn deeplink_command_execute_dispatches_by_resource_type() {
+    let _guard = lock_test_mutex();
+
+    let mcp_content = r#"{"mcpServers":{"dispatch-mcp":{"command":"echo","args":["hello"]}}}"#;
+    let mcp_b64 = BASE64_URL_SAFE_NO_PAD.encode(mcp_content.as_bytes());
+    let prompt_b64 = BASE64_URL_SAFE_NO_PAD.encode(b"dispatch prompt content");
+
+    let resource_urls: &[(&str, &str)] = &[
+        (
+            "provider",
+            "ccswitch://v1/import?resource=provider&app=claude&name=DispatchProvider&homepage=https%3A%2F%2Fexample.com&endpoint=https%3A%2F%2Fapi.example.com%2Fv1&apiKey=sk-dispatch",
+        ),
+        (
+            "mcp",
+            &format!("ccswitch://v1/import?resource=mcp&apps=claude,codex&config={mcp_b64}"),
+        ),
+        (
+            "prompt",
+            &format!("ccswitch://v1/import?resource=prompt&app=claude&name=DispatchPrompt&content={prompt_b64}"),
+        ),
+        (
+            "skill",
+            "ccswitch://v1/import?resource=skill&repo=dispatch-org/dispatch-skills",
+        ),
+    ];
+
+    for (resource, url) in resource_urls {
+        reset_test_fs();
+        let _home = ensure_test_home();
+
+        let cmd = cc_switch_lib::cli::commands::deeplink::DeeplinkCommand {
+            url: url.to_string(),
+        };
+        cc_switch_lib::cli::commands::deeplink::execute(cmd)
+            .unwrap_or_else(|e| panic!("[{resource}] execute() should succeed, got: {e}"));
+    }
+}
+
+#[test]
+fn deeplink_parse_rejects_unknown_resource_type() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let err = parse_deeplink_url("ccswitch://v1/import?resource=unknown&app=claude&name=test")
+        .expect_err("unknown resource type should be rejected at parser level");
+    assert!(
+        err.to_string().contains("Unsupported resource type"),
+        "expected 'Unsupported resource type', got: {err}"
+    );
+}
+
+#[test]
+fn deeplink_parse_rejects_missing_required_params() {
+    let _guard = lock_test_mutex();
+
+    let cases: &[(&str, &str, &str)] = &[
+        // (case label, URL missing a required param, expected error fragment)
+        (
+            "mcp without config",
+            "ccswitch://v1/import?resource=mcp&apps=claude",
+            "config",
+        ),
+        (
+            "prompt without content",
+            "ccswitch://v1/import?resource=prompt&app=claude&name=NoContent",
+            "content",
+        ),
+        (
+            "provider without app",
+            "ccswitch://v1/import?resource=provider&name=NoApp",
+            "app",
+        ),
+    ];
+
+    for (label, url, expected_fragment) in cases {
+        reset_test_fs();
+        ensure_test_home();
+
+        let err = match parse_deeplink_url(url) {
+            Err(e) => e,
+            Ok(_) => panic!("[{label}] parser should have rejected URL"),
+        };
+        assert!(
+            err.to_string()
+                .to_lowercase()
+                .contains(&expected_fragment.to_lowercase()),
+            "[{label}] expected error mentioning '{expected_fragment}', got: {err}"
+        );
+    }
+}
+
+#[test]
+fn deeplink_parse_rejects_mcp_invalid_app_in_apps_list() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let err = parse_deeplink_url(
+        "ccswitch://v1/import?resource=mcp&apps=claude,notanapp&config=dGVzdA==",
+    )
+    .expect_err("invalid app in apps list should be rejected at parser level");
+    assert!(
+        err.to_string().to_lowercase().contains("invalid app"),
+        "expected 'invalid app' error, got: {err}"
     );
 }
