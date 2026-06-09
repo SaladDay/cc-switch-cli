@@ -256,6 +256,13 @@ fn build_claude_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
         );
     }
 
+    // 合并自定义环境变量
+    if let Some(custom) = &request.custom_env {
+        for (key, value) in custom {
+            env.entry(key.clone()).or_insert(value.clone());
+        }
+    }
+
     json!({ "env": env })
 }
 
@@ -525,6 +532,24 @@ fn merge_claude_config(
             .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+    }
+
+    // 保留非标准 env key（如 ANTHROPIC_CUSTOM_HEADERS 等自定义变量）
+    let known_keys: &[&str] = &[
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    ];
+    let custom: serde_json::Map<String, serde_json::Value> = env
+        .iter()
+        .filter(|(k, _)| !known_keys.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if !custom.is_empty() {
+        request.custom_env = Some(custom);
     }
 
     Ok(())
