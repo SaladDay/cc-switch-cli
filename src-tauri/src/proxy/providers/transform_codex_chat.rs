@@ -308,10 +308,9 @@ pub fn responses_to_chat_completions_with_reasoning(
     let tools = tool_context.chat_tools();
     if !tools.is_empty() {
         result["tools"] = json!(tools);
-    }
-
-    if let Some(tool_choice) = body.get("tool_choice") {
-        result["tool_choice"] = responses_tool_choice_to_chat(tool_choice, &tool_context);
+        if let Some(tool_choice) = body.get("tool_choice") {
+            result["tool_choice"] = responses_tool_choice_to_chat(tool_choice, &tool_context);
+        }
     }
 
     for key in EXTRA_CHAT_PASSTHROUGH_FIELDS {
