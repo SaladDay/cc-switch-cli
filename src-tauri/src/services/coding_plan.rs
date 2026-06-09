@@ -181,12 +181,25 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
 
 // ── 智谱 GLM ────────────────────────────────────────────────
 
-async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
+/// 根据用户配置的 base_url 确定智谱配额查询端点。
+/// 中国大陆用户使用 open.bigmodel.cn，国际用户使用 api.z.ai。
+fn zhipu_quota_base(base_url: &str) -> &'static str {
+    if base_url.contains("bigmodel.cn") {
+        "https://open.bigmodel.cn"
+    } else {
+        "https://api.z.ai"
+    }
+}
+
+async fn query_zhipu(base_url: &str, api_key: &str) -> SubscriptionQuota {
     let client = crate::proxy::http_client::get();
 
-    // 统一走 api.z.ai 国际站（中国站 bigmodel.cn 有反爬机制）
+    let quota_url = format!(
+        "{}/api/monitor/usage/quota/limit",
+        zhipu_quota_base(base_url)
+    );
     let resp = client
-        .get("https://api.z.ai/api/monitor/usage/quota/limit")
+        .get(&quota_url)
         .header("Authorization", api_key) // 注意：智谱不加 Bearer 前缀
         .header("Content-Type", "application/json")
         .header("Accept-Language", "en-US,en")
@@ -265,6 +278,15 @@ async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
             });
         }
     }
+
+    // 按 nextResetTime 排序：缺失的（刚重置的 5 小时桶）排在前面，
+    // 有值的按重置时间升序排列，确保显示顺序正确。
+    tiers.sort_by(|a, b| match (&a.resets_at, &b.resets_at) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(a_time), Some(b_time)) => a_time.cmp(b_time),
+    });
 
     // 套餐等级存入 credential_message
     let level = data
@@ -442,7 +464,7 @@ pub async fn get_coding_plan_quota(
 
     let quota = match provider {
         CodingPlanProvider::Kimi => query_kimi(api_key).await,
-        CodingPlanProvider::ZhipuCn | CodingPlanProvider::ZhipuEn => query_zhipu(api_key).await,
+        CodingPlanProvider::ZhipuCn | CodingPlanProvider::ZhipuEn => query_zhipu(base_url, api_key).await,
         CodingPlanProvider::MiniMaxCn => query_minimax(api_key, true).await,
         CodingPlanProvider::MiniMaxEn => query_minimax(api_key, false).await,
     };

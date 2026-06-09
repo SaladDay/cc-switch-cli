@@ -333,16 +333,42 @@ impl TokenUsage {
                             {
                                 usage.output_tokens = output as u32;
                             }
-                            // OpenRouter 转换后的流式响应：input_tokens 也在 message_delta 中
-                            // 如果 message_start 中没有 input_tokens，则从 message_delta 获取
-                            if usage.input_tokens == 0 {
-                                if let Some(input) =
-                                    delta_usage.get("input_tokens").and_then(|v| v.as_u64())
+                            // 部分 Anthropic 兼容上游（如 Qwen、MiniMax）在 message_start
+                            // 中将 fresh+cached 合并报告为 input_tokens，导致虚高。
+                            // 当 message_delta 提供了更小的正值 input_tokens 时，优先采用
+                            // delta 的值，并同步更新缓存计数以避免重复计算。
+                            if let Some(input) =
+                                delta_usage.get("input_tokens").and_then(|v| v.as_u64())
+                            {
+                                let delta_input = input as u32;
+                                if delta_input > 0
+                                    && (usage.input_tokens == 0
+                                        || delta_input < usage.input_tokens)
                                 {
-                                    usage.input_tokens = input as u32;
+                                    usage.input_tokens = delta_input;
+                                    // 同步采用 delta 中的缓存计数
+                                    if let Some(cache_read) = delta_usage
+                                        .get("cache_read_input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                    {
+                                        usage.cache_read_tokens = cache_read as u32;
+                                    }
+                                    if let Some(cache_creation) = delta_usage
+                                        .get("cache_creation_input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                    {
+                                        usage.cache_creation_tokens = cache_creation as u32;
+                                    }
+                                }
+                            } else {
+                                // OpenRouter 转换后的流式响应：input_tokens 仅在
+                                // message_delta 中且 message_start 未提供时的回退路径
+                                if usage.input_tokens == 0 {
+                                    // (no input_tokens in delta, keep start value)
                                 }
                             }
                             // 从 message_delta 中处理缓存命中(cache_read_input_tokens)
+                            // 仅当上面未从 delta 同步时才回退
                             if usage.cache_read_tokens == 0 {
                                 if let Some(cache_read) = delta_usage
                                     .get("cache_read_input_tokens")
@@ -352,7 +378,6 @@ impl TokenUsage {
                                 }
                             }
                             // 从 message_delta 中处理缓存创建(cache_creation_input_tokens)
-                            // 注: 现在 zhipu 没有返回 cache_creation_input_tokens 字段
                             if usage.cache_creation_tokens == 0 {
                                 if let Some(cache_creation) = delta_usage
                                     .get("cache_creation_input_tokens")
