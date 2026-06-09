@@ -22,9 +22,16 @@ static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub fn scan_sessions() -> Vec<SessionMeta> {
-    let root = get_codex_config_dir().join("sessions");
+    let config_dir = get_codex_config_dir();
     let mut files = Vec::new();
-    collect_jsonl_files(&root, &mut files);
+
+    // 扫描活跃会话目录（按日期分区）
+    let sessions_root = config_dir.join("sessions");
+    collect_jsonl_files(&sessions_root, &mut files);
+
+    // 扫描归档会话目录（扁平结构）
+    let archived_root = config_dir.join("archived_sessions");
+    collect_jsonl_files(&archived_root, &mut files);
 
     let mut sessions = Vec::new();
     for path in files {

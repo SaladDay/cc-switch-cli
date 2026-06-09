@@ -528,8 +528,10 @@ fn set_codex_model_catalog_json_field(
     let generated_path = get_codex_model_catalog_path();
 
     match catalog_path {
-        Some(path) => {
-            doc["model_catalog_json"] = toml_edit::value(path.to_string_lossy().as_ref());
+        Some(_path) => {
+            // 使用相对文件名而非绝对路径，保持与 Codex 自身引用方式一致
+            doc["model_catalog_json"] =
+                toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
         }
         None => {
             let should_remove = doc
