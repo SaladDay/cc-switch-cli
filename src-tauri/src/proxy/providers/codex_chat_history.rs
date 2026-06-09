@@ -60,7 +60,7 @@ impl CodexChatHistoryStore {
             .map(|items| {
                 items
                     .iter()
-                    .filter_map(cached_function_call)
+                    .filter_map(cached_tool_call)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -74,7 +74,7 @@ impl CodexChatHistoryStore {
     }
 
     async fn record_function_call(&self, response_id: Option<&str>, item: &Value) -> bool {
-        let Some(call) = cached_function_call(item) else {
+        let Some(call) = cached_tool_call(item) else {
             return false;
         };
 
@@ -110,14 +110,18 @@ impl CodexChatHistoryStore {
         let output_call_ids = items
             .iter()
             .filter(|item| {
-                item.get("type").and_then(|value| value.as_str()) == Some("function_call_output")
+                item.get("type")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(is_tool_output_type)
             })
             .filter_map(response_item_call_id)
             .collect::<HashSet<_>>();
         let existing_call_ids = items
             .iter()
             .filter(|item| {
-                item.get("type").and_then(|value| value.as_str()) == Some("function_call")
+                item.get("type")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(is_tool_call_type)
             })
             .filter_map(response_item_call_id)
             .collect::<HashSet<_>>();
@@ -142,8 +146,9 @@ impl CodexChatHistoryStore {
         let mut new_items = Vec::new();
 
         for mut item in items {
-            match item.get("type").and_then(|value| value.as_str()) {
-                Some("function_call") => {
+            let item_type = item.get("type").and_then(|value| value.as_str());
+            match item_type {
+                Some(t) if is_tool_call_type(t) => {
                     if let Some(call_id) = response_item_call_id(&item) {
                         if let Some(cached) = lookup.call(&call_id) {
                             if enrich_function_call_reasoning(&mut item, cached) {
@@ -154,7 +159,7 @@ impl CodexChatHistoryStore {
                     }
                     new_items.push(item);
                 }
-                Some("function_call_output") => {
+                Some(t) if is_tool_output_type(t) => {
                     if let Some(group) = restore_group.take().filter(|group| !group.is_empty()) {
                         for (call_id, cached_item) in group {
                             seen_call_ids.insert(call_id);
@@ -436,8 +441,23 @@ async fn inspect_sse_block(
     }
 }
 
-fn cached_function_call(item: &Value) -> Option<(String, Value)> {
-    if item.get("type").and_then(|value| value.as_str()) != Some("function_call") {
+fn is_tool_call_type(type_str: &str) -> bool {
+    matches!(
+        type_str,
+        "function_call" | "custom_tool_call" | "tool_search_call"
+    )
+}
+
+fn is_tool_output_type(type_str: &str) -> bool {
+    matches!(
+        type_str,
+        "function_call_output" | "custom_tool_call_output" | "tool_search_output"
+    )
+}
+
+fn cached_tool_call(item: &Value) -> Option<(String, Value)> {
+    let type_str = item.get("type").and_then(|value| value.as_str())?;
+    if !is_tool_call_type(type_str) {
         return None;
     }
     let call_id = response_item_call_id(item)?;
@@ -468,7 +488,7 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
-    async fn enriches_tool_output_with_cached_function_call_from_previous_response() {
+    async fn enriches_tool_output_with_cached_tool_call_from_previous_response() {
         let history = CodexChatHistoryStore::default();
         history
             .record_response(&json!({
