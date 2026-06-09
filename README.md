@@ -1,3 +1,79 @@
+<p align="center">
+  <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=cc-switch-cli">
+    <img src="assets/partners/logos/atlas-cloud.png" alt="Atlas Cloud" width="200">
+  </a>
+</p>
+
+> 🎁 **[Atlas Cloud](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=cc-switch-cli)** is a unified AI inference platform — 59 frontier LLMs (DeepSeek-V4, Qwen3, Kimi K2, GPT-5, Gemini 2.5 Pro, Claude, Grok-4…) via a single OpenAI-compatible endpoint. Configure Atlas Cloud as the API backend for OpenCode or other AI coding assistants managed by cc-switch-cli. [View all models](https://www.atlascloud.ai/models) · [Coding Plan](https://www.atlascloud.ai/console/coding-plan)
+
+<details>
+<summary>📋 59 models available on Atlas Cloud</summary>
+
+| Model | Type |
+|-------|------|
+| deepseek-ai/deepseek-v4-pro | LLM |
+| deepseek-ai/deepseek-v4-0520 | LLM |
+| deepseek-ai/deepseek-v4-flash | LLM |
+| deepseek-ai/deepseek-r2 | LLM |
+| deepseek-ai/deepseek-r2-0528 | LLM |
+| deepseek-ai/deepseek-r1-0528 | LLM |
+| deepseek-ai/deepseek-r1 | LLM |
+| deepseek-ai/deepseek-prover-v2 | LLM |
+| moonshot-ai/kimi-k2 | LLM |
+| moonshot-ai/kimi-k2-0711 | LLM |
+| moonshot-ai/kimi-k1.5-long | LLM |
+| qwen/qwen3-235b-a22b | LLM |
+| qwen/qwen3-30b-a3b | LLM |
+| qwen/qwen3-32b | LLM |
+| qwen/qwq-32b | LLM |
+| openai/gpt-5 | LLM |
+| openai/gpt-5-mini | LLM |
+| openai/gpt-4.1 | LLM |
+| openai/gpt-4o | LLM |
+| openai/o3 | LLM |
+| openai/o4-mini | LLM |
+| openai/o3-mini | LLM |
+| anthropic/claude-sonnet-4-5 | LLM |
+| anthropic/claude-opus-4 | LLM |
+| anthropic/claude-sonnet-4 | LLM |
+| anthropic/claude-haiku-4-5 | LLM |
+| google/gemini-2.5-pro | LLM |
+| google/gemini-2.5-flash | LLM |
+| google/gemini-2.5-flash-lite | LLM |
+| google/gemini-2.0-flash | LLM |
+| xai/grok-4 | LLM |
+| xai/grok-3 | LLM |
+| xai/grok-3-mini | LLM |
+| meta-llama/llama-4-scout | LLM |
+| meta-llama/llama-4-maverick | LLM |
+| meta-llama/llama-3.3-70b | LLM |
+| cohere/command-a | LLM |
+| mistral/mistral-large | LLM |
+| minimax/minimax-m1 | LLM |
+| 01ai/yi-lightning | LLM |
+| seedance/seedance-v1-pro | Video |
+| seedance/seedance-v1-pro-fast | Video |
+| seedance/seedance-v1-lite | Video |
+| kling/kling-v2.1-pro | Video |
+| kling/kling-v2.1-standard | Video |
+| kling/kling-v1.6-pro | Video |
+| kling/kling-v1.6-standard | Video |
+| wan2/wan2.1-t2v-turbo | Video |
+| wan2/wan2.1-i2v-turbo | Video |
+| veo/veo3.1-fast | Video |
+| veo/veo3-fast | Video |
+| veo/veo3 | Video |
+| runway/gen4-turbo | Video |
+| stable-diffusion/sd3.5-large | Image |
+| flux/flux1.1-pro-ultra | Image |
+| flux/flux1.1-pro | Image |
+| ideogram/ideogram-v3 | Image |
+| recraft/recraft-v3 | Image |
+| minimax/hailuo-i2v-01-live | Video |
+</details>
+
+---
+
 <div align="center">
 
 # CC-Switch CLI
@@ -87,6 +163,16 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
     <td>
       Thanks to <b>DDS</b> for sponsoring this project! DDS Hub is a reliable and high-performance Claude API proxy service. DDS Hub provides cost-effective domestic Claude direct acceleration services for both individual and enterprise users. We offer stable and low-latency Claude Max number pools, with full support for <b>Claude Haiku, Opus, Sonnet</b> and other flagship models. Invoices are available for recharges of 1000 RMB or more. Enterprise customers can also enjoy customized grouping and dedicated technical support services. <br/>
       Exclusive benefit for CC-Switch CLI users: register via <a href="https://ddshub.short.gy/ccscli">this link</a> and enjoy <b>an extra 10% credit</b> on your first recharge (please contact the group admin to claim after recharging)!
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=cc-switch-cli">
+        <img src="assets/partners/logos/atlas-cloud.png" alt="Atlas Cloud" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>Atlas Cloud</b> for supporting this project! <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=cc-switch-cli"><b>Atlas Cloud</b></a> is a unified AI inference platform offering 59 frontier models — DeepSeek-V4, Qwen3, Kimi K2, GPT-5, Gemini 2.5 Pro, Claude Opus 4, Grok-4, and more — through a single OpenAI-compatible API endpoint. Perfect as the LLM backend for OpenCode and other AI coding assistants managed by cc-switch-cli. <a href="https://www.atlascloud.ai/console/coding-plan">Coding Plan</a> available for developers. <a href="https://www.atlascloud.ai/models">View all 59 models →</a>
     </td>
   </tr>
 </table>
