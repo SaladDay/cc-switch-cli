@@ -308,10 +308,9 @@ pub fn responses_to_chat_completions_with_reasoning(
     let tools = tool_context.chat_tools();
     if !tools.is_empty() {
         result["tools"] = json!(tools);
-    }
-
-    if let Some(tool_choice) = body.get("tool_choice") {
-        result["tool_choice"] = responses_tool_choice_to_chat(tool_choice, &tool_context);
+        if let Some(tool_choice) = body.get("tool_choice") {
+            result["tool_choice"] = responses_tool_choice_to_chat(tool_choice, &tool_context);
+        }
     }
 
     for key in EXTRA_CHAT_PASSTHROUGH_FIELDS {
@@ -2814,5 +2813,24 @@ mod tests {
 
         assert_eq!(result["error"]["message"], "rate limit exceeded");
         assert_eq!(result["error"]["type"], "upstream_error");
+    }
+
+    #[test]
+    fn responses_request_to_chat_omits_tool_choice_when_tools_empty() {
+        // tool_choice should be omitted when no tools are provided,
+        // otherwise strict upstream endpoints reject the request.
+        let input = json!({
+            "model": "gpt-5.4",
+            "tool_choice": "auto",
+            "input": "hello"
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+
+        assert!(result.get("tools").is_none());
+        assert!(
+            result.get("tool_choice").is_none(),
+            "tool_choice should be omitted when tools is empty"
+        );
     }
 }
