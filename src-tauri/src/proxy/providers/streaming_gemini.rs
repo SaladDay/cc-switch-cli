@@ -316,6 +316,11 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
                                     "id": message_id.clone().unwrap_or_default(),
                                     "type": "message",
                                     "role": "assistant",
+                                    // Spec-required fields; missing `content` crashes the
+                                    // official Anthropic SDK stream accumulator.
+                                    "content": [],
+                                    "stop_reason": serde_json::Value::Null,
+                                    "stop_sequence": serde_json::Value::Null,
                                     "model": current_model.clone().unwrap_or_default(),
                                     "usage": build_anthropic_usage(chunk_json.get("usageMetadata"))
                                 }
@@ -423,6 +428,11 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
                     "id": message_id.clone().unwrap_or_default(),
                     "type": "message",
                     "role": "assistant",
+                    // Spec-required fields; missing `content` crashes the
+                    // official Anthropic SDK stream accumulator.
+                    "content": [],
+                    "stop_reason": serde_json::Value::Null,
+                    "stop_sequence": serde_json::Value::Null,
                     "model": current_model.clone().unwrap_or_default(),
                     "usage": build_anthropic_usage(latest_usage.as_ref())
                 }
@@ -655,6 +665,29 @@ mod tests {
         assert!(output.contains("\"text\":\"lo\""));
         assert!(output.contains("\"stop_reason\":\"end_turn\""));
         assert!(output.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn message_start_is_spec_complete() {
+        // message_start must carry content/stop_reason/stop_sequence or the
+        // official Anthropic SDK stream accumulator crashes on snapshot.content.
+        let output = collect_stream_output(vec![
+            "data: {\"responseId\":\"resp_1\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"Hi\"}]}}],\"usageMetadata\":{\"promptTokenCount\":4,\"totalTokenCount\":6}}\n\n",
+        ]);
+
+        let data = output
+            .split("\n\n")
+            .find_map(|block| {
+                let line = block.lines().find(|l| l.starts_with("data: "))?;
+                let value: Value = serde_json::from_str(line.trim_start_matches("data: ")).ok()?;
+                (value["type"] == "message_start").then_some(value)
+            })
+            .expect("message_start event");
+        let message = &data["message"];
+
+        assert_eq!(message["content"], serde_json::json!([]));
+        assert_eq!(message["stop_reason"], Value::Null);
+        assert_eq!(message["stop_sequence"], Value::Null);
     }
 
     #[test]

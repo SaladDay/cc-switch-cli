@@ -166,6 +166,15 @@ pub fn create_anthropic_sse_stream(
                                         "id": message_id.clone().unwrap_or_default(),
                                         "type": "message",
                                         "role": "assistant",
+                                        // Anthropic SSE spec requires these fields in the
+                                        // message snapshot; the official SDK's stream
+                                        // accumulator does `snapshot.content.push(...)` and
+                                        // crashes ("Cannot read properties of undefined")
+                                        // when `content` is missing, forcing clients into
+                                        // non-streaming fallback (or silent stream loss).
+                                        "content": [],
+                                        "stop_reason": serde_json::Value::Null,
+                                        "stop_sequence": serde_json::Value::Null,
                                         "model": current_model.clone().unwrap_or_default(),
                                         "usage": start_usage
                                     }
@@ -817,6 +826,27 @@ mod tests {
             message_start["message"]["usage"]["cache_read_input_tokens"],
             0
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_message_start_is_spec_complete() {
+        // message_start must carry content/stop_reason/stop_sequence or the
+        // official Anthropic SDK stream accumulator crashes on snapshot.content.
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_events(input).await;
+        let message = &events
+            .iter()
+            .find(|event| event["type"] == "message_start")
+            .expect("message_start event")["message"];
+
+        assert_eq!(message["content"], serde_json::json!([]));
+        assert_eq!(message["stop_reason"], serde_json::Value::Null);
+        assert_eq!(message["stop_sequence"], serde_json::Value::Null);
     }
 
     #[tokio::test]

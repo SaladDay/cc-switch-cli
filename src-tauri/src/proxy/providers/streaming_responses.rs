@@ -170,6 +170,11 @@ pub fn create_anthropic_sse_stream_from_responses(
                                         "id": message_id.clone().unwrap_or_default(),
                                         "type": "message",
                                         "role": "assistant",
+                                        // Spec-required fields; missing `content` crashes the
+                                        // official Anthropic SDK stream accumulator.
+                                        "content": [],
+                                        "stop_reason": serde_json::Value::Null,
+                                        "stop_sequence": serde_json::Value::Null,
                                         "model": current_model.clone().unwrap_or_default(),
                                         "usage": build_anthropic_usage_from_responses(response_obj.get("usage"))
                                     }
@@ -185,6 +190,11 @@ pub fn create_anthropic_sse_stream_from_responses(
                                             "id": message_id.clone().unwrap_or_default(),
                                             "type": "message",
                                             "role": "assistant",
+                                            // Spec-required fields; missing `content` crashes the
+                                            // official Anthropic SDK stream accumulator.
+                                            "content": [],
+                                            "stop_reason": serde_json::Value::Null,
+                                            "stop_sequence": serde_json::Value::Null,
                                             "model": current_model.clone().unwrap_or_default(),
                                             "usage": { "input_tokens": 0, "output_tokens": 0 }
                                         }
@@ -301,6 +311,11 @@ pub fn create_anthropic_sse_stream_from_responses(
                                                     "id": message_id.clone().unwrap_or_default(),
                                                     "type": "message",
                                                     "role": "assistant",
+                                                    // Spec-required fields; missing `content` crashes the
+                                                    // official Anthropic SDK stream accumulator.
+                                                    "content": [],
+                                                    "stop_reason": serde_json::Value::Null,
+                                                    "stop_sequence": serde_json::Value::Null,
                                                     "model": current_model.clone().unwrap_or_default(),
                                                     "usage": { "input_tokens": 0, "output_tokens": 0 }
                                                 }
@@ -746,6 +761,34 @@ data: {\"response\":{\"status\":\"completed\"}}\r\n\
         assert!(merged.contains("\"type\":\"input_json_delta\""));
         assert!(merged.contains("\\\"city\\\":\\\"Tokyo\\\""));
         assert!(merged.contains("\"stop_reason\":\"tool_use\""));
+    }
+
+    #[tokio::test]
+    async fn tool_first_message_start_is_spec_complete() {
+        // A response that opens with a function_call (no preceding text) emits
+        // message_start from the tool path; it must still carry the spec-required
+        // fields or the official Anthropic SDK stream accumulator crashes.
+        let input = concat!(
+            "event: response.created\n",
+            "data: {\"response\":{\"id\":\"resp_tool\",\"model\":\"gpt-5.4\"}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"get_weather\"}}\n\n",
+            "event: response.function_call_arguments.done\n",
+            "data: {\"item_id\":\"fc_1\",\"arguments\":\"{}\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"response\":{\"status\":\"completed\"}}\n\n"
+        );
+
+        let (merged, _) = collect_stream(vec![Bytes::from(input)]).await;
+        let events = parse_anthropic_events(&merged);
+        let message = &events
+            .iter()
+            .find(|event| event["type"] == "message_start")
+            .expect("message_start event")["message"];
+
+        assert_eq!(message["content"], serde_json::json!([]));
+        assert_eq!(message["stop_reason"], Value::Null);
+        assert_eq!(message["stop_sequence"], Value::Null);
     }
 
     #[tokio::test]
