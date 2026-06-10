@@ -2814,4 +2814,23 @@ mod tests {
         assert_eq!(result["error"]["message"], "rate limit exceeded");
         assert_eq!(result["error"]["type"], "upstream_error");
     }
+
+    #[test]
+    fn responses_request_to_chat_omits_tool_choice_when_tools_empty() {
+        // tool_choice should be omitted when no tools are provided,
+        // otherwise strict upstream endpoints reject the request.
+        let input = json!({
+            "model": "gpt-5.4",
+            "tool_choice": "auto",
+            "input": "hello"
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+
+        assert!(result.get("tools").is_none());
+        assert!(
+            result.get("tool_choice").is_none(),
+            "tool_choice should be omitted when tools is empty"
+        );
+    }
 }
