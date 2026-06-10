@@ -1,5 +1,6 @@
 use clap::Args;
 
+use crate::app_config::AppType;
 use crate::cli::ui::{info, success};
 use crate::error::AppError;
 use crate::store::AppState;
@@ -10,9 +11,14 @@ pub struct DeeplinkCommand {
     pub url: String,
 }
 
-pub fn execute(cmd: DeeplinkCommand) -> Result<(), AppError> {
-    // The deep link URL carries its own `app`/`apps` parameters, so the global
-    // `--app` flag is intentionally ignored here.
+pub fn execute(cmd: DeeplinkCommand, app: Option<AppType>) -> Result<(), AppError> {
+    if app.is_some() {
+        return Err(AppError::InvalidInput(
+            "`--app` cannot be used with `deeplink`; target app(s) must be encoded in the URL via `app` or `apps`."
+                .to_string(),
+        ));
+    }
+
     let request = crate::parse_deeplink_url(&cmd.url)?;
     let state = AppState::try_new()?;
 
@@ -96,4 +102,52 @@ fn import_skill(state: &AppState, request: crate::DeepLinkImportRequest) -> Resu
 
     println!("{}", success(&format!("✓ Added skill repo '{repo_id}'")));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command() -> DeeplinkCommand {
+        DeeplinkCommand {
+            url: "ccswitch://v1/import?resource=provider&app=claude&name=Demo".to_string(),
+        }
+    }
+
+    #[test]
+    fn rejects_global_app_flag() {
+        let err = execute(command(), Some(AppType::Codex))
+            .expect_err("`--app` should be rejected for deeplink");
+
+        match err {
+            AppError::InvalidInput(message) => {
+                assert!(
+                    message.contains("`--app` cannot be used with `deeplink`"),
+                    "unexpected message: {message}"
+                );
+                assert!(
+                    message.contains("`app` or `apps`"),
+                    "message should point users to the URL parameters: {message}"
+                );
+            }
+            other => panic!("expected InvalidInput error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn app_flag_is_rejected_before_parsing_url() {
+        // An invalid URL would normally fail during parsing; the `--app` guard
+        // must short-circuit first so the error always points at the flag.
+        let cmd = DeeplinkCommand {
+            url: "not-a-valid-deeplink".to_string(),
+        };
+
+        let err = execute(cmd, Some(AppType::Claude))
+            .expect_err("`--app` should be rejected before URL parsing");
+
+        assert!(
+            matches!(&err, AppError::InvalidInput(message) if message.contains("`--app` cannot be used with `deeplink`")),
+            "expected the `--app` rejection, got {err:?}"
+        );
+    }
 }
