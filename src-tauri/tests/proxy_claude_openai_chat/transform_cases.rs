@@ -58,7 +58,7 @@ async fn cache_openai_chat_omits_prompt_cache_key_without_explicit_override() {
 }
 
 #[tokio::test]
-async fn cache_openai_chat_preserves_cache_control_metadata() {
+async fn cache_openai_chat_strips_cache_control_metadata() {
     let upstream_body = capture_openai_chat_upstream_body(
         "provider-fallback-id",
         provider_meta_from_json(json!({
@@ -90,29 +90,20 @@ async fn cache_openai_chat_preserves_cache_control_metadata() {
     )
     .await;
 
-    assert_eq!(
-        upstream_body
-            .pointer("/messages/0/cache_control/type")
-            .and_then(|value| value.as_str()),
-        Some("ephemeral")
+    assert!(
+        upstream_body.pointer("/messages/0/cache_control").is_none(),
+        "system message cache_control should be stripped"
     );
     assert_eq!(
         upstream_body
-            .pointer("/messages/1/content/0/cache_control/type")
-            .and_then(|value| value.as_str()),
-        Some("ephemeral")
+            .pointer("/messages/1/content")
+            .and_then(|v| v.as_str()),
+        Some("hello"),
+        "single text block should be simplified to plain string"
     );
-    assert_eq!(
-        upstream_body
-            .pointer("/messages/1/content/0/cache_control/ttl")
-            .and_then(|value| value.as_str()),
-        Some("5m")
-    );
-    assert_eq!(
-        upstream_body
-            .pointer("/tools/0/cache_control/type")
-            .and_then(|value| value.as_str()),
-        Some("ephemeral")
+    assert!(
+        upstream_body.pointer("/tools/0/cache_control").is_none(),
+        "tool cache_control should be stripped"
     );
 }
 
