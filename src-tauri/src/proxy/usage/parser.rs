@@ -342,8 +342,7 @@ impl TokenUsage {
                             {
                                 let delta_input = input as u32;
                                 if delta_input > 0
-                                    && (usage.input_tokens == 0
-                                        || delta_input < usage.input_tokens)
+                                    && (usage.input_tokens == 0 || delta_input < usage.input_tokens)
                                 {
                                     usage.input_tokens = delta_input;
                                     // 同步采用 delta 中的缓存计数

@@ -464,7 +464,9 @@ pub async fn get_coding_plan_quota(
 
     let quota = match provider {
         CodingPlanProvider::Kimi => query_kimi(api_key).await,
-        CodingPlanProvider::ZhipuCn | CodingPlanProvider::ZhipuEn => query_zhipu(base_url, api_key).await,
+        CodingPlanProvider::ZhipuCn | CodingPlanProvider::ZhipuEn => {
+            query_zhipu(base_url, api_key).await
+        }
         CodingPlanProvider::MiniMaxCn => query_minimax(api_key, true).await,
         CodingPlanProvider::MiniMaxEn => query_minimax(api_key, false).await,
     };
