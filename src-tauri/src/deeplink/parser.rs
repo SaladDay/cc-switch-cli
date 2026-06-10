@@ -138,5 +138,6 @@ fn parse_provider_deeplink(
             .get("usageAutoInterval")
             .and_then(|v| v.parse::<u64>().ok()),
         openclaw_config: None,
+        custom_env: None,
     })
 }
