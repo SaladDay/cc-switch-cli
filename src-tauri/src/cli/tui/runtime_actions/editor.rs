@@ -55,6 +55,19 @@ fn validate_provider_submit(
     None
 }
 
+fn refresh_provider_data_after_write(
+    ctx: &mut RuntimeActionContext<'_>,
+    state: &crate::store::AppState,
+) -> Result<(), AppError> {
+    let app_type = ctx.app.app_type.clone();
+    state.reload_config_snapshot_from_db()?;
+    ctx.data
+        .refresh_current_app_provider_data(state, &app_type)?;
+    ctx.app.clamp_selections(ctx.data);
+    ctx.data.mark_current_app_data_changed();
+    Ok(())
+}
+
 pub(super) fn open_external(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
     ctx.terminal.with_terminal_restored(|| {
         run_external_editor_for_current_editor(ctx.app, crate::cli::editor::open_external_editor)
@@ -792,7 +805,7 @@ fn submit_provider_add(
             ctx.app.form = None;
             ctx.app
                 .push_toast(texts::tui_toast_provider_add_finished(), ToastKind::Success);
-            *ctx.data = UiData::load(&ctx.app.app_type)?;
+            refresh_provider_data_after_write(ctx, &state)?;
         }
         Ok(false) => {
             ctx.app
@@ -842,7 +855,7 @@ fn submit_provider_edit(
         texts::tui_toast_provider_edit_finished(),
         ToastKind::Success,
     );
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     Ok(())
 }
 

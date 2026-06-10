@@ -2435,9 +2435,21 @@ fn openclaw_agents_picker_overlay_marks_current_option_when_editing_existing_fal
 }
 
 #[test]
+#[serial(home_settings)]
 fn header_centers_tabs_when_room_allows() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps(crate::settings::VisibleApps {
+        claude: true,
+        codex: true,
+        gemini: true,
+        opencode: true,
+        hermes: true,
+        openclaw: true,
+    })
+    .expect("save visible apps");
 
     let app = App::new(Some(AppType::Claude));
     let buf = render_with_size(&app, &minimal_data(&app.app_type), 140, 40);
@@ -2467,10 +2479,22 @@ fn header_centers_tabs_when_room_allows() {
 }
 
 #[test]
+#[serial(home_settings)]
 fn header_keeps_title_and_right_badges_visible_without_large_gap_in_chinese() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::Chinese);
     let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps(crate::settings::VisibleApps {
+        claude: true,
+        codex: true,
+        gemini: true,
+        opencode: true,
+        hermes: true,
+        openclaw: true,
+    })
+    .expect("save visible apps");
 
     let app = App::new(Some(AppType::Claude));
     let mut data = minimal_data(&app.app_type);

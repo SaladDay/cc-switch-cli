@@ -8,7 +8,9 @@ use crate::services::provider::ProviderSortUpdate;
 use crate::services::ProviderService;
 
 use super::super::app::{ConfirmAction, ConfirmOverlay, Overlay, ToastKind};
-use super::super::data::{load_state, UiData};
+use super::super::data::load_state;
+#[cfg(test)]
+use super::super::data::UiData;
 use super::super::form::ProviderAddField;
 use super::super::runtime_systems::{next_model_fetch_request_id, ModelFetchReq, StreamCheckReq};
 use super::super::text_edit::TextInput;
@@ -64,6 +66,37 @@ fn guard_last_active_failover_queue_entry(
     Ok(false)
 }
 
+fn refresh_provider_data_after_write(
+    ctx: &mut RuntimeActionContext<'_>,
+    state: &crate::store::AppState,
+) -> Result<(), AppError> {
+    refresh_provider_data_after_write_with_config(ctx, state, false)
+}
+
+fn refresh_provider_and_config_data_after_write(
+    ctx: &mut RuntimeActionContext<'_>,
+    state: &crate::store::AppState,
+) -> Result<(), AppError> {
+    refresh_provider_data_after_write_with_config(ctx, state, true)
+}
+
+fn refresh_provider_data_after_write_with_config(
+    ctx: &mut RuntimeActionContext<'_>,
+    state: &crate::store::AppState,
+    refresh_config: bool,
+) -> Result<(), AppError> {
+    let app_type = ctx.app.app_type.clone();
+    state.reload_config_snapshot_from_db()?;
+    ctx.data
+        .refresh_current_app_provider_data(state, &app_type)?;
+    if refresh_config {
+        ctx.data.refresh_current_app_config_data(state, &app_type)?;
+    }
+    ctx.app.clamp_selections(ctx.data);
+    ctx.data.mark_current_app_data_changed();
+    Ok(())
+}
+
 pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
     do_switch(ctx, id)
 }
@@ -72,7 +105,7 @@ pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(
     let state = load_state()?;
     let imported = ProviderService::import_live_config(&state, ctx.app.app_type.clone())? > 0;
 
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     ctx.app.pending_overlay = None;
     if imported {
         let toast_message = match ctx.app.app_type {
@@ -107,7 +140,7 @@ fn do_switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppEr
             );
         }
     }
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     ctx.app.pending_overlay = None;
 
     let proxy_ready = ctx
@@ -192,7 +225,7 @@ pub(super) fn set_failover_queue(
             .remove_from_failover_queue(ctx.app.app_type.as_str(), &id)?;
     }
 
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     ctx.app.push_toast(
         if enabled {
             crate::t!(
@@ -274,7 +307,7 @@ pub(super) fn move_failover_queue(
 
     let state = load_state()?;
     ProviderService::update_sort_order(&state, ctx.app.app_type.clone(), updates)?;
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     ctx.app.push_toast(
         crate::t!("Failover queue order updated.", "故障转移队列顺序已更新。"),
         ToastKind::Success,
@@ -291,7 +324,7 @@ pub(super) fn delete(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
     ProviderService::delete(&state, ctx.app.app_type.clone(), &id)?;
     ctx.app
         .push_toast(texts::tui_toast_provider_deleted(), ToastKind::Success);
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     Ok(())
 }
 
@@ -307,7 +340,7 @@ pub(super) fn remove_from_config(
                 texts::tui_toast_provider_removed_from_config(),
                 ToastKind::Success,
             );
-            *ctx.data = UiData::load(&ctx.app.app_type)?;
+            refresh_provider_data_after_write(ctx, &state)?;
             Ok(())
         }
         crate::app_config::AppType::OpenCode | crate::app_config::AppType::Hermes => {
@@ -317,7 +350,7 @@ pub(super) fn remove_from_config(
                 texts::tui_toast_provider_removed_from_app_config(ctx.app.app_type.as_str()),
                 ToastKind::Success,
             );
-            *ctx.data = UiData::load(&ctx.app.app_type)?;
+            refresh_provider_data_after_write(ctx, &state)?;
             Ok(())
         }
         _ => delete(ctx, id),
@@ -338,7 +371,7 @@ pub(super) fn set_default_model(
         texts::tui_toast_provider_set_as_default(&default)
     };
     ctx.app.push_toast(message, ToastKind::Success);
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_and_config_data_after_write(ctx, &state)?;
     Ok(())
 }
 
@@ -1122,6 +1155,12 @@ mod tests {
             .db
             .is_in_failover_queue("claude", "p1")
             .expect("read failover queue membership"));
+        assert!(ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .any(|row| row.id == "p1" && !row.provider.in_failover_queue));
     }
 
     #[test]
@@ -1151,10 +1190,6 @@ mod tests {
             .db
             .add_to_failover_queue("claude", "first")
             .expect("queue first provider");
-        state
-            .db
-            .add_to_failover_queue("claude", "second")
-            .expect("queue second provider");
 
         let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
         let mut app = App::new(Some(AppType::Claude));
@@ -1180,6 +1215,15 @@ mod tests {
             model_fetch_req_tx: None,
             managed_auth_req_tx: None,
         };
+
+        set_failover_queue(&mut ctx, "second".to_string(), true)
+            .expect("queue second provider before moving");
+        assert!(ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .any(|row| row.id == "second" && row.provider.in_failover_queue));
 
         move_failover_queue(
             &mut ctx,
@@ -1596,8 +1640,69 @@ mod tests {
         assert!(matches!(
             fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay { title, message, action })
-                if title == texts::tui_claude_api_format_requires_proxy_title()
-                    && message == texts::tui_claude_api_format_requires_proxy_message("openai_chat")
+                if title.as_str() == texts::tui_claude_api_format_requires_proxy_title()
+                    && message.as_str()
+                        == texts::tui_claude_api_format_requires_proxy_message("openai_chat")
+                            .as_str()
+                    && matches!(action, ConfirmAction::ProviderApiFormatProxyNotice)
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn provider_switch_proxy_notice_uses_refreshed_proxy_snapshot() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        claude_test_config("old-provider", "openai_chat")
+            .save()
+            .expect("persist claude providers");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::load(&AppType::Claude).expect("load claude data");
+        data.proxy.running = true;
+        data.proxy.claude_takeover = true;
+        data.proxy.managed_runtime = false;
+        assert_eq!(
+            data.proxy
+                .routes_current_app_through_proxy(&AppType::Claude),
+            Some(true),
+            "precondition: stale in-memory proxy snapshot should look ready"
+        );
+
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        switch(&mut ctx, "proxy-provider".to_string()).expect("switch provider");
+
+        assert_eq!(ctx.data.providers.current_id, "proxy-provider");
+        assert!(matches!(
+            &ctx.app.overlay,
+            Overlay::Confirm(ConfirmOverlay { title, message, action })
+                if title.as_str() == texts::tui_claude_api_format_requires_proxy_title()
+                    && message.as_str()
+                        == texts::tui_claude_api_format_requires_proxy_message("openai_chat")
+                            .as_str()
                     && matches!(action, ConfirmAction::ProviderApiFormatProxyNotice)
         ));
     }
@@ -1755,6 +1860,16 @@ mod tests {
         let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
         let mut app = App::new(Some(AppType::OpenClaw));
         let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(OpenClawDefaultModel {
+                    primary: "stale-provider/stale-model".to_string(),
+                    fallbacks: Vec::new(),
+                    extra: HashMap::new(),
+                }),
+                models: None,
+                extra: HashMap::new(),
+            });
         data.providers
             .rows
             .push(crate::cli::tui::data::ProviderRow {
@@ -1811,6 +1926,21 @@ mod tests {
         assert_eq!(default_model.primary, "p1/model-primary");
         assert_eq!(
             default_model.fallbacks,
+            vec![
+                "p1/model-fallback-1".to_string(),
+                "p1/model-fallback-2".to_string()
+            ]
+        );
+        let refreshed_snapshot_model = ctx
+            .data
+            .config
+            .openclaw_agents_defaults
+            .as_ref()
+            .and_then(|defaults| defaults.model.as_ref())
+            .expect("ui config snapshot should refresh after setting default model");
+        assert_eq!(refreshed_snapshot_model.primary, "p1/model-primary");
+        assert_eq!(
+            refreshed_snapshot_model.fallbacks,
             vec![
                 "p1/model-fallback-1".to_string(),
                 "p1/model-fallback-2".to_string()

@@ -16,13 +16,14 @@ use super::super::data::{
     UsageRangePreset,
 };
 use super::types::{
-    fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataMsg, AppDataReq,
-    AppDataSystem, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq,
-    ManagedAuthSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg, ProxyReq,
-    ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, SessionMsg, SessionReq, SessionSystem, SkillsMsg,
-    SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg, StreamCheckReq,
-    StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem, UsagePricingMsg, UsagePricingReq,
-    UsagePricingSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
+    fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
+    AppDataReq, AppDataSystem, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg,
+    ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg,
+    ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, SessionMsg, SessionReq, SessionSystem,
+    SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg,
+    StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem, UsagePricingMsg,
+    UsagePricingReq, UsagePricingSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq,
+    WebDavReqKind, WebDavSystem,
 };
 
 pub(crate) fn start_proxy_system() -> Result<ProxySystem, AppError> {
@@ -838,28 +839,19 @@ fn app_data_worker_loop(rx: mpsc::Receiver<AppDataReq>, tx: mpsc::Sender<AppData
                 state_cache = None;
                 let _ = ack.send(());
             }
-            req @ AppDataReq::Load { .. } => {
+            req @ (AppDataReq::InitialLoad { .. }
+            | AppDataReq::Load { .. }
+            | AppDataReq::FullLoad { .. }) => {
                 let mut backlog = VecDeque::from([req]);
-                drain_latest_by_app(&mut backlog, &mut deferred, &rx, app_data_req_app_type);
+                drain_latest_by_key(&mut backlog, &mut deferred, &rx, app_data_req_key);
 
                 while let Some(req) = backlog.pop_front() {
                     handle_app_data_req(&mut state_cache, req, &tx);
-                    drain_latest_by_app(&mut backlog, &mut deferred, &rx, app_data_req_app_type);
+                    drain_latest_by_key(&mut backlog, &mut deferred, &rx, app_data_req_key);
                 }
             }
         }
     }
-}
-
-fn drain_latest_by_app<T, F>(
-    backlog: &mut VecDeque<T>,
-    deferred: &mut VecDeque<T>,
-    rx: &mpsc::Receiver<T>,
-    key: F,
-) where
-    F: Fn(&T) -> Option<AppType>,
-{
-    drain_latest_by_key(backlog, deferred, rx, key);
 }
 
 fn drain_latest_by_key<T, K, F>(
@@ -891,9 +883,13 @@ fn drain_latest_by_key<T, K, F>(
     backlog.extend(latest_by_key.into_values());
 }
 
-fn app_data_req_app_type(req: &AppDataReq) -> Option<AppType> {
+fn app_data_req_key(req: &AppDataReq) -> Option<(AppType, AppDataLoadKind)> {
     match req {
-        AppDataReq::Load { app_type, .. } => Some(app_type.clone()),
+        AppDataReq::InitialLoad { app_type, .. } => {
+            Some((app_type.clone(), AppDataLoadKind::Initial))
+        }
+        AppDataReq::Load { app_type, .. } => Some((app_type.clone(), AppDataLoadKind::Snapshot)),
+        AppDataReq::FullLoad { app_type, .. } => Some((app_type.clone(), AppDataLoadKind::Full)),
         AppDataReq::DropState { .. } => None,
     }
 }
@@ -1226,24 +1222,66 @@ fn handle_app_data_req(
     req: AppDataReq,
     tx: &mpsc::Sender<AppDataMsg>,
 ) {
-    let AppDataReq::Load {
-        request_id,
-        generation,
-        app_state_epoch,
-        app_type,
-    } = req
-    else {
-        return;
+    let (kind, request_id, generation, app_state_epoch, app_type, result) = match req {
+        AppDataReq::InitialLoad {
+            request_id,
+            generation,
+            app_state_epoch,
+            app_type,
+        } => {
+            let result = UiData::load(&app_type).map_err(|err| err.to_string());
+            (
+                AppDataLoadKind::Initial,
+                request_id,
+                generation,
+                app_state_epoch,
+                app_type,
+                result,
+            )
+        }
+        AppDataReq::Load {
+            request_id,
+            generation,
+            app_state_epoch,
+            app_type,
+        } => {
+            let result = state_for_epoch(state_cache, app_state_epoch)
+                .and_then(|state| {
+                    state
+                        .reload_config_snapshot_from_db()
+                        .and_then(|()| UiData::load_fast_snapshot_from_state(state, &app_type))
+                })
+                .map_err(|err| err.to_string());
+            (
+                AppDataLoadKind::Snapshot,
+                request_id,
+                generation,
+                app_state_epoch,
+                app_type,
+                result,
+            )
+        }
+        AppDataReq::FullLoad {
+            request_id,
+            generation,
+            app_state_epoch,
+            app_type,
+        } => {
+            let result = UiData::load(&app_type).map_err(|err| err.to_string());
+            (
+                AppDataLoadKind::Full,
+                request_id,
+                generation,
+                app_state_epoch,
+                app_type,
+                result,
+            )
+        }
+        AppDataReq::DropState { .. } => return,
     };
-    let result = state_for_epoch(state_cache, app_state_epoch)
-        .and_then(|state| {
-            state
-                .reload_config_snapshot_from_db()
-                .and_then(|()| UiData::load_fast_snapshot_from_state(state, &app_type))
-        })
-        .map_err(|err| err.to_string());
 
     let _ = tx.send(AppDataMsg::Loaded {
+        kind,
         request_id,
         generation,
         app_state_epoch,
@@ -1740,6 +1778,51 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(drained, vec![(newer_custom, 2)]);
+        assert!(deferred.is_empty());
+    }
+
+    #[test]
+    fn app_data_drain_keeps_initial_and_snapshot_loads_distinct() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(AppDataReq::Load {
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+        })
+        .expect("queue snapshot request");
+        drop(tx);
+
+        let mut backlog = std::collections::VecDeque::from([AppDataReq::InitialLoad {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+        }]);
+        let mut deferred = std::collections::VecDeque::new();
+
+        drain_latest_by_key(&mut backlog, &mut deferred, &rx, app_data_req_key);
+
+        let mut drained = backlog
+            .into_iter()
+            .map(|req| match req {
+                AppDataReq::InitialLoad { request_id, .. } => {
+                    (AppDataLoadKind::Initial, request_id)
+                }
+                AppDataReq::Load { request_id, .. } => (AppDataLoadKind::Snapshot, request_id),
+                AppDataReq::FullLoad { request_id, .. } => (AppDataLoadKind::Full, request_id),
+                AppDataReq::DropState { .. } => panic!("unexpected DropState in backlog"),
+            })
+            .collect::<Vec<_>>();
+        drained.sort_by_key(|(_, request_id)| *request_id);
+
+        assert_eq!(
+            drained,
+            vec![
+                (AppDataLoadKind::Initial, 1),
+                (AppDataLoadKind::Snapshot, 2)
+            ]
+        );
         assert!(deferred.is_empty());
     }
 

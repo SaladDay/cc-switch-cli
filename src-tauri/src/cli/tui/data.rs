@@ -868,6 +868,29 @@ pub(crate) fn load_snapshot_state() -> Result<AppState, AppError> {
 }
 
 impl UiData {
+    pub(crate) fn mark_current_app_data_changed(&mut self) {
+        self.reload_token = next_reload_token();
+    }
+
+    pub(crate) fn refresh_current_app_provider_data(
+        &mut self,
+        state: &AppState,
+        app_type: &AppType,
+    ) -> Result<(), AppError> {
+        self.providers = load_providers_with_mode(state, app_type, ProviderLoadMode::SyncLive)?;
+        self.proxy = load_proxy_snapshot_from_state(state, app_type)?;
+        Ok(())
+    }
+
+    pub(crate) fn refresh_current_app_config_data(
+        &mut self,
+        state: &AppState,
+        app_type: &AppType,
+    ) -> Result<(), AppError> {
+        self.config = load_config_snapshot(state, app_type)?;
+        Ok(())
+    }
+
     pub fn load(app_type: &AppType) -> Result<Self, AppError> {
         let state = load_state()?;
 

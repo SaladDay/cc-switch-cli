@@ -111,9 +111,28 @@ pub(crate) enum QuotaMsg {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AppDataLoadKind {
+    Initial,
+    Snapshot,
+    Full,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum AppDataReq {
+    InitialLoad {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+    },
     Load {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+    },
+    FullLoad {
         request_id: u64,
         generation: u64,
         app_state_epoch: u64,
@@ -126,6 +145,7 @@ pub(crate) enum AppDataReq {
 
 pub(crate) enum AppDataMsg {
     Loaded {
+        kind: AppDataLoadKind,
         request_id: u64,
         generation: u64,
         app_state_epoch: u64,

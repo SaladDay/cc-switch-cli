@@ -18,9 +18,9 @@ pub(crate) use types::{
     build_stream_check_result_lines, fetch_provider_models_for_tui, ModelFetchStrategy,
 };
 pub(crate) use types::{
-    next_model_fetch_request_id, AppDataMsg, AppDataReq, LocalEnvReq, ManagedAuthReq,
-    ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq, SkillsReq, StreamCheckReq,
-    UpdateReq, UsagePricingMsg, UsagePricingReq, WebDavReq, WebDavReqKind,
+    next_model_fetch_request_id, AppDataLoadKind, AppDataMsg, AppDataReq, LocalEnvReq,
+    ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq, SkillsReq,
+    StreamCheckReq, UpdateReq, UsagePricingMsg, UsagePricingReq, WebDavReq, WebDavReqKind,
 };
 #[cfg(test)]
 pub(crate) use workers::drain_latest_webdav_req;
