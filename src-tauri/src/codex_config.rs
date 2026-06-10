@@ -530,8 +530,7 @@ fn set_codex_model_catalog_json_field(
     match catalog_path {
         Some(_path) => {
             // 使用相对文件名而非绝对路径，保持与 Codex 自身引用方式一致
-            doc["model_catalog_json"] =
-                toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
+            doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
         }
         None => {
             let should_remove = doc
@@ -1522,7 +1521,7 @@ name = "any"
             parsed
                 .get("model_catalog_json")
                 .and_then(toml::Value::as_str),
-            Some("/tmp/cc-switch-model-catalog.json")
+            Some("cc-switch-model-catalog.json")
         );
         assert!(
             parsed
@@ -1691,7 +1690,7 @@ wire_api = "responses"
             parsed
                 .get("model_catalog_json")
                 .and_then(toml::Value::as_str),
-            Some(get_codex_model_catalog_path().to_string_lossy().as_ref())
+            Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
         );
         let generated_catalog: Value = serde_json::from_str(
             &fs::read_to_string(get_codex_model_catalog_path()).expect("read catalog"),
