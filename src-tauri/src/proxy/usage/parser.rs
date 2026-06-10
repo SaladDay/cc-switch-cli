@@ -1161,4 +1161,102 @@ mod tests {
         assert_eq!(usage.output_tokens, 50);
         assert_eq!(usage.model, Some("gpt-4o".to_string()));
     }
+
+    #[test]
+    fn test_claude_stream_delta_input_override_inflated_start() {
+        // Some providers (Qwen, MiniMax) report fresh+cached as input_tokens in
+        // message_start, inflating the count. message_delta provides the correct
+        // (smaller) value that should override.
+        let events = vec![
+            json!({
+                "type": "message_start",
+                "message": {
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": {
+                        "input_tokens": 10000,
+                        "cache_read_input_tokens": 8000,
+                        "cache_creation_input_tokens": 0
+                    }
+                }
+            }),
+            json!({
+                "type": "message_delta",
+                "usage": {
+                    "output_tokens": 50,
+                    "input_tokens": 2000,
+                    "cache_read_input_tokens": 1500,
+                    "cache_creation_input_tokens": 0
+                }
+            }),
+        ];
+
+        let usage = TokenUsage::from_claude_stream_events(&events).unwrap();
+        // Delta input_tokens (2000) < start input_tokens (10000), so override
+        assert_eq!(usage.input_tokens, 2000);
+        assert_eq!(usage.output_tokens, 50);
+        // Cache counts synced from delta
+        assert_eq!(usage.cache_read_tokens, 1500);
+        assert_eq!(usage.cache_creation_tokens, 0);
+    }
+
+    #[test]
+    fn test_claude_stream_delta_input_not_overridden_when_larger() {
+        // If delta input_tokens is larger than start, keep the start value
+        let events = vec![
+            json!({
+                "type": "message_start",
+                "message": {
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": {
+                        "input_tokens": 1000,
+                        "cache_read_input_tokens": 200,
+                        "cache_creation_input_tokens": 0
+                    }
+                }
+            }),
+            json!({
+                "type": "message_delta",
+                "usage": {
+                    "output_tokens": 50,
+                    "input_tokens": 2000
+                }
+            }),
+        ];
+
+        let usage = TokenUsage::from_claude_stream_events(&events).unwrap();
+        // Delta (2000) > start (1000), so keep start value
+        assert_eq!(usage.input_tokens, 1000);
+        assert_eq!(usage.output_tokens, 50);
+    }
+
+    #[test]
+    fn test_claude_stream_delta_input_overrides_when_start_is_zero() {
+        // When start has zero input_tokens, delta should always be adopted
+        let events = vec![
+            json!({
+                "type": "message_start",
+                "message": {
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": {
+                        "input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0
+                    }
+                }
+            }),
+            json!({
+                "type": "message_delta",
+                "usage": {
+                    "output_tokens": 50,
+                    "input_tokens": 500,
+                    "cache_read_input_tokens": 100
+                }
+            }),
+        ];
+
+        let usage = TokenUsage::from_claude_stream_events(&events).unwrap();
+        assert_eq!(usage.input_tokens, 500);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_read_tokens, 100);
+    }
 }

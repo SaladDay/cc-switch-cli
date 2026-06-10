@@ -184,7 +184,8 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
 /// 根据用户配置的 base_url 确定智谱配额查询端点。
 /// 中国大陆用户使用 open.bigmodel.cn，国际用户使用 api.z.ai。
 fn zhipu_quota_base(base_url: &str) -> &'static str {
-    if base_url.contains("bigmodel.cn") {
+    let url = base_url.to_lowercase();
+    if url.contains("bigmodel.cn") {
         "https://open.bigmodel.cn"
     } else {
         "https://api.z.ai"
@@ -472,4 +473,123 @@ pub async fn get_coding_plan_quota(
     };
 
     Ok(quota)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zhipu_quota_base_cn() {
+        assert_eq!(
+            zhipu_quota_base("https://open.bigmodel.cn/api/paas/v4"),
+            "https://open.bigmodel.cn"
+        );
+    }
+
+    #[test]
+    fn zhipu_quota_base_en() {
+        assert_eq!(
+            zhipu_quota_base("https://api.z.ai/api/paas/v4"),
+            "https://api.z.ai"
+        );
+    }
+
+    #[test]
+    fn zhipu_quota_base_case_insensitive() {
+        assert_eq!(
+            zhipu_quota_base("https://OPEN.BIGMODEL.CN/api/paas/v4"),
+            "https://open.bigmodel.cn"
+        );
+        assert_eq!(
+            zhipu_quota_base("https://Api.Z.AI/api/paas/v4"),
+            "https://api.z.ai"
+        );
+    }
+
+    #[test]
+    fn detect_provider_case_insensitive() {
+        assert!(matches!(
+            detect_provider("https://OPEN.BIGMODEL.CN/api/paas/v4"),
+            Some(CodingPlanProvider::ZhipuCn)
+        ));
+        assert!(matches!(
+            detect_provider("https://Api.Z.AI/api/paas/v4"),
+            Some(CodingPlanProvider::ZhipuEn)
+        ));
+    }
+
+    #[test]
+    fn zhipu_quota_base_matches_detect_provider_for_cn() {
+        // Ensure zhipu_quota_base and detect_provider agree on CN vs EN
+        let urls = [
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://OPEN.BIGMODEL.CN/api/paas/v4",
+            "https://api.z.ai/api/paas/v4",
+            "https://Api.Z.AI/api/paas/v4",
+        ];
+        for url in &urls {
+            let provider = detect_provider(url);
+            let base = zhipu_quota_base(url);
+            match provider {
+                Some(CodingPlanProvider::ZhipuCn) => {
+                    assert_eq!(base, "https://open.bigmodel.cn", "CN mismatch for {url}")
+                }
+                Some(CodingPlanProvider::ZhipuEn) => {
+                    assert_eq!(base, "https://api.z.ai", "EN mismatch for {url}")
+                }
+                _ => panic!("unexpected provider for {url}"),
+            }
+        }
+    }
+
+    #[test]
+    fn zhipu_tier_sorting_none_resets_at_first() {
+        // When the 5-hour bucket has 0% utilization, nextResetTime is absent.
+        // Tiers with None resets_at should sort before those with Some.
+        let mut tiers = vec![
+            QuotaTier {
+                name: "weekly".to_string(),
+                utilization: 50.0,
+                resets_at: Some("2026-06-15T00:00:00Z".to_string()),
+            },
+            QuotaTier {
+                name: "five_hour".to_string(),
+                utilization: 0.0,
+                resets_at: None,
+            },
+        ];
+        tiers.sort_by(|a, b| match (&a.resets_at, &b.resets_at) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(a_time), Some(b_time)) => a_time.cmp(b_time),
+        });
+        assert_eq!(tiers[0].name, "five_hour");
+        assert_eq!(tiers[1].name, "weekly");
+    }
+
+    #[test]
+    fn zhipu_tier_sorting_by_reset_time_ascending() {
+        let mut tiers = vec![
+            QuotaTier {
+                name: "weekly".to_string(),
+                utilization: 50.0,
+                resets_at: Some("2026-06-15T00:00:00Z".to_string()),
+            },
+            QuotaTier {
+                name: "five_hour".to_string(),
+                utilization: 30.0,
+                resets_at: Some("2026-06-10T12:00:00Z".to_string()),
+            },
+        ];
+        tiers.sort_by(|a, b| match (&a.resets_at, &b.resets_at) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(a_time), Some(b_time)) => a_time.cmp(b_time),
+        });
+        assert_eq!(tiers[0].name, "five_hour");
+        assert_eq!(tiers[1].name, "weekly");
+    }
 }
