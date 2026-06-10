@@ -546,8 +546,7 @@ impl ChatToResponsesState {
                 ));
             } else {
                 let mut response = self.base_response("incomplete", output);
-                response["incomplete_details"] =
-                    json!({ "reason": "stream_truncated" });
+                response["incomplete_details"] = json!({ "reason": "stream_truncated" });
                 events.push(sse_event(
                     "response.completed",
                     json!({

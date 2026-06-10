@@ -624,7 +624,7 @@ mod tests {
         let result = anthropic_to_openai(input, None).unwrap();
 
         assert_eq!(result["messages"][0]["content"], "Project instructions");
-        assert_eq!(result["messages"][0]["cache_control"]["type"], "ephemeral");
+        assert!(result["messages"][0].get("cache_control").is_none());
     }
 
     #[test]
@@ -690,7 +690,7 @@ mod tests {
         let result = anthropic_to_openai(input, None).unwrap();
 
         assert_eq!(result["messages"][0]["role"], "system");
-        assert_eq!(result["messages"][0]["cache_control"]["type"], "ephemeral");
+        assert!(result["messages"][0].get("cache_control").is_none());
     }
 
     #[test]
@@ -713,7 +713,7 @@ mod tests {
             result["messages"][0]["content"],
             "You are Claude Code.\nBe concise."
         );
-        assert_eq!(result["messages"][0]["cache_control"]["type"], "ephemeral");
+        assert!(result["messages"][0].get("cache_control").is_none());
         assert_eq!(result["messages"][1]["role"], "user");
     }
 
@@ -762,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_to_openai_preserves_text_block_cache_control_and_array_shape() {
+    fn anthropic_to_openai_strips_text_block_cache_control_and_simplifies_single_block() {
         let input = json!({
             "model": "claude-3-opus",
             "max_tokens": 1024,
@@ -778,15 +778,7 @@ mod tests {
 
         let result = anthropic_to_openai(input, None).unwrap();
 
-        assert!(result["messages"][0]["content"].is_array());
-        assert_eq!(
-            result["messages"][0]["content"][0]["cache_control"]["type"],
-            "ephemeral"
-        );
-        assert_eq!(
-            result["messages"][0]["content"][0]["cache_control"]["ttl"],
-            "5m"
-        );
+        assert_eq!(result["messages"][0]["content"], "Hello");
     }
 
     #[test]
@@ -805,7 +797,7 @@ mod tests {
 
         let result = anthropic_to_openai(input, None).unwrap();
 
-        assert_eq!(result["tools"][0]["cache_control"]["type"], "ephemeral");
+        assert!(result["tools"][0].get("cache_control").is_none());
     }
 
     fn run_tool_choice(value: Value) -> Value {
