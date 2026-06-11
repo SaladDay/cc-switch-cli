@@ -1,56 +1,14 @@
 use super::*;
 use serial_test::serial;
-use std::ffi::OsString;
-use std::path::Path;
 use tempfile::TempDir;
 
-use crate::test_support::{
-    lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
-};
-
-struct EnvGuard {
-    _lock: TestHomeSettingsLock,
-    old_home: Option<OsString>,
-    old_userprofile: Option<OsString>,
-}
-
-impl EnvGuard {
-    fn set_home(home: &Path) -> Self {
-        let lock = lock_test_home_and_settings();
-        let old_home = std::env::var_os("HOME");
-        let old_userprofile = std::env::var_os("USERPROFILE");
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
-        set_test_home_override(Some(home));
-        crate::settings::reload_test_settings();
-        Self {
-            _lock: lock,
-            old_home,
-            old_userprofile,
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match &self.old_userprofile {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        set_test_home_override(self.old_home.as_deref().map(Path::new));
-        crate::settings::reload_test_settings();
-    }
-}
+use crate::test_support::TestEnvGuard;
 
 #[test]
 #[serial]
 fn switch_codex_provider_writes_stored_config_directly() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -97,7 +55,7 @@ fn switch_codex_provider_writes_stored_config_directly() {
 #[serial]
 fn switch_codex_provider_migrates_legacy_flat_config() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 

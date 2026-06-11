@@ -1,5 +1,5 @@
 use crate::app_config::AppType;
-use crate::config::{get_app_config_dir, home_dir};
+use crate::config::{get_app_config_dir, home_dir, write_json_file};
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -602,13 +602,7 @@ impl AppSettings {
         normalized.validate()?;
         let path = Self::settings_path();
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-        }
-
-        let json = serde_json::to_string_pretty(&normalized)
-            .map_err(|e| AppError::JsonSerialize { source: e })?;
-        fs::write(&path, json).map_err(|e| AppError::io(&path, e))?;
+        write_json_file(&path, &normalized)?;
         Ok(())
     }
 }

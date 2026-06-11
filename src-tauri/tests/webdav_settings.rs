@@ -1,6 +1,6 @@
 use cc_switch_lib::{
-    get_webdav_sync_settings, set_webdav_sync_settings, webdav_jianguoyun_preset,
-    WebDavSyncSettings, WebDavSyncStatus,
+    check_permissions, get_app_config_dir, get_webdav_sync_settings, set_webdav_sync_settings,
+    webdav_jianguoyun_preset, WebDavSyncSettings, WebDavSyncStatus,
 };
 
 #[path = "support.rs"]
@@ -54,6 +54,55 @@ fn set_webdav_sync_settings_persists_and_normalizes_fields() {
     );
     assert_eq!(saved.remote_root, "cc-switch-sync");
     assert_eq!(saved.profile, "default");
+}
+
+#[cfg(unix)]
+#[test]
+fn set_webdav_sync_settings_writes_sensitive_settings_json_as_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    set_webdav_sync_settings(Some(sample_settings())).expect("save webdav settings");
+
+    let settings_path = get_app_config_dir().join("settings.json");
+    let mode = std::fs::metadata(&settings_path)
+        .expect("metadata settings.json")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+    assert!(
+        check_permissions().is_empty(),
+        "fresh settings write should not be reported as insecure"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn set_webdav_sync_settings_rejects_parent_dir_config_path_before_creating_dirs() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let root = home.join("invalid-config-root");
+    std::fs::create_dir(&root).expect("create invalid config root");
+    unsafe {
+        std::env::set_var("CC_SWITCH_CONFIG_DIR", root.join("child").join(".."));
+    }
+
+    set_webdav_sync_settings(Some(sample_settings()))
+        .expect_err("invalid config dir should be rejected before writing settings");
+
+    assert!(
+        !root.join("child").exists(),
+        "settings save must not pre-create unvalidated path components"
+    );
+    assert!(
+        !root.join("settings.json").exists(),
+        "settings save must not write to the normalized parent directory"
+    );
 }
 
 #[test]

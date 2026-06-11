@@ -81,6 +81,10 @@ mod config {
             .join(".cc-switch")
     }
 
+    pub(crate) fn create_managed_config_dir_all(path: &Path) -> Result<(), AppError> {
+        fs::create_dir_all(path).map_err(|err| AppError::io(path, err))
+    }
+
     pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|err| AppError::io(parent, err))?;
