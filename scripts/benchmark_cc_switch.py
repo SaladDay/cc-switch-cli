@@ -138,6 +138,9 @@ def read_json(path: Path) -> dict:
 def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # cc-switch checks that sensitive files (.json, .db) have 0600 on Unix.
+    if sys.platform != "win32":
+        path.chmod(0o600)
 
 
 @dataclass
@@ -188,7 +191,11 @@ def configure_environment(real_env: bool) -> BenchEnvironment:
     }
     old_env = {key: os.environ.get(key) for key in env_updates}
     for path in env_updates.values():
-        Path(path).mkdir(parents=True, exist_ok=True)
+        p = Path(path)
+        p.mkdir(parents=True, exist_ok=True)
+        # cc-switch checks that its config dir has 0700 permissions on Unix.
+        if path == env_updates["CC_SWITCH_CONFIG_DIR"]:
+            p.chmod(0o700)
     for key, value in env_updates.items():
         os.environ[key] = value
     return BenchEnvironment(mode="sandbox", root=root, old_env=old_env)
@@ -325,6 +332,9 @@ def connect_db(paths: Paths) -> sqlite3.Connection:
     paths.cc_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(paths.db_path)
     conn.execute("PRAGMA busy_timeout = 5000")
+    # cc-switch checks that .db files have 0600 permissions on Unix.
+    if sys.platform != "win32":
+        paths.db_path.chmod(0o600)
     return conn
 
 
