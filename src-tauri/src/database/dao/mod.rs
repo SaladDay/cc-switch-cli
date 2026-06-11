@@ -4,6 +4,7 @@
 
 pub mod failover;
 pub mod mcp;
+pub mod model_routes;
 pub mod model_pricing;
 pub mod prompts;
 pub mod providers;
