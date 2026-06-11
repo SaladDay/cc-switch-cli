@@ -79,45 +79,15 @@ Phases 3, 4, 5 可并行执行（都只依赖 Phase 2）。
 
 **Depends on:** Phase 1
 **Estimated effort:** 4-6 小时
-**Files to touch:** ~7 files, ~420 lines
+**Files to touch:** ~8 files, ~500 lines
+**Plans:** 1 plan
 
-### Tasks
+### Plans
 
-1. **ModelRouter 引擎**
-   - 新建 `proxy/model_router.rs`
-   - `ModelRouter::new(db: Arc<Database>) → Self`
-   - `match_route(app_type, model) → Option<Provider>` — 通配符匹配逻辑
-   - 通配符转换：`*` → 正则 `.*`，支持 `*sonnet*`、`claude-*`、`*-4-5`、精确匹配
-   - 匹配策略：找到所有 matching + enabled 的规则，取 priority 最小的
-   - `*` 转正则时转义特殊字符（仅 `*` 为通配符）
-   - provider 不存在时记录 warning 并返回 None
-
-2. **HandlerContext 集成**
-   - 在 `proxy/handler_context.rs` 的 `load()` 方法中注入 ModelRouter
-   - 在 `select_providers()` 调用之前执行 model_route 匹配
-   - 匹配成功 → 使用路由选中的 provider（单 provider，无 failover）
-   - 匹配失败 → 回退到现有 ProviderRouter 逻辑
-   - 在 HandlerContext 中记录 `route_source: Option<String>`（用于日志/调试）
-
-3. **RequestForwarder 集成**
-   - 在 `proxy/forwarder.rs` 中接收路由选中的 provider
-   - 确保单 provider 模式跳过 failover 队列逻辑
-
-4. **ProxyServerState 装配**
-   - 在 `proxy/server.rs` 中创建 ModelRouter 实例
-   - 注入到 ProxyServerState 供 handler 使用
-
-5. **模块导出**
-   - `proxy/mod.rs` 导出 `model_router` 模块
-   - `lib.rs` 公开导出 ModelRoute 类型
-
-### Verification
-- [ ] `cargo test proxy` — 代理测试通过（已有测试不能回归）
-- [ ] ModelRouter 单元测试：精确匹配、通配符匹配、多规则优先级、无匹配回退
-- [ ] 集成测试：代理请求带上 model 参数，验证路由到正确 provider
-- [ ] 手动测试：启动代理，发不同 model 的请求验证路由行为
+- [ ] 02-01-PLAN.md — ModelRouter engine creation, HandlerContext integration, ProxyServerState wiring, integration tests
 
 **Covers:** RT-01 ~ RT-06, TE-02
+
 
 ---
 
