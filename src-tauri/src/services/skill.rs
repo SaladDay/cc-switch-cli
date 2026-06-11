@@ -17,7 +17,7 @@ use tokio::time::timeout;
 
 use crate::app_config::AppType;
 pub use crate::app_config::{InstalledSkill, SkillApps, UnmanagedSkill};
-use crate::config::get_app_config_dir;
+use crate::config::{create_managed_config_dir_all, get_app_config_dir};
 use crate::database::Database;
 use crate::error::{format_skill_error, AppError};
 
@@ -431,7 +431,7 @@ impl SkillService {
 
     pub fn get_ssot_dir() -> Result<PathBuf, AppError> {
         let dir = get_app_config_dir().join("skills");
-        fs::create_dir_all(&dir).map_err(|e| AppError::io(&dir, e))?;
+        create_managed_config_dir_all(&dir)?;
         Ok(dir)
     }
 

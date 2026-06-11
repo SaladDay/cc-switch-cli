@@ -31,7 +31,7 @@
 //!     args: ["-y", "@modelcontextprotocol/server-filesystem"]
 //! ```
 
-use crate::config::{atomic_write, get_app_config_dir, home_dir};
+use crate::config::{atomic_write, create_managed_config_dir_all, get_app_config_dir, home_dir};
 use crate::error::AppError;
 use crate::settings::{effective_backup_retain_count, get_hermes_override_dir};
 use chrono::Local;
@@ -273,7 +273,7 @@ fn replace_yaml_section(
 
 fn create_hermes_backup(source: &str) -> Result<PathBuf, AppError> {
     let backup_dir = get_app_config_dir().join("backups").join("hermes");
-    fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+    create_managed_config_dir_all(&backup_dir)?;
 
     let base_id = format!("hermes_{}", Local::now().format("%Y%m%d_%H%M%S"));
     let mut filename = format!("{base_id}.yaml");

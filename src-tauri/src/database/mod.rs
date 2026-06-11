@@ -37,12 +37,13 @@ pub(crate) use dao::providers_seed::is_official_seed_id;
 pub use dao::FailoverQueueItem;
 
 use crate::config::{
-    get_app_config_dir, resolve_existing_or_new_child_path, restrict_dir_permissions,
+    get_app_config_dir, resolve_config_dir_without_following_user_symlinks,
+    resolve_existing_or_new_child_path,
 };
 use crate::error::AppError;
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
@@ -58,7 +59,60 @@ static DATABASE_PERMISSION_CHECK: Once = Once::new();
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 10;
+pub(crate) const SCHEMA_VERSION: i32 = 11;
+
+fn database_open_flags() -> OpenFlags {
+    OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW
+}
+
+fn readonly_database_open_flags() -> OpenFlags {
+    OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW
+}
+
+pub(crate) fn database_path() -> Result<PathBuf, AppError> {
+    Ok(
+        resolve_config_dir_without_following_user_symlinks(&get_app_config_dir())?
+            .join("cc-switch.db"),
+    )
+}
+
+#[cfg(unix)]
+fn reject_hardlinked_database_file(path: &Path, meta: &std::fs::Metadata) -> Result<(), AppError> {
+    use std::os::unix::fs::MetadataExt;
+
+    if meta.nlink() > 1 {
+        return Err(AppError::InvalidInput(format!(
+            "数据库文件不能有多个硬链接: {}",
+            path.display()
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_existing_database_file(path: &Path) -> Result<(), AppError> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| AppError::io(path, e))?;
+    if meta.file_type().is_symlink() {
+        return Err(AppError::InvalidInput(format!(
+            "数据库文件不能是符号链接: {}",
+            path.display()
+        )));
+    }
+    if !meta.is_file() {
+        return Err(AppError::InvalidInput(format!(
+            "数据库路径不是普通文件: {}",
+            path.display()
+        )));
+    }
+
+    reject_hardlinked_database_file(path, &meta)
+}
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -66,49 +120,130 @@ pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError
         .map_err(|e| AppError::Config(format!("JSON serialization failed: {e}")))
 }
 
-// Create folders with 0o700 permissions, and parent folders as well.
-// Leave existing folders untouched.
-// We fix the permissions of existing folders in config::prompt_fix_permissions,
-// so we don't need to do it here and risk messing with other processes' permissions.
-// We should also reject inscure path before actually creating files and folders
+// Create folders with 0o700 permissions.
+// Leave existing folders untouched. We fix permissions elsewhere, so this helper
+// must not chmod arbitrary existing parents or follow symlinked config paths.
 pub(crate) fn create_secure_dir_all(path: &Path) -> Result<bool, AppError> {
-    let resolved_path = resolve_existing_or_new_child_path(path)?;
-    create_secure_dir_all_resolved(&resolved_path)
-}
-
-fn create_secure_dir_all_resolved(path: &Path) -> Result<bool, AppError> {
-    if path.as_os_str().is_empty() || path.is_dir() {
-        return Ok(false);
-    }
-
-    if let Some(parent) = path.parent() {
-        if parent != path && !parent.as_os_str().is_empty() {
-            create_secure_dir_all(parent)?;
-        }
-    }
+    let path = resolve_create_dir_path(path)?;
 
     #[cfg(unix)]
-    let create_result = {
-        use std::os::unix::fs::DirBuilderExt;
-
-        std::fs::DirBuilder::new().mode(0o700).create(path)
-    };
+    {
+        create_secure_dir_all_no_symlink(&path)
+    }
 
     #[cfg(not(unix))]
-    let create_result = std::fs::DirBuilder::new().create(path);
-
-    match create_result {
-        Ok(()) => Ok(true),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {
-            // 竞态：目录在 is_dir() 检查后、create 前被其他进程创建，
-            // 需要收紧权限以确保安全
-            #[cfg(unix)]
-            restrict_dir_permissions(path).map_err(|e| AppError::io(path, e))?;
-
-            Ok(false)
+    {
+        match std::fs::create_dir_all(&path) {
+            Ok(()) => Ok(true),
+            Err(err) => Err(AppError::io(&path, err)),
         }
-        Err(err) => Err(AppError::io(path, err)),
     }
+}
+
+fn resolve_create_dir_path(path: &Path) -> Result<PathBuf, AppError> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        resolve_existing_or_new_child_path(path)?;
+        return normalize_path_lexically(path);
+    }
+
+    Ok(path.to_path_buf())
+}
+
+fn normalize_path_lexically(path: &Path) -> Result<PathBuf, AppError> {
+    let base = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        std::env::current_dir().map_err(|e| AppError::io(".", e))?
+    };
+
+    let mut normalized = PathBuf::new();
+    for component in base.join(path).components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(AppError::InvalidInput(format!(
+                        "路径包含无效的父目录组件: {}",
+                        path.display()
+                    )));
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    Ok(normalized)
+}
+
+#[cfg(unix)]
+fn create_secure_dir_all_no_symlink(path: &Path) -> Result<bool, AppError> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let mut current = PathBuf::new();
+    let mut created_any = false;
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => continue,
+            Component::ParentDir => unreachable!("parent components are rejected before creation"),
+            Component::Normal(part) => {
+                current.push(part);
+                match std::fs::symlink_metadata(&current) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        if let Some(resolved) = allowed_platform_symlink_component(&current)? {
+                            current = resolved;
+                            continue;
+                        }
+                        return Err(AppError::InvalidInput(format!(
+                            "配置目录路径不能包含符号链接: {}",
+                            current.display()
+                        )));
+                    }
+                    Ok(meta) if meta.is_dir() => {}
+                    Ok(_) => {
+                        return Err(AppError::InvalidInput(format!(
+                            "配置目录路径组件不是目录: {}",
+                            current.display()
+                        )));
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        std::fs::DirBuilder::new()
+                            .mode(0o700)
+                            .create(&current)
+                            .map_err(|e| AppError::io(&current, e))?;
+                        created_any = true;
+                    }
+                    Err(err) => return Err(AppError::io(&current, err)),
+                }
+            }
+        }
+    }
+
+    Ok(created_any)
+}
+
+#[cfg(unix)]
+fn allowed_platform_symlink_component(path: &Path) -> Result<Option<PathBuf>, AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        if matches!(path.to_str(), Some("/tmp") | Some("/var") | Some("/etc")) {
+            let resolved = path.canonicalize().map_err(|e| AppError::io(path, e))?;
+            let meta = std::fs::metadata(&resolved).map_err(|e| AppError::io(&resolved, e))?;
+            if meta.is_dir() {
+                return Ok(Some(resolved));
+            }
+        }
+    }
+
+    let _ = path;
+    Ok(None)
 }
 
 /// 安全地获取 Mutex 锁，避免 unwrap panic
@@ -151,7 +286,7 @@ impl Database {
         }
         warn_insecure_permissions_once();
 
-        let db_path = get_app_config_dir().join("cc-switch.db");
+        let db_path = database_path()?;
 
         // 确保父目录存在
         if let Some(parent) = db_path.parent() {
@@ -162,13 +297,17 @@ impl Database {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            if !db_path.exists() {
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .mode(0o600)
-                    .open(&db_path)
-                    .map_err(|e| AppError::io(&db_path, e))?;
+            match std::fs::symlink_metadata(&db_path) {
+                Ok(_) => validate_existing_database_file(&db_path)?,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&db_path)
+                        .map_err(|e| AppError::io(&db_path, e))?;
+                }
+                Err(err) => return Err(AppError::io(&db_path, err)),
             }
         }
         #[cfg(not(unix))]
@@ -178,7 +317,8 @@ impl Database {
             }
         }
 
-        let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = Connection::open_with_flags(&db_path, database_open_flags())
+            .map_err(|e| AppError::Database(e.to_string()))?;
 
         Self::configure_connection(&conn)?;
         // 多进程并发：daemon 与 worker 都会打开这个文件，WAL + busy_timeout 让
@@ -222,15 +362,17 @@ impl Database {
     ///
     /// 用于 TUI 后台热刷新等只读路径；不会创建目录、建表、迁移、seed 或执行启动维护。
     pub fn open_readonly_current_schema() -> Result<Self, AppError> {
-        let db_path = get_app_config_dir().join("cc-switch.db");
+        let db_path = database_path()?;
         if !db_path.exists() {
             return Err(AppError::Database(format!(
                 "database is not initialized: {}",
                 db_path.display()
             )));
         }
+        #[cfg(unix)]
+        validate_existing_database_file(&db_path)?;
 
-        let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        let conn = Connection::open_with_flags(&db_path, readonly_database_open_flags())
             .map_err(|e| AppError::Database(e.to_string()))?;
         Self::configure_connection(&conn)?;
 

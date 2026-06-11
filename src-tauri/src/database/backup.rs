@@ -2,13 +2,12 @@
 //!
 //! 提供 SQL 导出/导入和二进制快照备份功能。
 
-use super::{create_secure_dir_all, lock_conn, Database, DB_BACKUP_RETAIN};
-use crate::config::get_app_config_dir;
+use super::{create_secure_dir_all, database_path, lock_conn, Database, DB_BACKUP_RETAIN};
 use crate::error::AppError;
 use chrono::Utc;
 use rusqlite::backup::Backup;
 use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
@@ -470,7 +469,7 @@ impl Database {
 
     /// 生成一致性快照备份，返回备份文件路径（不存在主库时返回 None）
     pub(crate) fn backup_database_file(&self) -> Result<Option<PathBuf>, AppError> {
-        let db_path = get_app_config_dir().join("cc-switch.db");
+        let db_path = database_path()?;
         if !db_path.exists() {
             return Ok(None);
         }
@@ -492,26 +491,9 @@ impl Database {
             counter += 1;
         }
 
-        // 新建备份文件时以 0o600 原子创建
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .mode(0o600)
-                .open(&backup_path)
-                .map_err(|e| AppError::io(&backup_path, e))?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::File::create(&backup_path).map_err(|e| AppError::io(&backup_path, e))?;
-        }
-
         {
             let conn = lock_conn!(self.conn);
-            let mut dest_conn =
-                Connection::open(&backup_path).map_err(|e| AppError::Database(e.to_string()))?;
+            let mut dest_conn = Self::create_backup_db_connection(&backup_path)?;
             let backup = Backup::new(&conn, &mut dest_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             backup
@@ -521,6 +503,70 @@ impl Database {
 
         Self::cleanup_db_backups(&backup_dir)?;
         Ok(Some(backup_path))
+    }
+
+    pub(super) fn create_backup_db_connection(backup_path: &Path) -> Result<Connection, AppError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            match std::fs::symlink_metadata(backup_path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(AppError::InvalidInput(format!(
+                        "数据库备份文件不能是符号链接: {}",
+                        backup_path.display()
+                    )));
+                }
+                Ok(meta) if meta.is_file() => {
+                    return Err(AppError::InvalidInput(format!(
+                        "数据库备份文件已存在: {}",
+                        backup_path.display()
+                    )));
+                }
+                Ok(_) => {
+                    return Err(AppError::InvalidInput(format!(
+                        "数据库备份路径不是普通文件: {}",
+                        backup_path.display()
+                    )));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(backup_path)
+                        .map_err(|e| AppError::io(backup_path, e))?;
+                }
+                Err(err) => return Err(AppError::io(backup_path, err)),
+            }
+
+            let open_path = Self::canonicalize_existing_parent(backup_path)?;
+            let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+            Connection::open_with_flags(&open_path, flags)
+                .map_err(|e| AppError::Database(e.to_string()))
+        }
+
+        #[cfg(not(unix))]
+        {
+            std::fs::File::create(backup_path).map_err(|e| AppError::io(backup_path, e))?;
+            Connection::open(backup_path).map_err(|e| AppError::Database(e.to_string()))
+        }
+    }
+
+    fn canonicalize_existing_parent(path: &Path) -> Result<PathBuf, AppError> {
+        let Some(file_name) = path.file_name() else {
+            return Err(AppError::InvalidInput(format!(
+                "数据库备份路径缺少文件名: {}",
+                path.display()
+            )));
+        };
+        let parent = path
+            .parent()
+            .ok_or_else(|| AppError::InvalidInput(format!("无效路径: {}", path.display())))?;
+        let parent = parent.canonicalize().map_err(|e| AppError::io(parent, e))?;
+        Ok(parent.join(file_name))
     }
 
     /// 清理旧的数据库备份，保留最新的 N 个
@@ -736,10 +782,7 @@ impl Database {
             return Ok(true);
         };
 
-        Ok(!policy
-            .local_settings_keys
-            .iter()
-            .any(|local_key| *local_key == key))
+        Ok(!policy.local_settings_keys.contains(&key))
     }
 
     fn neutralize_export_row(
