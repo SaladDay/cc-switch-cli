@@ -2481,13 +2481,11 @@ fn schema_migration_v10_adds_model_routes_table() {
         "model_routes table should exist after v10 -> v11 migration"
     );
     assert!(
-        Database::has_column(&conn, "model_routes", "pattern")
-            .expect("check pattern column"),
+        Database::has_column(&conn, "model_routes", "pattern").expect("check pattern column"),
         "model_routes.pattern column should exist"
     );
     assert!(
-        Database::has_column(&conn, "model_routes", "priority")
-            .expect("check priority column"),
+        Database::has_column(&conn, "model_routes", "priority").expect("check priority column"),
         "model_routes.priority column should exist"
     );
 }

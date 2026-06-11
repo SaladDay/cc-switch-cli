@@ -51,7 +51,6 @@ pub use config::{
     prompt_fix_permissions, read_json_file, validate_config_dir,
 };
 pub use database::{Database, FailoverQueueItem};
-pub use model_route::ModelRoute;
 pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkImportRequest};
 pub use error::AppError;
 pub use import_export::export_config_to_file;
@@ -61,6 +60,7 @@ pub use mcp::{
     sync_enabled_to_codex, sync_enabled_to_gemini, sync_single_server_to_claude,
     sync_single_server_to_codex, sync_single_server_to_gemini,
 };
+pub use model_route::ModelRoute;
 pub use provider::{Provider, ProviderMeta, UsageScript};
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
 pub use services::{
