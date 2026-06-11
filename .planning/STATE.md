@@ -1,3 +1,18 @@
+---
+gsd_state_version: 1.0
+milestone: v1.0
+milestone_name: milestone
+current_phase: Phase 1 (planned, ready to execute)
+status: unknown
+last_updated: "2026-06-11T16:20:22.592Z"
+progress:
+  total_phases: 6
+  completed_phases: 1
+  total_plans: 1
+  completed_plans: 1
+  percent: 17
+---
+
 # State: CC-Switch CLI
 
 **Last updated:** 2026-06-11
@@ -37,7 +52,9 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 ## Quick Start (Next Session)
 
 ```bash
+
 # Execute Phase 1:
+
 /gsd-execute-phase 01-database
 ```
 
@@ -46,3 +63,13 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 - 上游 PR #4081 于 2026-06-11 提交，当前状态 OPEN，有一次 codex review 但无实质性修改要求
 - cc-switch-cli 与 cc-switch 的关键差异：无 React 前端、ratatui TUI、代理架构细节可能不同
 - Phase 4 (TUI) 是最大的工作量来源（35-40%），取决于现有 TUI 组件的复用程度
+
+## Performance Metrics
+
+| Phase | Plan | Duration | Notes |
+|-------|------|----------|-------|
+| Phase 01-database P01 | 18 | 3 tasks | 7 files |
+
+## Decisions
+
+- [Phase ?]: ModelRoute type in separate model_route.rs module (matches upstream PR #4081 structure)
