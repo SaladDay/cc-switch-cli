@@ -1,6 +1,6 @@
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
-use crate::provider::{ClaudeApiKeyField, Provider};
+use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig, Provider};
 use crate::services::ProviderService;
 use serde_json::{json, Value};
 
@@ -9,10 +9,10 @@ use super::provider_json::{
 };
 use super::provider_state_loading::populate_form_from_provider;
 use super::{
-    ClaudeApiFormat, CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType,
-    HermesModelField, ProviderAddField, ProviderAddFormState, ProviderFormPage, TextInput,
-    UsageQueryField, UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE,
-    OPENCLAW_DEFAULT_API_PROTOCOL,
+    ClaudeApiFormat, CodexLocalRoutingField, CodexModelCatalogField, CodexModelCatalogRow,
+    CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType, HermesModelField,
+    ProviderAddField, ProviderAddFormState, ProviderFormPage, TextInput, UsageQueryField,
+    UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
 fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
@@ -99,14 +99,16 @@ impl ProviderAddFormState {
     pub fn new_with_common_snippet(app_type: AppType, common_snippet: &str) -> Self {
         let include_common_config =
             Self::snippet_has_effective_common_config(&app_type, common_snippet);
+        let is_codex = matches!(app_type, AppType::Codex);
         let openclaw_api_default = match app_type {
             AppType::OpenClaw => OPENCLAW_DEFAULT_API_PROTOCOL,
             _ => "@ai-sdk/openai-compatible",
         };
 
-        let codex_defaults = match app_type {
-            AppType::Codex => ("", "gpt-5.4", CodexWireApi::Responses, true),
-            _ => ("", "", CodexWireApi::Responses, true),
+        let codex_defaults = if is_codex {
+            ("", "gpt-5.4", CodexWireApi::Responses, true)
+        } else {
+            ("", "", CodexWireApi::Responses, true)
         };
 
         let mut form = Self {
@@ -121,6 +123,9 @@ impl ProviderAddFormState {
             usage_query_touched: false,
             usage_query_field_idx: 0,
             usage_query_editing: false,
+            codex_local_routing_field_idx: 0,
+            codex_model_catalog_idx: 0,
+            codex_model_catalog_field: CodexModelCatalogField::Model,
             extra: json!({}),
             id: TextInput::new(""),
             id_is_manual: false,
@@ -137,7 +142,11 @@ impl ProviderAddFormState {
             claude_api_key: TextInput::new(""),
             claude_api_key_field: ClaudeApiKeyField::AuthToken,
             claude_base_url: TextInput::new(""),
-            claude_api_format: ClaudeApiFormat::Anthropic,
+            claude_api_format: if is_codex {
+                ClaudeApiFormat::OpenAiResponses
+            } else {
+                ClaudeApiFormat::Anthropic
+            },
             claude_model: TextInput::new(""),
             claude_reasoning_model: TextInput::new(""),
             claude_haiku_model: TextInput::new(""),
@@ -153,6 +162,8 @@ impl ProviderAddFormState {
             codex_requires_openai_auth: codex_defaults.3,
             codex_env_key: TextInput::new("OPENAI_API_KEY"),
             codex_api_key: TextInput::new(""),
+            codex_chat_reasoning: CodexChatReasoningConfig::default(),
+            codex_model_catalog: Vec::new(),
             gemini_auth_type: GeminiAuthType::ApiKey,
             gemini_api_key: TextInput::new(""),
             gemini_base_url: TextInput::new("https://generativelanguage.googleapis.com"),
@@ -360,6 +371,7 @@ impl ProviderAddFormState {
                 if !self.is_codex_official_provider() {
                     fields.push(ProviderAddField::CodexBaseUrl);
                     fields.push(ProviderAddField::CodexModel);
+                    fields.push(ProviderAddField::CodexLocalRouting);
                     fields.push(ProviderAddField::CodexApiKey);
                 }
             }
@@ -499,6 +511,7 @@ impl ProviderAddFormState {
             ProviderAddField::HermesRateLimitDelay => Some(&self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexLocalRouting
             | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
@@ -550,6 +563,7 @@ impl ProviderAddFormState {
             ProviderAddField::HermesRateLimitDelay => Some(&mut self.hermes_rate_limit_delay),
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexLocalRouting
             | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
@@ -604,6 +618,239 @@ impl ProviderAddFormState {
         self.usage_query_editing = false;
         let len = self.usage_query_table_fields().len();
         self.usage_query_field_idx = self.usage_query_field_idx.min(len.saturating_sub(1));
+    }
+
+    pub fn open_codex_local_routing_page(&mut self) {
+        if !matches!(self.app_type, AppType::Codex) || self.is_codex_official_provider() {
+            return;
+        }
+        self.page = ProviderFormPage::CodexLocalRouting;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        self.usage_query_editing = false;
+        let len = self.codex_local_routing_fields().len();
+        self.codex_local_routing_field_idx = self
+            .codex_local_routing_field_idx
+            .min(len.saturating_sub(1));
+    }
+
+    pub fn close_codex_local_routing_page(&mut self) {
+        self.page = ProviderFormPage::Main;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+    }
+
+    pub fn open_codex_model_catalog_page(&mut self) {
+        if !self.codex_local_routing_enabled() {
+            return;
+        }
+        self.page = ProviderFormPage::CodexModelCatalog;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        self.usage_query_editing = false;
+        self.codex_model_catalog_idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len().saturating_sub(1));
+    }
+
+    pub fn close_codex_model_catalog_page(&mut self) {
+        self.page = ProviderFormPage::CodexLocalRouting;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        self.codex_model_catalog_idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len().saturating_sub(1));
+    }
+
+    pub fn selected_codex_model_catalog_row(&self) -> Option<&CodexModelCatalogRow> {
+        self.codex_model_catalog.get(
+            self.codex_model_catalog_idx
+                .min(self.codex_model_catalog.len().saturating_sub(1)),
+        )
+    }
+
+    pub fn selected_codex_model_catalog_field_value(
+        &self,
+        field: CodexModelCatalogField,
+    ) -> String {
+        let Some(row) = self.selected_codex_model_catalog_row() else {
+            return String::new();
+        };
+        match field {
+            CodexModelCatalogField::Model => row.model.clone(),
+            CodexModelCatalogField::DisplayName => row.display_name.clone(),
+            CodexModelCatalogField::ContextWindow => row.context_window.clone(),
+        }
+    }
+
+    pub fn upsert_codex_model_catalog_model(&mut self, model: &str) -> bool {
+        let model = model.trim();
+        if model.is_empty() {
+            return false;
+        }
+
+        if let Some(index) = self
+            .codex_model_catalog
+            .iter()
+            .position(|row| row.model.eq_ignore_ascii_case(model))
+        {
+            self.codex_model_catalog_idx = index;
+            return false;
+        }
+
+        self.codex_model_catalog.push(CodexModelCatalogRow {
+            model: model.to_string(),
+            display_name: String::new(),
+            context_window: String::new(),
+        });
+        self.codex_model_catalog_idx = self.codex_model_catalog.len().saturating_sub(1);
+        true
+    }
+
+    pub fn set_selected_codex_model_catalog_model(&mut self, model: &str) -> bool {
+        let model = model.trim();
+        if model.is_empty() {
+            return false;
+        }
+
+        let idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len().saturating_sub(1));
+        if self.codex_model_catalog.get(idx).is_none() {
+            return self.upsert_codex_model_catalog_model(model);
+        }
+
+        if let Some(existing_idx) = self
+            .codex_model_catalog
+            .iter()
+            .position(|row| row.model.eq_ignore_ascii_case(model))
+        {
+            if existing_idx != idx {
+                self.codex_model_catalog.remove(idx);
+                self.codex_model_catalog_idx =
+                    existing_idx.min(self.codex_model_catalog.len().saturating_sub(1));
+                return true;
+            }
+        }
+
+        if let Some(row) = self.codex_model_catalog.get_mut(idx) {
+            row.model = model.to_string();
+            self.codex_model_catalog_idx = idx;
+            return true;
+        }
+        false
+    }
+
+    pub fn set_codex_model_catalog_field(
+        &mut self,
+        row: Option<usize>,
+        field: CodexModelCatalogField,
+        value: &str,
+    ) -> bool {
+        match (row, field) {
+            (None, CodexModelCatalogField::Model) => self.upsert_codex_model_catalog_model(value),
+            (None, _) => false,
+            (Some(index), CodexModelCatalogField::Model) => {
+                self.codex_model_catalog_idx =
+                    index.min(self.codex_model_catalog.len().saturating_sub(1));
+                self.set_selected_codex_model_catalog_model(value)
+            }
+            (Some(index), CodexModelCatalogField::DisplayName) => {
+                let Some(row) = self.codex_model_catalog.get_mut(index) else {
+                    return false;
+                };
+                row.display_name = value.trim().to_string();
+                self.codex_model_catalog_idx = index;
+                true
+            }
+            (Some(index), CodexModelCatalogField::ContextWindow) => {
+                let Some(row) = self.codex_model_catalog.get_mut(index) else {
+                    return false;
+                };
+                row.context_window = value.trim().to_string();
+                self.codex_model_catalog_idx = index;
+                true
+            }
+        }
+    }
+
+    pub fn remove_selected_codex_model_catalog_model(&mut self) -> bool {
+        if self.codex_model_catalog.is_empty() {
+            self.codex_model_catalog_idx = 0;
+            return false;
+        }
+        let idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len() - 1);
+        self.codex_model_catalog.remove(idx);
+        self.codex_model_catalog_idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len().saturating_sub(1));
+        true
+    }
+
+    pub fn codex_local_routing_fields(&self) -> Vec<CodexLocalRoutingField> {
+        let mut fields = vec![CodexLocalRoutingField::Enabled];
+        if self.codex_local_routing_enabled() {
+            fields.extend([
+                CodexLocalRoutingField::SupportsThinking,
+                CodexLocalRoutingField::SupportsEffort,
+                CodexLocalRoutingField::ModelCatalog,
+            ]);
+        }
+        fields
+    }
+
+    pub fn selected_codex_local_routing_field(&self) -> Option<CodexLocalRoutingField> {
+        let fields = self.codex_local_routing_fields();
+        fields
+            .get(
+                self.codex_local_routing_field_idx
+                    .min(fields.len().saturating_sub(1)),
+            )
+            .copied()
+    }
+
+    pub fn toggle_codex_local_routing_enabled(&mut self) {
+        self.claude_api_format = if self.codex_local_routing_enabled() {
+            ClaudeApiFormat::OpenAiResponses
+        } else {
+            ClaudeApiFormat::OpenAiChat
+        };
+        let len = self.codex_local_routing_fields().len();
+        self.codex_local_routing_field_idx = self
+            .codex_local_routing_field_idx
+            .min(len.saturating_sub(1));
+    }
+
+    pub fn toggle_codex_reasoning_thinking(&mut self) {
+        let next = !self.codex_reasoning_supports_thinking();
+        self.codex_chat_reasoning.supports_thinking = Some(next);
+        if !next {
+            self.codex_chat_reasoning.supports_effort = Some(false);
+        }
+    }
+
+    pub fn toggle_codex_reasoning_effort(&mut self) {
+        let next = !self.codex_reasoning_supports_effort();
+        self.codex_chat_reasoning.supports_effort = Some(next);
+        if next {
+            self.codex_chat_reasoning.supports_thinking = Some(true);
+            if self.codex_chat_reasoning.effort_param.is_none() {
+                self.codex_chat_reasoning.effort_param = Some("reasoning_effort".to_string());
+            }
+        } else {
+            self.codex_chat_reasoning.effort_param = Some("none".to_string());
+        }
+    }
+
+    pub fn codex_reasoning_supports_thinking(&self) -> bool {
+        self.codex_chat_reasoning.supports_thinking == Some(true)
+            || self.codex_chat_reasoning.supports_effort == Some(true)
+    }
+
+    pub fn codex_reasoning_supports_effort(&self) -> bool {
+        self.codex_chat_reasoning.supports_effort == Some(true)
     }
 
     pub fn refresh_default_usage_query_template(&mut self) {
@@ -1154,6 +1401,12 @@ impl ProviderAddFormState {
         meta_flag || category_flag || website_flag || name_flag
     }
 
+    pub fn codex_local_routing_enabled(&self) -> bool {
+        matches!(self.app_type, AppType::Codex)
+            && !self.is_codex_official_provider()
+            && matches!(self.claude_api_format, ClaudeApiFormat::OpenAiChat)
+    }
+
     pub fn apply_provider_json_to_fields(&mut self, provider: &Provider) {
         let previous_mode = self.mode.clone();
         let previous_focus = self.focus;
@@ -1162,6 +1415,8 @@ impl ProviderAddFormState {
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
+        let previous_codex_local_routing_field_idx = self.codex_local_routing_field_idx;
+        let previous_codex_model_catalog_field = self.codex_model_catalog_field;
         let previous_hermes_models_field_idx = self.hermes_models_field_idx;
         let previous_json_scroll = self.json_scroll;
         let previous_codex_preview_section = self.codex_preview_section;
@@ -1199,6 +1454,7 @@ impl ProviderAddFormState {
         next.codex_preview_section = previous_codex_preview_section;
         next.codex_auth_scroll = previous_codex_auth_scroll;
         next.codex_config_scroll = previous_codex_config_scroll;
+        next.codex_model_catalog_field = previous_codex_model_catalog_field;
         next.editing = false;
         next.usage_query_editing = false;
         next.hermes_models_editing = false;
@@ -1213,6 +1469,12 @@ impl ProviderAddFormState {
             0
         } else {
             previous_usage_query_field_idx.min(usage_fields_len - 1)
+        };
+        let codex_local_routing_fields_len = next.codex_local_routing_fields().len();
+        next.codex_local_routing_field_idx = if codex_local_routing_fields_len == 0 {
+            0
+        } else {
+            previous_codex_local_routing_field_idx.min(codex_local_routing_fields_len - 1)
         };
         let hermes_model_fields_len = next.hermes_model_fields().len();
         next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
@@ -1242,6 +1504,8 @@ impl ProviderAddFormState {
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
+        let previous_codex_local_routing_field_idx = self.codex_local_routing_field_idx;
+        let previous_codex_model_catalog_field = self.codex_model_catalog_field;
         let previous_hermes_models_field_idx = self.hermes_models_field_idx;
         let previous_json_scroll = self.json_scroll;
         let previous_codex_preview_section = self.codex_preview_section;
@@ -1289,6 +1553,7 @@ impl ProviderAddFormState {
         next.codex_preview_section = previous_codex_preview_section;
         next.codex_auth_scroll = previous_codex_auth_scroll;
         next.codex_config_scroll = previous_codex_config_scroll;
+        next.codex_model_catalog_field = previous_codex_model_catalog_field;
         next.editing = false;
         next.usage_query_editing = false;
         next.hermes_models_editing = false;
@@ -1304,6 +1569,12 @@ impl ProviderAddFormState {
             0
         } else {
             previous_usage_query_field_idx.min(usage_fields_len - 1)
+        };
+        let codex_local_routing_fields_len = next.codex_local_routing_fields().len();
+        next.codex_local_routing_field_idx = if codex_local_routing_fields_len == 0 {
+            0
+        } else {
+            previous_codex_local_routing_field_idx.min(codex_local_routing_fields_len - 1)
         };
         let hermes_model_fields_len = next.hermes_model_fields().len();
         next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
@@ -1398,6 +1669,38 @@ impl ProviderAddFormState {
         texts::tui_openclaw_models_summary(total)
     }
 
+    pub(crate) fn codex_model_catalog_summary(&self) -> String {
+        let count = self.codex_model_catalog.len();
+        if crate::cli::i18n::is_chinese() {
+            format!("{count} 个模型")
+        } else if count == 1 {
+            "1 model".to_string()
+        } else {
+            format!("{count} models")
+        }
+    }
+
+    #[cfg(test)]
+    pub fn apply_codex_model_catalog_value(&mut self, models_value: Value) -> Result<(), String> {
+        if !matches!(self.app_type, AppType::Codex) {
+            return Ok(());
+        }
+        let Some(models) = models_value.as_array() else {
+            return Err(texts::tui_toast_json_must_be_array().to_string());
+        };
+        self.codex_model_catalog = models
+            .iter()
+            .filter_map(codex_model_catalog_row_from_value)
+            .collect();
+        self.codex_model_catalog_idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len().saturating_sub(1));
+        if self.codex_model_catalog.is_empty() {
+            self.codex_model_catalog_field = CodexModelCatalogField::Model;
+        }
+        Ok(())
+    }
+
     pub(crate) fn openclaw_models_editor_text(&self) -> String {
         serde_json::to_string_pretty(&Value::Array(self.openclaw_models.clone()))
             .unwrap_or_else(|_| "[]".to_string())
@@ -1422,6 +1725,43 @@ impl ProviderAddFormState {
         settings_obj.insert("models".to_string(), models_value);
         self.apply_provider_json_value_to_fields(provider_value)
     }
+}
+
+pub(crate) fn codex_model_catalog_row_from_value(value: &Value) -> Option<CodexModelCatalogRow> {
+    let model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if model.is_empty() {
+        return None;
+    }
+
+    let display_name = value
+        .get("displayName")
+        .or_else(|| value.get("display_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let context_window = value
+        .get("contextWindow")
+        .or_else(|| value.get("context_window"))
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(|value| value.trim().to_string())
+                .or_else(|| value.as_u64().map(|value| value.to_string()))
+                .or_else(|| value.as_i64().map(|value| value.to_string()))
+        })
+        .unwrap_or_default();
+
+    Some(CodexModelCatalogRow {
+        model,
+        display_name,
+        context_window,
+    })
 }
 
 pub(crate) fn detect_coding_plan_provider_for_usage_query(base_url: &str) -> Option<&'static str> {

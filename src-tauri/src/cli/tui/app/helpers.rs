@@ -738,6 +738,10 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
         route,
         Route::Providers
             | Route::ProviderDetail { .. }
+            | Route::Usage
+            | Route::UsageLogs
+            | Route::UsageLogDetail { .. }
+            | Route::Pricing
             | Route::Sessions
             | Route::Mcp
             | Route::Prompts
@@ -768,6 +772,7 @@ pub(crate) fn session_key(session: &crate::session_manager::SessionMeta) -> Stri
     )
 }
 
+#[cfg(test)]
 pub(crate) fn visible_sessions<'a>(
     filter: &FilterState,
     app_type: &AppType,
@@ -784,6 +789,85 @@ pub(crate) fn visible_sessions<'a>(
         .collect()
 }
 
+pub(crate) fn visible_sessions_for_state<'a>(
+    filter: &FilterState,
+    app_type: &AppType,
+    rows: &'a [crate::session_manager::SessionMeta],
+    detail_key: Option<&str>,
+    messages_loaded: bool,
+    messages: &[crate::session_manager::SessionMessage],
+) -> Vec<&'a crate::session_manager::SessionMeta> {
+    let query = filter.query_lower();
+    let provider_id = app_type.as_str();
+    let message_match_key = query.as_deref().and_then(|_| {
+        loaded_detail_message_match_key(filter, detail_key, messages_loaded, messages)
+    });
+
+    rows.iter()
+        .filter(|row| row.provider_id == provider_id)
+        .filter(|row| match &query {
+            None => true,
+            Some(q) => {
+                session_matches_filter(row, q)
+                    || message_match_key
+                        .as_deref()
+                        .is_some_and(|key| session_key(row) == key)
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn visible_session_messages<'a>(
+    sessions: &'a SessionsState,
+) -> Vec<(usize, &'a crate::session_manager::SessionMessage)> {
+    let query = sessions.message_query_lower();
+    sessions
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| match &query {
+            None => true,
+            Some(query) => session_message_matches_message_filter(message, query),
+        })
+        .collect()
+}
+
+pub(crate) fn clamp_session_message_selection(sessions: &mut SessionsState) {
+    let selected = {
+        let visible = visible_session_messages(sessions);
+        if visible.is_empty() {
+            Some(0)
+        } else if visible
+            .iter()
+            .any(|(index, _)| *index == sessions.message_idx)
+        {
+            None
+        } else {
+            Some(visible[0].0)
+        }
+    };
+    if let Some(selected) = selected {
+        sessions.message_idx = selected;
+    }
+}
+
+fn loaded_detail_message_match_key(
+    filter: &FilterState,
+    detail_key: Option<&str>,
+    messages_loaded: bool,
+    messages: &[crate::session_manager::SessionMessage],
+) -> Option<String> {
+    let key = detail_key?;
+    if !messages_loaded || messages.is_empty() {
+        return None;
+    }
+    let query = filter.query_lower()?;
+    messages
+        .iter()
+        .any(|message| session_message_matches_filter(message, &query))
+        .then(|| key.to_string())
+}
+
 fn session_matches_filter(session: &crate::session_manager::SessionMeta, query: &str) -> bool {
     filter_text_matches(&session.provider_id, query)
         || filter_text_matches(&session.session_id, query)
@@ -793,6 +877,41 @@ fn session_matches_filter(session: &crate::session_manager::SessionMeta, query: 
         || filter_option_path_matches(session.source_path.as_deref(), query)
         || filter_option_text_matches(session.resume_command.as_deref(), query)
         || filter_timestamp_matches(session.last_active_at.or(session.created_at), query)
+}
+
+fn session_message_matches_filter(
+    message: &crate::session_manager::SessionMessage,
+    query: &str,
+) -> bool {
+    filter_text_matches(&message.role, query)
+        || filter_text_matches(
+            &crate::cli::i18n::texts::tui_sessions_role_label(&message.role),
+            query,
+        )
+        || filter_text_matches(&message.content, query)
+        || filter_timestamp_matches(message.ts, query)
+}
+
+fn session_message_matches_message_filter(
+    message: &crate::session_manager::SessionMessage,
+    query: &str,
+) -> bool {
+    if let Some(role) = session_message_role_query(query) {
+        return message.role.eq_ignore_ascii_case(role);
+    }
+
+    session_message_matches_filter(message, query)
+}
+
+fn session_message_role_query(query: &str) -> Option<&'static str> {
+    match query.trim() {
+        "user" | "用户" => Some("user"),
+        "assistant" | "ai" | "助手" => Some("assistant"),
+        "system" | "系统" => Some("system"),
+        "tool" | "工具" => Some("tool"),
+        "developer" | "开发者" => Some("developer"),
+        _ => None,
+    }
 }
 
 fn filter_option_text_matches(value: Option<&str>, query: &str) -> bool {
@@ -928,6 +1047,23 @@ pub(crate) fn visible_mcp<'a>(
             None => true,
             Some(q) => {
                 row.server.name.to_lowercase().contains(q) || row.id.to_lowercase().contains(q)
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn visible_pricing_rows<'a>(
+    filter: &FilterState,
+    data: &'a UiData,
+) -> Vec<&'a super::data::ModelPricingRow> {
+    let query = filter.query_lower();
+    data.pricing
+        .rows
+        .iter()
+        .filter(|row| match &query {
+            None => true,
+            Some(q) => {
+                filter_text_matches(&row.model_id, q) || filter_text_matches(&row.display_name, q)
             }
         })
         .collect()

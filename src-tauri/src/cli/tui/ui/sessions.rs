@@ -9,7 +9,14 @@ pub(super) fn render_sessions(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let visible = app::visible_sessions(&app.filter, &app.app_type, &app.sessions.rows);
+    let visible = app::visible_sessions_for_state(
+        &app.filter,
+        &app.app_type,
+        &app.sessions.rows,
+        app.sessions.detail_key.as_deref(),
+        app.sessions.messages_loaded,
+        &app.sessions.messages,
+    );
 
     let outer = Block::default()
         .borders(Borders::ALL)
@@ -35,7 +42,7 @@ pub(super) fn render_sessions(
             theme,
             &[
                 ("↑↓", texts::tui_key_select()),
-                ("←→/h/l", texts::tui_key_focus()),
+                ("←→/h/l", texts::tui_key_pane()),
                 ("Enter", texts::tui_key_view()),
                 ("R", texts::tui_key_restore()),
                 ("d", texts::tui_key_delete()),
@@ -309,6 +316,7 @@ fn render_session_messages(
         return;
     }
 
+    let visible_messages = app::visible_session_messages(&app.sessions);
     if app.sessions.messages.is_empty() {
         render_centered_lines(
             frame,
@@ -321,12 +329,22 @@ fn render_session_messages(
         return;
     }
 
-    let visible = visible_message_window(
-        &app.sessions.messages,
-        app.sessions.message_idx,
-        inner.height,
-    );
-    let rows = visible.map(|message| {
+    if visible_messages.is_empty() {
+        render_centered_lines(
+            frame,
+            inner,
+            vec![Line::styled(
+                texts::tui_sessions_messages_filtered_empty(),
+                Style::default().fg(theme.comment),
+            )],
+        );
+        return;
+    }
+
+    let selected_visible_idx =
+        selected_message_visible_index(&visible_messages, app.sessions.message_idx).unwrap_or(0);
+    let visible = visible_message_window(&visible_messages, selected_visible_idx, inner.height);
+    let rows = visible.map(|(_, message)| {
         let role = texts::tui_sessions_role_label(&message.role);
         let preview = collapse_message_preview(&message.content);
         let time = message.ts.map(format_timestamp).unwrap_or_default();
@@ -351,12 +369,8 @@ fn render_session_messages(
 
     let mut state = TableState::default();
     if matches!(app.sessions.pane, SessionsPane::Detail) {
-        state.select(Some(app.sessions.message_idx.saturating_sub(
-            message_window_start(
-                app.sessions.messages.len(),
-                app.sessions.message_idx,
-                inner.height,
-            ),
+        state.select(Some(selected_visible_idx.saturating_sub(
+            message_window_start(visible_messages.len(), selected_visible_idx, inner.height),
         )));
     }
     frame.render_stateful_widget(table, inset_left(inner, CONTENT_INSET_LEFT), &mut state);
@@ -486,15 +500,24 @@ fn message_window_start(total: usize, selected: usize, height: u16) -> usize {
         .min(total - visible_rows)
 }
 
-fn visible_message_window(
-    messages: &[crate::session_manager::SessionMessage],
+fn selected_message_visible_index(
+    messages: &[(usize, &crate::session_manager::SessionMessage)],
+    selected: usize,
+) -> Option<usize> {
+    messages
+        .iter()
+        .position(|(message_idx, _)| *message_idx == selected)
+}
+
+fn visible_message_window<'a>(
+    messages: &'a [(usize, &'a crate::session_manager::SessionMessage)],
     selected: usize,
     height: u16,
-) -> impl Iterator<Item = &crate::session_manager::SessionMessage> {
+) -> impl Iterator<Item = (usize, &'a crate::session_manager::SessionMessage)> + 'a {
     let visible_rows = height.saturating_sub(1).max(1) as usize;
     let start = message_window_start(messages.len(), selected, height);
     let end = (start + visible_rows).min(messages.len());
-    messages[start..end].iter()
+    messages[start..end].iter().copied()
 }
 
 #[cfg(test)]

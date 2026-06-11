@@ -27,6 +27,9 @@ pub enum EditorSubmit {
     ProviderEdit {
         id: String,
     },
+    PricingEdit {
+        model_id: String,
+    },
     McpAdd,
     McpEdit {
         id: String,

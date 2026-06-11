@@ -20,6 +20,32 @@ fn default_app_preferred_port(app_type: &str) -> u16 {
     }
 }
 
+fn default_global_proxy_config() -> GlobalProxyConfig {
+    GlobalProxyConfig {
+        proxy_enabled: false,
+        listen_address: "127.0.0.1".to_string(),
+        listen_port: 15721,
+        enable_logging: true,
+    }
+}
+
+fn default_app_proxy_config(app_type: impl Into<String>) -> AppProxyConfig {
+    AppProxyConfig {
+        app_type: app_type.into(),
+        enabled: false,
+        auto_failover_enabled: false,
+        max_retries: 3,
+        streaming_first_byte_timeout: 60,
+        streaming_idle_timeout: 120,
+        non_streaming_timeout: 600,
+        circuit_failure_threshold: 4,
+        circuit_success_threshold: 2,
+        circuit_timeout_seconds: 60,
+        circuit_error_rate_threshold: 0.6,
+        circuit_min_requests: 10,
+    }
+}
+
 impl Database {
     // ==================== Global Proxy Config ====================
 
@@ -74,13 +100,34 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // 如果不存在，创建默认配置
                 self.init_proxy_config_rows().await?;
-                Ok(GlobalProxyConfig {
-                    proxy_enabled: false,
-                    listen_address: "127.0.0.1".to_string(),
-                    listen_port: 15721,
-                    enable_logging: true,
-                })
+                Ok(default_global_proxy_config())
             }
+            Err(e) => Err(AppError::Database(e.to_string())),
+        }
+    }
+
+    /// 获取全局代理配置，不存在时返回默认值但不写入数据库。
+    pub async fn get_global_proxy_config_or_default(&self) -> Result<GlobalProxyConfig, AppError> {
+        let result = {
+            let conn = lock_conn!(self.conn);
+            conn.query_row(
+                "SELECT proxy_enabled, listen_address, listen_port, enable_logging
+                 FROM proxy_config WHERE app_type = 'claude'",
+                [],
+                |row| {
+                    Ok(GlobalProxyConfig {
+                        proxy_enabled: row.get::<_, i32>(0)? != 0,
+                        listen_address: row.get(1)?,
+                        listen_port: row.get::<_, i32>(2)? as u16,
+                        enable_logging: row.get::<_, i32>(3)? != 0,
+                    })
+                },
+            )
+        };
+
+        match result {
+            Ok(config) => Ok(config),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default_global_proxy_config()),
             Err(e) => Err(AppError::Database(e.to_string())),
         }
     }
@@ -159,6 +206,27 @@ impl Database {
                 self.init_proxy_config_rows().await?;
                 Ok("1".to_string())
             }
+            Err(e) => Err(AppError::Database(e.to_string())),
+        }
+    }
+
+    /// 获取默认成本倍率，不存在时返回默认值但不写入数据库。
+    pub async fn get_default_cost_multiplier_or_default(
+        &self,
+        app_type: &str,
+    ) -> Result<String, AppError> {
+        let result = {
+            let conn = lock_conn!(self.conn);
+            conn.query_row(
+                "SELECT default_cost_multiplier FROM proxy_config WHERE app_type = ?1",
+                [app_type],
+                |row| row.get(0),
+            )
+        };
+
+        match result {
+            Ok(value) => Ok(value),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok("1".to_string()),
             Err(e) => Err(AppError::Database(e.to_string())),
         }
     }
@@ -294,20 +362,50 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // 如果不存在，创建默认配置
                 self.init_proxy_config_rows().await?;
-                Ok(AppProxyConfig {
-                    app_type: app_type_owned,
-                    enabled: false,
-                    auto_failover_enabled: false,
-                    max_retries: 3,
-                    streaming_first_byte_timeout: 60,
-                    streaming_idle_timeout: 120,
-                    non_streaming_timeout: 600,
-                    circuit_failure_threshold: 4,
-                    circuit_success_threshold: 2,
-                    circuit_timeout_seconds: 60,
-                    circuit_error_rate_threshold: 0.6,
-                    circuit_min_requests: 10,
-                })
+                Ok(default_app_proxy_config(app_type_owned))
+            }
+            Err(e) => Err(AppError::Database(e.to_string())),
+        }
+    }
+
+    /// 获取应用级代理配置，不存在时返回默认值但不写入数据库。
+    pub async fn get_proxy_config_for_app_or_default(
+        &self,
+        app_type: &str,
+    ) -> Result<AppProxyConfig, AppError> {
+        let app_type_owned = app_type.to_string();
+        let result = {
+            let conn = lock_conn!(self.conn);
+            conn.query_row(
+                "SELECT app_type, enabled, auto_failover_enabled,
+                        max_retries, streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
+                        circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
+                        circuit_error_rate_threshold, circuit_min_requests
+                 FROM proxy_config WHERE app_type = ?1",
+                [app_type],
+                |row| {
+                    Ok(AppProxyConfig {
+                        app_type: row.get(0)?,
+                        enabled: row.get::<_, i32>(1)? != 0,
+                        auto_failover_enabled: row.get::<_, i32>(2)? != 0,
+                        max_retries: row.get::<_, i32>(3)? as u32,
+                        streaming_first_byte_timeout: row.get::<_, i32>(4)? as u32,
+                        streaming_idle_timeout: row.get::<_, i32>(5)? as u32,
+                        non_streaming_timeout: row.get::<_, i32>(6)? as u32,
+                        circuit_failure_threshold: row.get::<_, i32>(7)? as u32,
+                        circuit_success_threshold: row.get::<_, i32>(8)? as u32,
+                        circuit_timeout_seconds: row.get::<_, i32>(9)? as u32,
+                        circuit_error_rate_threshold: row.get(10)?,
+                        circuit_min_requests: row.get::<_, i32>(11)? as u32,
+                    })
+                },
+            )
+        };
+
+        match result {
+            Ok(config) => Ok(config),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                Ok(default_app_proxy_config(app_type_owned))
             }
             Err(e) => Err(AppError::Database(e.to_string())),
         }

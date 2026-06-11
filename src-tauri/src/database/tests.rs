@@ -261,6 +261,82 @@ fn init_rejects_unsafe_config_dir() {
         "unexpected error: {err}"
     );
 }
+fn readonly_snapshot_rejects_missing_database_without_creating_file() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+
+    let err = match Database::open_readonly_current_schema() {
+        Ok(_) => panic!("missing database should not open as a snapshot"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains("database is not initialized"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !db_path.exists(),
+        "readonly snapshot open should not create the database file"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn readonly_snapshot_rejects_old_schema_without_migrating() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+    let db_path = temp.path().join("cc-switch.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    Database::set_user_version(&conn, SCHEMA_VERSION - 1).expect("set old version");
+    drop(conn);
+
+    let err = match Database::open_readonly_current_schema() {
+        Ok(_) => panic!("old schema should require initialization first"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains("requires initialization"),
+        "unexpected error: {err}"
+    );
+    let conn = Connection::open(&db_path).expect("reopen db");
+    assert!(
+        !Database::table_exists(&conn, "providers").expect("check providers table"),
+        "readonly snapshot open should not create or migrate tables"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn readonly_snapshot_opens_current_schema_without_allowing_writes() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+
+    let db = Database::init().expect("initialize database");
+    assert_eq!(
+        Database::get_user_version(&db.conn.lock().expect("lock db conn")).expect("read version"),
+        SCHEMA_VERSION
+    );
+    drop(db);
+
+    let snapshot =
+        Database::open_readonly_current_schema().expect("open readonly current schema snapshot");
+    assert!(
+        snapshot.get_all_providers("claude").is_ok(),
+        "readonly snapshot should support normal reads"
+    );
+    let err = snapshot
+        .set_setting("snapshot_write_probe", "1")
+        .expect_err("readonly snapshot should reject writes");
+    assert!(
+        err.to_string().contains("readonly") || err.to_string().contains("read-only"),
+        "unexpected write error: {err}"
+    );
+}
 
 #[test]
 fn schema_migration_adds_missing_columns_for_providers() {
@@ -473,6 +549,8 @@ fn startup_migration_repairs_legacy_request_logs_before_session_index() {
     assert!(index_exists(&conn, "idx_request_logs_model"));
     assert!(index_exists(&conn, "idx_request_logs_session"));
     assert!(index_exists(&conn, "idx_request_logs_status"));
+    assert!(index_exists(&conn, "idx_request_logs_app_created_at"));
+    assert!(index_exists(&conn, "idx_request_logs_dedup_lookup_expr"));
 }
 
 #[test]
@@ -529,6 +607,141 @@ fn schema_create_tables_include_usage_daily_rollups() {
     assert_eq!(
         normalize_default(&skill_enabled_hermes.default).as_deref(),
         Some("0")
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn init_runs_startup_usage_rollup() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+
+    {
+        let db = Database::init().expect("init db");
+        let old_ts = chrono::Utc::now().timestamp() - 40 * 86_400;
+        let conn = db.conn.lock().expect("lock db");
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model, request_model,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                total_cost_usd, latency_ms, status_code, created_at, data_source
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                "startup-rollup-old",
+                "anthropic",
+                "claude",
+                "claude-sonnet-4",
+                "claude-sonnet-4",
+                100,
+                50,
+                7,
+                3,
+                "0.25",
+                123,
+                200,
+                old_ts,
+                "proxy",
+            ],
+        )
+        .expect("seed old usage log");
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model, request_model,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd,
+                total_cost_usd, latency_ms, status_code, created_at, data_source
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5,
+                ?6, ?7, ?8, ?9,
+                '0', '0', '0', '0',
+                '0', ?10, ?11, ?12, ?13
+            )",
+            params![
+                "startup-rollup-zero-cost",
+                "_codex_session",
+                "codex",
+                "gpt-5.5",
+                "gpt-5.5",
+                1_000_000,
+                0,
+                0,
+                0,
+                0,
+                200,
+                old_ts,
+                "codex_session",
+            ],
+        )
+        .expect("seed old zero-cost usage log");
+    }
+
+    let db = Database::init().expect("reinit db");
+    let conn = db.conn.lock().expect("lock db");
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = 'startup-rollup-old'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count old request log");
+    assert_eq!(
+        remaining, 0,
+        "startup maintenance should prune rolled-up detail logs"
+    );
+
+    let rollup: (i64, i64, i64, i64, i64, i64, String, i64) = conn
+        .query_row(
+            "SELECT request_count, success_count, input_tokens, output_tokens,
+                    cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms
+             FROM usage_daily_rollups
+             WHERE app_type = 'claude'
+               AND provider_id = 'anthropic'
+               AND model = 'claude-sonnet-4'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .expect("read startup rollup");
+    assert_eq!(rollup, (1, 1, 100, 50, 7, 3, "0.25".to_string(), 123));
+
+    let zero_cost_remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = 'startup-rollup-zero-cost'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count old zero-cost request log");
+    assert_eq!(
+        zero_cost_remaining, 0,
+        "startup maintenance should prune old zero-cost details only after backfill"
+    );
+
+    let (zero_cost_requests, zero_cost_total): (i64, f64) = conn
+        .query_row(
+            "SELECT request_count, CAST(total_cost_usd AS REAL)
+             FROM usage_daily_rollups
+             WHERE app_type = 'codex'
+               AND provider_id = '_codex_session'
+               AND model = 'gpt-5.5'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read zero-cost startup rollup");
+    assert_eq!(zero_cost_requests, 1);
+    assert_eq!(
+        zero_cost_total, 5.0,
+        "startup maintenance should backfill costs before rolling up old details"
     );
 }
 
@@ -1657,4 +1870,69 @@ fn init_does_not_silently_fix_existing_dir_permissions() {
         dir_perms, 0o755,
         "init should not silently change existing dir permissions"
     );
+}
+fn model_pricing_delete_survives_reseed_until_user_upserts() {
+    let db = Database::memory().expect("create memory db");
+
+    assert!(db
+        .delete_model_pricing("gpt-5.4")
+        .expect("delete seeded pricing"));
+    db.ensure_model_pricing_seeded()
+        .expect("reseed after delete");
+
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM model_pricing WHERE model_id = 'gpt-5.4'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count deleted pricing");
+        assert_eq!(count, 0, "deleted built-in pricing should stay hidden");
+    }
+
+    let restored = ModelPricingUpdate::new("gpt-5.4", "GPT 5.4", "2", "8", "0.2", "0")
+        .expect("valid restored pricing");
+    db.upsert_model_pricing(&restored).expect("restore pricing");
+    db.ensure_model_pricing_seeded()
+        .expect("reseed after restore");
+
+    let conn = db.conn.lock().expect("lock conn");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM model_pricing WHERE model_id = 'gpt-5.4'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count restored pricing");
+    assert_eq!(count, 1, "manual upsert should clear delete marker");
+}
+
+#[test]
+fn model_pricing_upsert_rejects_invalid_values() {
+    let db = Database::memory().expect("create memory db");
+    let invalid = ModelPricingUpdate {
+        model_id: "bad-model".to_string(),
+        display_name: "Bad Model".to_string(),
+        input_cost_per_million: "not-a-number".to_string(),
+        output_cost_per_million: "1".to_string(),
+        cache_read_cost_per_million: "0".to_string(),
+        cache_creation_cost_per_million: "0".to_string(),
+    };
+
+    assert!(db.upsert_model_pricing(&invalid).is_err());
+
+    let conn = db.conn.lock().expect("lock conn");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM model_pricing WHERE model_id = 'bad-model'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count invalid pricing");
+    assert_eq!(count, 0, "invalid pricing should not be persisted");
+
+    assert!(ModelPricingUpdate::new("bad-negative", "Bad Negative", "-1", "1", "0", "0").is_err());
+    assert!(ModelPricingUpdate::new("", "Blank Model", "1", "1", "0", "0").is_err());
 }

@@ -1,5 +1,5 @@
 use crate::app_config::{AppType, McpApps};
-use crate::provider::ClaudeApiKeyField;
+use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
 use serde_json::Value;
 
 use super::app::EditorState;
@@ -78,6 +78,10 @@ impl ClaudeApiFormat {
         ClaudeApiFormat::OpenAiResponses,
         ClaudeApiFormat::GeminiNative,
     ];
+    pub const CODEX: [Self; 2] = [
+        ClaudeApiFormat::OpenAiResponses,
+        ClaudeApiFormat::OpenAiChat,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -97,20 +101,38 @@ impl ClaudeApiFormat {
         }
     }
 
-    pub fn picker_index(self) -> usize {
-        match self {
-            ClaudeApiFormat::Anthropic => 0,
-            ClaudeApiFormat::OpenAiChat => 1,
-            ClaudeApiFormat::OpenAiResponses => 2,
-            ClaudeApiFormat::GeminiNative => 3,
+    pub fn choices_for_app(app_type: &AppType) -> &'static [Self] {
+        match app_type {
+            AppType::Codex => &Self::CODEX,
+            _ => &Self::ALL,
         }
     }
 
-    pub fn from_picker_index(index: usize) -> Self {
-        Self::ALL
+    pub fn picker_index_for_app(self, app_type: &AppType) -> usize {
+        Self::choices_for_app(app_type)
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0)
+    }
+
+    pub fn from_picker_index_for_app(index: usize, app_type: &AppType) -> Self {
+        Self::choices_for_app(app_type)
             .get(index)
             .copied()
-            .unwrap_or(ClaudeApiFormat::Anthropic)
+            .unwrap_or_else(|| {
+                if matches!(app_type, AppType::Codex) {
+                    ClaudeApiFormat::OpenAiResponses
+                } else {
+                    ClaudeApiFormat::Anthropic
+                }
+            })
+    }
+
+    pub fn requires_proxy_for_app(self, app_type: &AppType) -> bool {
+        match app_type {
+            AppType::Codex => matches!(self, ClaudeApiFormat::OpenAiChat),
+            _ => self.requires_proxy(),
+        }
     }
 
     pub fn requires_proxy(self) -> bool {
@@ -169,6 +191,7 @@ pub enum ProviderAddField {
     CodexFastMode,
     CodexBaseUrl,
     CodexModel,
+    CodexLocalRouting,
     #[allow(dead_code)]
     CodexWireApi,
     #[allow(dead_code)]
@@ -206,6 +229,8 @@ pub enum ProviderAddField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderFormPage {
     Main,
+    CodexLocalRouting,
+    CodexModelCatalog,
     UsageQuery,
 }
 
@@ -238,6 +263,113 @@ pub enum UsageQueryField {
     AutoInterval,
     CodingPlanProvider,
     Script,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexLocalRoutingField {
+    Enabled,
+    SupportsThinking,
+    SupportsEffort,
+    ModelCatalog,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexModelCatalogField {
+    Model,
+    DisplayName,
+    ContextWindow,
+}
+
+impl CodexModelCatalogField {
+    pub const ALL: [Self; 3] = [Self::Model, Self::DisplayName, Self::ContextWindow];
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Model => 0,
+            Self::DisplayName => 1,
+            Self::ContextWindow => 2,
+        }
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        Self::ALL.get(index).copied().unwrap_or(Self::ContextWindow)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexModelCatalogRow {
+    pub model: String,
+    pub display_name: String,
+    pub context_window: String,
+}
+
+impl CodexModelCatalogRow {
+    pub(crate) fn summary_label(&self) -> String {
+        let model = self.model.trim();
+        let display_name = self.display_name.trim();
+        let mut label = if display_name.is_empty() || display_name == model {
+            model.to_string()
+        } else {
+            format!("{display_name} ({model})")
+        };
+
+        let context_window = codex_model_catalog_context_window_label(&self.context_window);
+        if !context_window.is_empty() {
+            label.push_str(&format!(" [{context_window}]"));
+        }
+        label
+    }
+}
+
+pub(crate) fn parse_codex_model_catalog_context_window(raw: &str) -> Option<u64> {
+    let compact = raw
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != ',' && *ch != '_')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if compact.is_empty() {
+        return None;
+    }
+
+    let number_len = compact
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if number_len == 0 {
+        return None;
+    }
+
+    let (number, suffix) = compact.split_at(number_len);
+    let value = number.parse::<f64>().ok()?;
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+
+    let multiplier = if suffix.starts_with('k') {
+        1_000.0
+    } else if suffix.starts_with('m') {
+        1_000_000.0
+    } else {
+        1.0
+    };
+    let normalized = (value * multiplier).round();
+    (normalized > 0.0 && normalized <= u64::MAX as f64).then_some(normalized as u64)
+}
+
+pub(crate) fn codex_model_catalog_context_window_label(raw: &str) -> String {
+    if let Some(value) = parse_codex_model_catalog_context_window(raw) {
+        if value >= 1_000_000 && value % 1_000_000 == 0 {
+            format!("{}m", value / 1_000_000)
+        } else if value >= 1_000 && value % 1_000 == 0 {
+            format!("{}k", value / 1_000)
+        } else {
+            value.to_string()
+        }
+    } else {
+        raw.trim().to_string()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +421,9 @@ pub struct ProviderAddFormState {
     pub usage_query_touched: bool,
     pub usage_query_field_idx: usize,
     pub usage_query_editing: bool,
+    pub codex_local_routing_field_idx: usize,
+    pub codex_model_catalog_idx: usize,
+    pub codex_model_catalog_field: CodexModelCatalogField,
     pub extra: Value,
     pub id: TextInput,
     pub id_is_manual: bool,
@@ -323,6 +458,8 @@ pub struct ProviderAddFormState {
     pub codex_requires_openai_auth: bool,
     pub codex_env_key: TextInput,
     pub codex_api_key: TextInput,
+    pub codex_chat_reasoning: CodexChatReasoningConfig,
+    pub codex_model_catalog: Vec<CodexModelCatalogRow>,
 
     pub gemini_auth_type: GeminiAuthType,
     pub gemini_api_key: TextInput,

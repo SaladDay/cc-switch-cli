@@ -1,6 +1,6 @@
 [package]
 name = "cc-switch"
-version = "5.7.0"
+version = "5.8.2"
 description = "All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode & OpenClaw"
 authors = ["Jason Young", "saladday"]
 license = "MIT"
@@ -56,7 +56,7 @@ toml_edit = "0.22"
 serde_yaml = "0.9"
 base64 = "0.22"
 indexmap = { version = "2", features = ["serde"] }
-rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks"] }
 rust_decimal = "1.33"
 json5 = "0.4"
 json-five = "0.3.1"

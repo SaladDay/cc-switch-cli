@@ -9,6 +9,7 @@ use crate::settings::{
 use super::super::app::{App, ConfirmAction, ConfirmOverlay, LoadingKind, Overlay, ToastKind};
 use super::super::data::{load_state, UiData};
 use super::super::runtime_actions::app_display_name;
+use super::super::CacheInvalidation;
 use super::types::{
     build_stream_check_result_lines, LocalEnvMsg, ManagedAuthMsg, ModelFetchMsg, ProxyMsg,
     QuotaMsg, RequestTracker, SessionMsg, SkillsMsg, SpeedtestMsg, StreamCheckMsg, UpdateMsg,
@@ -110,10 +111,13 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
         SessionMsg::ScanFinished { request_id, result } => match result {
             Ok(rows) => {
                 if app.sessions.finish_scan(request_id, rows) {
-                    let visible_len = crate::cli::tui::app::visible_sessions(
+                    let visible_len = crate::cli::tui::app::visible_sessions_for_state(
                         &app.filter,
                         &app.app_type,
                         &app.sessions.rows,
+                        app.sessions.detail_key.as_deref(),
+                        app.sessions.messages_loaded,
+                        &app.sessions.messages,
                     )
                     .len();
                     if visible_len == 0 {
@@ -137,7 +141,9 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
             result,
         } => match result {
             Ok(messages) => {
-                app.sessions.finish_message_load(request_id, &key, messages);
+                if app.sessions.finish_message_load(request_id, &key, messages) {
+                    crate::cli::tui::app::clamp_session_message_selection(&mut app.sessions);
+                }
             }
             Err(error) => {
                 app.sessions
@@ -155,10 +161,13 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
         } => match result {
             Ok(()) => {
                 if app.sessions.finish_delete(request_id, &key) {
-                    let visible_len = crate::cli::tui::app::visible_sessions(
+                    let visible_len = crate::cli::tui::app::visible_sessions_for_state(
                         &app.filter,
                         &app.app_type,
                         &app.sessions.rows,
+                        app.sessions.detail_key.as_deref(),
+                        app.sessions.messages_loaded,
+                        &app.sessions.messages,
                     )
                     .len();
                     if visible_len == 0 {
@@ -292,22 +301,27 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
                     let now = app.tick;
                     let expires_ticks = seconds_to_tui_ticks(device.expires_in).max(1);
                     let interval_ticks = seconds_to_tui_ticks(device.interval).max(1);
+                    let user_code = device.user_code.clone();
+                    let verification_uri = device.verification_uri.clone();
                     app.managed_auth_login = Some(crate::cli::tui::app::ManagedAuthLoginState {
                         auth_provider,
                         device_code: device.device_code,
-                        user_code: device.user_code,
-                        verification_uri: device.verification_uri,
                         expires_at_tick: now.saturating_add(expires_ticks),
                         poll_interval_ticks: interval_ticks,
                         next_poll_tick: now,
                     });
-                    app.push_toast(
-                        texts::tui_toast_managed_auth_login_started(),
+                    app.push_persistent_toast(
+                        texts::tui_toast_managed_auth_login_in_progress(
+                            &user_code,
+                            &verification_uri,
+                        ),
                         ToastKind::Info,
                     );
                 }
                 Err(err) => {
                     app.managed_auth_login = None;
+                    app.clear_managed_auth_login_toast();
+                    app.clear_managed_auth_cancel_confirm();
                     app.push_toast(
                         texts::tui_toast_managed_auth_login_failed(&err),
                         ToastKind::Error,
@@ -321,14 +335,17 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
             result,
         } => match result {
             Ok(Some(account)) => {
-                if app
+                if !app
                     .managed_auth_login
                     .as_ref()
                     .is_some_and(|login| login.device_code == device_code)
                 {
-                    app.managed_auth_login = None;
+                    return;
                 }
+                app.managed_auth_login = None;
                 app.managed_auth_loading = false;
+                app.clear_managed_auth_login_toast();
+                app.clear_managed_auth_cancel_confirm();
                 if let Some(status) = app.managed_auth_status.as_mut() {
                     if status.provider == auth_provider {
                         status.authenticated = true;
@@ -347,6 +364,7 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
                         accounts: vec![account.clone()],
                     });
                 }
+                app.settings_managed_accounts_idx = 0;
                 app.push_toast(
                     texts::tui_toast_managed_auth_login_finished(&account.login),
                     ToastKind::Success,
@@ -354,14 +372,17 @@ pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
             }
             Ok(None) => {}
             Err(err) => {
-                if app
+                if !app
                     .managed_auth_login
                     .as_ref()
                     .is_some_and(|login| login.device_code == device_code)
                 {
-                    app.managed_auth_login = None;
+                    return;
                 }
+                app.managed_auth_login = None;
                 app.managed_auth_loading = false;
+                app.clear_managed_auth_login_toast();
+                app.clear_managed_auth_cancel_confirm();
                 app.push_toast(
                     texts::tui_toast_managed_auth_login_failed(&err),
                     ToastKind::Error,
@@ -425,7 +446,8 @@ pub(crate) fn handle_skills_msg(
     app: &mut App,
     data: &mut UiData,
     msg: SkillsMsg,
-) -> Result<(), AppError> {
+) -> Result<CacheInvalidation, AppError> {
+    let mut invalidation = CacheInvalidation::None;
     match msg {
         SkillsMsg::DiscoverFinished { query, result } => match result {
             Ok(skills) => {
@@ -450,6 +472,7 @@ pub(crate) fn handle_skills_msg(
             Ok(installed) => {
                 app.overlay = Overlay::None;
                 *data = UiData::load(&app.app_type)?;
+                invalidation = CacheInvalidation::DataReloaded;
 
                 for row in app.skills_discover_results.iter_mut() {
                     if row.directory.eq_ignore_ascii_case(&installed.directory) {
@@ -472,7 +495,7 @@ pub(crate) fn handle_skills_msg(
         },
     }
 
-    Ok(())
+    Ok(invalidation)
 }
 
 fn is_webdav_loading_overlay(app: &App) -> bool {
@@ -490,7 +513,7 @@ pub(crate) fn handle_webdav_msg(
     data: &mut UiData,
     webdav_loading: &mut RequestTracker,
     msg: WebDavMsg,
-) -> Result<(), AppError> {
+) -> Result<CacheInvalidation, AppError> {
     match msg {
         WebDavMsg::Finished {
             request_id,
@@ -499,12 +522,22 @@ pub(crate) fn handle_webdav_msg(
         } => match result {
             Ok(done) => {
                 if webdav_loading.is_stale(request_id) {
-                    return Ok(());
+                    return Ok(CacheInvalidation::None);
                 }
 
                 if webdav_loading.finish_if_active(request_id) && is_webdav_loading_overlay(app) {
                     app.overlay = Overlay::None;
                 }
+
+                let done_invalidation = match &done {
+                    WebDavDone::Downloaded { decision, .. }
+                        if !matches!(decision, SyncDecision::V1MigrationNeeded) =>
+                    {
+                        CacheInvalidation::AppStateRecreated
+                    }
+                    WebDavDone::V1Migrated { .. } => CacheInvalidation::AppStateRecreated,
+                    _ => CacheInvalidation::DataReloaded,
+                };
 
                 match done {
                     WebDavDone::ConnectionChecked => {
@@ -568,10 +601,11 @@ pub(crate) fn handle_webdav_msg(
                     }
                 }
                 *data = UiData::load(&app.app_type)?;
+                Ok(done_invalidation)
             }
             Err(err) => {
                 if webdav_loading.is_stale(request_id) {
-                    return Ok(());
+                    return Ok(CacheInvalidation::None);
                 }
 
                 if webdav_loading.finish_if_active(request_id) && is_webdav_loading_overlay(app) {
@@ -642,10 +676,10 @@ pub(crate) fn handle_webdav_msg(
                 };
                 *data = UiData::load(&app.app_type)?;
                 app.push_toast(msg, ToastKind::Error);
+                Ok(CacheInvalidation::DataReloaded)
             }
         },
     }
-    Ok(())
 }
 
 pub(crate) fn handle_proxy_msg(
@@ -653,7 +687,8 @@ pub(crate) fn handle_proxy_msg(
     data: &mut UiData,
     proxy_loading: &mut RequestTracker,
     msg: ProxyMsg,
-) -> Result<(), AppError> {
+) -> Result<CacheInvalidation, AppError> {
+    let mut invalidation = CacheInvalidation::None;
     match msg {
         ProxyMsg::ManagedSessionFinished {
             request_id,
@@ -662,7 +697,7 @@ pub(crate) fn handle_proxy_msg(
             result,
         } => {
             if !proxy_loading.finish_if_active(request_id) {
-                return Ok(());
+                return Ok(CacheInvalidation::None);
             }
 
             if matches!(
@@ -678,6 +713,7 @@ pub(crate) fn handle_proxy_msg(
             match result {
                 Ok(()) => {
                     *data = UiData::load(&app.app_type)?;
+                    invalidation = CacheInvalidation::DataReloaded;
                     app.reset_proxy_activity(
                         data.proxy.estimated_input_tokens_total,
                         data.proxy.estimated_output_tokens_total,
@@ -697,7 +733,7 @@ pub(crate) fn handle_proxy_msg(
         }
     }
 
-    Ok(())
+    Ok(invalidation)
 }
 
 #[allow(dead_code)]

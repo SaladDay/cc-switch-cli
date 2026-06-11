@@ -1,14 +1,16 @@
 use crate::app_config::AppType;
-use crate::provider::ClaudeApiKeyField;
+use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
 use crate::services::ProviderService;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 use super::codex_config::{
     build_codex_provider_config_toml, clean_codex_provider_key, update_codex_config_snippet,
 };
 use super::{
-    ClaudeApiFormat, GeminiAuthType, ProviderAddFormState, UsageQueryTemplate,
-    OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
+    parse_codex_model_catalog_context_window, ClaudeApiFormat, GeminiAuthType,
+    ProviderAddFormState, UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
+    OPENCLAW_DEFAULT_USER_AGENT,
 };
 
 impl ProviderAddFormState {
@@ -128,11 +130,15 @@ impl ProviderAddFormState {
                     if !auth_value.is_object() {
                         *auth_value = json!({});
                     }
+                    settings_obj.remove("modelCatalog");
                 } else {
                     let provider_key =
                         clean_codex_provider_key(self.id.value.trim(), self.name.value.trim());
                     let base_url = self.codex_base_url.value.trim().trim_end_matches('/');
-                    let model = if self.codex_model.is_blank() {
+                    let model_catalog = self.normalized_codex_model_catalog_for_save();
+                    let model = if self.codex_local_routing_enabled() && !model_catalog.is_empty() {
+                        model_catalog[0]["model"].as_str().unwrap_or("gpt-5.4")
+                    } else if self.codex_model.is_blank() {
                         "gpt-5.4"
                     } else {
                         self.codex_model.value.trim()
@@ -161,6 +167,14 @@ impl ProviderAddFormState {
                         self.codex_env_key.value.trim(),
                     );
                     settings_obj.insert("config".to_string(), Value::String(config_toml));
+                    if self.codex_local_routing_enabled() && !model_catalog.is_empty() {
+                        settings_obj.insert(
+                            "modelCatalog".to_string(),
+                            json!({ "models": model_catalog }),
+                        );
+                    } else {
+                        settings_obj.remove("modelCatalog");
+                    }
 
                     let api_key = self.codex_api_key.value.trim();
                     if api_key.is_empty() {
@@ -497,6 +511,8 @@ impl ProviderAddFormState {
                 | ClaudeApiFormat::GeminiNative
         ) && matches!(self.app_type, AppType::Claude)
             && !self.is_claude_official_provider();
+        let should_write_codex_api_format =
+            matches!(self.app_type, AppType::Codex) && !self.is_codex_official_provider();
         let should_write_claude_api_key_field = matches!(self.app_type, AppType::Claude)
             && !self.is_claude_official_provider()
             && !self.is_claude_codex_oauth_provider()
@@ -505,6 +521,7 @@ impl ProviderAddFormState {
 
         if !should_write_common_config_meta
             && !should_write_claude_api_format
+            && !should_write_codex_api_format
             && !should_write_claude_api_key_field
             && !is_codex_oauth
             && !self.has_usage_script_meta()
@@ -563,6 +580,30 @@ impl ProviderAddFormState {
                 );
             } else {
                 meta_obj.remove("apiKeyField");
+            }
+        }
+
+        if matches!(self.app_type, AppType::Codex) {
+            if self.is_codex_official_provider() {
+                meta_obj.remove("apiFormat");
+                meta_obj.remove("codexChatReasoning");
+            } else {
+                let api_format = match self.claude_api_format {
+                    ClaudeApiFormat::OpenAiChat => "openai_chat",
+                    _ => "openai_responses",
+                };
+                meta_obj.insert("apiFormat".to_string(), json!(api_format));
+                if self.codex_local_routing_enabled() {
+                    if let Some(reasoning) =
+                        normalize_codex_chat_reasoning_for_save(&self.codex_chat_reasoning)
+                    {
+                        meta_obj.insert("codexChatReasoning".to_string(), reasoning);
+                    } else {
+                        meta_obj.remove("codexChatReasoning");
+                    }
+                } else {
+                    meta_obj.remove("codexChatReasoning");
+                }
             }
         }
 
@@ -691,6 +732,89 @@ impl ProviderAddFormState {
             .and_then(Value::as_object)
             .is_some_and(|meta| meta.contains_key("usage_script"))
     }
+
+    fn normalized_codex_model_catalog_for_save(&self) -> Vec<Value> {
+        let mut seen = HashSet::new();
+        let mut models = Vec::new();
+
+        for row in &self.codex_model_catalog {
+            let model = row.model.trim();
+            if model.is_empty() || !seen.insert(model.to_string()) {
+                continue;
+            }
+
+            let mut obj = serde_json::Map::new();
+            obj.insert("model".to_string(), json!(model));
+
+            let display_name = row.display_name.trim();
+            if !display_name.is_empty() {
+                obj.insert("displayName".to_string(), json!(display_name));
+            }
+
+            if let Some(context_window) =
+                parse_codex_model_catalog_context_window(row.context_window.trim())
+            {
+                if context_window > 0 {
+                    obj.insert("contextWindow".to_string(), json!(context_window));
+                }
+            }
+
+            models.push(Value::Object(obj));
+        }
+
+        models
+    }
+}
+
+fn normalize_codex_chat_reasoning_for_save(value: &CodexChatReasoningConfig) -> Option<Value> {
+    let raw = serde_json::to_value(value).ok()?;
+    let has_explicit_config = raw.as_object().is_some_and(|obj| !obj.is_empty());
+    let supports_effort = value.supports_effort == Some(true);
+    let supports_thinking = value.supports_thinking == Some(true) || supports_effort;
+
+    if !supports_thinking && !supports_effort {
+        return has_explicit_config.then(|| {
+            json!({
+                "supportsThinking": false,
+                "supportsEffort": false,
+                "thinkingParam": "none",
+                "effortParam": "none",
+                "outputFormat": value.output_format.as_deref().unwrap_or("auto"),
+            })
+        });
+    }
+
+    let mut obj = serde_json::Map::new();
+    obj.insert("supportsThinking".to_string(), json!(supports_thinking));
+    obj.insert("supportsEffort".to_string(), json!(supports_effort));
+    obj.insert(
+        "thinkingParam".to_string(),
+        json!(if supports_thinking {
+            value.thinking_param.as_deref().unwrap_or("thinking")
+        } else {
+            "none"
+        }),
+    );
+    obj.insert(
+        "effortParam".to_string(),
+        json!(if supports_effort {
+            value.effort_param.as_deref().unwrap_or("reasoning_effort")
+        } else {
+            "none"
+        }),
+    );
+    if supports_effort {
+        obj.insert(
+            "effortValueMode".to_string(),
+            json!(value.effort_value_mode.as_deref().unwrap_or("passthrough")),
+        );
+    }
+    obj.insert(
+        "outputFormat".to_string(),
+        json!(value.output_format.as_deref().unwrap_or("auto")),
+    );
+
+    Some(Value::Object(obj))
 }
 
 pub(crate) fn normalize_usage_timeout(raw: &str) -> u64 {

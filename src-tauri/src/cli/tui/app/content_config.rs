@@ -918,17 +918,65 @@ impl App {
         key: KeyEvent,
         _data: &UiData,
     ) -> Action {
+        let account_count = self.managed_auth_account_count();
         match key.code {
             KeyCode::Up => {
-                self.settings_managed_accounts_idx = 0;
+                self.settings_managed_accounts_idx =
+                    self.settings_managed_accounts_idx.saturating_sub(1);
                 Action::None
             }
             KeyCode::Down => {
-                self.settings_managed_accounts_idx = 0;
+                self.settings_managed_accounts_idx =
+                    (self.settings_managed_accounts_idx + 1).min(account_count.saturating_sub(1));
                 Action::None
             }
+            KeyCode::Char('a') => self.start_managed_account_login(),
+            KeyCode::Char('r') => Action::ManagedAuthRefresh {
+                auth_provider: "codex_oauth".to_string(),
+            },
+            KeyCode::Char(' ') => self.switch_selected_managed_account(),
             KeyCode::Enter => self.activate_managed_account_row(),
             _ => Action::None,
+        }
+    }
+
+    fn managed_auth_account_count(&self) -> usize {
+        self.managed_auth_status
+            .as_ref()
+            .map(|status| status.accounts.len())
+            .unwrap_or(0)
+    }
+
+    fn selected_managed_account(&self) -> Option<&crate::services::ManagedAuthAccount> {
+        let status = self.managed_auth_status.as_ref()?;
+        status.accounts.get(
+            self.settings_managed_accounts_idx
+                .min(status.accounts.len().saturating_sub(1)),
+        )
+    }
+
+    fn start_managed_account_login(&mut self) -> Action {
+        if self.managed_auth_loading || self.managed_auth_login.is_some() {
+            return Action::None;
+        }
+
+        Action::ManagedAuthStartLogin {
+            auth_provider: "codex_oauth".to_string(),
+        }
+    }
+
+    fn switch_selected_managed_account(&mut self) -> Action {
+        if self.managed_auth_loading || self.managed_auth_login.is_some() {
+            return Action::None;
+        }
+
+        let Some(account) = self.selected_managed_account() else {
+            return Action::None;
+        };
+
+        Action::ManagedAuthSetDefault {
+            auth_provider: "codex_oauth".to_string(),
+            account_id: account.id.clone(),
         }
     }
 
@@ -937,18 +985,13 @@ impl App {
             return Action::None;
         }
 
-        let Some(status) = self.managed_auth_status.as_ref() else {
+        if self.managed_auth_status.is_none() {
             return Action::ManagedAuthRefresh {
                 auth_provider: "codex_oauth".to_string(),
             };
-        };
+        }
 
-        if let Some(account) = status
-            .accounts
-            .iter()
-            .find(|account| account.is_default)
-            .or_else(|| status.accounts.first())
-        {
+        if let Some(account) = self.selected_managed_account() {
             self.overlay = Overlay::ManagedAccountActionPicker {
                 auth_provider: "codex_oauth".to_string(),
                 account_id: account.id.clone(),
@@ -1067,13 +1110,19 @@ impl App {
                 ),
             ]);
         } else {
-            lines.push(
+            lines.extend([
+                format!(
+                    "{}: {}:{}",
+                    crate::t!("Listen", "监听"),
+                    data.proxy.configured_listen_address,
+                    data.proxy.configured_listen_port
+                ),
                 crate::t!(
-                    "Proxy configuration is unavailable.",
-                    "代理配置暂时不可用。"
+                    "Stop the local proxy before editing listen address or port. Restart routing after those settings change.",
+                    "修改监听地址或端口前需要先停止本地代理；改完后重新启动路由才会生效。"
                 )
                 .to_string(),
-            );
+            ]);
         }
 
         lines.push(String::new());

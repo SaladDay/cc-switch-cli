@@ -30,17 +30,10 @@ const CLAUDE_API_FORMAT_CHOICES: [&str; 4] = [
     CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     CLAUDE_API_FORMAT_GEMINI_NATIVE,
 ];
-
-fn is_codex_official_provider(provider: &Provider) -> bool {
-    provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.codex_official)
-        .unwrap_or(false)
-        || provider.category.as_deref() == Some("official")
-        || provider.website_url.as_deref() == Some("https://chatgpt.com/codex")
-        || provider.name.trim().eq_ignore_ascii_case("OpenAI Official")
-}
+const CODEX_API_FORMAT_CHOICES: [&str; 2] = [
+    CLAUDE_API_FORMAT_OPENAI_RESPONSES,
+    CLAUDE_API_FORMAT_OPENAI_CHAT,
+];
 
 fn is_claude_official_provider(provider: &Provider) -> bool {
     provider
@@ -63,6 +56,18 @@ fn normalize_claude_api_format(raw: &str) -> &'static str {
         CLAUDE_API_FORMAT_OPENAI_RESPONSES => CLAUDE_API_FORMAT_OPENAI_RESPONSES,
         CLAUDE_API_FORMAT_GEMINI_NATIVE => CLAUDE_API_FORMAT_GEMINI_NATIVE,
         _ => CLAUDE_API_FORMAT_ANTHROPIC,
+    }
+}
+
+fn normalize_codex_api_format(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "chat"
+        | "chat_completions"
+        | "chat-completions"
+        | CLAUDE_API_FORMAT_OPENAI_CHAT
+        | "openai-chat"
+        | "openai_chat_completions" => CLAUDE_API_FORMAT_OPENAI_CHAT,
+        _ => CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     }
 }
 
@@ -103,6 +108,34 @@ fn effective_claude_api_format(provider: &Provider) -> &'static str {
         CLAUDE_API_FORMAT_OPENAI_CHAT
     } else {
         CLAUDE_API_FORMAT_ANTHROPIC
+    }
+}
+
+fn effective_codex_api_format(provider: &Provider) -> &'static str {
+    if let Some(api_format) = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_format.as_deref())
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("api_format")
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("apiFormat")
+                .and_then(|value| value.as_str())
+        })
+    {
+        return normalize_codex_api_format(api_format);
+    }
+
+    if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+        CLAUDE_API_FORMAT_OPENAI_CHAT
+    } else {
+        CLAUDE_API_FORMAT_OPENAI_RESPONSES
     }
 }
 
@@ -165,6 +198,31 @@ fn strip_claude_api_format_legacy_settings(provider: &mut Provider) {
     settings_obj.remove("openrouter_compat_mode");
 }
 
+fn strip_codex_api_format_legacy_settings(provider: &mut Provider) {
+    let Some(settings_obj) = provider.settings_config.as_object_mut() else {
+        return;
+    };
+    settings_obj.remove("api_format");
+    settings_obj.remove("apiFormat");
+}
+
+fn normalize_codex_settings_wire_api(provider: &mut Provider) {
+    let Some(config_text) = provider
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let normalized =
+        crate::codex_config::normalize_codex_config_wire_api_to_responses(&config_text);
+
+    if let Some(settings_obj) = provider.settings_config.as_object_mut() {
+        settings_obj.insert("config".to_string(), serde_json::Value::String(normalized));
+    }
+}
+
 fn apply_claude_api_format(provider: &mut Provider, api_format: &str) {
     let api_format = normalize_claude_api_format(api_format);
     if api_format == CLAUDE_API_FORMAT_ANTHROPIC {
@@ -179,6 +237,16 @@ fn apply_claude_api_format(provider: &mut Provider, api_format: &str) {
             .api_format = Some(api_format.to_string());
     }
     strip_claude_api_format_legacy_settings(provider);
+}
+
+fn apply_codex_api_format(provider: &mut Provider, api_format: &str) {
+    let api_format = normalize_codex_api_format(api_format);
+    provider
+        .meta
+        .get_or_insert_with(ProviderMeta::default)
+        .api_format = Some(api_format.to_string());
+    strip_codex_api_format_legacy_settings(provider);
+    normalize_codex_settings_wire_api(provider);
 }
 
 fn apply_fixed_claude_api_format_if_needed(app_type: &AppType, provider: &mut Provider) -> bool {
@@ -199,30 +267,71 @@ fn apply_fixed_claude_api_format_if_needed(app_type: &AppType, provider: &mut Pr
     false
 }
 
-fn prompt_claude_api_format(provider: &Provider) -> Result<&'static str, AppError> {
-    let current = effective_claude_api_format(provider);
-    let default_index = CLAUDE_API_FORMAT_CHOICES
+fn apply_fixed_codex_api_format_if_needed(app_type: &AppType, provider: &mut Provider) -> bool {
+    if !matches!(app_type, AppType::Codex) {
+        return true;
+    }
+
+    if provider.is_codex_official() {
+        if let Some(meta) = provider.meta.as_mut() {
+            meta.api_format = None;
+            meta.codex_chat_reasoning = None;
+        }
+        if let Some(settings_obj) = provider.settings_config.as_object_mut() {
+            settings_obj.remove("modelCatalog");
+        }
+        prune_empty_provider_meta(provider);
+        strip_codex_api_format_legacy_settings(provider);
+        normalize_codex_settings_wire_api(provider);
+        return true;
+    }
+
+    false
+}
+
+fn prompt_api_format(
+    choices: &'static [&'static str],
+    current: &str,
+    value_label: fn(&str) -> &'static str,
+    fallback: &'static str,
+) -> Result<&'static str, AppError> {
+    let default_index = choices
         .iter()
         .position(|api_format| *api_format == current)
         .unwrap_or(0);
-    let choices = CLAUDE_API_FORMAT_CHOICES
+    let labels = choices
         .iter()
-        .map(|api_format| texts::tui_claude_api_format_value(api_format).to_string())
+        .map(|api_format| value_label(api_format).to_string())
         .collect::<Vec<_>>();
 
-    let selected = Select::new(texts::tui_label_claude_api_format(), choices.clone())
+    let selected = Select::new(texts::tui_label_claude_api_format(), labels.clone())
         .with_starting_cursor(default_index)
         .prompt()
         .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
-    let selected_index = choices
+    let selected_index = labels
         .iter()
-        .position(|choice| choice == &selected)
+        .position(|label| label == &selected)
         .unwrap_or(default_index);
 
-    Ok(CLAUDE_API_FORMAT_CHOICES
-        .get(selected_index)
-        .copied()
-        .unwrap_or(CLAUDE_API_FORMAT_ANTHROPIC))
+    Ok(choices.get(selected_index).copied().unwrap_or(fallback))
+}
+
+fn prompt_claude_api_format(provider: &Provider) -> Result<&'static str, AppError> {
+    prompt_api_format(
+        &CLAUDE_API_FORMAT_CHOICES,
+        effective_claude_api_format(provider),
+        texts::tui_claude_api_format_value,
+        CLAUDE_API_FORMAT_ANTHROPIC,
+    )
+}
+
+fn prompt_codex_api_format(provider: &Provider) -> Result<&'static str, AppError> {
+    prompt_api_format(
+        &CODEX_API_FORMAT_CHOICES,
+        effective_codex_api_format(provider),
+        texts::tui_codex_api_format_value,
+        CLAUDE_API_FORMAT_OPENAI_RESPONSES,
+    )
 }
 
 fn prompt_and_apply_claude_api_format(
@@ -236,6 +345,30 @@ fn prompt_and_apply_claude_api_format(
     let api_format = prompt_claude_api_format(provider)?;
     apply_claude_api_format(provider, api_format);
     Ok(())
+}
+
+fn prompt_and_apply_codex_api_format(
+    app_type: &AppType,
+    provider: &mut Provider,
+) -> Result<(), AppError> {
+    if apply_fixed_codex_api_format_if_needed(app_type, provider) {
+        return Ok(());
+    }
+
+    let api_format = prompt_codex_api_format(provider)?;
+    apply_codex_api_format(provider, api_format);
+    Ok(())
+}
+
+fn prompt_and_apply_provider_api_format(
+    app_type: &AppType,
+    provider: &mut Provider,
+) -> Result<(), AppError> {
+    match app_type {
+        AppType::Claude => prompt_and_apply_claude_api_format(app_type, provider),
+        AppType::Codex => prompt_and_apply_codex_api_format(app_type, provider),
+        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(()),
+    }
 }
 
 fn normalize_optional_account_id(account_id: Option<String>) -> Option<String> {
@@ -718,7 +851,7 @@ fn add_provider(app_type: AppType, template: Option<ProviderAddTemplate>) -> Res
                 &app_type,
                 Some(&provider.settings_config),
                 provider.meta.as_ref(),
-                is_codex_official_provider(&provider),
+                provider.is_codex_official(),
             )?;
             provider.settings_config = prompt_result.settings_config.clone();
             settings_prompt_result = Some(prompt_result);
@@ -746,7 +879,7 @@ fn add_provider(app_type: AppType, template: Option<ProviderAddTemplate>) -> Res
         &mut provider,
         settings_prompt_result.as_ref(),
     );
-    prompt_and_apply_claude_api_format(&app_type, &mut provider)?;
+    prompt_and_apply_provider_api_format(&app_type, &mut provider)?;
     prompt_and_apply_codex_oauth_provider_options(&app_type, &mut provider)?;
     if let Some(enabled) = prompt_common_config_enabled(&app_type, common_snippet.as_deref(), None)?
     {
@@ -826,7 +959,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
             &app_type,
             Some(&original.settings_config),
             original.meta.as_ref(),
-            matches!(app_type, AppType::Codex) && is_codex_official_provider(&original),
+            matches!(app_type, AppType::Codex) && original.is_codex_official(),
         )?)
     } else {
         None
@@ -863,7 +996,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         in_failover_queue: original.in_failover_queue, // 保留故障转移状态
     };
     apply_settings_prompt_result_metadata(&app_type, &mut updated, settings_prompt_result.as_ref());
-    prompt_and_apply_claude_api_format(&app_type, &mut updated)?;
+    prompt_and_apply_provider_api_format(&app_type, &mut updated)?;
     prompt_and_apply_codex_oauth_provider_options(&app_type, &mut updated)?;
     if let Some(enabled) =
         prompt_common_config_enabled(&app_type, common_snippet.as_deref(), Some(&updated))?
@@ -907,6 +1040,15 @@ mod tests {
         Provider::with_id(
             "provider-1".to_string(),
             "Provider One".to_string(),
+            settings_config,
+            None,
+        )
+    }
+
+    fn codex_provider(settings_config: serde_json::Value) -> Provider {
+        Provider::with_id(
+            "codex-provider".to_string(),
+            "Codex Provider".to_string(),
             settings_config,
             None,
         )
@@ -1145,6 +1287,122 @@ mod tests {
     }
 
     #[test]
+    fn codex_api_format_effective_value_prefers_meta_over_legacy_settings() {
+        let mut provider = codex_provider(json!({
+            "api_format": "openai_chat",
+            "apiFormat": "chat"
+        }));
+        provider.meta = Some(ProviderMeta {
+            api_format: Some(CLAUDE_API_FORMAT_OPENAI_RESPONSES.to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            effective_codex_api_format(&provider),
+            CLAUDE_API_FORMAT_OPENAI_RESPONSES
+        );
+    }
+
+    #[test]
+    fn codex_api_format_effective_value_reads_legacy_chat_wire_api() {
+        let provider = codex_provider(json!({
+            "config": r#"model_provider = "vendor"
+
+[model_providers.vendor]
+base_url = "https://vendor.example/v1"
+wire_api = "chat"
+"#
+        }));
+
+        assert_eq!(
+            effective_codex_api_format(&provider),
+            CLAUDE_API_FORMAT_OPENAI_CHAT
+        );
+    }
+
+    #[test]
+    fn codex_api_format_apply_writes_meta_and_normalizes_legacy_config() {
+        let mut provider = codex_provider(json!({
+            "api_format": "openai_responses",
+            "apiFormat": "openai_responses",
+            "config": r#"model_provider = "vendor"
+wire_api = "chat"
+
+[model_providers.vendor]
+base_url = "https://vendor.example/v1"
+wire_api = "chat"
+"#
+        }));
+
+        apply_codex_api_format(&mut provider, CLAUDE_API_FORMAT_OPENAI_CHAT);
+
+        assert_eq!(
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref()),
+            Some(CLAUDE_API_FORMAT_OPENAI_CHAT)
+        );
+        assert!(provider.settings_config.get("api_format").is_none());
+        assert!(provider.settings_config.get("apiFormat").is_none());
+        let config_text = provider
+            .settings_config
+            .get("config")
+            .and_then(serde_json::Value::as_str)
+            .expect("config should remain a string");
+        assert!(config_text.contains("wire_api = \"responses\""));
+        assert!(
+            !config_text.contains("wire_api = \"chat\""),
+            "CLI should persist upstream Codex wire_api semantics"
+        );
+    }
+
+    #[test]
+    fn codex_api_format_fixed_provider_clears_overrides_and_normalizes_config() {
+        let mut provider = codex_provider(json!({
+            "api_format": "openai_chat",
+            "apiFormat": "chat",
+            "config": r#"model_provider = "openai"
+
+[model_providers.openai]
+base_url = "https://api.openai.com/v1"
+wire_api = "chat"
+"#,
+            "modelCatalog": {
+                "models": [
+                    { "model": "stale-chat-model" }
+                ]
+            }
+        }));
+        provider.category = Some("official".to_string());
+        provider.meta = Some(ProviderMeta {
+            api_format: Some(CLAUDE_API_FORMAT_OPENAI_CHAT.to_string()),
+            codex_chat_reasoning: Some(crate::provider::CodexChatReasoningConfig {
+                supports_thinking: Some(true),
+                supports_effort: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        assert!(apply_fixed_codex_api_format_if_needed(
+            &AppType::Codex,
+            &mut provider
+        ));
+        assert!(provider.meta.is_none());
+        assert!(provider.settings_config.get("api_format").is_none());
+        assert!(provider.settings_config.get("apiFormat").is_none());
+        assert!(provider.settings_config.get("modelCatalog").is_none());
+        let config_text = provider
+            .settings_config
+            .get("config")
+            .and_then(serde_json::Value::as_str)
+            .expect("config should remain a string");
+        assert!(config_text.contains("wire_api = \"responses\""));
+        assert!(!config_text.contains("wire_api = \"chat\""));
+    }
+
+    #[test]
     fn codex_oauth_provider_options_write_upstream_managed_account_shape() {
         let mut provider = claude_provider(json!({
             "env": {
@@ -1361,7 +1619,7 @@ fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), App
             &app_type,
             Some(&draft.settings_config),
             draft.meta.as_ref(),
-            matches!(app_type, AppType::Codex) && is_codex_official_provider(&source),
+            matches!(app_type, AppType::Codex) && source.is_codex_official(),
         )?)
     } else {
         None
@@ -1396,7 +1654,7 @@ fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), App
         in_failover_queue: false,
     };
     apply_settings_prompt_result_metadata(&app_type, &mut copied, settings_prompt_result.as_ref());
-    prompt_and_apply_claude_api_format(&app_type, &mut copied)?;
+    prompt_and_apply_provider_api_format(&app_type, &mut copied)?;
     prompt_and_apply_codex_oauth_provider_options(&app_type, &mut copied)?;
     if let Some(enabled) =
         prompt_common_config_enabled(&app_type, common_snippet.as_deref(), Some(&copied))?

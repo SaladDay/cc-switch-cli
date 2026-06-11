@@ -43,6 +43,14 @@ impl App {
 
     fn handle_form_exit_key(&mut self) -> Action {
         if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+            if matches!(provider.page, form::ProviderFormPage::CodexModelCatalog) {
+                provider.close_codex_model_catalog_page();
+                return Action::None;
+            }
+            if matches!(provider.page, form::ProviderFormPage::CodexLocalRouting) {
+                provider.close_codex_local_routing_page();
+                return Action::None;
+            }
             if matches!(provider.page, form::ProviderFormPage::UsageQuery) {
                 provider.close_usage_query_page();
                 return Action::None;

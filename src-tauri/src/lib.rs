@@ -30,6 +30,7 @@ mod session_manager;
 mod settings;
 mod store;
 mod sync_policy;
+mod usage_events;
 mod usage_script;
 
 #[cfg(test)]

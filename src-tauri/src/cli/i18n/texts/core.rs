@@ -1056,6 +1056,30 @@ pub fn tui_label_quota() -> &'static str {
     }
 }
 
+pub fn tui_label_provider_proxy() -> &'static str {
+    if is_chinese() {
+        "代理"
+    } else {
+        "Proxy"
+    }
+}
+
+pub fn tui_provider_needs_proxy_label() -> &'static str {
+    if is_chinese() {
+        "需要代理"
+    } else {
+        "Needs Proxy"
+    }
+}
+
+pub fn tui_provider_no_proxy_support_label() -> &'static str {
+    if is_chinese() {
+        "不支持代理"
+    } else {
+        "No Proxy Support"
+    }
+}
+
 pub fn tui_quota_loading() -> &'static str {
     if is_chinese() {
         "查询中…"
@@ -1425,6 +1449,25 @@ pub fn tui_claude_api_format_value(api_format: &str) -> &'static str {
     }
 }
 
+pub fn tui_codex_api_format_value(api_format: &str) -> &'static str {
+    match api_format {
+        "openai_chat" => {
+            if is_chinese() {
+                "OpenAI Chat Completions (需本地路由)"
+            } else {
+                "OpenAI Chat Completions (Local routing)"
+            }
+        }
+        _ => {
+            if is_chinese() {
+                "OpenAI Responses API (原生)"
+            } else {
+                "OpenAI Responses API (Native)"
+            }
+        }
+    }
+}
+
 pub fn tui_claude_api_format_requires_proxy_title() -> &'static str {
     if is_chinese() {
         "需开启代理"
@@ -1439,5 +1482,141 @@ pub fn tui_claude_api_format_requires_proxy_message(api_format: &str) -> String 
         format!("已切换为 {label}。\n该格式需开启本地代理使用。\n请在主页按 P 打开本地代理。")
     } else {
         format!("Switched to {label}.\nThis format requires the local proxy.\nPress P on the home page to open local proxy.")
+    }
+}
+
+pub fn tui_codex_api_format_requires_proxy_message(api_format: &str) -> String {
+    let label = tui_codex_api_format_value(api_format);
+    if is_chinese() {
+        format!("已切换为 {label}。\n该格式需要本地路由映射。\n使用此供应商时请保持本地代理开启。")
+    } else {
+        format!("Switched to {label}.\nThis format requires local route mapping.\nKeep the local proxy enabled while using this provider.")
+    }
+}
+
+pub fn tui_label_codex_local_routing() -> &'static str {
+    if is_chinese() {
+        "本地路由"
+    } else {
+        "Local Routing"
+    }
+}
+
+pub fn tui_codex_local_routing_title(provider: &str) -> String {
+    let title = tui_label_codex_local_routing();
+    if provider.trim().is_empty() {
+        title.to_string()
+    } else {
+        format!("{title} - {provider}")
+    }
+}
+
+pub fn tui_codex_local_routing_enable() -> &'static str {
+    if is_chinese() {
+        "启用本地路由"
+    } else {
+        "Enable Local Routing"
+    }
+}
+
+pub fn tui_codex_reasoning_supports_thinking() -> &'static str {
+    if is_chinese() {
+        "支持思考模式"
+    } else {
+        "Supports Thinking"
+    }
+}
+
+pub fn tui_codex_reasoning_supports_effort() -> &'static str {
+    if is_chinese() {
+        "支持思考等级"
+    } else {
+        "Supports Reasoning Effort"
+    }
+}
+
+pub fn tui_codex_model_catalog() -> &'static str {
+    if is_chinese() {
+        "模型映射"
+    } else {
+        "Model Mapping"
+    }
+}
+
+pub fn tui_codex_model_catalog_title(provider: &str) -> String {
+    if is_chinese() {
+        if provider.trim().is_empty() {
+            "模型映射".to_string()
+        } else {
+            format!("模型映射 - {provider}")
+        }
+    } else if provider.trim().is_empty() {
+        "Model Mapping".to_string()
+    } else {
+        format!("Model Mapping - {provider}")
+    }
+}
+
+pub fn tui_codex_model_catalog_model_header() -> &'static str {
+    if is_chinese() {
+        "模型"
+    } else {
+        "Model"
+    }
+}
+
+pub fn tui_codex_model_catalog_display_header() -> &'static str {
+    if is_chinese() {
+        "显示名称"
+    } else {
+        "Display"
+    }
+}
+
+pub fn tui_codex_model_catalog_context_header() -> &'static str {
+    if is_chinese() {
+        "上下文"
+    } else {
+        "Context"
+    }
+}
+
+pub fn tui_codex_model_catalog_empty() -> &'static str {
+    if is_chinese() {
+        "暂无模型映射"
+    } else {
+        "No model mappings"
+    }
+}
+
+pub fn tui_codex_model_catalog_model_prompt() -> &'static str {
+    if is_chinese() {
+        "模型 ID"
+    } else {
+        "Model ID"
+    }
+}
+
+pub fn tui_codex_model_catalog_display_prompt() -> &'static str {
+    if is_chinese() {
+        "显示名称"
+    } else {
+        "Display Name"
+    }
+}
+
+pub fn tui_codex_model_catalog_context_prompt() -> &'static str {
+    if is_chinese() {
+        "上下文窗口"
+    } else {
+        "Context Window"
+    }
+}
+
+pub fn tui_codex_model_catalog_preview_title() -> &'static str {
+    if is_chinese() {
+        "模型映射"
+    } else {
+        "Model Mapping"
     }
 }

@@ -52,6 +52,12 @@ impl App {
         if matches!(provider.page, form::ProviderFormPage::UsageQuery) {
             return self.handle_usage_query_page_key(key);
         }
+        if matches!(provider.page, form::ProviderFormPage::CodexModelCatalog) {
+            return self.handle_codex_model_catalog_page_key(key);
+        }
+        if matches!(provider.page, form::ProviderFormPage::CodexLocalRouting) {
+            return self.handle_codex_local_routing_page_key(key, data);
+        }
 
         match provider.focus {
             FormFocus::Fields => self.handle_provider_fields_key(key, data),
@@ -228,7 +234,9 @@ impl App {
                     return Action::None;
                 };
                 self.overlay = Overlay::ClaudeApiFormatPicker {
-                    selected: provider.claude_api_format.picker_index(),
+                    selected: provider
+                        .claude_api_format
+                        .picker_index_for_app(&provider.app_type),
                 };
                 Action::None
             }
@@ -385,6 +393,15 @@ impl App {
                 }
                 Action::None
             }
+            ProviderAddField::CodexLocalRouting => {
+                if matches!(key.code, KeyCode::Enter) {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                        return Action::None;
+                    };
+                    provider.open_codex_local_routing_page();
+                }
+                Action::None
+            }
             ProviderAddField::CodexModel
             | ProviderAddField::GeminiModel
             | ProviderAddField::OpenCodeModelId => {
@@ -402,6 +419,229 @@ impl App {
                 }
                 Action::None
             }
+        }
+    }
+
+    fn handle_codex_local_routing_page_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Option<Action> {
+        let (fields, selected) = self.prepare_codex_local_routing_field_selection()?;
+
+        match key.code {
+            KeyCode::Esc => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.close_codex_local_routing_page();
+                Some(Action::None)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.codex_local_routing_field_idx =
+                    provider.codex_local_routing_field_idx.saturating_sub(1);
+                Some(Action::None)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.codex_local_routing_field_idx =
+                    (provider.codex_local_routing_field_idx + 1).min(fields.len() - 1);
+                Some(Action::None)
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                Some(self.handle_codex_local_routing_field_activate(selected, data))
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_codex_local_routing_field_activate(
+        &mut self,
+        selected: form::CodexLocalRoutingField,
+        data: &UiData,
+    ) -> Action {
+        match selected {
+            form::CodexLocalRoutingField::Enabled => {
+                let enabled = {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                        return Action::None;
+                    };
+                    provider.toggle_codex_local_routing_enabled();
+                    provider.codex_local_routing_enabled()
+                };
+                if enabled
+                    && !data
+                        .proxy
+                        .routes_current_app_through_proxy(&AppType::Codex)
+                        .unwrap_or(false)
+                {
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+                        message: texts::tui_codex_api_format_requires_proxy_message("openai_chat"),
+                        action: ConfirmAction::ProviderApiFormatProxyNotice,
+                    });
+                }
+                Action::None
+            }
+            form::CodexLocalRoutingField::SupportsThinking => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                if provider.codex_local_routing_enabled() {
+                    provider.toggle_codex_reasoning_thinking();
+                }
+                Action::None
+            }
+            form::CodexLocalRoutingField::SupportsEffort => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                if provider.codex_local_routing_enabled() {
+                    provider.toggle_codex_reasoning_effort();
+                }
+                Action::None
+            }
+            form::CodexLocalRoutingField::ModelCatalog => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                if !provider.codex_local_routing_enabled() {
+                    return Action::None;
+                }
+                provider.open_codex_model_catalog_page();
+                Action::None
+            }
+        }
+    }
+
+    fn handle_codex_model_catalog_page_key(&mut self, key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Esc => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.close_codex_model_catalog_page();
+                Some(Action::None)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.codex_model_catalog_idx =
+                    provider.codex_model_catalog_idx.saturating_sub(1);
+                Some(Action::None)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                if !provider.codex_model_catalog.is_empty() {
+                    provider.codex_model_catalog_idx = (provider.codex_model_catalog_idx + 1)
+                        .min(provider.codex_model_catalog.len() - 1);
+                }
+                Some(Action::None)
+            }
+            KeyCode::Left => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.codex_model_catalog_field = form::CodexModelCatalogField::from_index(
+                    provider.codex_model_catalog_field.index().saturating_sub(1),
+                );
+                Some(Action::None)
+            }
+            KeyCode::Right => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.codex_model_catalog_field = form::CodexModelCatalogField::from_index(
+                    (provider.codex_model_catalog_field.index() + 1)
+                        .min(form::CodexModelCatalogField::ALL.len().saturating_sub(1)),
+                );
+                Some(Action::None)
+            }
+            KeyCode::Char('f') => Some(self.build_codex_model_catalog_fetch_action()),
+            KeyCode::Char('+') | KeyCode::Char('a') => {
+                self.open_codex_model_catalog_field_input(
+                    None,
+                    form::CodexModelCatalogField::Model,
+                    "",
+                );
+                Some(Action::None)
+            }
+            KeyCode::Enter => {
+                let (row, field, current) = match self.form.as_ref() {
+                    Some(FormState::ProviderAdd(provider))
+                        if !provider.codex_model_catalog.is_empty() =>
+                    {
+                        let row = provider.codex_model_catalog_idx;
+                        let field = provider.codex_model_catalog_field;
+                        let current = provider.selected_codex_model_catalog_field_value(field);
+                        (Some(row), field, current)
+                    }
+                    _ => (None, form::CodexModelCatalogField::Model, String::new()),
+                };
+                self.open_codex_model_catalog_field_input(row, field, &current);
+                Some(Action::None)
+            }
+            KeyCode::Delete | KeyCode::Backspace => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.remove_selected_codex_model_catalog_model();
+                Some(Action::None)
+            }
+            _ => None,
+        }
+    }
+
+    fn open_codex_model_catalog_field_input(
+        &mut self,
+        row: Option<usize>,
+        field: form::CodexModelCatalogField,
+        value: &str,
+    ) {
+        let prompt = match field {
+            form::CodexModelCatalogField::Model => texts::tui_codex_model_catalog_model_prompt(),
+            form::CodexModelCatalogField::DisplayName => {
+                texts::tui_codex_model_catalog_display_prompt()
+            }
+            form::CodexModelCatalogField::ContextWindow => {
+                texts::tui_codex_model_catalog_context_prompt()
+            }
+        };
+        self.overlay = Overlay::TextInput(TextInputState {
+            title: texts::tui_codex_model_catalog().to_string(),
+            prompt: prompt.to_string(),
+            input: TextInput::new(value),
+            submit: TextSubmit::CodexModelCatalogField { row, field },
+            secret: false,
+        });
+    }
+
+    fn build_codex_model_catalog_fetch_action(&mut self) -> Action {
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+            return Action::None;
+        };
+        let base_url = provider.codex_base_url.value.trim();
+        if base_url.is_empty() {
+            self.push_toast(texts::tui_model_fetch_need_endpoint(), ToastKind::Warning);
+            return Action::None;
+        }
+
+        Action::ProviderModelFetch {
+            base_url: provider.codex_base_url.value.clone(),
+            api_key: (!provider.codex_api_key.value.trim().is_empty())
+                .then(|| provider.codex_api_key.value.clone()),
+            codex_oauth: false,
+            codex_oauth_account_id: None,
+            field: ProviderAddField::CodexLocalRouting,
+            claude_idx: None,
         }
     }
 
@@ -889,6 +1129,34 @@ impl App {
 
         let selected = fields.get(provider.usage_query_field_idx).copied()?;
         Some((fields, selected, provider.usage_query_editing))
+    }
+
+    fn prepare_codex_local_routing_field_selection(
+        &mut self,
+    ) -> Option<(
+        Vec<form::CodexLocalRoutingField>,
+        form::CodexLocalRoutingField,
+    )> {
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+            return None;
+        };
+        if !matches!(provider.page, form::ProviderFormPage::CodexLocalRouting) {
+            return None;
+        }
+        if !matches!(provider.focus, FormFocus::Fields) {
+            return None;
+        }
+
+        let fields = provider.codex_local_routing_fields();
+        if !fields.is_empty() {
+            provider.codex_local_routing_field_idx =
+                provider.codex_local_routing_field_idx.min(fields.len() - 1);
+        } else {
+            provider.codex_local_routing_field_idx = 0;
+        }
+
+        let selected = provider.selected_codex_local_routing_field()?;
+        Some((fields, selected))
     }
 
     fn finish_provider_input_change(

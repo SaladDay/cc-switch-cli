@@ -4,6 +4,7 @@ use crate::app_config::{AppType, McpServer};
 use crate::cli::i18n::texts;
 use crate::cli::tui::form::strip_common_config_from_settings;
 use crate::commands::workspace;
+use crate::database::ModelPricingUpdate;
 use crate::error::AppError;
 use crate::openclaw_config::{
     set_agents_defaults, set_env_config, set_tools_config, OpenClawAgentsDefaults,
@@ -21,17 +22,6 @@ use super::helpers::{
 };
 use super::RuntimeActionContext;
 
-fn is_codex_official_provider(provider: &Provider) -> bool {
-    provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.codex_official)
-        .unwrap_or(false)
-        || provider.category.as_deref() == Some("official")
-        || provider.website_url.as_deref() == Some("https://chatgpt.com/codex")
-        || provider.name.trim().eq_ignore_ascii_case("OpenAI Official")
-}
-
 fn validate_provider_submit(
     app_type: &AppType,
     provider: &Provider,
@@ -45,7 +35,7 @@ fn validate_provider_submit(
         });
     }
 
-    if matches!(app_type, AppType::Codex) && !is_codex_official_provider(provider) {
+    if matches!(app_type, AppType::Codex) && !provider.is_codex_official() {
         let parsed = crate::cli::tui::form::parse_codex_config_snippet(
             provider
                 .settings_config
@@ -63,6 +53,19 @@ fn validate_provider_submit(
     }
 
     None
+}
+
+fn refresh_provider_data_after_write(
+    ctx: &mut RuntimeActionContext<'_>,
+    state: &crate::store::AppState,
+) -> Result<(), AppError> {
+    let app_type = ctx.app.app_type.clone();
+    state.reload_config_snapshot_from_db()?;
+    ctx.data
+        .refresh_current_app_provider_data(state, &app_type)?;
+    ctx.app.clamp_selections(ctx.data);
+    ctx.data.mark_current_app_data_changed();
+    Ok(())
 }
 
 pub(super) fn open_external(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
@@ -258,6 +261,7 @@ pub(super) fn submit(
         }
         EditorSubmit::ProviderAdd => submit_provider_add(ctx, content),
         EditorSubmit::ProviderEdit { id } => submit_provider_edit(ctx, id, content),
+        EditorSubmit::PricingEdit { model_id } => submit_pricing_edit(ctx, model_id, content),
         EditorSubmit::McpAdd => submit_mcp_add(ctx, content),
         EditorSubmit::McpEdit { id } => submit_mcp_edit(ctx, id, content),
         EditorSubmit::ConfigCommonSnippet { app_type, source } => {
@@ -801,7 +805,7 @@ fn submit_provider_add(
             ctx.app.form = None;
             ctx.app
                 .push_toast(texts::tui_toast_provider_add_finished(), ToastKind::Success);
-            *ctx.data = UiData::load(&ctx.app.app_type)?;
+            refresh_provider_data_after_write(ctx, &state)?;
         }
         Ok(false) => {
             ctx.app
@@ -851,9 +855,99 @@ fn submit_provider_edit(
         texts::tui_toast_provider_edit_finished(),
         ToastKind::Success,
     );
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     Ok(())
 }
+
+#[derive(serde::Deserialize)]
+struct PricingEditPayload {
+    model_id: String,
+    display_name: String,
+    input_cost_per_million: String,
+    output_cost_per_million: String,
+    cache_read_cost_per_million: String,
+    cache_creation_cost_per_million: String,
+}
+
+fn submit_pricing_edit(
+    ctx: &mut RuntimeActionContext<'_>,
+    model_id: String,
+    content: String,
+) -> Result<(), AppError> {
+    let payload: PricingEditPayload = match serde_json::from_str(&content) {
+        Ok(payload) => payload,
+        Err(e) => {
+            ctx.app.push_toast(
+                texts::tui_toast_invalid_json(&e.to_string()),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+    };
+
+    if payload.model_id.trim() != model_id {
+        ctx.app.push_toast(
+            crate::t!(
+                "Model id cannot be changed from this editor.",
+                "不能在此编辑器中修改模型 ID。"
+            ),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    }
+    let pricing = match ModelPricingUpdate::new(
+        model_id,
+        payload.display_name,
+        payload.input_cost_per_million,
+        payload.output_cost_per_million,
+        payload.cache_read_cost_per_million,
+        payload.cache_creation_cost_per_million,
+    ) {
+        Ok(pricing) => pricing,
+        Err(err) => {
+            ctx.app.push_toast(err.to_string(), ToastKind::Warning);
+            return Ok(());
+        }
+    };
+
+    let state = load_state()?;
+    if let Err(err) = state.db.upsert_model_pricing(&pricing) {
+        ctx.app.push_toast(err.to_string(), ToastKind::Error);
+        return Ok(());
+    }
+    let backfilled = match state
+        .db
+        .backfill_missing_usage_costs_for_model(&pricing.model_id)
+    {
+        Ok(count) => count,
+        Err(err) => {
+            ctx.app.push_toast(err.to_string(), ToastKind::Warning);
+            0
+        }
+    };
+
+    ctx.app.editor = None;
+    if backfilled > 0 {
+        ctx.app.push_toast(
+            format!(
+                "{} {} {}",
+                crate::t!("Model pricing updated.", "模型定价已更新。"),
+                crate::t!("Usage costs backfilled:", "已回填用量费用:"),
+                backfilled,
+            ),
+            ToastKind::Success,
+        );
+    } else {
+        ctx.app.push_toast(
+            crate::t!("Model pricing updated.", "模型定价已更新。"),
+            ToastKind::Success,
+        );
+    }
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.clamp_selections(ctx.data);
+    Ok(())
+}
+
 fn submit_mcp_add(ctx: &mut RuntimeActionContext<'_>, content: String) -> Result<(), AppError> {
     let server: McpServer = match serde_json::from_str(&content) {
         Ok(s) => s,

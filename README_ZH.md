@@ -2,14 +2,16 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.7.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.8.2-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Claude Code、Codex、Gemini、OpenCode、Hermes 与 OpenClaw 的命令行管理工具**
+**支持 TUI + CLI 双模式的 Claude Code、Codex、Gemini、OpenCode、Hermes 与 OpenClaw 管理工具**
 
-统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes 与 OpenClaw 的供应商配置，并按应用提供 MCP 服务器、Skills 扩展、提示词、本地代理路由和环境检查等能力。
+日常切换、账号和会话管理可使用交互式 TUI；脚本化、自动化和终端工作流可使用 CLI。
+
+统一管理供应商配置、MCP 服务器、Skills 扩展、提示词、本地代理路由、用量统计和环境检查等能力。
 
 [English](README.md) | 中文
 
@@ -47,6 +49,26 @@
   </tr>
   <tr>
     <td width="180">
+      <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
+        <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>Cubence</b> 赞助本项目！Cubence 是一家致力为客户提供稳定、高效的API中转服务商。从25年9月运营至今，提供了Claude code、Codex、Gemini等多种模型支持。通过<a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">此链接</a>注册，并在充值时使用 <code>CCSCLI</code> 优惠码享受9折优惠。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://runapi.co/register?aff=kTlB">
+        <img src="assets/partners/logos/runapi.png" alt="RunAPI" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>RunAPI</b> 赞助本项目！<a href="https://runapi.co/register?aff=kTlB"><b>RunAPI</b></a> 是高效稳定的 API 平台和 OpenRouter 平替，一个 API Key 即可访问 OpenAI、Claude、Gemini、DeepSeek、Grok 等 150+ 主流模型，低至 1 折，极其稳定，可以无缝兼容 Claude Code、OpenClaw 等工具。cc-switch-cli 用户专属福利：注册联系管理员即可领取 ￥7 的免费额度。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">
         <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
       </a>
@@ -54,16 +76,6 @@
     <td>
       感谢 <b>AICodeMirror</b> 赞助本项目！<b>AICodeMirror</b> 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级并发、快速开票与 7x24 专属技术支持。Claude Code / Codex / Gemini 官方通道价格低至原价的 <b>38% / 2% / 9%</b>，充值另有折上折！<br/>
       <b>AICodeMirror</b> 为 cc-switch-cli 用户提供专属福利：通过<a href="https://www.aicodemirror.com/register?invitecode=77V9EA">此链接</a>注册，首充可享 <b>8 折</b>，即 <b>20% off</b>，企业客户最高可享 <b>75 折</b>，即 <b>25% off</b>。
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
-        <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
-      </a>
-    </td>
-    <td>
-      感谢 <b>Cubence</b> 赞助本项目！Cubence 是一家致力为客户提供稳定、高效的API中转服务商。从25年9月运营至今，提供了Claude code、Codex、Gemini等多种模型支持。通过<a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">此链接</a>注册，并在充值时使用 <code>CCSCLI</code> 优惠码享受9折优惠。
     </td>
   </tr>
   <tr>
@@ -103,18 +115,23 @@
 
 ## 🚀 快速开始
 
-**交互模式（推荐）**
+**TUI 模式（推荐）**
 ```bash
 cc-switch
 ```
-🤩 按照屏幕菜单探索功能。
+使用全屏界面切换供应商、管理账号、查看会话并检查代理状态。
 
 **命令行模式**
 ```bash
 cc-switch provider list              # 列出供应商
 cc-switch provider switch <id>       # 切换供应商
+cc-switch use <id>                   # 切换供应商（快捷命令）
 cc-switch provider export <id>       # 导出 Claude 供应商为独立 settings 文件
 cc-switch provider stream-check <id> # 检查供应商流式健康
+cc-switch start <claude|codex> <id> --dry-run # 预览启动配置
+cc-switch auth list                  # 查看托管的 ChatGPT/Codex OAuth 账号
+cc-switch sessions list --all        # 查看历史会话
+cc-switch sessions sync-usage --all  # 导入本地会话 token / cost 用量
 cc-switch config webdav show         # 查看 WebDAV 同步设置
 cc-switch env tools                  # 检查本地 CLI 工具
 cc-switch mcp sync                   # 同步 MCP 服务器
@@ -265,6 +282,7 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 cc-switch provider list              # 列出所有供应商
 cc-switch provider current           # 显示当前供应商
 cc-switch provider switch <id>       # 切换供应商
+cc-switch use <id>                   # 切换供应商（快捷命令）
 cc-switch provider add               # 添加新供应商
 cc-switch provider edit <id>         # 编辑现有供应商
 cc-switch provider duplicate <id>    # 复制供应商
@@ -274,6 +292,20 @@ cc-switch provider speedtest <id>    # 测试 API 延迟
 cc-switch provider stream-check <id> # 执行流式健康检查
 cc-switch provider fetch-models <id> # 拉取远端模型列表
 cc-switch provider export <id> --output ~/.claude/settings-demo.json # 自定义 settings 文件路径
+```
+
+### 🔐 托管账号
+
+本地管理 ChatGPT/Codex OAuth 账号，并在供应商配置中复用；也可以通过本地代理将 Codex OAuth 账号作为 Claude Code 供应商使用。
+
+**功能：** 设备码登录、账号列表、默认账号选择、账号移除，以及无需在每个供应商里复制长期 token 的账号绑定。
+
+```bash
+cc-switch auth status                # 查看托管账号状态
+cc-switch auth login                 # 使用 ChatGPT/Codex OAuth 登录
+cc-switch auth list                  # 列出已登录账号
+cc-switch auth default <account-id>  # 设置默认账号
+cc-switch auth remove <account-id>   # 移除账号
 ```
 
 ### 🛠️ MCP 服务器管理
@@ -337,6 +369,20 @@ cc-switch skills repos enable <repo> # 启用仓库但保留当前分支
 cc-switch skills repos disable <repo> # 禁用仓库但保留当前分支
 ```
 
+### 🕘 历史会话与用量统计
+
+查看历史会话，一键 resume，删除旧会话，并将本地会话日志导入 token / cost 统计，方便管理用量。
+
+**功能：** 跨应用扫描会话、消息预览、一键恢复、删除确认、JSON 输出，以及 Claude、Codex、Gemini、OpenCode 的用量同步。
+
+```bash
+cc-switch sessions list --all        # 列出支持应用的历史会话
+cc-switch sessions show <id>         # 查看会话信息和消息
+cc-switch sessions resume <id>       # 恢复会话
+cc-switch sessions delete <id>       # 删除会话
+cc-switch sessions sync-usage --all  # 同步本地日志到用量统计
+```
+
 ### ⚙️ 配置管理
 
 管理配置文件的备份、导入和导出。
@@ -379,11 +425,13 @@ cc-switch config webdav migrate-v1-to-v2
 cc-switch config reset               # 重置为默认配置
 ```
 
-### 🌉 代理管理
+### 🌉 代理管理与模型接入
 
 查看并控制由守护进程管理的按应用代理路由。
 
-**功能：** 每个应用可独立启用/禁用代理、每个应用可配置监听端口、由 daemon 管理 worker、当前路由检查、首页遥测，以及用于调试的前台运行模式。
+**功能：** 每个应用可独立启用/禁用代理、每个应用可配置监听端口、由 daemon 管理 worker、当前路由检查、首页遥测、token 统计，以及用于调试的前台运行模式。
+
+本地代理可将 Claude Code、Codex、Gemini 路由到 CC-Switch，适配 OpenAI Responses API 与 Chat Completions 供应商，并在目标应用支持的路径下接入 DeepSeek、Kimi、Qwen、OpenRouter、xAI、Groq、Mistral 等主流 OpenAI-compatible 模型。
 
 ```bash
 cc-switch proxy show                              # 显示代理配置、路由和 daemon worker 状态

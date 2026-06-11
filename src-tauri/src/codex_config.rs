@@ -528,8 +528,9 @@ fn set_codex_model_catalog_json_field(
     let generated_path = get_codex_model_catalog_path();
 
     match catalog_path {
-        Some(path) => {
-            doc["model_catalog_json"] = toml_edit::value(path.to_string_lossy().as_ref());
+        Some(_path) => {
+            // 使用相对文件名而非绝对路径，保持与 Codex 自身引用方式一致
+            doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
         }
         None => {
             let should_remove = doc
@@ -1083,6 +1084,42 @@ pub fn update_codex_config_snippet(
     }
 }
 
+/// Normalize persisted Codex provider config to upstream semantics.
+///
+/// Codex providers should keep `wire_api = "responses"` in the Codex config
+/// TOML. Local Responses <-> Chat routing is controlled by provider
+/// `meta.apiFormat`, not by persisting `wire_api = "chat"`.
+pub fn normalize_codex_config_wire_api_to_responses(config_text: &str) -> String {
+    let mut doc = match config_text.trim().parse::<toml_edit::DocumentMut>() {
+        Ok(doc) => doc,
+        Err(_) => return config_text.to_string(),
+    };
+
+    let mut updated = false;
+    if let Some(provider_key) = active_codex_model_provider_id(&doc) {
+        if let Some(section) = doc
+            .get_mut("model_providers")
+            .and_then(|providers| providers.as_table_like_mut())
+            .and_then(|providers| providers.get_mut(&provider_key))
+            .and_then(|provider| provider.as_table_like_mut())
+        {
+            section.insert("wire_api", toml_edit::value("responses"));
+            updated = true;
+        }
+    }
+
+    if doc.get("wire_api").is_some() {
+        doc["wire_api"] = toml_edit::value("responses");
+        updated = true;
+    }
+
+    if updated {
+        doc.to_string().trim().to_string()
+    } else {
+        config_text.to_string()
+    }
+}
+
 fn non_empty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1146,6 +1183,59 @@ mod tests {
         fn drop(&mut self) {
             let _ = crate::settings::update_settings(self.original.clone());
         }
+    }
+
+    #[test]
+    fn normalize_codex_config_wire_api_updates_active_provider_and_top_level() {
+        let normalized = normalize_codex_config_wire_api_to_responses(
+            r#"model_provider = "vendor"
+wire_api = "chat"
+
+[model_providers.vendor]
+base_url = "https://vendor.example/v1"
+wire_api = "chat"
+
+[model_providers.other]
+base_url = "https://other.example/v1"
+wire_api = "chat"
+"#,
+        );
+
+        let parsed = normalized
+            .parse::<toml_edit::DocumentMut>()
+            .expect("normalized config should stay valid TOML");
+        assert_eq!(parsed["wire_api"].as_str(), Some("responses"));
+        assert_eq!(
+            parsed["model_providers"]["vendor"]["wire_api"].as_str(),
+            Some("responses")
+        );
+        assert_eq!(
+            parsed["model_providers"]["other"]["wire_api"].as_str(),
+            Some("chat"),
+            "inactive providers should be left alone"
+        );
+    }
+
+    #[test]
+    fn normalize_codex_config_wire_api_updates_top_level_only_config() {
+        let normalized = normalize_codex_config_wire_api_to_responses(
+            r#"wire_api = "chat"
+model = "gpt-5.4"
+"#,
+        );
+
+        let parsed = normalized
+            .parse::<toml_edit::DocumentMut>()
+            .expect("normalized config should stay valid TOML");
+        assert_eq!(parsed["wire_api"].as_str(), Some("responses"));
+        assert_eq!(parsed["model"].as_str(), Some("gpt-5.4"));
+    }
+
+    #[test]
+    fn normalize_codex_config_wire_api_preserves_invalid_toml() {
+        let config = "model_provider = ";
+
+        assert_eq!(normalize_codex_config_wire_api_to_responses(config), config);
     }
 
     #[test]
@@ -1431,7 +1521,7 @@ name = "any"
             parsed
                 .get("model_catalog_json")
                 .and_then(toml::Value::as_str),
-            Some("/tmp/cc-switch-model-catalog.json")
+            Some("cc-switch-model-catalog.json")
         );
         assert!(
             parsed
@@ -1600,7 +1690,7 @@ wire_api = "responses"
             parsed
                 .get("model_catalog_json")
                 .and_then(toml::Value::as_str),
-            Some(get_codex_model_catalog_path().to_string_lossy().as_ref())
+            Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
         );
         let generated_catalog: Value = serde_json::from_str(
             &fs::read_to_string(get_codex_model_catalog_path()).expect("read catalog"),

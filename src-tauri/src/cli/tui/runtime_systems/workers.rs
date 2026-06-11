@@ -1,19 +1,29 @@
-use std::sync::mpsc;
+use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex,
+};
 
+use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 use crate::services::{SkillService, StreamCheckService, WebDavSyncService};
 use crate::settings::{set_webdav_sync_settings, webdav_jianguoyun_preset};
 
-use super::super::data::load_state;
+use super::super::data::{
+    load_snapshot_state, load_state, load_usage_pricing_data_from_state_for_range, UiData,
+    UsageRangePreset,
+};
 use super::types::{
-    fetch_provider_models_for_tui, model_fetch_strategy_for_field, LocalEnvMsg, LocalEnvReq,
-    LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg,
-    ModelFetchReq, ModelFetchSystem, ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq,
-    QuotaSystem, SessionMsg, SessionReq, SessionSystem, SkillsMsg, SkillsReq, SkillsSystem,
-    SpeedtestMsg, SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg,
-    UpdateReq, UpdateSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind,
-    WebDavSystem,
+    fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
+    AppDataReq, AppDataSystem, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg,
+    ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg,
+    ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, SessionMsg, SessionReq, SessionSystem,
+    SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg,
+    StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem, UsagePricingMsg,
+    UsagePricingReq, UsagePricingSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq,
+    WebDavReqKind, WebDavSystem,
 };
 
 pub(crate) fn start_proxy_system() -> Result<ProxySystem, AppError> {
@@ -781,6 +791,635 @@ fn quota_worker_loop(rx: mpsc::Receiver<QuotaReq>, tx: mpsc::Sender<QuotaMsg>) {
     }
 }
 
+pub(crate) fn start_usage_pricing_system() -> Result<UsagePricingSystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<UsagePricingMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<UsagePricingReq>();
+
+    let handle = std::thread::Builder::new()
+        .name("cc-switch-usage-pricing".to_string())
+        .spawn(move || usage_pricing_worker_loop(req_rx, result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn usage/pricing worker thread".to_string(),
+            source: e,
+        })?;
+
+    Ok(UsagePricingSystem {
+        req_tx,
+        result_rx,
+        _handle: handle,
+    })
+}
+
+pub(crate) fn start_app_data_system() -> Result<AppDataSystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<AppDataMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<AppDataReq>();
+
+    let handle = std::thread::Builder::new()
+        .name("cc-switch-app-data".to_string())
+        .spawn(move || app_data_worker_loop(req_rx, result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn app data worker thread".to_string(),
+            source: e,
+        })?;
+
+    Ok(AppDataSystem {
+        req_tx,
+        result_rx,
+        _handle: handle,
+    })
+}
+
+fn app_data_worker_loop(rx: mpsc::Receiver<AppDataReq>, tx: mpsc::Sender<AppDataMsg>) {
+    let mut state_cache: Option<(u64, crate::store::AppState)> = None;
+    let mut deferred = VecDeque::new();
+
+    while let Some(req) = deferred.pop_front().or_else(|| rx.recv().ok()) {
+        match req {
+            AppDataReq::DropState { ack } => {
+                state_cache = None;
+                let _ = ack.send(());
+            }
+            req @ (AppDataReq::InitialLoad { .. }
+            | AppDataReq::Load { .. }
+            | AppDataReq::FullLoad { .. }) => {
+                let mut backlog = VecDeque::from([req]);
+                drain_latest_by_key(&mut backlog, &mut deferred, &rx, app_data_req_key);
+
+                while let Some(req) = backlog.pop_front() {
+                    handle_app_data_req(&mut state_cache, req, &tx);
+                    drain_latest_by_key(&mut backlog, &mut deferred, &rx, app_data_req_key);
+                }
+            }
+        }
+    }
+}
+
+fn drain_latest_by_key<T, K, F>(
+    backlog: &mut VecDeque<T>,
+    deferred: &mut VecDeque<T>,
+    rx: &mpsc::Receiver<T>,
+    key: F,
+) where
+    K: Eq + Hash,
+    F: Fn(&T) -> Option<K>,
+{
+    let mut latest_by_key = HashMap::<K, T>::new();
+    while let Some(req) = backlog.pop_front() {
+        if let Some(key) = key(&req) {
+            latest_by_key.insert(key, req);
+        } else {
+            deferred.push_back(req);
+        }
+    }
+    for req in rx.try_iter() {
+        if deferred.is_empty() {
+            if let Some(key) = key(&req) {
+                latest_by_key.insert(key, req);
+                continue;
+            }
+        }
+        deferred.push_back(req);
+    }
+    backlog.extend(latest_by_key.into_values());
+}
+
+fn app_data_req_key(req: &AppDataReq) -> Option<(AppType, AppDataLoadKind)> {
+    match req {
+        AppDataReq::InitialLoad { app_type, .. } => {
+            Some((app_type.clone(), AppDataLoadKind::Initial))
+        }
+        AppDataReq::Load { app_type, .. } => Some((app_type.clone(), AppDataLoadKind::Snapshot)),
+        AppDataReq::FullLoad { app_type, .. } => Some((app_type.clone(), AppDataLoadKind::Full)),
+        AppDataReq::DropState { .. } => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum UsagePricingReqRangeKey {
+    Fixed(UsageRangePreset),
+    Custom,
+}
+
+fn usage_pricing_req_key(req: &UsagePricingReq) -> Option<(AppType, UsagePricingReqRangeKey)> {
+    match req {
+        UsagePricingReq::Load {
+            app_type, range, ..
+        } => {
+            let range_key = match range {
+                UsageRangePreset::Custom(_) => UsagePricingReqRangeKey::Custom,
+                _ => UsagePricingReqRangeKey::Fixed(*range),
+            };
+            Some((app_type.clone(), range_key))
+        }
+        UsagePricingReq::DropState { .. } => None,
+    }
+}
+
+fn usage_pricing_req_is_custom(req: &UsagePricingReq) -> bool {
+    matches!(
+        req,
+        UsagePricingReq::Load {
+            range: UsageRangePreset::Custom(_),
+            ..
+        }
+    )
+}
+
+#[derive(Default)]
+struct UsagePricingCustomState {
+    running: bool,
+    running_request_id: Option<u64>,
+    running_interrupt: Option<rusqlite::InterruptHandle>,
+    running_cancel: Option<Arc<AtomicBool>>,
+    cancel_requested: bool,
+    pending: Vec<UsagePricingReq>,
+    drop_acks: Vec<mpsc::Sender<()>>,
+}
+
+#[derive(Default)]
+struct UsagePricingCustomCompletion {
+    next: Option<UsagePricingReq>,
+    drop_acks: Vec<mpsc::Sender<()>>,
+}
+
+impl UsagePricingCustomState {
+    fn enqueue(&mut self, req: UsagePricingReq) -> Option<UsagePricingReq> {
+        if !self.running {
+            self.running = true;
+            self.running_request_id = usage_pricing_req_request_id(&req);
+            self.cancel_requested = false;
+            return Some(req);
+        }
+        if self.req_is_newer_than_running(&req) {
+            self.cancel_running();
+        }
+
+        if let UsagePricingReq::Load { app_type, .. } = &req {
+            self.pending
+                .retain(|pending| !usage_pricing_req_matches_app(pending, app_type));
+        }
+        self.pending.push(req);
+        None
+    }
+
+    fn set_running_interrupt_handle(&mut self, handle: rusqlite::InterruptHandle) {
+        if !self.running {
+            return;
+        }
+        if self.cancel_requested || self.has_pending_newer_than_running() {
+            handle.interrupt();
+        }
+        self.running_interrupt = Some(handle);
+    }
+
+    fn set_running_cancel_token(&mut self, token: Arc<AtomicBool>) {
+        if !self.running {
+            token.store(true, Ordering::Relaxed);
+            return;
+        }
+        if self.cancel_requested || self.has_pending_newer_than_running() {
+            token.store(true, Ordering::Relaxed);
+        }
+        self.running_cancel = Some(token);
+    }
+
+    fn complete(&mut self) -> UsagePricingCustomCompletion {
+        self.running_interrupt = None;
+        self.running_cancel = None;
+        let drop_acks = self.drop_acks.drain(..).collect();
+        if let Some(next) = self.pending.pop() {
+            self.running_request_id = usage_pricing_req_request_id(&next);
+            self.cancel_requested = false;
+            return UsagePricingCustomCompletion {
+                next: Some(next),
+                drop_acks,
+            };
+        }
+        self.running = false;
+        self.running_request_id = None;
+        self.cancel_requested = false;
+        UsagePricingCustomCompletion {
+            next: None,
+            drop_acks,
+        }
+    }
+
+    fn is_idle(&self) -> bool {
+        !self.running && self.pending.is_empty()
+    }
+
+    fn clear_pending_and_ack_when_idle(&mut self, ack: mpsc::Sender<()>) {
+        self.pending.clear();
+        if self.is_idle() {
+            let _ = ack.send(());
+        } else {
+            self.cancel_running();
+            self.drop_acks.push(ack);
+        }
+    }
+
+    fn cancel_running(&mut self) {
+        self.cancel_requested = true;
+        if let Some(token) = &self.running_cancel {
+            token.store(true, Ordering::Relaxed);
+        }
+        if let Some(handle) = &self.running_interrupt {
+            handle.interrupt();
+        }
+    }
+
+    fn req_is_newer_than_running(&self, req: &UsagePricingReq) -> bool {
+        match (usage_pricing_req_request_id(req), self.running_request_id) {
+            (Some(req_id), Some(running_id)) => req_id > running_id,
+            (Some(_), None) => true,
+            _ => false,
+        }
+    }
+
+    fn has_pending_newer_than_running(&self) -> bool {
+        let Some(running_id) = self.running_request_id else {
+            return !self.pending.is_empty();
+        };
+        self.pending
+            .iter()
+            .filter_map(usage_pricing_req_request_id)
+            .any(|request_id| request_id > running_id)
+    }
+}
+
+fn usage_pricing_req_request_id(req: &UsagePricingReq) -> Option<u64> {
+    match req {
+        UsagePricingReq::Load { request_id, .. } => Some(*request_id),
+        UsagePricingReq::DropState { .. } => None,
+    }
+}
+
+#[cfg(test)]
+fn usage_pricing_custom_state_snapshot(
+    state: &UsagePricingCustomState,
+) -> (bool, Option<u64>, bool, bool, Vec<u64>) {
+    (
+        state.running,
+        state.running_request_id,
+        state.cancel_requested,
+        state.is_idle(),
+        state
+            .pending
+            .iter()
+            .filter_map(usage_pricing_req_request_id)
+            .collect(),
+    )
+}
+
+fn spawn_usage_pricing_custom_req(
+    req: UsagePricingReq,
+    state: Arc<Mutex<UsagePricingCustomState>>,
+    tx: mpsc::Sender<UsagePricingMsg>,
+) {
+    let cancel_token = Arc::new(AtomicBool::new(false));
+    let registered_cancel_token = {
+        match state.lock() {
+            Ok(mut state_guard) => {
+                state_guard.set_running_cancel_token(Arc::clone(&cancel_token));
+                true
+            }
+            Err(_) => false,
+        }
+    };
+    if !registered_cancel_token {
+        send_usage_pricing_req_error(
+            &req,
+            &tx,
+            "custom usage worker state is unavailable".to_string(),
+        );
+        finish_usage_pricing_custom_req(state, tx);
+        return;
+    }
+
+    let fallback_req = req.clone();
+    let fallback_state = Arc::clone(&state);
+    let fallback_tx = tx.clone();
+    match std::thread::Builder::new()
+        .name("cc-switch-usage-custom".to_string())
+        .spawn(move || {
+            let interrupt_state = Arc::clone(&state);
+            let panic_req = req.clone();
+            let panic_tx = tx.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handle_usage_pricing_uncached_req_with_cancel(
+                    req,
+                    &tx,
+                    cancel_token,
+                    move |handle| {
+                        if let Ok(mut state) = interrupt_state.lock() {
+                            state.set_running_interrupt_handle(handle);
+                        }
+                    },
+                );
+            }));
+            if result.is_err() {
+                send_usage_pricing_req_error(
+                    &panic_req,
+                    &panic_tx,
+                    "custom usage worker panicked".to_string(),
+                );
+            }
+            finish_usage_pricing_custom_req(state, tx);
+        }) {
+        Ok(_handle) => {}
+        Err(err) => {
+            send_usage_pricing_req_error(
+                &fallback_req,
+                &fallback_tx,
+                format!("failed to spawn custom usage worker: {err}"),
+            );
+            finish_usage_pricing_custom_req(fallback_state, fallback_tx);
+        }
+    }
+}
+
+fn finish_usage_pricing_custom_req(
+    state: Arc<Mutex<UsagePricingCustomState>>,
+    tx: mpsc::Sender<UsagePricingMsg>,
+) {
+    let completion = match state.lock() {
+        Ok(mut state) => state.complete(),
+        Err(_) => UsagePricingCustomCompletion::default(),
+    };
+    for ack in completion.drop_acks {
+        let _ = ack.send(());
+    }
+    if let Some(req) = completion.next {
+        spawn_usage_pricing_custom_req(req, state, tx);
+    }
+}
+
+struct UsagePricingCustomRunner {
+    state: Arc<Mutex<UsagePricingCustomState>>,
+    tx: mpsc::Sender<UsagePricingMsg>,
+}
+
+impl UsagePricingCustomRunner {
+    fn new(tx: mpsc::Sender<UsagePricingMsg>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(UsagePricingCustomState::default())),
+            tx,
+        }
+    }
+
+    fn dispatch(&self, req: UsagePricingReq) {
+        let launch = match self.state.lock() {
+            Ok(mut state) => state.enqueue(req),
+            Err(_) => {
+                send_usage_pricing_req_error(
+                    &req,
+                    &self.tx,
+                    "custom usage worker state is unavailable".to_string(),
+                );
+                return;
+            }
+        };
+        if let Some(req) = launch {
+            spawn_usage_pricing_custom_req(req, Arc::clone(&self.state), self.tx.clone());
+        }
+    }
+
+    fn drop_state(&self, ack: mpsc::Sender<()>) {
+        match self.state.lock() {
+            Ok(mut state) => state.clear_pending_and_ack_when_idle(ack),
+            Err(_) => {
+                let _ = ack.send(());
+            }
+        }
+    }
+}
+
+fn usage_pricing_req_matches_app(req: &UsagePricingReq, app_type: &AppType) -> bool {
+    matches!(
+        req,
+        UsagePricingReq::Load {
+            app_type: req_app_type,
+            ..
+        } if req_app_type == app_type
+    )
+}
+
+fn state_for_epoch(
+    state_cache: &mut Option<(u64, crate::store::AppState)>,
+    epoch: u64,
+) -> Result<&crate::store::AppState, AppError> {
+    let needs_reload = state_cache
+        .as_ref()
+        .is_none_or(|(cached_epoch, _)| *cached_epoch != epoch);
+    if needs_reload {
+        *state_cache = Some((epoch, load_snapshot_state()?));
+    }
+    Ok(&state_cache.as_ref().expect("state cache initialized").1)
+}
+
+fn handle_app_data_req(
+    state_cache: &mut Option<(u64, crate::store::AppState)>,
+    req: AppDataReq,
+    tx: &mpsc::Sender<AppDataMsg>,
+) {
+    let (kind, request_id, generation, app_state_epoch, app_type, result) = match req {
+        AppDataReq::InitialLoad {
+            request_id,
+            generation,
+            app_state_epoch,
+            app_type,
+        } => {
+            let result = UiData::load(&app_type).map_err(|err| err.to_string());
+            (
+                AppDataLoadKind::Initial,
+                request_id,
+                generation,
+                app_state_epoch,
+                app_type,
+                result,
+            )
+        }
+        AppDataReq::Load {
+            request_id,
+            generation,
+            app_state_epoch,
+            app_type,
+        } => {
+            let result = state_for_epoch(state_cache, app_state_epoch)
+                .and_then(|state| {
+                    state
+                        .reload_config_snapshot_from_db()
+                        .and_then(|()| UiData::load_fast_snapshot_from_state(state, &app_type))
+                })
+                .map_err(|err| err.to_string());
+            (
+                AppDataLoadKind::Snapshot,
+                request_id,
+                generation,
+                app_state_epoch,
+                app_type,
+                result,
+            )
+        }
+        AppDataReq::FullLoad {
+            request_id,
+            generation,
+            app_state_epoch,
+            app_type,
+        } => {
+            let result = UiData::load(&app_type).map_err(|err| err.to_string());
+            (
+                AppDataLoadKind::Full,
+                request_id,
+                generation,
+                app_state_epoch,
+                app_type,
+                result,
+            )
+        }
+        AppDataReq::DropState { .. } => return,
+    };
+
+    let _ = tx.send(AppDataMsg::Loaded {
+        kind,
+        request_id,
+        generation,
+        app_state_epoch,
+        app_type,
+        result,
+    });
+}
+
+fn usage_pricing_worker_loop(
+    rx: mpsc::Receiver<UsagePricingReq>,
+    tx: mpsc::Sender<UsagePricingMsg>,
+) {
+    let mut state_cache: Option<(u64, crate::store::AppState)> = None;
+    let mut deferred = VecDeque::new();
+    let custom_runner = UsagePricingCustomRunner::new(tx.clone());
+
+    while let Some(req) = deferred.pop_front().or_else(|| rx.recv().ok()) {
+        match req {
+            UsagePricingReq::DropState { ack } => {
+                state_cache = None;
+                custom_runner.drop_state(ack);
+            }
+            req @ UsagePricingReq::Load { .. } => {
+                let mut backlog = VecDeque::from([req]);
+                drain_latest_by_key(&mut backlog, &mut deferred, &rx, usage_pricing_req_key);
+
+                while let Some(req) = backlog.pop_front() {
+                    if usage_pricing_req_is_custom(&req) {
+                        custom_runner.dispatch(req);
+                    } else {
+                        handle_usage_pricing_req(&mut state_cache, req, &tx);
+                    }
+                    drain_latest_by_key(&mut backlog, &mut deferred, &rx, usage_pricing_req_key);
+                }
+            }
+        }
+    }
+}
+
+fn handle_usage_pricing_req(
+    state_cache: &mut Option<(u64, crate::store::AppState)>,
+    req: UsagePricingReq,
+    tx: &mpsc::Sender<UsagePricingMsg>,
+) {
+    let UsagePricingReq::Load {
+        request_id,
+        generation,
+        app_state_epoch,
+        app_type,
+        range,
+    } = req
+    else {
+        return;
+    };
+    let result = state_for_epoch(state_cache, app_state_epoch)
+        .and_then(|state| load_usage_pricing_data_from_state_for_range(state, &app_type, range))
+        .map_err(|err| err.to_string());
+
+    let _ = tx.send(UsagePricingMsg::Loaded {
+        request_id,
+        generation,
+        app_state_epoch,
+        app_type,
+        range,
+        result,
+    });
+}
+
+fn handle_usage_pricing_uncached_req_with_cancel<F>(
+    req: UsagePricingReq,
+    tx: &mpsc::Sender<UsagePricingMsg>,
+    cancel_token: Arc<AtomicBool>,
+    on_interrupt_handle: F,
+) where
+    F: FnOnce(rusqlite::InterruptHandle),
+{
+    let UsagePricingReq::Load {
+        request_id,
+        generation,
+        app_state_epoch,
+        app_type,
+        range,
+    } = req
+    else {
+        return;
+    };
+    let result = load_snapshot_state()
+        .and_then(|state| {
+            let handle = {
+                let conn = state.db.conn.lock().map_err(AppError::from)?;
+                let cancel_for_handler = Arc::clone(&cancel_token);
+                conn.progress_handler(
+                    1_000,
+                    Some(move || cancel_for_handler.load(Ordering::Relaxed)),
+                );
+                conn.get_interrupt_handle()
+            };
+            on_interrupt_handle(handle);
+            load_usage_pricing_data_from_state_for_range(&state, &app_type, range)
+        })
+        .map_err(|err| err.to_string());
+
+    let _ = tx.send(UsagePricingMsg::Loaded {
+        request_id,
+        generation,
+        app_state_epoch,
+        app_type,
+        range,
+        result,
+    });
+}
+
+fn send_usage_pricing_req_error(
+    req: &UsagePricingReq,
+    tx: &mpsc::Sender<UsagePricingMsg>,
+    err: String,
+) {
+    let &UsagePricingReq::Load {
+        request_id,
+        generation,
+        app_state_epoch,
+        ref app_type,
+        range,
+    } = req
+    else {
+        return;
+    };
+
+    let _ = tx.send(UsagePricingMsg::Loaded {
+        request_id,
+        generation,
+        app_state_epoch,
+        app_type: app_type.clone(),
+        range,
+        result: Err(err),
+    });
+}
+
 pub(crate) fn start_skills_system() -> Result<SkillsSystem, AppError> {
     let (result_tx, result_rx) = mpsc::channel::<SkillsMsg>();
     let (req_tx, req_rx) = mpsc::channel::<SkillsReq>();
@@ -941,5 +1580,401 @@ mod tests {
             drained[0],
             SessionReq::Refresh { request_id: 2, .. }
         ));
+    }
+
+    #[test]
+    fn usage_pricing_drain_keeps_latest_request_per_app() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(UsagePricingReq::Load {
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: UsageRangePreset::SevenDays,
+        })
+        .expect("queue newer claude request");
+        tx.send(UsagePricingReq::Load {
+            request_id: 3,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            range: UsageRangePreset::SevenDays,
+        })
+        .expect("queue codex request");
+        drop(tx);
+
+        let mut backlog = std::collections::VecDeque::from([UsagePricingReq::Load {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: UsageRangePreset::SevenDays,
+        }]);
+
+        let mut deferred = std::collections::VecDeque::new();
+        drain_latest_by_key(&mut backlog, &mut deferred, &rx, usage_pricing_req_key);
+
+        let mut drained = backlog
+            .into_iter()
+            .map(|req| match req {
+                UsagePricingReq::Load {
+                    request_id,
+                    app_type,
+                    ..
+                } => (app_type, request_id),
+                UsagePricingReq::DropState { .. } => panic!("unexpected DropState in backlog"),
+            })
+            .collect::<Vec<_>>();
+        drained.sort_by_key(|(_, request_id)| *request_id);
+
+        assert_eq!(drained, vec![(AppType::Claude, 2), (AppType::Codex, 3)]);
+        assert!(deferred.is_empty());
+    }
+
+    #[test]
+    fn drain_latest_by_app_preserves_drop_state_as_barrier() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(UsagePricingReq::Load {
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: UsageRangePreset::SevenDays,
+        })
+        .expect("queue newer claude request before barrier");
+        let (ack_tx, _ack_rx) = mpsc::channel();
+        tx.send(UsagePricingReq::DropState { ack: ack_tx })
+            .expect("queue drop-state barrier");
+        tx.send(UsagePricingReq::Load {
+            request_id: 3,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: UsageRangePreset::SevenDays,
+        })
+        .expect("queue claude request after barrier");
+        drop(tx);
+
+        let mut backlog = std::collections::VecDeque::from([UsagePricingReq::Load {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: UsageRangePreset::SevenDays,
+        }]);
+        let mut deferred = std::collections::VecDeque::new();
+
+        drain_latest_by_key(&mut backlog, &mut deferred, &rx, usage_pricing_req_key);
+
+        let next = backlog.pop_front().expect("latest request before barrier");
+        assert!(matches!(
+            next,
+            UsagePricingReq::Load {
+                request_id: 2,
+                app_type: AppType::Claude,
+                ..
+            }
+        ));
+        assert!(backlog.is_empty());
+
+        assert!(matches!(
+            deferred.pop_front(),
+            Some(UsagePricingReq::DropState { .. })
+        ));
+        assert!(matches!(
+            deferred.pop_front(),
+            Some(UsagePricingReq::Load {
+                request_id: 3,
+                app_type: AppType::Claude,
+                ..
+            })
+        ));
+        assert!(deferred.is_empty());
+    }
+
+    #[test]
+    fn usage_pricing_drain_keeps_distinct_ranges_for_same_app() {
+        let custom = UsageRangePreset::Custom(crate::cli::tui::data::UsageCustomRange {
+            start: 1_700_000_000,
+            end: 1_700_086_399,
+        });
+        let (tx, rx) = mpsc::channel();
+        tx.send(UsagePricingReq::Load {
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: custom,
+        })
+        .expect("queue custom request");
+        drop(tx);
+
+        let mut backlog = std::collections::VecDeque::from([UsagePricingReq::Load {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: UsageRangePreset::SevenDays,
+        }]);
+        let mut deferred = std::collections::VecDeque::new();
+
+        drain_latest_by_key(&mut backlog, &mut deferred, &rx, usage_pricing_req_key);
+
+        let mut drained = backlog
+            .into_iter()
+            .map(|req| match req {
+                UsagePricingReq::Load {
+                    request_id, range, ..
+                } => (range, request_id),
+                UsagePricingReq::DropState { .. } => panic!("unexpected DropState in backlog"),
+            })
+            .collect::<Vec<_>>();
+        drained.sort_by_key(|(_, request_id)| *request_id);
+
+        assert_eq!(drained, vec![(UsageRangePreset::SevenDays, 1), (custom, 2)]);
+        assert!(deferred.is_empty());
+    }
+
+    #[test]
+    fn usage_pricing_drain_keeps_only_latest_custom_range_per_app() {
+        let older_custom = UsageRangePreset::Custom(crate::cli::tui::data::UsageCustomRange {
+            start: 1_700_000_000,
+            end: 1_700_086_399,
+        });
+        let newer_custom = UsageRangePreset::Custom(crate::cli::tui::data::UsageCustomRange {
+            start: 1_700_086_400,
+            end: 1_700_172_799,
+        });
+        let (tx, rx) = mpsc::channel();
+        tx.send(UsagePricingReq::Load {
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: newer_custom,
+        })
+        .expect("queue newer custom request");
+        drop(tx);
+
+        let mut backlog = std::collections::VecDeque::from([UsagePricingReq::Load {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: older_custom,
+        }]);
+        let mut deferred = std::collections::VecDeque::new();
+
+        drain_latest_by_key(&mut backlog, &mut deferred, &rx, usage_pricing_req_key);
+
+        let drained = backlog
+            .into_iter()
+            .map(|req| match req {
+                UsagePricingReq::Load {
+                    request_id, range, ..
+                } => (range, request_id),
+                UsagePricingReq::DropState { .. } => panic!("unexpected DropState in backlog"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(drained, vec![(newer_custom, 2)]);
+        assert!(deferred.is_empty());
+    }
+
+    #[test]
+    fn app_data_drain_keeps_initial_and_snapshot_loads_distinct() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(AppDataReq::Load {
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+        })
+        .expect("queue snapshot request");
+        drop(tx);
+
+        let mut backlog = std::collections::VecDeque::from([AppDataReq::InitialLoad {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+        }]);
+        let mut deferred = std::collections::VecDeque::new();
+
+        drain_latest_by_key(&mut backlog, &mut deferred, &rx, app_data_req_key);
+
+        let mut drained = backlog
+            .into_iter()
+            .map(|req| match req {
+                AppDataReq::InitialLoad { request_id, .. } => {
+                    (AppDataLoadKind::Initial, request_id)
+                }
+                AppDataReq::Load { request_id, .. } => (AppDataLoadKind::Snapshot, request_id),
+                AppDataReq::FullLoad { request_id, .. } => (AppDataLoadKind::Full, request_id),
+                AppDataReq::DropState { .. } => panic!("unexpected DropState in backlog"),
+            })
+            .collect::<Vec<_>>();
+        drained.sort_by_key(|(_, request_id)| *request_id);
+
+        assert_eq!(
+            drained,
+            vec![
+                (AppDataLoadKind::Initial, 1),
+                (AppDataLoadKind::Snapshot, 2)
+            ]
+        );
+        assert!(deferred.is_empty());
+    }
+
+    #[test]
+    fn usage_pricing_custom_state_runs_one_and_keeps_latest_pending() {
+        let older_custom = UsageRangePreset::Custom(crate::cli::tui::data::UsageCustomRange {
+            start: 1_700_000_000,
+            end: 1_700_086_399,
+        });
+        let newer_custom = UsageRangePreset::Custom(crate::cli::tui::data::UsageCustomRange {
+            start: 1_700_086_400,
+            end: 1_700_172_799,
+        });
+        let mut state = UsagePricingCustomState::default();
+
+        let first = UsagePricingReq::Load {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: older_custom,
+        };
+        let stale_pending = UsagePricingReq::Load {
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: older_custom,
+        };
+        let latest_pending = UsagePricingReq::Load {
+            request_id: 3,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: newer_custom,
+        };
+
+        assert!(state.enqueue(first).is_some());
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        state.set_running_cancel_token(Arc::clone(&cancel_token));
+        assert!(state.enqueue(stale_pending).is_none());
+        assert!(state.enqueue(latest_pending).is_none());
+        assert!(cancel_token.load(Ordering::Relaxed));
+        assert_eq!(
+            usage_pricing_custom_state_snapshot(&state),
+            (true, Some(1), true, false, vec![3])
+        );
+
+        let completion = state.complete();
+        let next = completion.next.expect("latest pending request");
+        assert!(completion.drop_acks.is_empty());
+        assert!(matches!(
+            next,
+            UsagePricingReq::Load {
+                request_id: 3,
+                range,
+                ..
+            } if range == newer_custom
+        ));
+        assert_eq!(
+            usage_pricing_custom_state_snapshot(&state),
+            (true, Some(3), false, false, Vec::new())
+        );
+
+        let completion = state.complete();
+        assert!(completion.next.is_none());
+        assert!(completion.drop_acks.is_empty());
+        assert_eq!(
+            usage_pricing_custom_state_snapshot(&state),
+            (false, None, false, true, Vec::new())
+        );
+    }
+
+    #[test]
+    fn usage_pricing_custom_state_remembers_drop_before_interrupt_handle() {
+        let custom = UsageRangePreset::Custom(crate::cli::tui::data::UsageCustomRange {
+            start: 1_700_000_000,
+            end: 1_700_086_399,
+        });
+        let mut state = UsagePricingCustomState::default();
+
+        assert!(state
+            .enqueue(UsagePricingReq::Load {
+                request_id: 1,
+                generation: 0,
+                app_state_epoch: 0,
+                app_type: AppType::Claude,
+                range: custom,
+            })
+            .is_some());
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        state.set_running_cancel_token(Arc::clone(&cancel_token));
+        let (ack_tx, ack_rx) = mpsc::channel();
+        state.clear_pending_and_ack_when_idle(ack_tx);
+
+        assert!(cancel_token.load(Ordering::Relaxed));
+        assert!(ack_rx.try_recv().is_err());
+        assert_eq!(
+            usage_pricing_custom_state_snapshot(&state),
+            (true, Some(1), true, false, Vec::new())
+        );
+
+        let completion = state.complete();
+        assert!(completion.next.is_none());
+        assert_eq!(completion.drop_acks.len(), 1);
+        for ack in completion.drop_acks {
+            let _ = ack.send(());
+        }
+        assert!(ack_rx.recv().is_ok());
+        assert_eq!(
+            usage_pricing_custom_state_snapshot(&state),
+            (false, None, false, true, Vec::new())
+        );
+    }
+
+    #[test]
+    fn usage_pricing_custom_runner_defers_drop_ack_until_worker_completes() {
+        let (tx, _rx) = mpsc::channel();
+        let runner = UsagePricingCustomRunner::new(tx);
+        let custom = UsageRangePreset::Custom(crate::cli::tui::data::UsageCustomRange {
+            start: 1_700_000_000,
+            end: 1_700_086_399,
+        });
+
+        {
+            let mut state = runner.state.lock().expect("custom state should lock");
+            assert!(state
+                .enqueue(UsagePricingReq::Load {
+                    request_id: 1,
+                    generation: 0,
+                    app_state_epoch: 0,
+                    app_type: AppType::Claude,
+                    range: custom,
+                })
+                .is_some());
+            state.set_running_cancel_token(Arc::new(AtomicBool::new(false)));
+        }
+
+        let (ack_tx, ack_rx) = mpsc::channel();
+        runner.drop_state(ack_tx);
+        assert!(ack_rx.try_recv().is_err());
+
+        let completion = runner
+            .state
+            .lock()
+            .expect("custom state should lock")
+            .complete();
+        assert!(completion.next.is_none());
+        assert_eq!(completion.drop_acks.len(), 1);
+        for ack in completion.drop_acks {
+            let _ = ack.send(());
+        }
+        assert!(ack_rx.recv().is_ok());
     }
 }

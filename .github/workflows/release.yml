@@ -16,9 +16,69 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  benchmark-gate:
+    name: Blocking benchmark gate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      TERM: xterm-256color
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: release-benchmark-gate
+
+      - name: Build release binary
+        working-directory: src-tauri
+        run: cargo build --release
+
+      - name: Run blocking benchmarks
+        run: |
+          python3 scripts/benchmark_cc_switch.py \
+            --binary src-tauri/target/release/cc-switch \
+            --operation-set ci-blocking \
+            --iterations 5 \
+            --warmup 1 \
+            --providers-per-app 12 \
+            --usage-rows 500 \
+            --sessions-per-app 8 \
+            --mcp-rows 4 \
+            --skill-rows 4 \
+            --redact-paths \
+            --fail-fast \
+            --json-output benchmark-results.json
+
+      - name: Check benchmark thresholds
+        run: |
+          python3 scripts/check_benchmark_thresholds.py \
+            benchmark-results.json \
+            --summary-output benchmark-summary.md
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-benchmark-results
+          path: |
+            benchmark-results.json
+            benchmark-summary.md
+          if-no-files-found: warn
+
   build:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
+    needs: benchmark-gate
     strategy:
       fail-fast: false
       matrix:
@@ -159,6 +219,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: cc-switch-cli-*
 
       - name: Display structure
         run: |
@@ -316,39 +377,15 @@ jobs:
           name: CC Switch CLI ${{ github.ref_name }}
           draft: false
           prerelease: false
+          generate_release_notes: true
           body: |
-            ## CC Switch CLI ${{ github.ref_name }}
+            Use the assets below for platform packages, checksums, and update metadata.
 
-            All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode & OpenClaw
+            Install on macOS/Linux:
 
-            See `CHANGELOG.md` and the README in this tag for the latest release notes and upgrade highlights.
-
-            ### 📦 下载 / Downloads
-
-            | 平台 Platform | 文件 File |
-            |---------------|-----------|
-            | **macOS** (Universal) | `cc-switch-cli-${{ github.ref_name }}-darwin-universal.tar.gz` |
-            | **Windows** (x64) | `cc-switch-cli-${{ github.ref_name }}-windows-x64.zip` |
-            | **Linux** (x64 musl) | `cc-switch-cli-${{ github.ref_name }}-linux-x64-musl.tar.gz` |
-            | **Linux** (x64 glibc) | `cc-switch-cli-${{ github.ref_name }}-linux-x64.tar.gz` |
-            | **Linux** (ARM64 musl) | `cc-switch-cli-${{ github.ref_name }}-linux-arm64-musl.tar.gz` |
-            | **Linux** (ARM64 glibc) | `cc-switch-cli-${{ github.ref_name }}-linux-arm64.tar.gz` |
-
-            ### 🚀 快速安装 / Quick Install
-
-            **macOS / Linux (one-liner):**
             ```bash
             curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
             ```
-
-            **Windows:**
-            ```powershell
-            # 下载 zip 后将 cc-switch.exe 移动到 PATH 目录或直接运行
-            ```
-
-            💡 **macOS 提示**: 如遇 "无法验证开发者"，执行：`xattr -cr ~/.local/bin/cc-switch`
-
-            💡 **Linux 用户建议优先使用 `-musl` 版本（静态链接，无系统库依赖，兼容所有发行版）**
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

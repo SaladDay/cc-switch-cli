@@ -122,6 +122,22 @@ impl Provider {
         self.provider_type() == Some("codex_oauth")
     }
 
+    pub fn is_codex_official(&self) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.codex_official)
+            .unwrap_or(false)
+            || self
+                .category
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("official"))
+            || self
+                .website_url
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("https://chatgpt.com/codex"))
+            || self.name.trim().eq_ignore_ascii_case("OpenAI Official")
+    }
+
     pub fn is_github_copilot(&self) -> bool {
         self.provider_type() == Some("github_copilot")
             || self.claude_base_url_contains("githubcopilot.com")
@@ -661,6 +677,35 @@ mod tests {
             ..Default::default()
         });
         assert!(copilot.is_github_copilot());
+    }
+
+    #[test]
+    fn provider_detects_codex_official_identity() {
+        let mut provider = Provider::with_id(
+            "openai".to_string(),
+            "Third Party".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        assert!(!provider.is_codex_official());
+
+        provider.meta = Some(ProviderMeta {
+            codex_official: Some(true),
+            ..Default::default()
+        });
+        assert!(provider.is_codex_official());
+
+        provider.meta = None;
+        provider.category = Some("Official".to_string());
+        assert!(provider.is_codex_official());
+
+        provider.category = None;
+        provider.website_url = Some("https://chatgpt.com/codex".to_string());
+        assert!(provider.is_codex_official());
+
+        provider.website_url = None;
+        provider.name = "OpenAI Official".to_string();
+        assert!(provider.is_codex_official());
     }
 }
 

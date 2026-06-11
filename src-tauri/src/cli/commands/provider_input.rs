@@ -5,7 +5,10 @@ use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::cli::ui::info;
 use crate::error::AppError;
-use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
+use crate::provider::{
+    AuthBinding, AuthBindingSource, ClaudeApiKeyField, CodexChatReasoningConfig, Provider,
+    ProviderMeta,
+};
 use crate::services::ProviderService;
 use clap::ValueEnum;
 use colored::Colorize;
@@ -22,9 +25,11 @@ pub enum ProviderAddTemplate {
     OpenaiOfficial,
     GoogleOauth,
     Packycode,
+    Runapi,
     Aicodemirror,
     Cubence,
     Dds,
+    Deepseek,
 }
 
 impl ProviderAddTemplate {
@@ -36,9 +41,11 @@ impl ProviderAddTemplate {
             Self::OpenaiOfficial => "openai-official",
             Self::GoogleOauth => "google-oauth",
             Self::Packycode => "packycode",
+            Self::Runapi => "runapi",
             Self::Aicodemirror => "aicodemirror",
             Self::Cubence => "cubence",
             Self::Dds => "dds",
+            Self::Deepseek => "deepseek",
         }
     }
 
@@ -49,10 +56,26 @@ impl ProviderAddTemplate {
     pub fn requires_settings_prompt(self) -> bool {
         matches!(
             self,
-            Self::Packycode | Self::Aicodemirror | Self::Cubence | Self::Dds
+            Self::Packycode
+                | Self::Runapi
+                | Self::Aicodemirror
+                | Self::Cubence
+                | Self::Dds
+                | Self::Deepseek
         )
     }
 }
+
+const DEEPSEEK_CODEX_CONFIG: &str = r#"model_provider = "custom"
+model = "deepseek-v4-flash"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.custom]
+name = "deepseek"
+base_url = "https://api.deepseek.com"
+wire_api = "responses"
+requires_openai_auth = true"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderAddTemplateChoice {
@@ -152,7 +175,7 @@ struct SponsorProviderPreset {
     hermes_base_url: &'static str,
 }
 
-const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 4] = [
+const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 5] = [
     SponsorProviderPreset {
         id: ProviderAddTemplate::Packycode,
         provider_name: "PackyCode",
@@ -167,19 +190,6 @@ const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 4] = [
         hermes_base_url: "https://www.packyapi.com",
     },
     SponsorProviderPreset {
-        id: ProviderAddTemplate::Aicodemirror,
-        provider_name: "AICodeMirror",
-        chip_label: "* AICodeMirror",
-        website_url: "https://www.aicodemirror.com",
-        partner_promotion_key: "aicodemirror",
-        claude_base_url: "https://api.aicodemirror.com/api/claudecode",
-        codex_base_url: "https://api.aicodemirror.com/api/codex/backend-api/codex",
-        gemini_base_url: "https://api.aicodemirror.com/api/gemini",
-        opencode_base_url: "https://api.aicodemirror.com/api/claudecode",
-        openclaw_base_url: "https://api.aicodemirror.com/api/claudecode",
-        hermes_base_url: "",
-    },
-    SponsorProviderPreset {
         id: ProviderAddTemplate::Cubence,
         provider_name: "Cubence",
         chip_label: "* Cubence",
@@ -191,6 +201,32 @@ const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 4] = [
         opencode_base_url: "https://api.cubence.com/v1",
         openclaw_base_url: "https://api.cubence.com",
         hermes_base_url: "https://api.cubence.com",
+    },
+    SponsorProviderPreset {
+        id: ProviderAddTemplate::Runapi,
+        provider_name: "RunAPI",
+        chip_label: "* RunAPI",
+        website_url: "https://runapi.co",
+        partner_promotion_key: "runapi",
+        claude_base_url: "https://runapi.co",
+        codex_base_url: "https://runapi.co/v1",
+        gemini_base_url: "",
+        opencode_base_url: "https://runapi.co",
+        openclaw_base_url: "https://runapi.co",
+        hermes_base_url: "https://runapi.co",
+    },
+    SponsorProviderPreset {
+        id: ProviderAddTemplate::Aicodemirror,
+        provider_name: "AICodeMirror",
+        chip_label: "* AICodeMirror",
+        website_url: "https://www.aicodemirror.com",
+        partner_promotion_key: "aicodemirror",
+        claude_base_url: "https://api.aicodemirror.com/api/claudecode",
+        codex_base_url: "https://api.aicodemirror.com/api/codex/backend-api/codex",
+        gemini_base_url: "https://api.aicodemirror.com/api/gemini",
+        opencode_base_url: "https://api.aicodemirror.com/api/claudecode",
+        openclaw_base_url: "https://api.aicodemirror.com/api/claudecode",
+        hermes_base_url: "",
     },
     SponsorProviderPreset {
         id: ProviderAddTemplate::Dds,
@@ -207,7 +243,7 @@ const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 4] = [
     },
 ];
 
-const PROVIDER_TEMPLATE_CHOICES_CLAUDE: [ProviderAddTemplateChoice; 7] = [
+const PROVIDER_TEMPLATE_CHOICES_CLAUDE: [ProviderAddTemplateChoice; 8] = [
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Custom,
         label: "Custom",
@@ -225,20 +261,24 @@ const PROVIDER_TEMPLATE_CHOICES_CLAUDE: [ProviderAddTemplateChoice; 7] = [
         label: SPONSOR_PROVIDER_PRESETS[0].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Aicodemirror,
+        template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Cubence,
+        template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Dds,
+        template: ProviderAddTemplate::Aicodemirror,
         label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Dds,
+        label: SPONSOR_PROVIDER_PRESETS[4].chip_label,
     },
 ];
 
-const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 6] = [
+const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 8] = [
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Custom,
         label: "Custom",
@@ -252,16 +292,24 @@ const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 6] = [
         label: SPONSOR_PROVIDER_PRESETS[0].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Aicodemirror,
+        template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Cubence,
+        template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Dds,
+        template: ProviderAddTemplate::Aicodemirror,
         label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Dds,
+        label: SPONSOR_PROVIDER_PRESETS[4].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Deepseek,
+        label: "DeepSeek",
     },
 ];
 
@@ -279,53 +327,65 @@ const PROVIDER_TEMPLATE_CHOICES_GEMINI: [ProviderAddTemplateChoice; 5] = [
         label: SPONSOR_PROVIDER_PRESETS[0].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Aicodemirror,
+        template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Cubence,
-        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
-    },
-];
-
-const PROVIDER_TEMPLATE_CHOICES_OPENCODE: [ProviderAddTemplateChoice; 3] = [
-    ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Custom,
-        label: "Custom",
-    },
-    ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Aicodemirror,
-        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
-    },
-    ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Cubence,
-        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+        label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
     },
 ];
 
-const PROVIDER_TEMPLATE_CHOICES_HERMES: [ProviderAddTemplateChoice; 2] = [
+const PROVIDER_TEMPLATE_CHOICES_OPENCODE: [ProviderAddTemplateChoice; 4] = [
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Custom,
         label: "Custom",
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Aicodemirror,
+        label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
     },
 ];
 
-const PROVIDER_TEMPLATE_CHOICES_OPENCLAW: [ProviderAddTemplateChoice; 3] = [
+const PROVIDER_TEMPLATE_CHOICES_HERMES: [ProviderAddTemplateChoice; 3] = [
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Custom,
         label: "Custom",
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Aicodemirror,
+        template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Cubence,
+        template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+];
+
+const PROVIDER_TEMPLATE_CHOICES_OPENCLAW: [ProviderAddTemplateChoice; 4] = [
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Custom,
+        label: "Custom",
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Runapi,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Aicodemirror,
+        label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
     },
 ];
 
@@ -406,8 +466,10 @@ pub fn build_provider_template_seed(
     let id = generate_provider_id(name, existing_ids);
     let website_url = template_default_website_url(template).map(str::to_string);
     let category = template_default_category(template).map(str::to_string);
-    let meta = template_default_meta(template);
+    let meta = template_default_meta(app_type, template);
     let settings_config = build_provider_template_settings_config(app_type, template, &id)?;
+    let icon = template_default_icon(template).map(str::to_string);
+    let icon_color = template_default_icon_color(template).map(str::to_string);
 
     Ok(Provider {
         id,
@@ -418,8 +480,8 @@ pub fn build_provider_template_seed(
         created_at: None,
         sort_index: None,
         notes: None,
-        icon: None,
-        icon_color: None,
+        icon,
+        icon_color,
         meta,
         in_failover_queue: false,
     })
@@ -431,7 +493,9 @@ fn template_default_name(template: ProviderAddTemplate) -> Result<&'static str, 
         ProviderAddTemplate::CodexOauth => "Codex",
         ProviderAddTemplate::OpenaiOfficial => "OpenAI Official",
         ProviderAddTemplate::GoogleOauth => "Google OAuth",
+        ProviderAddTemplate::Deepseek => "DeepSeek",
         ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Dds => sponsor_preset(template)
@@ -447,7 +511,9 @@ fn template_default_website_url(template: ProviderAddTemplate) -> Option<&'stati
         ProviderAddTemplate::CodexOauth => Some("https://openai.com/chatgpt/pricing"),
         ProviderAddTemplate::OpenaiOfficial => Some("https://chatgpt.com/codex"),
         ProviderAddTemplate::GoogleOauth => Some("https://ai.google.dev"),
+        ProviderAddTemplate::Deepseek => Some("https://platform.deepseek.com"),
         ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Dds => sponsor_preset(template).map(|preset| preset.website_url),
@@ -460,6 +526,8 @@ fn template_default_category(template: ProviderAddTemplate) -> Option<&'static s
         ProviderAddTemplate::ClaudeOfficial
         | ProviderAddTemplate::OpenaiOfficial
         | ProviderAddTemplate::GoogleOauth => Some("official"),
+        ProviderAddTemplate::Deepseek => Some("cn_official"),
+        ProviderAddTemplate::Runapi => Some("aggregator"),
         ProviderAddTemplate::Custom
         | ProviderAddTemplate::CodexOauth
         | ProviderAddTemplate::Packycode
@@ -469,7 +537,10 @@ fn template_default_category(template: ProviderAddTemplate) -> Option<&'static s
     }
 }
 
-fn template_default_meta(template: ProviderAddTemplate) -> Option<ProviderMeta> {
+fn template_default_meta(
+    app_type: &AppType,
+    template: ProviderAddTemplate,
+) -> Option<ProviderMeta> {
     match template {
         ProviderAddTemplate::CodexOauth => Some(ProviderMeta {
             provider_type: Some("codex_oauth".to_string()),
@@ -486,19 +557,70 @@ fn template_default_meta(template: ProviderAddTemplate) -> Option<ProviderMeta> 
             codex_official: Some(true),
             ..Default::default()
         }),
+        ProviderAddTemplate::Deepseek => Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            codex_chat_reasoning: Some(CodexChatReasoningConfig {
+                supports_thinking: Some(true),
+                supports_effort: Some(true),
+                thinking_param: Some("thinking".to_string()),
+                effort_param: Some("reasoning_effort".to_string()),
+                effort_value_mode: Some("deepseek".to_string()),
+                output_format: Some("reasoning_content".to_string()),
+            }),
+            ..Default::default()
+        }),
         ProviderAddTemplate::GoogleOauth => Some(ProviderMeta {
             partner_promotion_key: Some("google-official".to_string()),
             ..Default::default()
         }),
         ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
-        | ProviderAddTemplate::Dds => sponsor_preset(template).map(|preset| ProviderMeta {
-            is_partner: Some(true),
-            partner_promotion_key: Some(preset.partner_promotion_key.to_string()),
-            ..Default::default()
+        | ProviderAddTemplate::Dds => sponsor_preset(template).map(|preset| {
+            let mut meta = ProviderMeta {
+                is_partner: Some(true),
+                partner_promotion_key: Some(preset.partner_promotion_key.to_string()),
+                ..Default::default()
+            };
+            if matches!(app_type, AppType::Codex) {
+                meta.api_format = Some("openai_responses".to_string());
+            }
+            meta
         }),
         ProviderAddTemplate::Custom | ProviderAddTemplate::ClaudeOfficial => None,
+    }
+}
+
+fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> {
+    match template {
+        ProviderAddTemplate::Deepseek => Some("deepseek"),
+        ProviderAddTemplate::Runapi => Some("runapi"),
+        ProviderAddTemplate::Custom
+        | ProviderAddTemplate::ClaudeOfficial
+        | ProviderAddTemplate::CodexOauth
+        | ProviderAddTemplate::OpenaiOfficial
+        | ProviderAddTemplate::GoogleOauth
+        | ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Dds => None,
+    }
+}
+
+fn template_default_icon_color(template: ProviderAddTemplate) -> Option<&'static str> {
+    match template {
+        ProviderAddTemplate::Deepseek => Some("#1E88E5"),
+        ProviderAddTemplate::Custom
+        | ProviderAddTemplate::ClaudeOfficial
+        | ProviderAddTemplate::CodexOauth
+        | ProviderAddTemplate::OpenaiOfficial
+        | ProviderAddTemplate::GoogleOauth
+        | ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Runapi
+        | ProviderAddTemplate::Aicodemirror
+        | ProviderAddTemplate::Cubence
+        | ProviderAddTemplate::Dds => None,
     }
 }
 
@@ -524,8 +646,10 @@ fn build_provider_template_settings_config(
             }
         })),
         ProviderAddTemplate::OpenaiOfficial => build_codex_official_settings_config(None),
+        ProviderAddTemplate::Deepseek => Ok(build_codex_deepseek_settings_config()),
         ProviderAddTemplate::GoogleOauth => Ok(json!({ "env": {} })),
         ProviderAddTemplate::Packycode
+        | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
         | ProviderAddTemplate::Dds => build_sponsor_template_settings_config(
@@ -535,6 +659,90 @@ fn build_provider_template_settings_config(
         ),
         ProviderAddTemplate::Custom => Err(unsupported_template_error(template)),
     }
+}
+
+fn build_codex_deepseek_settings_config() -> Value {
+    json!({
+        "config": DEEPSEEK_CODEX_CONFIG,
+        "modelCatalog": {
+            "models": [
+                {
+                    "model": "deepseek-v4-flash",
+                    "displayName": "DeepSeek V4 Flash",
+                    "contextWindow": 1000000,
+                },
+                {
+                    "model": "deepseek-v4-pro",
+                    "displayName": "DeepSeek V4 Pro",
+                    "contextWindow": 1000000,
+                },
+            ],
+        },
+    })
+}
+
+fn runapi_opencode_settings_config(base_url: &str) -> Result<Value, AppError> {
+    build_opencode_settings_config(
+        Some(&json!({
+            "name": "RunAPI",
+            "options": {
+                "setCacheKey": true,
+            },
+            "models": {
+                "claude-opus-4-8": {
+                    "name": "Claude Opus 4.8",
+                },
+                "claude-haiku-4-5": {
+                    "name": "Claude Haiku 4.5",
+                },
+            },
+        })),
+        "@ai-sdk/anthropic",
+        "",
+        base_url,
+        "claude-sonnet-4-6",
+        "Claude Sonnet 4.6",
+        "",
+        "",
+        None,
+    )
+}
+
+fn runapi_hermes_models() -> Value {
+    json!([
+        {
+            "id": "claude-opus-4-8",
+            "name": "Claude Opus 4.8",
+        },
+        {
+            "id": "claude-sonnet-4-6",
+            "name": "Claude Sonnet 4.6",
+        },
+        {
+            "id": "claude-haiku-4-5",
+            "name": "Claude Haiku 4.5",
+        },
+    ])
+}
+
+fn runapi_openclaw_models() -> Value {
+    json!([
+        {
+            "id": "claude-opus-4-8",
+            "name": "Claude Opus 4.8",
+            "contextWindow": 1000000,
+        },
+        {
+            "id": "claude-sonnet-4-6",
+            "name": "Claude Sonnet 4.6",
+            "contextWindow": 1000000,
+        },
+        {
+            "id": "claude-haiku-4-5",
+            "name": "Claude Haiku 4.5",
+            "contextWindow": 200000,
+        },
+    ])
 }
 
 fn build_sponsor_template_settings_config(
@@ -577,6 +785,9 @@ fn build_sponsor_template_settings_config(
                     },
                 }))
             } else {
+                if preset.id == ProviderAddTemplate::Runapi {
+                    return runapi_opencode_settings_config(preset.opencode_base_url);
+                }
                 build_opencode_settings_config(
                     None,
                     "@ai-sdk/openai-compatible",
@@ -590,14 +801,27 @@ fn build_sponsor_template_settings_config(
                 )
             }
         }
-        AppType::Hermes => build_hermes_settings_config(
-            None,
-            crate::hermes_config::HERMES_DEFAULT_API_MODE,
-            preset.hermes_base_url,
-            "",
-            json!([]),
-            "",
-        ),
+        AppType::Hermes => {
+            if preset.id == ProviderAddTemplate::Runapi {
+                build_hermes_settings_config(
+                    Some(&json!({ "name": "runapi" })),
+                    "anthropic_messages",
+                    preset.hermes_base_url,
+                    "",
+                    runapi_hermes_models(),
+                    "",
+                )
+            } else {
+                build_hermes_settings_config(
+                    None,
+                    crate::hermes_config::HERMES_DEFAULT_API_MODE,
+                    preset.hermes_base_url,
+                    "",
+                    json!([]),
+                    "",
+                )
+            }
+        }
         AppType::OpenClaw => {
             if preset.id == ProviderAddTemplate::Aicodemirror {
                 build_openclaw_settings_config(
@@ -626,6 +850,15 @@ fn build_sponsor_template_settings_config(
                             },
                         },
                     ]),
+                )
+            } else if preset.id == ProviderAddTemplate::Runapi {
+                build_openclaw_settings_config(
+                    None,
+                    "anthropic-messages",
+                    "",
+                    preset.openclaw_base_url,
+                    false,
+                    runapi_openclaw_models(),
                 )
             } else {
                 build_openclaw_settings_config(
@@ -951,8 +1184,9 @@ requires_openai_auth = true
                 "Claude Official",
                 "Codex",
                 "* PackyCode",
-                "* AICodeMirror",
                 "* Cubence",
+                "* RunAPI",
+                "* AICodeMirror",
                 "* DDS",
             ]
         );
@@ -962,9 +1196,11 @@ requires_openai_auth = true
                 "Custom",
                 "OpenAI Official",
                 "* PackyCode",
-                "* AICodeMirror",
                 "* Cubence",
+                "* RunAPI",
+                "* AICodeMirror",
                 "* DDS",
+                "DeepSeek",
             ]
         );
         assert_eq!(
@@ -973,23 +1209,29 @@ requires_openai_auth = true
                 "Custom",
                 "Google OAuth",
                 "* PackyCode",
-                "* AICodeMirror",
                 "* Cubence",
+                "* AICodeMirror",
             ]
         );
         assert_eq!(
             labels(AppType::OpenCode),
-            vec!["Custom", "* AICodeMirror", "* Cubence"]
+            vec!["Custom", "* Cubence", "* RunAPI", "* AICodeMirror"]
         );
-        assert_eq!(labels(AppType::Hermes), vec!["Custom", "* Cubence"]);
+        assert_eq!(
+            labels(AppType::Hermes),
+            vec!["Custom", "* Cubence", "* RunAPI"]
+        );
         assert_eq!(
             labels(AppType::OpenClaw),
-            vec!["Custom", "* AICodeMirror", "* Cubence"]
+            vec!["Custom", "* Cubence", "* RunAPI", "* AICodeMirror"]
         );
     }
 
     #[test]
     fn cli_provider_template_rejects_unsupported_app_template_pairs() {
+        assert!(
+            validate_provider_add_template(&AppType::Gemini, ProviderAddTemplate::Runapi).is_err()
+        );
         assert!(
             validate_provider_add_template(&AppType::Gemini, ProviderAddTemplate::Dds).is_err()
         );
@@ -999,6 +1241,10 @@ requires_openai_auth = true
         );
         assert!(
             validate_provider_add_template(&AppType::Claude, ProviderAddTemplate::GoogleOauth)
+                .is_err()
+        );
+        assert!(
+            validate_provider_add_template(&AppType::Claude, ProviderAddTemplate::Deepseek)
                 .is_err()
         );
     }
@@ -1366,6 +1612,78 @@ requires_openai_auth = true
     }
 
     #[test]
+    fn cli_codex_deepseek_template_matches_upstream_preset_values() {
+        let provider =
+            build_provider_template_seed(&AppType::Codex, ProviderAddTemplate::Deepseek, &[])
+                .expect("build DeepSeek Codex provider");
+
+        assert_eq!(provider.id, "deepseek");
+        assert_eq!(provider.name, "DeepSeek");
+        assert_eq!(
+            provider.website_url.as_deref(),
+            Some("https://platform.deepseek.com")
+        );
+        assert_eq!(provider.category.as_deref(), Some("cn_official"));
+        assert_eq!(provider.icon.as_deref(), Some("deepseek"));
+        assert_eq!(provider.icon_color.as_deref(), Some("#1E88E5"));
+        assert!(
+            provider.settings_config.get("auth").is_none(),
+            "DeepSeek preset should not persist an empty API key snapshot"
+        );
+
+        let config = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("DeepSeek Codex config should be TOML string");
+        assert!(config.contains("model_provider = \"custom\""));
+        assert!(config.contains("model = \"deepseek-v4-flash\""));
+        assert!(config.contains("disable_response_storage = true"));
+        assert!(config.contains("[model_providers.custom]"));
+        assert!(config.contains("name = \"deepseek\""));
+        assert!(config.contains("base_url = \"https://api.deepseek.com\""));
+        assert!(config.contains("wire_api = \"responses\""));
+        assert!(config.contains("requires_openai_auth = true"));
+        assert!(
+            !config.contains("https://api.deepseek.com/v1"),
+            "DeepSeek Codex preset should match upstream base URL without /v1"
+        );
+
+        assert_eq!(
+            provider.settings_config["modelCatalog"],
+            json!({
+                "models": [
+                    {
+                        "model": "deepseek-v4-flash",
+                        "displayName": "DeepSeek V4 Flash",
+                        "contextWindow": 1000000,
+                    },
+                    {
+                        "model": "deepseek-v4-pro",
+                        "displayName": "DeepSeek V4 Pro",
+                        "contextWindow": 1000000,
+                    },
+                ],
+            })
+        );
+
+        let meta = provider.meta.expect("DeepSeek metadata should be present");
+        assert_eq!(meta.api_format.as_deref(), Some("openai_chat"));
+        let reasoning = meta
+            .codex_chat_reasoning
+            .expect("DeepSeek reasoning metadata should be present");
+        assert_eq!(reasoning.supports_thinking, Some(true));
+        assert_eq!(reasoning.supports_effort, Some(true));
+        assert_eq!(reasoning.thinking_param.as_deref(), Some("thinking"));
+        assert_eq!(reasoning.effort_param.as_deref(), Some("reasoning_effort"));
+        assert_eq!(reasoning.effort_value_mode.as_deref(), Some("deepseek"));
+        assert_eq!(
+            reasoning.output_format.as_deref(),
+            Some("reasoning_content")
+        );
+    }
+
+    #[test]
     fn cli_sponsor_templates_match_tui_partner_metadata_and_app_shapes() {
         let codex =
             build_provider_template_seed(&AppType::Codex, ProviderAddTemplate::Packycode, &[])
@@ -1389,6 +1707,13 @@ requires_openai_auth = true
         assert_eq!(
             codex.meta.as_ref().and_then(|meta| meta.is_partner),
             Some(true)
+        );
+        assert_eq!(
+            codex
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref()),
+            Some("openai_responses")
         );
 
         let opencode = build_provider_template_seed(
@@ -3814,6 +4139,19 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
             }
         }
         AppType::Codex => {
+            if !provider.is_codex_official() {
+                let api_format =
+                    if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+                        "openai_chat"
+                    } else {
+                        "openai_responses"
+                    };
+                println!(
+                    "  {}: {}",
+                    texts::tui_label_claude_api_format(),
+                    texts::tui_codex_api_format_value(api_format)
+                );
+            }
             if let Some(auth) = provider.settings_config.get("auth") {
                 if let Some(api_key) = auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()) {
                     println!(

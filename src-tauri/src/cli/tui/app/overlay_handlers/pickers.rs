@@ -199,6 +199,14 @@ impl App {
         key: KeyEvent,
         data: &UiData,
     ) -> Option<Action> {
+        let app_type = self
+            .form
+            .as_ref()
+            .and_then(|form| match form {
+                FormState::ProviderAdd(provider) => Some(provider.app_type.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| self.app_type.clone());
         let Overlay::ClaudeApiFormatPicker { selected } = &mut self.overlay else {
             return None;
         };
@@ -214,15 +222,16 @@ impl App {
             }
             KeyCode::Down => {
                 *selected = (*selected + 1).min(
-                    crate::cli::tui::form::ClaudeApiFormat::ALL
+                    crate::cli::tui::form::ClaudeApiFormat::choices_for_app(&app_type)
                         .len()
                         .saturating_sub(1),
                 );
                 Action::None
             }
             KeyCode::Enter => {
-                let next_format =
-                    crate::cli::tui::form::ClaudeApiFormat::from_picker_index(*selected);
+                let next_format = crate::cli::tui::form::ClaudeApiFormat::from_picker_index_for_app(
+                    *selected, &app_type,
+                );
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     self.overlay = Overlay::None;
                     return Some(Action::None);
@@ -236,12 +245,17 @@ impl App {
                     .proxy
                     .routes_current_app_through_proxy(&provider.app_type)
                     .unwrap_or(false);
-                if changed && next_format.requires_proxy() && !proxy_ready {
+                if changed && next_format.requires_proxy_for_app(&provider.app_type) && !proxy_ready
+                {
+                    let message = if matches!(provider.app_type, crate::app_config::AppType::Codex)
+                    {
+                        texts::tui_codex_api_format_requires_proxy_message(next_format.as_str())
+                    } else {
+                        texts::tui_claude_api_format_requires_proxy_message(next_format.as_str())
+                    };
                     self.overlay = Overlay::Confirm(ConfirmOverlay {
                         title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
-                        message: texts::tui_claude_api_format_requires_proxy_message(
-                            next_format.as_str(),
-                        ),
+                        message,
                         action: ConfirmAction::ProviderApiFormatProxyNotice,
                     });
                 }
@@ -699,6 +713,8 @@ impl App {
                         }
                     } else if field == ProviderAddField::HermesModels {
                         provider.set_selected_hermes_model_id_from_picker(&selected_model);
+                    } else if field == ProviderAddField::CodexLocalRouting {
+                        provider.upsert_codex_model_catalog_model(&selected_model);
                     } else if let Some(input_field) = provider.input_mut(field) {
                         input_field.set(selected_model);
                     }

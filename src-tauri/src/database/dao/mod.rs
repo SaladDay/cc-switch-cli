@@ -4,6 +4,7 @@
 
 pub mod failover;
 pub mod mcp;
+pub mod model_pricing;
 pub mod prompts;
 pub mod providers;
 pub mod providers_seed;
@@ -11,6 +12,7 @@ pub mod proxy;
 pub mod settings;
 pub mod skills;
 pub mod stream_check;
+pub mod usage_rollup;
 // NOTE(cc-switch-cli): keep schema aligned with upstream, but only compile the DAOs
 // that are currently supported by the CLI build. The remaining upstream DAOs are
 // intentionally left unreferenced (and thus not compiled) until the corresponding

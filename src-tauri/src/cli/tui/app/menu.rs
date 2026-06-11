@@ -12,6 +12,38 @@ impl App {
         self.daily_memory_idx = 0;
     }
 
+    pub(crate) fn displayed_filter_input(&self) -> &TextInput {
+        match self.displayed_filter_scope() {
+            FilterScope::Global => &self.filter.input,
+            FilterScope::SessionMessages => &self.sessions.message_filter,
+        }
+    }
+
+    pub(crate) fn should_show_filter_bar(&self) -> bool {
+        self.filter.active || !self.displayed_filter_input().value.trim().is_empty()
+    }
+
+    fn displayed_filter_scope(&self) -> FilterScope {
+        if self.filter.active {
+            return self.filter.scope;
+        }
+        if matches!(self.route, Route::Sessions)
+            && matches!(self.focus, Focus::Content)
+            && matches!(self.sessions.pane, SessionsPane::Detail)
+            && !self.sessions.message_filter.value.trim().is_empty()
+        {
+            return FilterScope::SessionMessages;
+        }
+        FilterScope::Global
+    }
+
+    fn active_filter_input_mut(&mut self) -> &mut TextInput {
+        match self.filter.scope {
+            FilterScope::Global => &mut self.filter.input,
+            FilterScope::SessionMessages => &mut self.sessions.message_filter,
+        }
+    }
+
     pub fn new(app_override: Option<AppType>) -> Self {
         let app_type = app_override.unwrap_or(AppType::Claude);
         Self {
@@ -42,6 +74,8 @@ impl App {
             usage_query_notice_confirmed: true,
             local_env_results: Vec::new(),
             local_env_loading: true,
+            usage: UsageState::default(),
+            pricing: PricingState::default(),
             sessions: SessionsState::default(),
             provider_idx: 0,
             mcp_idx: 0,
@@ -89,6 +123,9 @@ impl App {
         match route {
             Route::Main => NavItem::Main,
             Route::Providers | Route::ProviderDetail { .. } => NavItem::Providers,
+            Route::Usage | Route::UsageLogs | Route::UsageLogDetail { .. } | Route::Pricing => {
+                NavItem::Usage
+            }
             Route::Sessions => NavItem::Sessions,
             Route::Mcp => NavItem::Mcp,
             Route::Prompts => NavItem::Prompts,
@@ -217,10 +254,10 @@ impl App {
         self.tick = self.tick.wrapping_add(1);
         self.expire_managed_auth_login_if_needed();
         if let Some(toast) = &mut self.toast {
-            if toast.remaining_ticks > 0 {
+            if !toast.persistent && toast.remaining_ticks > 0 {
                 toast.remaining_ticks -= 1;
             }
-            if toast.remaining_ticks == 0 {
+            if !toast.persistent && toast.remaining_ticks == 0 {
                 self.toast = None;
             }
         }
@@ -242,6 +279,7 @@ impl App {
 
         self.managed_auth_login = None;
         self.managed_auth_loading = false;
+        self.clear_managed_auth_cancel_confirm();
         self.push_toast(
             texts::tui_toast_managed_auth_login_expired(),
             ToastKind::Warning,
@@ -331,6 +369,47 @@ impl App {
         self.toast = Some(Toast::new(message, kind));
     }
 
+    pub fn push_persistent_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
+        self.toast = Some(Toast::persistent(message, kind));
+    }
+
+    pub(crate) fn clear_managed_auth_login_toast(&mut self) {
+        if self.toast.as_ref().is_some_and(|toast| toast.persistent) {
+            self.toast = None;
+        }
+    }
+
+    pub(crate) fn clear_managed_auth_cancel_confirm(&mut self) {
+        if matches!(
+            &self.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ManagedAuthCancelLogin,
+                ..
+            })
+        ) {
+            self.close_overlay();
+        }
+    }
+
+    pub(crate) fn cancel_managed_auth_login(&mut self) {
+        if self.managed_auth_login.take().is_some() {
+            self.managed_auth_loading = false;
+            self.clear_managed_auth_login_toast();
+            self.push_toast(
+                texts::tui_toast_managed_auth_login_cancelled(),
+                ToastKind::Info,
+            );
+        }
+    }
+
+    fn confirm_managed_auth_login_cancel(&mut self) {
+        self.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_confirm_managed_auth_cancel_title().to_string(),
+            message: texts::tui_confirm_managed_auth_cancel_message().to_string(),
+            action: ConfirmAction::ManagedAuthCancelLogin,
+        });
+    }
+
     pub(crate) fn prompt_visible_apps_auto_detection(&mut self) {
         if self.overlay.is_active() || self.pending_overlay.is_some() {
             self.pending_overlay = Some(Overlay::Confirm(ConfirmOverlay {
@@ -347,8 +426,53 @@ impl App {
         }
     }
 
-    pub fn open_help(&mut self) {
-        self.overlay = Overlay::Help;
+    pub fn open_help(&mut self, data: &UiData) {
+        if self.help_should_open_proxy_view() {
+            self.open_proxy_help_view(data, None);
+            return;
+        }
+
+        let help = Overlay::Help(crate::cli::tui::help::HelpState::new(
+            crate::cli::tui::help::context_help_for_app(self),
+        ));
+        if self.overlay.can_be_covered_by_help() {
+            let previous = std::mem::replace(&mut self.overlay, help);
+            self.pending_overlay = Some(previous);
+        } else if !self.overlay.is_active() {
+            self.overlay = help;
+        }
+    }
+
+    fn help_shortcut_is_available(&self) -> bool {
+        if self.editor.is_some() || self.filter.active || self.form_text_input_is_active() {
+            return false;
+        }
+        if matches!(self.overlay, Overlay::Help(_)) || self.overlay_text_input_is_active() {
+            return false;
+        }
+        !self.overlay.is_active()
+            || (self.pending_overlay.is_none() && self.overlay.can_be_covered_by_help())
+    }
+
+    fn help_should_open_proxy_view(&self) -> bool {
+        if self.overlay.is_active() {
+            return false;
+        }
+        if matches!(self.route, Route::SettingsProxy) {
+            return true;
+        }
+        if matches!(self.route, Route::Settings) && matches!(self.focus, Focus::Content) {
+            return matches!(
+                SettingsItem::ALL.get(self.settings_idx),
+                Some(SettingsItem::Proxy)
+            );
+        }
+        if matches!(self.route, Route::Config) && matches!(self.focus, Focus::Content) {
+            return visible_config_items(&self.filter, &self.app_type)
+                .get(self.config_idx)
+                .is_some_and(|item| matches!(item, ConfigItem::Proxy));
+        }
+        false
     }
 
     pub fn close_overlay(&mut self) {
@@ -402,6 +526,15 @@ impl App {
             return Action::Quit;
         }
 
+        if self.managed_auth_login.is_some()
+            && !self.overlay.is_active()
+            && !self.text_input_is_active()
+            && matches!(key.code, KeyCode::Esc)
+        {
+            self.confirm_managed_auth_login_cancel();
+            return Action::None;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char(','))
             && !self.overlay.is_active()
@@ -412,6 +545,11 @@ impl App {
         }
 
         let key = self.normalize_vim_navigation_key(key);
+
+        if matches!(key.code, KeyCode::Char('?')) && self.help_shortcut_is_available() {
+            self.open_help(data);
+            return Action::None;
+        }
 
         if self.overlay.is_active() {
             return self.on_overlay_key(key, data);
@@ -435,10 +573,6 @@ impl App {
 
         // Global actions.
         match key.code {
-            KeyCode::Char('?') => {
-                self.open_help();
-                return Action::None;
-            }
             KeyCode::Char('/') => {
                 self.filter.active = true;
                 self.prepare_filter_focus();
@@ -459,19 +593,15 @@ impl App {
                     .map(Action::SetAppType)
                     .unwrap_or(Action::None);
             }
-            KeyCode::Left
-                if matches!(self.route, Route::Sessions) && self.focus == Focus::Content =>
-            {
-                return self.on_content_key(key, data);
+            KeyCode::Left if matches!(self.route, Route::Sessions) => {
+                return self.move_sessions_focus_left();
             }
             KeyCode::Left => {
                 self.focus = Focus::Nav;
                 return Action::None;
             }
-            KeyCode::Right
-                if matches!(self.route, Route::Sessions) && self.focus == Focus::Content =>
-            {
-                return self.on_content_key(key, data);
+            KeyCode::Right if matches!(self.route, Route::Sessions) => {
+                return self.move_sessions_focus_right(data);
             }
             KeyCode::Right => {
                 if route_has_content_list(&self.route) {
@@ -480,6 +610,26 @@ impl App {
                     self.focus = Focus::Nav;
                 }
                 return Action::None;
+            }
+            KeyCode::Tab if matches!(self.route, Route::Sessions) => {
+                return if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.move_sessions_focus_left()
+                } else {
+                    self.move_sessions_focus_right(data)
+                };
+            }
+            KeyCode::Tab
+                if matches!(self.route, Route::Usage) && matches!(self.focus, Focus::Content) =>
+            {
+                return self.on_usage_key(key, data);
+            }
+            KeyCode::BackTab if matches!(self.route, Route::Sessions) => {
+                return self.move_sessions_focus_left();
+            }
+            KeyCode::BackTab
+                if matches!(self.route, Route::Usage) && matches!(self.focus, Focus::Content) =>
+            {
+                return self.on_usage_key(key, data);
             }
             KeyCode::Char('q') | KeyCode::Esc => {
                 return self.on_back_key();
@@ -515,13 +665,15 @@ impl App {
     }
 
     pub(crate) fn on_filter_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
-        let is_daily_memory = matches!(self.route, Route::ConfigOpenClawDailyMemory);
+        let scope = self.filter.scope;
+        let is_daily_memory = matches!(scope, FilterScope::Global)
+            && matches!(self.route, Route::ConfigOpenClawDailyMemory);
         let mut filter_changed = false;
         let action = match key.code {
             KeyCode::Esc => {
-                filter_changed = !self.filter.input.value.is_empty();
+                filter_changed = !self.active_filter_input_mut().value.is_empty();
                 self.filter.active = false;
-                self.filter.input.set("");
+                self.active_filter_input_mut().set("");
                 if is_daily_memory {
                     self.openclaw_daily_memory_search_results.clear();
                     self.daily_memory_idx = 0;
@@ -543,7 +695,7 @@ impl App {
                 }
             }
             _ => {
-                let Some(edit) = self.filter.input.apply_key(key) else {
+                let Some(edit) = self.active_filter_input_mut().apply_key(key) else {
                     return Action::None;
                 };
                 filter_changed = edit.changed;
@@ -556,7 +708,7 @@ impl App {
                 }
             }
         };
-        self.sync_after_filter_key(data, filter_changed);
+        self.sync_after_filter_key(data, filter_changed, scope);
         action
     }
 
@@ -590,7 +742,11 @@ impl App {
         match self.route.clone() {
             Route::Providers => self.on_providers_key(key, data),
             Route::ProviderDetail { id } => self.on_provider_detail_key(key, data, &id),
-            Route::Sessions => self.on_sessions_key(key),
+            Route::Usage => self.on_usage_key(key, data),
+            Route::UsageLogs => self.on_usage_logs_key(key, data),
+            Route::UsageLogDetail { request_id } => self.on_usage_log_detail_key(key, &request_id),
+            Route::Pricing => self.on_pricing_key(key, data),
+            Route::Sessions => self.on_sessions_key(key, data),
             Route::Mcp => self.on_mcp_key(key, data),
             Route::Prompts => self.on_prompts_key(key, data),
             Route::HermesMemory => self.on_hermes_memory_key(key, data),
@@ -617,17 +773,31 @@ impl App {
     }
 
     fn prepare_filter_focus(&mut self) {
-        if matches!(self.route, Route::Sessions) {
+        if matches!(self.route, Route::Sessions)
+            && matches!(self.focus, Focus::Content)
+            && matches!(self.sessions.pane, SessionsPane::Detail)
+        {
+            self.filter.scope = FilterScope::SessionMessages;
+        } else {
+            self.filter.scope = FilterScope::Global;
+        }
+        if matches!(self.route, Route::Sessions) && matches!(self.filter.scope, FilterScope::Global)
+        {
             self.sessions.pane = SessionsPane::List;
         }
     }
 
-    fn sync_after_filter_key(&mut self, data: &UiData, filter_changed: bool) {
+    fn sync_after_filter_key(&mut self, data: &UiData, filter_changed: bool, scope: FilterScope) {
+        if matches!(scope, FilterScope::SessionMessages) {
+            if filter_changed {
+                clamp_session_message_selection(&mut self.sessions);
+            }
+            return;
+        }
         if matches!(self.route, Route::Sessions) {
             self.sessions.pane = SessionsPane::List;
             if filter_changed {
                 self.sessions.selected_idx = 0;
-                self.sessions.clear_detail();
             }
         }
         self.clamp_selections(data);
@@ -655,8 +825,14 @@ impl App {
             self.prompt_idx = self.prompt_idx.min(prompt_len - 1);
         }
 
-        let visible_session_rows =
-            visible_sessions(&self.filter, &self.app_type, &self.sessions.rows);
+        let visible_session_rows = visible_sessions_for_state(
+            &self.filter,
+            &self.app_type,
+            &self.sessions.rows,
+            self.sessions.detail_key.as_deref(),
+            self.sessions.messages_loaded,
+            &self.sessions.messages,
+        );
         let sessions_len = visible_session_rows.len();
         if sessions_len == 0 {
             self.sessions.selected_idx = 0;
@@ -671,13 +847,26 @@ impl App {
         if session_detail_missing {
             self.sessions.clear_detail();
         }
-        if self.sessions.messages.is_empty() {
-            self.sessions.message_idx = 0;
+        clamp_session_message_selection(&mut self.sessions);
+
+        let usage_len = usage_active_pane_len(&self.usage.pane, self.usage.range, data);
+        if usage_len == 0 {
+            self.usage.selected_idx = 0;
         } else {
-            self.sessions.message_idx = self
-                .sessions
-                .message_idx
-                .min(self.sessions.messages.len() - 1);
+            self.usage.selected_idx = self.usage.selected_idx.min(usage_len - 1);
+        }
+        let usage_logs_len = data.usage.recent_logs_for(self.usage.range).len();
+        if usage_logs_len == 0 {
+            self.usage.logs_idx = 0;
+        } else {
+            self.usage.logs_idx = self.usage.logs_idx.min(usage_logs_len - 1);
+        }
+
+        let pricing_len = visible_pricing_rows(&self.filter, data).len();
+        if pricing_len == 0 {
+            self.pricing.selected_idx = 0;
+        } else {
+            self.pricing.selected_idx = self.pricing.selected_idx.min(pricing_len - 1);
         }
 
         let skills_len = visible_skills_installed(&self.filter, data).len();

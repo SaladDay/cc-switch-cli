@@ -524,23 +524,17 @@ async fn handle_passthrough_request(
             Ok(response) => response,
             Err(failure) => {
                 let super::forwarder::ForwardFailure { provider, error } = failure;
+                let provider = provider.or_else(|| context.primary_provider().cloned());
+                if let Some(provider) = provider.as_ref() {
+                    let request_log = RequestLogContext::from_handler(
+                        &context,
+                        provider.clone(),
+                        true,
+                        passthrough_usage_log_policy(&context.app_type, provider, &endpoint),
+                    );
+                    log_error_request(&context.state, &request_log, &error).await;
+                }
                 if matches!(context.app_type, AppType::Codex) {
-                    let provider = provider.or_else(|| context.primary_provider().cloned());
-                    if let Some(provider) = provider.as_ref() {
-                        let request_log = RequestLogContext::from_handler(
-                            &context,
-                            provider.clone(),
-                            true,
-                            if super::providers::should_convert_codex_responses_to_chat(
-                                provider, &endpoint,
-                            ) {
-                                UsageLogPolicy::Transformed
-                            } else {
-                                UsageLogPolicy::Passthrough
-                            },
-                        );
-                        log_error_request(&context.state, &request_log, &error).await;
-                    }
                     context.state.record_request_error(&error).await;
                     return build_codex_proxy_error_response(
                         &context,
@@ -607,14 +601,16 @@ async fn handle_passthrough_request(
                 build_buffered_passthrough_response(status, &response.headers, response.body)
             }
         };
-        let request_log = converts_codex_chat.then(|| {
-            RequestLogContext::from_handler(
-                &context,
-                forward_result.provider.clone(),
-                true,
-                UsageLogPolicy::Transformed,
-            )
-        });
+        let request_log = Some(RequestLogContext::from_handler(
+            &context,
+            forward_result.provider.clone(),
+            true,
+            if converts_codex_chat {
+                UsageLogPolicy::Transformed
+            } else {
+                UsageLogPolicy::Passthrough
+            },
+        ));
         return ResponseHandler::finish_streaming(
             &context.state,
             response_result,
@@ -650,13 +646,7 @@ async fn handle_passthrough_request(
                         &context,
                         provider.clone(),
                         false,
-                        if super::providers::should_convert_codex_responses_to_chat(
-                            provider, &endpoint,
-                        ) {
-                            UsageLogPolicy::Transformed
-                        } else {
-                            UsageLogPolicy::Passthrough
-                        },
+                        passthrough_usage_log_policy(&context.app_type, provider, &endpoint),
                     );
                     log_error_request(&context.state, &request_log, &error).await;
                 }
@@ -682,7 +672,7 @@ async fn handle_passthrough_request(
     }
 
     let forward_result = match forwarder
-        .forward_buffered_response(
+        .forward_buffered_response_detailed(
             &context.app_type,
             &endpoint,
             body,
@@ -694,7 +684,17 @@ async fn handle_passthrough_request(
         .await
     {
         Ok(response) => response,
-        Err(error) => {
+        Err(failure) => {
+            let super::forwarder::ForwardFailure { provider, error } = failure;
+            if let Some(provider) = provider.or_else(|| context.primary_provider().cloned()) {
+                let request_log = RequestLogContext::from_handler(
+                    &context,
+                    provider,
+                    false,
+                    UsageLogPolicy::Passthrough,
+                );
+                log_error_request(&context.state, &request_log, &error).await;
+            }
             context.state.record_request_error(&error).await;
             return proxy_error_response(error);
         }
@@ -711,14 +711,12 @@ async fn handle_passthrough_request(
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
     });
     let status = response.status;
-    let request_log = converts_codex_chat.then(|| {
-        RequestLogContext::from_handler(
-            &context,
-            forward_result.provider.clone(),
-            false,
-            UsageLogPolicy::Transformed,
-        )
-    });
+    let request_log = Some(RequestLogContext::from_handler(
+        &context,
+        forward_result.provider.clone(),
+        false,
+        passthrough_usage_log_policy(&context.app_type, &forward_result.provider, &endpoint),
+    ));
     let response_result = if converts_codex_chat {
         build_buffered_codex_chat_response(
             response.status,
@@ -1046,26 +1044,44 @@ async fn finish_codex_live_aware_response(
                 .as_ref()
                 .is_ok_and(|prepared| prepared.stream_completion.is_some())
             {
+                let request_log = Some(RequestLogContext::from_handler(
+                    context,
+                    provider.clone(),
+                    true,
+                    UsageLogPolicy::Passthrough,
+                ));
                 ResponseHandler::finish_streaming(
                     &context.state,
                     response_result,
                     status,
                     success_sync,
-                    None,
+                    request_log,
                 )
                 .await
             } else {
+                let request_log = Some(RequestLogContext::from_handler(
+                    context,
+                    provider.clone(),
+                    false,
+                    UsageLogPolicy::Passthrough,
+                ));
                 ResponseHandler::finish_buffered(
                     &context.state,
                     response_result,
                     status,
                     success_sync,
-                    None,
+                    request_log,
                 )
                 .await
             }
         }
         super::forwarder::StreamingResponse::Buffered(response) => {
+            let request_log = Some(RequestLogContext::from_handler(
+                context,
+                provider.clone(),
+                false,
+                UsageLogPolicy::Passthrough,
+            ));
             let response_result =
                 build_buffered_passthrough_response(status, &response.headers, response.body);
             ResponseHandler::finish_buffered(
@@ -1073,7 +1089,7 @@ async fn finish_codex_live_aware_response(
                 response_result,
                 status,
                 success_sync,
-                None,
+                request_log,
             )
             .await
         }
@@ -1091,6 +1107,20 @@ fn request_is_streaming(app_type: &AppType, endpoint: &str, body: &Value) -> boo
 
     matches!(app_type, AppType::Gemini)
         && (endpoint.contains("alt=sse") || endpoint.contains(":streamGenerateContent"))
+}
+
+fn passthrough_usage_log_policy(
+    app_type: &AppType,
+    provider: &Provider,
+    endpoint: &str,
+) -> UsageLogPolicy {
+    if matches!(app_type, AppType::Codex)
+        && super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
+    {
+        UsageLogPolicy::Transformed
+    } else {
+        UsageLogPolicy::Passthrough
+    }
 }
 
 fn remaining_timeout(timeout: Option<Duration>, started_at: Instant) -> Option<Duration> {

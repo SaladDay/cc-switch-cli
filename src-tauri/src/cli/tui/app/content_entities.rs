@@ -1,6 +1,69 @@
 use super::*;
 
 impl App {
+    pub(crate) fn move_sessions_focus_left(&mut self) -> Action {
+        if self.focus == Focus::Nav {
+            return Action::None;
+        }
+
+        match self.sessions.pane {
+            SessionsPane::List => {
+                self.focus = Focus::Nav;
+            }
+            SessionsPane::Detail => {
+                self.sessions.pane = SessionsPane::List;
+            }
+        }
+        Action::None
+    }
+
+    pub(crate) fn move_sessions_focus_right(&mut self, data: &UiData) -> Action {
+        if self.focus == Focus::Nav {
+            self.focus = Focus::Content;
+            self.sessions.pane = SessionsPane::List;
+            return Action::None;
+        }
+
+        match self.sessions.pane {
+            SessionsPane::List => self.open_selected_session_detail(data),
+            SessionsPane::Detail => Action::None,
+        }
+    }
+
+    fn open_selected_session_detail(&mut self, data: &UiData) -> Action {
+        let visible = visible_sessions_for_state(
+            &self.filter,
+            &self.app_type,
+            &self.sessions.rows,
+            self.sessions.detail_key.as_deref(),
+            self.sessions.messages_loaded,
+            &self.sessions.messages,
+        );
+        let Some(session) = visible.get(self.sessions.selected_idx) else {
+            return Action::None;
+        };
+        let key = session_key(session);
+        let provider_id = session.provider_id.clone();
+        let source_path = session.source_path.clone();
+        self.sessions.open_detail(key.clone());
+        self.sessions.pane = SessionsPane::Detail;
+        self.clamp_selections(data);
+        match source_path {
+            Some(source_path) => Action::SessionMessagesLoad {
+                key,
+                provider_id,
+                source_path,
+            },
+            None => {
+                self.push_toast(
+                    texts::tui_sessions_toast_source_missing(),
+                    ToastKind::Warning,
+                );
+                Action::None
+            }
+        }
+    }
+
     fn is_provider_read_only(&self, row: &super::data::ProviderRow) -> bool {
         super::data::provider_is_read_only(&self.app_type, row)
     }
@@ -438,30 +501,39 @@ impl App {
         }
     }
 
-    pub(crate) fn on_sessions_key(&mut self, key: KeyEvent) -> Action {
-        let visible = visible_sessions(&self.filter, &self.app_type, &self.sessions.rows);
+    pub(crate) fn on_sessions_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        let visible = visible_sessions_for_state(
+            &self.filter,
+            &self.app_type,
+            &self.sessions.rows,
+            self.sessions.detail_key.as_deref(),
+            self.sessions.messages_loaded,
+            &self.sessions.messages,
+        );
         match key.code {
-            KeyCode::Left => {
-                self.sessions.pane = match self.sessions.pane {
-                    SessionsPane::List => SessionsPane::List,
-                    SessionsPane::Detail => SessionsPane::List,
-                };
-                Action::None
-            }
-            KeyCode::Right => {
-                self.sessions.pane = match self.sessions.pane {
-                    SessionsPane::List => SessionsPane::Detail,
-                    SessionsPane::Detail => SessionsPane::Detail,
-                };
-                Action::None
-            }
+            KeyCode::Left => self.move_sessions_focus_left(),
+            KeyCode::Right => self.move_sessions_focus_right(data),
             KeyCode::Up => {
                 match self.sessions.pane {
                     SessionsPane::List => {
                         self.sessions.selected_idx = self.sessions.selected_idx.saturating_sub(1);
                     }
                     SessionsPane::Detail => {
-                        self.sessions.message_idx = self.sessions.message_idx.saturating_sub(1);
+                        let next_idx = {
+                            let messages = visible_session_messages(&self.sessions);
+                            if messages.is_empty() {
+                                Some(0)
+                            } else {
+                                let current = messages
+                                    .iter()
+                                    .position(|(index, _)| *index == self.sessions.message_idx)
+                                    .unwrap_or(0);
+                                Some(messages[current.saturating_sub(1)].0)
+                            }
+                        };
+                        if let Some(next_idx) = next_idx {
+                            self.sessions.message_idx = next_idx;
+                        }
                     }
                 }
                 Action::None
@@ -475,42 +547,35 @@ impl App {
                         }
                     }
                     SessionsPane::Detail => {
-                        if !self.sessions.messages.is_empty() {
-                            self.sessions.message_idx = (self.sessions.message_idx + 1)
-                                .min(self.sessions.messages.len() - 1);
+                        let next_idx = {
+                            let messages = visible_session_messages(&self.sessions);
+                            if messages.is_empty() {
+                                Some(0)
+                            } else {
+                                let current = messages
+                                    .iter()
+                                    .position(|(index, _)| *index == self.sessions.message_idx)
+                                    .unwrap_or(0);
+                                Some(messages[(current + 1).min(messages.len() - 1)].0)
+                            }
+                        };
+                        if let Some(next_idx) = next_idx {
+                            self.sessions.message_idx = next_idx;
                         }
                     }
                 }
                 Action::None
             }
             KeyCode::Enter => match self.sessions.pane {
-                SessionsPane::List => {
-                    let Some(session) = visible.get(self.sessions.selected_idx) else {
-                        return Action::None;
-                    };
-                    let key = session_key(session);
-                    let provider_id = session.provider_id.clone();
-                    let source_path = session.source_path.clone();
-                    self.sessions.open_detail(key.clone());
-                    self.sessions.pane = SessionsPane::Detail;
-                    match source_path {
-                        Some(source_path) => Action::SessionMessagesLoad {
-                            key,
-                            provider_id,
-                            source_path,
-                        },
-                        None => {
-                            self.push_toast(
-                                texts::tui_sessions_toast_source_missing(),
-                                ToastKind::Warning,
-                            );
-                            Action::None
-                        }
-                    }
-                }
+                SessionsPane::List => self.open_selected_session_detail(data),
                 SessionsPane::Detail => {
-                    let Some(message) = self.sessions.messages.get(self.sessions.message_idx)
-                    else {
+                    let messages = visible_session_messages(&self.sessions);
+                    let message = messages
+                        .iter()
+                        .find(|(index, _)| *index == self.sessions.message_idx)
+                        .or_else(|| messages.first())
+                        .map(|(_, message)| *message);
+                    let Some(message) = message else {
                         return Action::None;
                     };
                     self.overlay = Overlay::TextView(TextViewState {

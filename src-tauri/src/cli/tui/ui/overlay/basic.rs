@@ -3,34 +3,51 @@ use super::super::*;
 
 pub(super) fn render_help_overlay(
     frame: &mut Frame<'_>,
-    app: &App,
     content_area: Rect,
     theme: &theme::Theme,
+    help: &crate::cli::tui::help::HelpState,
 ) {
     let area = centered_rect(OVERLAY_LG.0, OVERLAY_LG.1, content_area);
     frame.render_widget(Clear, area);
 
+    let content = &help.content;
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(overlay_border_style(theme, false))
-        .title(texts::tui_help_title());
+        .title(content.title.clone());
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
         .split(inner);
 
-    render_key_bar_center(frame, chunks[0], theme, &[("Esc", texts::tui_key_close())]);
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_scroll()),
+            ("Esc", texts::tui_key_close()),
+        ],
+    );
 
-    let body_area = inset_top(chunks[1], 1);
-    let lines = texts::tui_help_text_for_app(&app.app_type)
-        .lines()
-        .map(|s| Line::raw(s.to_string()))
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            content.eyebrow.clone(),
+            Style::default().fg(theme.comment),
+        )),
+        inset_top(chunks[1], 1),
+    );
+
+    let body_area = chunks[2];
+    render_scrolling_lines(frame, body_area, &content.lines, help.scroll);
 }
 
 pub(super) fn render_confirm_overlay(
@@ -112,6 +129,16 @@ pub(super) fn render_confirm_overlay(
             chunks[0],
             theme,
             &[("Enter", texts::tui_key_close())],
+        );
+    } else if matches!(confirm.action, ConfirmAction::ManagedAuthCancelLogin) {
+        render_key_bar_center(
+            frame,
+            chunks[0],
+            theme,
+            &[
+                ("Enter", texts::tui_key_cancel_login()),
+                ("Esc", texts::tui_key_keep_waiting()),
+            ],
         );
     } else {
         render_key_bar_center(

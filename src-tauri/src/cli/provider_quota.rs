@@ -119,7 +119,7 @@ pub(crate) async fn query_quota(target: &QuotaTarget) -> Result<ProviderUsageQuo
             crate::services::CodexOAuthService::get_quota(account_id.as_deref()).await,
         )),
         QuotaTargetKind::UsageScript => {
-            let state = AppState::try_new().map_err(|error| error.to_string())?;
+            let state = AppState::try_open_snapshot().map_err(|error| error.to_string())?;
             ProviderService::query_provider_usage(
                 &state,
                 target.app_type.clone(),

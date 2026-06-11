@@ -111,6 +111,12 @@ pub enum Action {
         field: ProviderAddField,
         claude_idx: Option<usize>,
     },
+    UsageCustomRange {
+        range: data::UsageCustomRange,
+    },
+    PricingDelete {
+        model_id: String,
+    },
 
     ManagedAuthRefresh {
         auth_provider: String,
@@ -548,6 +554,8 @@ pub struct App {
     pub local_env_results: Vec<crate::services::local_env_check::ToolCheckResult>,
     pub local_env_loading: bool,
 
+    pub usage: UsageState,
+    pub pricing: PricingState,
     pub sessions: SessionsState,
     pub provider_idx: usize,
     pub mcp_idx: usize,

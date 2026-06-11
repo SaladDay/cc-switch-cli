@@ -58,12 +58,26 @@ impl App {
     }
 
     fn handle_help_overlay_key(&mut self, key: KeyEvent) -> Option<Action> {
-        if !matches!(self.overlay, Overlay::Help) {
+        if !matches!(self.overlay, Overlay::Help(_)) {
             return None;
         }
         Some(match key.code {
             KeyCode::Esc | KeyCode::Char('?') => {
-                self.overlay = Overlay::None;
+                self.close_overlay();
+                Action::None
+            }
+            KeyCode::Up => {
+                if let Overlay::Help(help) = &mut self.overlay {
+                    help.scroll = help.scroll.saturating_sub(1);
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                if let Overlay::Help(help) = &mut self.overlay {
+                    if !help.content.lines.is_empty() {
+                        help.scroll = (help.scroll + 1).min(help.content.lines.len() - 1);
+                    }
+                }
                 Action::None
             }
             _ => Action::None,

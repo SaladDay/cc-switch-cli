@@ -11,7 +11,7 @@ pub(crate) fn render_overlay(
 
     match &app.overlay {
         Overlay::None => {}
-        Overlay::Help => super::basic::render_help_overlay(frame, app, content_area, theme),
+        Overlay::Help(help) => super::basic::render_help_overlay(frame, content_area, theme, help),
         Overlay::Confirm(confirm) => {
             super::basic::render_confirm_overlay(frame, content_area, theme, confirm)
         }

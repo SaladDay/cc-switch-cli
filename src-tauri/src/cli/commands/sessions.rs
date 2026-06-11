@@ -6,7 +6,9 @@ use std::str::FromStr;
 
 use crate::app_config::AppType;
 use crate::cli::ui::{create_table, info, success, to_json, warning};
+use crate::database::Database;
 use crate::error::AppError;
+use crate::services::session_usage::SessionSyncResult;
 use crate::session_manager::{self, SessionMessage, SessionMeta};
 
 #[derive(Subcommand, Debug, Clone)]
@@ -79,6 +81,18 @@ pub enum SessionsCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Sync local session logs into usage statistics
+    SyncUsage {
+        /// Sync a specific provider instead of --app
+        #[arg(long, value_parser = parse_session_provider)]
+        provider: Option<AppType>,
+        /// Sync every supported provider
+        #[arg(long)]
+        all: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Serialize)]
@@ -122,6 +136,11 @@ pub fn execute(cmd: SessionsCommand, app: Option<AppType>) -> Result<(), AppErro
             all,
             yes,
         } => delete_session(app, provider, all, &selector, yes),
+        SessionsCommand::SyncUsage {
+            provider,
+            all,
+            json,
+        } => sync_usage(app, provider, all, json),
     }
 }
 
@@ -301,6 +320,79 @@ fn delete_session(
         ))
     );
     Ok(())
+}
+
+fn sync_usage(
+    app: Option<AppType>,
+    provider: Option<AppType>,
+    all: bool,
+    json: bool,
+) -> Result<(), AppError> {
+    let db = Database::init()?;
+    let backfill_error = match db.backfill_missing_usage_costs() {
+        Ok(updated) if updated > 0 => {
+            log::info!("Manual session usage sync backfilled costs for {updated} usage row(s)");
+            None
+        }
+        Ok(_) => None,
+        Err(error) => Some(format!("Usage cost backfill failed: {error}")),
+    };
+
+    let mut result = if all || (app.is_none() && provider.is_none()) {
+        crate::services::session_usage::sync_all_session_usage(&db)?
+    } else {
+        let app_type = provider.or(app).unwrap_or(AppType::Claude);
+        sync_usage_for_provider(&db, app_type)?
+    };
+    if let Some(message) = backfill_error {
+        result.errors.push(message);
+    }
+
+    if json {
+        println!(
+            "{}",
+            to_json(&result).map_err(|source| AppError::JsonSerialize { source })?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{}",
+        success(&format!(
+            "Synced usage: imported {}, skipped {}, scanned {} file(s).",
+            result.imported, result.skipped, result.files_scanned
+        ))
+    );
+    for error in result.errors.iter().take(8) {
+        println!("{}", warning(error));
+    }
+    if result.errors.len() > 8 {
+        println!(
+            "{}",
+            warning(&format!(
+                "... and {} more error(s)",
+                result.errors.len() - 8
+            ))
+        );
+    }
+
+    Ok(())
+}
+
+fn sync_usage_for_provider(
+    db: &Database,
+    app_type: AppType,
+) -> Result<SessionSyncResult, AppError> {
+    match app_type {
+        AppType::Claude => crate::services::session_usage::sync_claude_session_logs(db),
+        AppType::Codex => crate::services::session_usage_codex::sync_codex_usage(db),
+        AppType::Gemini => crate::services::session_usage_gemini::sync_gemini_usage(db),
+        AppType::OpenCode => crate::services::session_usage_opencode::sync_opencode_usage(db),
+        other => Err(AppError::InvalidInput(format!(
+            "session usage sync is only supported for claude, codex, gemini, and opencode; got {}",
+            other.as_str()
+        ))),
+    }
 }
 
 fn resolve_scanned_session(

@@ -1,8 +1,9 @@
 use super::codex_config::parse_codex_config_snippet;
+use super::provider_state::codex_model_catalog_row_from_value;
 use super::{
     claude_hide_attribution_enabled, detect_balance_provider_for_usage_query,
-    detect_coding_plan_provider_for_usage_query, ClaudeApiFormat, ProviderAddFormState,
-    UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
+    detect_coding_plan_provider_for_usage_query, ClaudeApiFormat, CodexWireApi,
+    ProviderAddFormState, UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 use crate::app_config::AppType;
 use crate::provider::Provider;
@@ -168,6 +169,7 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
 }
 
 fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    let mut parsed_wire_api = None;
     if let Some(config) = provider
         .settings_config
         .get("config")
@@ -181,7 +183,7 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
             form.codex_model.set(model);
         }
         if let Some(wire_api) = parsed.wire_api {
-            form.codex_wire_api = wire_api;
+            parsed_wire_api = Some(wire_api);
         }
         if let Some(requires_openai_auth) = parsed.requires_openai_auth {
             form.codex_requires_openai_auth = requires_openai_auth;
@@ -199,6 +201,25 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
             form.codex_api_key.set(key);
         }
     }
+    form.claude_api_format = parse_codex_api_format(provider, parsed_wire_api);
+    form.codex_wire_api = CodexWireApi::Responses;
+    form.codex_chat_reasoning = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.codex_chat_reasoning.clone())
+        .unwrap_or_default();
+    form.codex_model_catalog = provider
+        .settings_config
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(codex_model_catalog_row_from_value)
+                .collect()
+        })
+        .unwrap_or_default();
 }
 
 fn populate_gemini_form(form: &mut ProviderAddFormState, provider: &Provider) {
@@ -409,6 +430,36 @@ fn parse_claude_api_format(provider: &Provider) -> ClaudeApiFormat {
         ClaudeApiFormat::OpenAiChat
     } else {
         ClaudeApiFormat::Anthropic
+    }
+}
+
+fn parse_codex_api_format(provider: &Provider, wire_api: Option<CodexWireApi>) -> ClaudeApiFormat {
+    if let Some(api_format) = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_format.as_deref())
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("api_format")
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("apiFormat")
+                .and_then(|value| value.as_str())
+        })
+    {
+        return match api_format {
+            "openai_chat" => ClaudeApiFormat::OpenAiChat,
+            _ => ClaudeApiFormat::OpenAiResponses,
+        };
+    }
+
+    match wire_api {
+        Some(CodexWireApi::Chat) => ClaudeApiFormat::OpenAiChat,
+        _ => ClaudeApiFormat::OpenAiResponses,
     }
 }
 

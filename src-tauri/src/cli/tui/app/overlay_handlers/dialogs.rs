@@ -42,6 +42,9 @@ impl App {
                     }
                     ConfirmAction::McpDelete { id } => Action::McpDelete { id: id.clone() },
                     ConfirmAction::PromptDelete { id } => Action::PromptDelete { id: id.clone() },
+                    ConfirmAction::PricingDelete { model_id } => Action::PricingDelete {
+                        model_id: model_id.clone(),
+                    },
                     ConfirmAction::SessionDelete {
                         key,
                         provider_id,
@@ -85,6 +88,10 @@ impl App {
                     ConfirmAction::ProviderApiFormatProxyNotice => Action::None,
                     ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
                     ConfirmAction::UsageQueryNotice => Action::ConfirmUsageQueryNotice,
+                    ConfirmAction::ManagedAuthCancelLogin => {
+                        self.cancel_managed_auth_login();
+                        Action::None
+                    }
                     ConfirmAction::ProxyEnableAndAutoFailover { app_type } => {
                         Action::EnableProxyAndAutoFailover {
                             app_type: app_type.clone(),
@@ -329,9 +336,64 @@ impl App {
             TextSubmit::OpenClawToolsRule { section, row } => {
                 self.handle_openclaw_tools_rule_submit(section, row, raw, data)
             }
+            TextSubmit::UsageCustomRange => match data::parse_usage_custom_range(&raw) {
+                Ok(range) => Action::UsageCustomRange { range },
+                Err(err) => {
+                    self.push_toast(format!("Invalid custom range: {err}"), ToastKind::Warning);
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: if crate::cli::i18n::is_chinese() {
+                            "自定义时间区间".to_string()
+                        } else {
+                            "Custom Range".to_string()
+                        },
+                        prompt: if crate::cli::i18n::is_chinese() {
+                            "格式：YYYY-MM-DD..YYYY-MM-DD".to_string()
+                        } else {
+                            "Format: YYYY-MM-DD..YYYY-MM-DD".to_string()
+                        },
+                        input: TextInput::new(raw),
+                        submit: TextSubmit::UsageCustomRange,
+                        secret: false,
+                    });
+                    Action::None
+                }
+            },
+            TextSubmit::CodexModelCatalogField { row, field } => {
+                self.handle_codex_model_catalog_field_submit(row, field, raw)
+            }
             TextSubmit::WebDavJianguoyunUsername => self.handle_webdav_username_submit(raw),
             TextSubmit::WebDavJianguoyunPassword => self.handle_webdav_password_submit(raw),
         }
+    }
+
+    fn handle_codex_model_catalog_field_submit(
+        &mut self,
+        row: Option<usize>,
+        field: form::CodexModelCatalogField,
+        raw: String,
+    ) -> Action {
+        let trimmed = raw.trim().to_string();
+        if matches!(field, form::CodexModelCatalogField::Model) && trimmed.is_empty() {
+            self.push_toast(
+                texts::tui_toast_provider_add_missing_fields(),
+                ToastKind::Warning,
+            );
+            self.overlay = Overlay::TextInput(TextInputState {
+                title: texts::tui_codex_model_catalog().to_string(),
+                prompt: codex_model_catalog_field_prompt(field).to_string(),
+                input: TextInput::new(trimmed),
+                submit: TextSubmit::CodexModelCatalogField { row, field },
+                secret: false,
+            });
+            return Action::None;
+        }
+
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+            return Action::None;
+        };
+        provider.codex_model_catalog_field = field;
+        provider.set_codex_model_catalog_field(row, field, &trimmed);
+        Action::None
     }
 
     fn handle_openclaw_agents_runtime_submit(
@@ -487,5 +549,17 @@ impl App {
         }
 
         Action::SetProxyListenPort { port }
+    }
+}
+
+fn codex_model_catalog_field_prompt(field: form::CodexModelCatalogField) -> &'static str {
+    match field {
+        form::CodexModelCatalogField::Model => texts::tui_codex_model_catalog_model_prompt(),
+        form::CodexModelCatalogField::DisplayName => {
+            texts::tui_codex_model_catalog_display_prompt()
+        }
+        form::CodexModelCatalogField::ContextWindow => {
+            texts::tui_codex_model_catalog_context_prompt()
+        }
     }
 }

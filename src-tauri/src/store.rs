@@ -89,6 +89,13 @@ impl AppState {
         Self::from_parts(db, config)
     }
 
+    /// 打开只读数据库快照，用于 TUI 后台热刷新等非初始化路径。
+    pub fn try_open_snapshot() -> Result<Self, AppError> {
+        let db = Arc::new(Database::open_readonly_current_schema()?);
+        let config = export_db_to_multi_app_config(&db)?;
+        Self::from_parts(db, config)
+    }
+
     /// 创建新的应用状态，并在真实进程启动路径上执行一次启动恢复。
     pub fn try_new_with_startup_recovery() -> Result<Self, AppError> {
         let state = Self::try_new()?;
@@ -114,8 +121,16 @@ impl AppState {
 
         state.import_live_current_provider_configs_on_startup()?;
         state.migrate_codex_provider_buckets_on_startup();
+        state.sync_session_usage_on_startup();
 
         Ok(state)
+    }
+
+    fn sync_session_usage_on_startup(&self) {
+        crate::services::session_usage::run_session_usage_sync_cycle_best_effort(
+            &self.db,
+            "startup-recovery",
+        );
     }
 
     fn migrate_codex_provider_buckets_on_startup(&self) {
@@ -256,6 +271,14 @@ impl AppState {
             &mut config,
         )?;
 
+        let mut guard = self.config.write().map_err(AppError::from)?;
+        *guard = config;
+        Ok(())
+    }
+
+    /// 从数据库重建内存配置快照，但不执行任何 legacy/common-config 写入迁移。
+    pub fn reload_config_snapshot_from_db(&self) -> Result<(), AppError> {
+        let config = export_db_to_multi_app_config(&self.db)?;
         let mut guard = self.config.write().map_err(AppError::from)?;
         *guard = config;
         Ok(())

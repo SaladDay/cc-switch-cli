@@ -22,6 +22,22 @@ pub fn get_opencode_config_path() -> PathBuf {
     get_opencode_dir().join("opencode.json")
 }
 
+pub fn get_opencode_base_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("opencode");
+        }
+    }
+
+    dirs::home_dir()
+        .map(|home| home.join(".local").join("share").join("opencode"))
+        .unwrap_or_else(|| PathBuf::from(".local").join("share").join("opencode"))
+}
+
+pub fn get_opencode_db_path() -> PathBuf {
+    get_opencode_base_dir().join("opencode.db")
+}
+
 pub fn read_opencode_config() -> Result<Value, AppError> {
     let path = get_opencode_config_path();
     if !path.exists() {

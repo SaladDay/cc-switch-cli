@@ -2,16 +2,18 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.7.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.8.2-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 <a href="https://trendshift.io/repositories/22544" target="_blank"><img src="https://trendshift.io/api/badge/repositories/22544" alt="SaladDay%2Fcc-switch-cli | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 
-**Command-Line Management Tool for Claude Code, Codex, Gemini, OpenCode, Hermes & OpenClaw**
+**TUI + CLI dual-mode manager for Claude Code, Codex, Gemini, OpenCode, Hermes & OpenClaw**
 
-Unified management for Claude Code, Codex, Gemini, OpenCode, Hermes, and OpenClaw provider configurations, plus app-specific support for MCP servers, skills, prompts, local proxy routes, and environment checks.
+Use the interactive TUI for daily switching, account, and session work, or the CLI for scripts and repeatable terminal workflows.
+
+Unified management for provider configurations, MCP servers, skills, prompts, local proxy routes, usage statistics, and environment checks across supported AI coding assistants.
 
 English | [中文](README_ZH.md)
 
@@ -48,22 +50,32 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
   </tr>
   <tr>
     <td width="180">
-      <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">
-        <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
-      </a>
-    </td>
-    <td>
-      Thanks to <b>AICodeMirror</b> for sponsoring this project! <b>AICodeMirror</b> provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at <b>38% / 2% / 9%</b> of original price, with extra discounts on top-ups! <b>AICodeMirror</b> offers special benefits for cc-switch-cli users: register via <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">this link</a> to enjoy <b>20% off</b> your first top-up, and enterprise customers can get up to <b>25% off</b>!
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
       <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
         <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
       </a>
     </td>
     <td>
       Thanks to <b>Cubence</b> for sponsoring this project! Cubence is an API relay service provider dedicated to offering stable and efficient services to its customers. Operating since September 2025, it has provided support for various models such as Claude code, Codex, and Gemini. Register via <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">this link</a> and use the <code>CCSCLI</code> discount code when topping up to enjoy a 10% discount.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://runapi.co/register?aff=kTlB">
+        <img src="assets/partners/logos/runapi.png" alt="RunAPI" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>RunAPI</b> for sponsoring this project! <a href="https://runapi.co/register?aff=kTlB"><b>RunAPI</b></a> is a fast, stable API platform and OpenRouter alternative. One API key gives access to 150+ mainstream models, including OpenAI, Claude, Gemini, DeepSeek, and Grok, with prices as low as 10% of the original cost. It works with tools such as Claude Code and OpenClaw. Exclusive benefit for cc-switch-cli users: register and contact the admin to claim CNY 7 in free credits.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">
+        <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>AICodeMirror</b> for sponsoring this project! <b>AICodeMirror</b> provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at <b>38% / 2% / 9%</b> of original price, with extra discounts on top-ups! <b>AICodeMirror</b> offers special benefits for cc-switch-cli users: register via <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">this link</a> to enjoy <b>20% off</b> your first top-up, and enterprise customers can get up to <b>25% off</b>!
     </td>
   </tr>
   <tr>
@@ -103,18 +115,23 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 ## 🚀 Quick Start
 
-**Interactive Mode (Recommended)**
+**TUI Mode (Recommended)**
 ```bash
 cc-switch
 ```
-🤩 Follow on-screen menus to explore features.
+Use the full-screen interface to switch providers, manage accounts, review sessions, and inspect proxy status.
 
 **Command-Line Mode**
 ```bash
 cc-switch provider list              # List providers
 cc-switch provider switch <id>       # Switch provider
+cc-switch use <id>                   # Switch provider (shortcut)
 cc-switch provider export <id>       # Export a Claude provider to a standalone settings file
 cc-switch provider stream-check <id> # Check provider stream health
+cc-switch start <claude|codex> <id> --dry-run # Preview launch
+cc-switch auth list                  # List managed ChatGPT/Codex OAuth accounts
+cc-switch sessions list --all        # Review saved assistant sessions
+cc-switch sessions sync-usage --all  # Import local session token/cost usage
 cc-switch config webdav show         # Inspect WebDAV sync settings
 cc-switch env tools                  # Check local CLI tools
 cc-switch mcp sync                   # Sync MCP servers
@@ -261,6 +278,7 @@ Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode
 cc-switch provider list              # List all providers
 cc-switch provider current           # Show current provider
 cc-switch provider switch <id>       # Switch provider
+cc-switch use <id>                   # Switch provider (shortcut)
 cc-switch provider add               # Add new provider
 cc-switch provider edit <id>         # Edit existing provider
 cc-switch provider duplicate <id>    # Duplicate a provider
@@ -270,6 +288,20 @@ cc-switch provider speedtest <id>    # Test API latency
 cc-switch provider stream-check <id> # Run stream health check
 cc-switch provider fetch-models <id> # Fetch remote model list
 cc-switch provider export <id> --output ~/.claude/settings-demo.json # Custom settings file path
+```
+
+### 🔐 Managed Accounts
+
+Manage ChatGPT/Codex OAuth accounts locally and reuse them across provider profiles, including using a Codex OAuth account as a Claude Code provider through the local proxy.
+
+**Features:** device-flow login, account listing, default account selection, account removal, and provider binding without copying long-lived tokens into each provider.
+
+```bash
+cc-switch auth status                # Show managed account status
+cc-switch auth login                 # Sign in with ChatGPT/Codex OAuth
+cc-switch auth list                  # List signed-in accounts
+cc-switch auth default <account-id>  # Set the default account
+cc-switch auth remove <account-id>   # Remove an account
 ```
 
 ### 🛠️ MCP Server Management
@@ -333,6 +365,20 @@ cc-switch skills repos enable <repo> # Enable repo without changing branch
 cc-switch skills repos disable <repo> # Disable repo without changing branch
 ```
 
+### 🕘 Session History & Usage Statistics
+
+Review saved assistant sessions, resume a session with one command, delete old records, and import local session logs into token/cost statistics.
+
+**Features:** cross-app session scanning, message preview, one-command resume, safe delete confirmation, JSON output, and usage sync for Claude, Codex, Gemini, and OpenCode.
+
+```bash
+cc-switch sessions list --all        # List saved sessions across supported apps
+cc-switch sessions show <id>         # Show session metadata and messages
+cc-switch sessions resume <id>       # Resume a saved session
+cc-switch sessions delete <id>       # Delete a saved session
+cc-switch sessions sync-usage --all  # Sync local logs into usage statistics
+```
+
 ### ⚙️ Configuration Management
 
 Manage configuration backups, imports, and exports.
@@ -375,11 +421,13 @@ cc-switch config webdav migrate-v1-to-v2
 cc-switch config reset               # Reset to default configuration
 ```
 
-### 🌉 Proxy Management
+### 🌉 Proxy Management & Model Relay
 
 Inspect and control daemon-managed per-app proxy routes for supported apps.
 
-**Features:** independent enable/disable per app, per-app listen ports, daemon-managed workers, current route inspection, dashboard telemetry, and foreground serve mode for debugging.
+**Features:** independent enable/disable per app, per-app listen ports, daemon-managed workers, current route inspection, dashboard telemetry, token accounting, and foreground serve mode for debugging.
+
+The local proxy can route Claude Code, Codex, and Gemini through CC-Switch, adapt OpenAI Responses API and Chat Completions providers, and connect mainstream OpenAI-compatible models such as DeepSeek, Kimi, Qwen, OpenRouter, xAI, Groq, and Mistral where the target app supports that route.
 
 ```bash
 cc-switch proxy show                              # Show proxy configuration, routes, and daemon worker status

@@ -25,6 +25,24 @@ pub fn menu_manage_providers_variants() -> (&'static str, &'static str) {
     ("🔑 Providers", "🔑 供应商")
 }
 
+pub fn menu_usage() -> &'static str {
+    let (en, zh) = menu_usage_variants();
+    if is_chinese() { zh } else { en }
+}
+
+pub fn menu_usage_variants() -> (&'static str, &'static str) {
+    ("📊 Usage", "📊 使用统计")
+}
+
+pub fn menu_pricing() -> &'static str {
+    let (en, zh) = menu_pricing_variants();
+    if is_chinese() { zh } else { en }
+}
+
+pub fn menu_pricing_variants() -> (&'static str, &'static str) {
+    ("💵 Pricing", "💵 模型定价")
+}
+
 pub fn menu_manage_mcp() -> &'static str {
     let (en, zh) = menu_manage_mcp_variants();
     if is_chinese() {

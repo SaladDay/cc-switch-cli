@@ -20,11 +20,13 @@ use crate::{
         app,
         app::{
             Action, App, ConfigItem, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit,
-            Focus, Overlay, TextInputState, TextSubmit,
+            Focus, Overlay, TextInputState, TextSubmit, UsagePane,
         },
         data::{
-            ConfigSnapshot, McpSnapshot, OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow,
-            ProvidersSnapshot, ProxySnapshot, SkillsSnapshot, UiData,
+            ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot,
+            OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
+            ProxySnapshot, SkillsSnapshot, UiData, UsageLogRow, UsageProviderStatsRow,
+            UsageRangePreset, UsageSnapshot, UsageSummarySnapshot, UsageTrendBucket,
         },
         form::{FormFocus, FormState, PromptMetaFormState, ProviderAddField, TextInput},
         route::{NavItem, Route},
@@ -81,6 +83,556 @@ fn tui_sessions_empty_state_is_localized_and_mentions_runtime_scan() {
 }
 
 #[test]
+fn tui_usage_empty_state_renders_dashboard_shell() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+
+    assert!(all.contains("Usage Statistics"), "{all}");
+    assert!(all.contains("Usage Trend"), "{all}");
+    assert!(all.contains("No usage recorded"), "{all}");
+    assert!(all.contains("Today"), "{all}");
+    assert!(all.contains("7 days"), "{all}");
+    assert!(all.contains("30 days"), "{all}");
+    assert!(all.contains("custom range"), "{all}");
+    assert!(all.contains("switch panel"), "{all}");
+    assert!(all.contains("details"), "{all}");
+    assert!(all.contains("pricing"), "{all}");
+    assert!(!all.contains("metric"), "{all}");
+    assert!(!all.contains("Provider Stats"), "{all}");
+}
+
+#[test]
+fn tui_usage_loading_state_renders_non_blocking_placeholder() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::SevenDays);
+    let data = minimal_data(&app.app_type);
+
+    let all = all_text(&render_with_size(&app, &data, 160, 40));
+
+    assert!(all.contains("Usage Statistics"), "{all}");
+    assert!(all.contains("Loading..."), "{all}");
+    assert!(all.contains("Today"), "{all}");
+    assert!(all.contains("details"), "{all}");
+    assert!(!all.contains("No usage recorded"), "{all}");
+    assert!(!all.contains("No data for the selected range"), "{all}");
+}
+
+#[test]
+fn tui_usage_loading_state_ignores_shared_fixed_recent_logs() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::SevenDays);
+    let mut data = minimal_data(&app.app_type);
+    data.usage.recent_logs.push(UsageLogRow {
+        request_id: "old-log".to_string(),
+        created_at: 1_780_617_600,
+        app_type: "claude".to_string(),
+        provider_id: "p1".to_string(),
+        model: "claude-sonnet-4".to_string(),
+        status_code: 200,
+        ..UsageLogRow::default()
+    });
+    data.usage.logs_total = 1;
+
+    let all = all_text(&render_with_size(&app, &data, 160, 40));
+
+    assert!(all.contains("Usage Statistics"), "{all}");
+    assert!(all.contains("Loading..."), "{all}");
+    assert!(!all.contains("No usage recorded"), "{all}");
+}
+
+#[test]
+fn tui_usage_loading_state_keeps_existing_data_visible() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::SevenDays);
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d = UsageSummarySnapshot {
+        total_requests: 2,
+        total_cost_usd: 0.42,
+        total_tokens: 800,
+        ..UsageSummarySnapshot::default()
+    };
+    data.usage.trends_7d = vec![UsageTrendBucket {
+        key: "2026-06-05".to_string(),
+        label: "06/05".to_string(),
+        request_count: 2,
+        total_tokens: 800,
+        total_cost_usd: 0.42,
+        error_count: 0,
+    }];
+
+    let all = all_text(&render_with_size(&app, &data, 160, 40));
+
+    assert!(all.contains("$0.420"), "{all}");
+    assert!(all.contains("800"), "{all}");
+    assert!(all.contains("06/05"), "{all}");
+    assert!(!all.contains("Loading..."), "{all}");
+}
+
+#[test]
+fn tui_usage_renders_summary_and_trend() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage = UsageSnapshot {
+        summary_7d: UsageSummarySnapshot {
+            total_requests: 4,
+            success_count: 3,
+            total_cost_usd: 1.25,
+            total_tokens: 1_800,
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_read_tokens: 250,
+            cache_creation_tokens: 50,
+            avg_latency_ms: Some(420),
+        },
+        trends_7d: vec![UsageTrendBucket {
+            key: "2026-06-05".to_string(),
+            label: "06/05".to_string(),
+            request_count: 4,
+            total_tokens: 1_800,
+            total_cost_usd: 1.25,
+            error_count: 1,
+        }],
+        top_providers_7d: vec![UsageProviderStatsRow {
+            provider_id: "p1".to_string(),
+            provider_name: Some("Demo Provider".to_string()),
+            request_count: 4,
+            success_count: 3,
+            total_tokens: 1_800,
+            total_cost_usd: 1.25,
+            avg_latency_ms: Some(420),
+        }],
+        recent_logs: vec![UsageLogRow {
+            request_id: "req-1".to_string(),
+            created_at: 1_780_617_600,
+            app_type: "claude".to_string(),
+            provider_id: "p1".to_string(),
+            provider_name: Some("Demo Provider".to_string()),
+            model: "claude-sonnet-4".to_string(),
+            status_code: 200,
+            input_tokens: 1_000,
+            output_tokens: 500,
+            total_cost_usd: 1.25,
+            latency_ms: 420,
+            ..UsageLogRow::default()
+        }],
+        logs_total: 1,
+        ..UsageSnapshot::default()
+    };
+
+    let all = all_text(&render_with_size(&app, &data, 180, 42));
+
+    assert!(all.contains("$1.250"), "{all}");
+    assert!(all.contains("1.8k"), "{all}");
+    assert!(all.contains("Real Tokens"), "{all}");
+    assert!(all.contains("Input"), "{all}");
+    assert!(all.contains("Output"), "{all}");
+    assert!(all.contains("Cache Read"), "{all}");
+    assert!(all.contains("Cache Write"), "{all}");
+    assert!(all.contains("Errors"), "{all}");
+    assert!(all.contains("Avg Latency"), "{all}");
+    assert!(all.contains("Cache Tokens"), "{all}");
+    assert!(all.contains("Cost / Req"), "{all}");
+    assert!(all.contains("Cache Hit"), "{all}");
+    assert!(all.contains("19%"), "{all}");
+    assert!(all.contains("06/05"), "{all}");
+    assert!(!all.contains("Latest"), "{all}");
+    assert!(!all.contains("Peak"), "{all}");
+    assert!(!all.contains("Total"), "{all}");
+    assert!(!all.contains("Range"), "{all}");
+    assert!(!all.contains("Demo Provider"), "{all}");
+}
+
+#[test]
+fn tui_usage_overview_keeps_metric_values_near_labels() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d = UsageSummarySnapshot {
+        total_requests: 4,
+        success_count: 3,
+        total_cost_usd: 1.25,
+        total_tokens: 1_800,
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_tokens: 250,
+        cache_creation_tokens: 50,
+        avg_latency_ms: Some(420),
+    };
+
+    let all = all_text(&render_with_size(&app, &data, 180, 42));
+    let primary = line_with(&all, "Real Tokens");
+    let secondary = line_with(&all, "Input");
+    let tertiary = line_with(&all, "Errors");
+
+    assert!(primary.contains("Real Tokens  1.8k"), "{all}");
+    assert!(primary.contains("Requests  4"), "{all}");
+    assert!(secondary.contains("Input  1.0k"), "{all}");
+    assert!(secondary.contains("Output  500"), "{all}");
+    assert!(tertiary.contains("Errors  1"), "{all}");
+    assert!(tertiary.contains("Cost / Req  $0.312"), "{all}");
+
+    let primary_y = line_index(&all, "Real Tokens");
+    let secondary_y = line_index(&all, "Input");
+    let tertiary_y = line_index(&all, "Errors");
+    let cache_border_y = all
+        .lines()
+        .position(|line| line.contains('╭'))
+        .unwrap_or_else(|| panic!("missing cache border in:\n{all}"));
+    assert_eq!(secondary_y - primary_y, 1, "{all}");
+    assert_eq!(tertiary_y - secondary_y, 1, "{all}");
+    assert_eq!(cache_border_y - tertiary_y, 1, "{all}");
+}
+
+#[test]
+fn tui_usage_overview_short_height_keeps_even_spacing() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d = UsageSummarySnapshot {
+        total_requests: 4,
+        success_count: 3,
+        total_cost_usd: 1.25,
+        total_tokens: 1_800,
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_tokens: 250,
+        cache_creation_tokens: 50,
+        avg_latency_ms: Some(420),
+    };
+
+    let all = all_text(&render_with_size(&app, &data, 180, 24));
+
+    assert!(all.contains("Real Tokens  1.8k"), "{all}");
+    assert!(all.contains("Input  1.0k"), "{all}");
+    assert!(all.contains("Cost / Req  $0.312"), "{all}");
+
+    let primary_y = line_index(&all, "Real Tokens");
+    let secondary_y = line_index(&all, "Input");
+    let tertiary_y = line_index(&all, "Errors");
+    let cache_border_y = all
+        .lines()
+        .position(|line| line.contains('╭'))
+        .unwrap_or_else(|| panic!("missing cache border in:\n{all}"));
+    assert_eq!(secondary_y - primary_y, 1, "{all}");
+    assert_eq!(tertiary_y - secondary_y, 1, "{all}");
+    assert_eq!(cache_border_y - tertiary_y, 1, "{all}");
+}
+
+#[test]
+fn tui_usage_metric_spacing_keeps_narrow_rows_drawable() {
+    assert_eq!(super::usage_metric_row_spacing(35), Some((1, 8)));
+    assert_eq!(super::usage_metric_row_spacing(36), Some((1, 8)));
+    assert_eq!(super::usage_metric_row_spacing(37), Some((1, 8)));
+}
+
+#[test]
+fn tui_usage_compact_trend_omits_text_summary() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.trends_7d = vec![
+        UsageTrendBucket {
+            key: "2026-06-04".to_string(),
+            label: "06/04".to_string(),
+            request_count: 2,
+            total_tokens: 800,
+            total_cost_usd: 0.5,
+            error_count: 0,
+        },
+        UsageTrendBucket {
+            key: "2026-06-05".to_string(),
+            label: "06/05".to_string(),
+            request_count: 4,
+            total_tokens: 1_800,
+            total_cost_usd: 1.25,
+            error_count: 1,
+        },
+    ];
+
+    let all = all_text(&render_with_size(&app, &data, 80, 24));
+
+    assert!(all.contains("Usage Trend"), "{all}");
+    assert!(!all.contains("Latest"), "{all}");
+    assert!(!all.contains("Peak"), "{all}");
+    assert!(!all.contains("Total"), "{all}");
+    assert!(!all.contains("Range"), "{all}");
+    assert!(!all.contains("06/04 -> 06/05"), "{all}");
+}
+
+#[test]
+fn tui_usage_trend_renders_midpoint_axis_labels() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.trends_7d = (1..=7)
+        .map(|day| UsageTrendBucket {
+            key: format!("2026-06-{day:02}"),
+            label: format!("06/{day:02}"),
+            request_count: day as u64,
+            total_tokens: day as u64 * 100,
+            total_cost_usd: day as f64 / 10.0,
+            error_count: 0,
+        })
+        .collect();
+
+    let all = all_text(&render_with_size(&app, &data, 180, 42));
+
+    assert!(all.contains("06/01"), "{all}");
+    assert!(all.contains("06/04"), "{all}");
+    assert!(all.contains("06/07"), "{all}");
+    assert!(all.contains("$0.500"), "{all}");
+    assert!(all.contains("$1.000"), "{all}");
+}
+
+#[test]
+fn tui_usage_tiny_height_omits_overview_title_without_content() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d = UsageSummarySnapshot {
+        total_requests: 4,
+        success_count: 3,
+        total_cost_usd: 1.25,
+        total_tokens: 1_800,
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_tokens: 250,
+        cache_creation_tokens: 50,
+        avg_latency_ms: Some(420),
+    };
+
+    let all = all_text(&render_with_size(&app, &data, 120, 10));
+
+    assert!(all.contains("Usage Statistics"), "{all}");
+    assert!(all.contains("$1.250"), "{all}");
+    assert!(!all.contains("Overview"), "{all}");
+}
+
+#[test]
+fn tui_usage_details_tables_follow_selected_range() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::UsageLogs;
+    app.focus = Focus::Content;
+    app.usage.pane = UsagePane::Providers;
+
+    let mut data = minimal_data(&app.app_type);
+    data.usage = UsageSnapshot {
+        top_providers_today: vec![UsageProviderStatsRow {
+            provider_id: "today".to_string(),
+            provider_name: Some("Today Provider".to_string()),
+            request_count: 2,
+            success_count: 2,
+            total_tokens: 200,
+            total_cost_usd: 0.2,
+            avg_latency_ms: Some(120),
+        }],
+        top_providers_7d: vec![UsageProviderStatsRow {
+            provider_id: "week".to_string(),
+            provider_name: Some("Week Provider".to_string()),
+            request_count: 8,
+            success_count: 7,
+            total_tokens: 800,
+            total_cost_usd: 0.8,
+            avg_latency_ms: Some(180),
+        }],
+        ..UsageSnapshot::default()
+    };
+
+    let week = all_text(&render_with_size(&app, &data, 160, 40));
+    assert!(week.contains("Usage Details"), "{week}");
+    assert!(week.contains("Model Stats"), "{week}");
+    assert!(week.contains("Provider Stats"), "{week}");
+    assert!(week.contains("Request Logs"), "{week}");
+    assert!(week.contains("Week Provider"), "{week}");
+    assert!(!week.contains("Today Provider"), "{week}");
+
+    app.usage.range = UsageRangePreset::Today;
+    let today = all_text(&render_with_size(&app, &data, 160, 40));
+    assert!(today.contains("Today Provider"), "{today}");
+    assert!(!today.contains("Week Provider"), "{today}");
+}
+
+#[test]
+fn tui_usage_narrow_width_renders_without_losing_primary_sections() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        80,
+        28,
+    ));
+
+    assert!(all.contains("Usage Statistics"), "{all}");
+    assert!(all.contains("Overview"), "{all}");
+    assert!(all.contains("Usage Trend"), "{all}");
+    assert!(!all.contains("Top Providers"), "{all}");
+}
+
+#[test]
+fn tui_pricing_renders_catalog_and_recent_usage_context() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Pricing;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.pricing = ModelPricingSnapshot {
+        rows: vec![
+            ModelPricingRow {
+                model_id: "gpt-5.4".to_string(),
+                display_name: "GPT 5.4".to_string(),
+                input_cost_per_million: "2".to_string(),
+                output_cost_per_million: "8".to_string(),
+                cache_read_cost_per_million: "0.125".to_string(),
+                cache_creation_cost_per_million: "1".to_string(),
+                recent_request_count: 12,
+                recent_total_tokens: 1_500,
+                recent_total_cost_usd: 0.42,
+                last_used_at: Some(1_780_617_600),
+            },
+            ModelPricingRow {
+                model_id: "claude-sonnet-4-5".to_string(),
+                display_name: "Claude Sonnet 4.5".to_string(),
+                input_cost_per_million: "3".to_string(),
+                output_cost_per_million: "15".to_string(),
+                cache_read_cost_per_million: "0.3".to_string(),
+                cache_creation_cost_per_million: "3.75".to_string(),
+                ..ModelPricingRow::default()
+            },
+        ],
+        recent_unknown_models: 1,
+        recent_unmatched_total_tokens: 500,
+        recent_unmatched_total_cost_usd: 0.12,
+    };
+
+    let all = all_text(&render_with_size(&app, &data, 180, 36));
+
+    assert!(all.contains("Model Pricing"), "{all}");
+    assert!(all.contains("2 catalog"), "{all}");
+    assert!(all.contains("1 used 30d"), "{all}");
+    assert!(all.contains("1 unmatched models 30d"), "{all}");
+    assert!(all.contains("2.0k tokens"), "{all}");
+    assert!(all.contains("$0.540 total"), "{all}");
+    assert!(all.contains("$0.120 unmatched"), "{all}");
+    assert!(all.contains("gpt-5.4"), "{all}");
+    assert!(all.contains("GPT 5.4"), "{all}");
+    assert!(all.contains("$2.00"), "{all}");
+    assert!(all.contains("$8.00"), "{all}");
+    assert!(all.contains("$0.420"), "{all}");
+    assert!(
+        all.contains("Enter=edit") || all.contains("Enter edit"),
+        "{all}"
+    );
+    assert!(!all.contains("Enter/e=edit"), "{all}");
+    assert!(
+        all.contains("d=delete") || all.contains("d delete"),
+        "{all}"
+    );
+    assert!(
+        all.contains("Esc=close") || all.contains("Esc close"),
+        "{all}"
+    );
+    assert!(!all.contains("details"), "{all}");
+}
+
+#[test]
+fn tui_pricing_loading_state_uses_usage_pricing_pending_signal() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Pricing;
+    app.focus = Focus::Content;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::SevenDays);
+    let data = minimal_data(&app.app_type);
+
+    let all = all_text(&render_with_size(&app, &data, 160, 36));
+
+    assert!(all.contains("Model Pricing"), "{all}");
+    assert!(all.contains("Loading..."), "{all}");
+    assert!(!all.contains("No model pricing rows found"), "{all}");
+}
+
+#[test]
+fn tui_pricing_loading_state_keeps_unmatched_context_visible() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Pricing;
+    app.focus = Focus::Content;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::SevenDays);
+    let mut data = minimal_data(&app.app_type);
+    data.pricing = ModelPricingSnapshot {
+        recent_unknown_models: 1,
+        recent_unmatched_total_tokens: 500,
+        recent_unmatched_total_cost_usd: 0.12,
+        ..ModelPricingSnapshot::default()
+    };
+
+    let all = all_text(&render_with_size(&app, &data, 160, 36));
+
+    assert!(all.contains("Model Pricing"), "{all}");
+    assert!(all.contains("1 unmatched models 30d"), "{all}");
+    assert!(all.contains("500 tokens"), "{all}");
+    assert!(all.contains("$0.120 total"), "{all}");
+    assert!(all.contains("$0.120 unmatched"), "{all}");
+    assert!(all.contains("No model pricing rows found"), "{all}");
+    assert!(!all.contains("Loading..."), "{all}");
+}
+
+#[test]
 fn tui_sessions_renders_split_detail_and_message_preview() {
     let _lang = use_test_language(Language::English);
 
@@ -101,6 +653,7 @@ fn tui_sessions_renders_split_detail_and_message_preview() {
     });
     app.sessions
         .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.pane = app::SessionsPane::Detail;
     app.sessions.messages_loaded = true;
     app.sessions
         .messages
@@ -221,6 +774,220 @@ fn tui_sessions_filters_rows_by_current_app() {
     let codex = all_text(&render(&app, &minimal_data(&app.app_type)));
     assert!(!codex.contains("Claude visible"), "{codex}");
     assert!(codex.contains("Codex hidden"), "{codex}");
+}
+
+#[test]
+fn tui_sessions_slash_search_filters_user_role_messages() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "abcdef123456".to_string(),
+        title: Some("Debug deploy".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/session.jsonl".to_string()),
+        resume_command: Some("claude --resume abcdef123456".to_string()),
+    });
+    app.sessions
+        .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.pane = app::SessionsPane::Detail;
+    app.sessions.messages_loaded = true;
+    app.sessions.messages = vec![
+        crate::session_manager::SessionMessage {
+            role: "user".to_string(),
+            content: "How do I deploy this service?".to_string(),
+            ts: Some(1_735_689_900_000),
+        },
+        crate::session_manager::SessionMessage {
+            role: "assistant".to_string(),
+            content: "The user should use the release workflow.".to_string(),
+            ts: Some(1_735_689_901_000),
+        },
+        crate::session_manager::SessionMessage {
+            role: "tool".to_string(),
+            content: "cargo test".to_string(),
+            ts: Some(1_735_689_902_000),
+        },
+    ];
+
+    let data = minimal_data(&app.app_type);
+    let action = app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &data);
+    assert!(matches!(action, Action::None));
+    for ch in "User".chars() {
+        let action = app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &data);
+        assert!(matches!(action, Action::None));
+    }
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(!all.contains("Search: User"), "{all}");
+    assert!(all.contains("How do I deploy"), "{all}");
+    assert!(!all.contains("release workflow"), "{all}");
+    assert!(!all.contains("cargo test"), "{all}");
+}
+
+#[test]
+fn tui_sessions_search_filters_loaded_message_content() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "abcdef123456".to_string(),
+        title: Some("Debug deploy".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/session.jsonl".to_string()),
+        resume_command: Some("claude --resume abcdef123456".to_string()),
+    });
+    app.sessions
+        .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.messages_loaded = true;
+    app.sessions.messages = vec![
+        crate::session_manager::SessionMessage {
+            role: "user".to_string(),
+            content: "How do I deploy this service?".to_string(),
+            ts: Some(1_735_689_900_000),
+        },
+        crate::session_manager::SessionMessage {
+            role: "assistant".to_string(),
+            content: "Use the release workflow.".to_string(),
+            ts: Some(1_735_689_901_000),
+        },
+    ];
+    app.sessions.message_filter.set("deploy");
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("How do I deploy"), "{all}");
+    assert!(!all.contains("Use the release workflow"), "{all}");
+}
+
+#[test]
+fn tui_sessions_search_matches_localized_user_role_label() {
+    let _lang = use_test_language(Language::Chinese);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "abcdef123456".to_string(),
+        title: Some("Debug deploy".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/demo-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/session.jsonl".to_string()),
+        resume_command: Some("claude --resume abcdef123456".to_string()),
+    });
+    app.sessions
+        .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.messages_loaded = true;
+    app.sessions.messages = vec![
+        crate::session_manager::SessionMessage {
+            role: "user".to_string(),
+            content: "How do I deploy this service?".to_string(),
+            ts: Some(1_735_689_900_000),
+        },
+        crate::session_manager::SessionMessage {
+            role: "assistant".to_string(),
+            content: "提醒用户使用发布流程。".to_string(),
+            ts: Some(1_735_689_901_000),
+        },
+    ];
+    app.sessions.message_filter.set("用户");
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("How do I deploy"), "{all}");
+    assert!(!all.contains("发布流程"), "{all}");
+}
+
+#[test]
+fn tui_sessions_session_and_message_filters_are_independent() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "ai-session".to_string(),
+        title: Some("AI incident".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/ai-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_900_000),
+        source_path: Some("/tmp/ai.jsonl".to_string()),
+        resume_command: Some("claude --resume ai-session".to_string()),
+    });
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "claude".to_string(),
+        session_id: "billing-session".to_string(),
+        title: Some("Billing question".to_string()),
+        summary: None,
+        project_dir: Some("/tmp/billing-project".to_string()),
+        created_at: Some(1_735_689_600_000),
+        last_active_at: Some(1_735_689_800_000),
+        source_path: Some("/tmp/billing.jsonl".to_string()),
+        resume_command: Some("claude --resume billing-session".to_string()),
+    });
+    app.sessions
+        .open_detail(app::session_key(&app.sessions.rows[0]));
+    app.sessions.pane = app::SessionsPane::Detail;
+    app.sessions.messages_loaded = true;
+    app.sessions.messages = vec![
+        crate::session_manager::SessionMessage {
+            role: "user".to_string(),
+            content: "How do I inspect the deployment?".to_string(),
+            ts: Some(1_735_689_900_000),
+        },
+        crate::session_manager::SessionMessage {
+            role: "assistant".to_string(),
+            content: "AI response for the user.".to_string(),
+            ts: Some(1_735_689_901_000),
+        },
+    ];
+    app.filter.input.set("AI");
+    app.sessions.message_filter.set("User");
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("AI incident"), "{all}");
+    assert!(!all.contains("Billing question"), "{all}");
+    assert!(all.contains("How do I inspect"), "{all}");
+    assert!(!all.contains("AI response"), "{all}");
 }
 
 #[test]
@@ -792,7 +1559,10 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
         config: ConfigSnapshot::default(),
         skills: SkillsSnapshot::default(),
         proxy: ProxySnapshot::default(),
+        usage: UsageSnapshot::default(),
+        pricing: Default::default(),
         quota: Default::default(),
+        reload_token: Default::default(),
     }
 }
 
@@ -1310,7 +2080,7 @@ fn settings_page_shows_managed_accounts_summary() {
 }
 
 #[test]
-fn settings_managed_accounts_page_renders_chatgpt_left_and_details_right() {
+fn settings_managed_accounts_page_renders_multi_account_manager() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -1343,13 +2113,135 @@ fn settings_managed_accounts_page_renders_chatgpt_left_and_details_right() {
         "{all}"
     );
     assert!(all.contains("default@example.com"), "{all}");
-    assert!(!all.contains("alt@example.com"), "{all}");
+    assert!(all.contains("alt@example.com"), "{all}");
     assert!(all.contains("acc-default"), "{all}");
     assert!(all.contains(texts::tui_managed_accounts_default()), "{all}");
+    assert!(all.contains(texts::tui_key_add_account()), "{all}");
+    assert!(all.contains(texts::tui_key_switch()), "{all}");
     assert!(
-        all.contains(texts::tui_managed_accounts_login_idle()),
+        !all.contains(texts::tui_managed_accounts_login_status()),
         "{all}"
     );
+    assert!(
+        !all.contains(texts::tui_managed_accounts_login_waiting()),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_managed_accounts_login_idle()),
+        "{all}"
+    );
+}
+
+#[test]
+fn settings_managed_accounts_login_renders_only_toast() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SettingsManagedAccounts;
+    app.focus = Focus::Content;
+    app.managed_auth_login = Some(crate::cli::tui::app::ManagedAuthLoginState {
+        auth_provider: "codex_oauth".to_string(),
+        device_code: "device-1".to_string(),
+        expires_at_tick: 900,
+        poll_interval_ticks: 5,
+        next_poll_tick: 0,
+    });
+    app.push_persistent_toast(
+        texts::tui_toast_managed_auth_login_in_progress(
+            "USER-1",
+            "https://auth.example.test/device",
+        ),
+        crate::cli::tui::app::ToastKind::Info,
+    );
+
+    let buf = render(&app, &minimal_data(&app.app_type));
+    let all = all_text(&buf);
+
+    let rows = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .collect::<Vec<_>>();
+    let title_row = rows
+        .iter()
+        .position(|row| row.contains("ChatGPT login in progress"))
+        .expect("login toast should render title line");
+    let code_row = rows
+        .iter()
+        .position(|row| row.contains("Code: USER-1"))
+        .expect("login toast should render code line");
+    let url_row = rows
+        .iter()
+        .position(|row| row.contains("Verification URL: https://auth.example.test/device"))
+        .expect("login toast should render URL line");
+    let cancel_row = rows
+        .iter()
+        .position(|row| row.contains("Press Esc to cancel"))
+        .expect("login toast should render cancel hint line");
+    assert!(title_row < code_row && code_row < url_row && url_row < cancel_row);
+    assert!(!rows[title_row].contains("USER-1"), "{}", rows[title_row]);
+    assert!(all.contains("USER-1"), "{all}");
+    assert!(all.contains("Press Esc to cancel"), "{all}");
+    assert!(!all.contains("Esc/c"), "{all}");
+    assert!(
+        !all.contains(texts::tui_managed_accounts_login_status()),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_managed_accounts_login_waiting()),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_managed_accounts_login_idle()),
+        "{all}"
+    );
+}
+
+#[test]
+fn managed_auth_cancel_confirm_renders_above_login_toast() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SettingsManagedAccounts;
+    app.focus = Focus::Content;
+    app.managed_auth_login = Some(crate::cli::tui::app::ManagedAuthLoginState {
+        auth_provider: "codex_oauth".to_string(),
+        device_code: "device-1".to_string(),
+        expires_at_tick: 900,
+        poll_interval_ticks: 5,
+        next_poll_tick: 0,
+    });
+    app.push_persistent_toast(
+        texts::tui_toast_managed_auth_login_in_progress(
+            "USER-1",
+            "https://auth.example.test/device",
+        ),
+        crate::cli::tui::app::ToastKind::Info,
+    );
+    app.overlay = Overlay::Confirm(ConfirmOverlay {
+        title: texts::tui_confirm_managed_auth_cancel_title().to_string(),
+        message: texts::tui_confirm_managed_auth_cancel_message().to_string(),
+        action: ConfirmAction::ManagedAuthCancelLogin,
+    });
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_confirm_managed_auth_cancel_title()),
+        "{all}"
+    );
+    assert!(all.contains("Press Enter to cancel"), "{all}");
+    assert!(all.contains("Esc to keep waiting"), "{all}");
+
+    let key_bar_row = all
+        .lines()
+        .find(|line| line.contains("Enter cancel login"))
+        .expect("managed auth cancel confirm should render a specific key bar");
+    assert!(key_bar_row.contains("Esc keep waiting"), "{key_bar_row}");
+    assert!(!key_bar_row.contains("Enter confirm"), "{key_bar_row}");
+    assert!(!key_bar_row.contains("Esc cancel"), "{key_bar_row}");
 }
 
 #[test]
@@ -1543,9 +2435,21 @@ fn openclaw_agents_picker_overlay_marks_current_option_when_editing_existing_fal
 }
 
 #[test]
+#[serial(home_settings)]
 fn header_centers_tabs_when_room_allows() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps(crate::settings::VisibleApps {
+        claude: true,
+        codex: true,
+        gemini: true,
+        opencode: true,
+        hermes: true,
+        openclaw: true,
+    })
+    .expect("save visible apps");
 
     let app = App::new(Some(AppType::Claude));
     let buf = render_with_size(&app, &minimal_data(&app.app_type), 140, 40);
@@ -1575,10 +2479,22 @@ fn header_centers_tabs_when_room_allows() {
 }
 
 #[test]
+#[serial(home_settings)]
 fn header_keeps_title_and_right_badges_visible_without_large_gap_in_chinese() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::Chinese);
     let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_visible_apps(crate::settings::VisibleApps {
+        claude: true,
+        codex: true,
+        gemini: true,
+        opencode: true,
+        hermes: true,
+        openclaw: true,
+    })
+    .expect("save visible apps");
 
     let app = App::new(Some(AppType::Claude));
     let mut data = minimal_data(&app.app_type);
@@ -5678,6 +6594,7 @@ fn workspace_openclaw_nav_uses_app_specific_labels_and_hides_generic_entries() {
         NavItem::OpenClawEnv,
         NavItem::OpenClawTools,
         NavItem::OpenClawAgents,
+        NavItem::Usage,
         NavItem::Config,
         NavItem::Settings,
         NavItem::Exit,
@@ -5692,6 +6609,10 @@ fn workspace_openclaw_nav_uses_app_specific_labels_and_hides_generic_entries() {
     assert!(!all.contains(&nav_label_text(NavItem::Mcp)), "{all}");
     assert!(!all.contains(&nav_label_text(NavItem::Skills)), "{all}");
     assert!(!all.contains(&nav_label_text(NavItem::Prompts)), "{all}");
+    assert!(
+        !all.contains(&buffer_cell_text(texts::menu_pricing())),
+        "{all}"
+    );
     assert!(all.contains(&nav_label_text(NavItem::Config)), "{all}");
 }
 
@@ -5711,6 +6632,7 @@ fn workspace_non_openclaw_nav_keeps_generic_labels() {
         NavItem::Skills,
         NavItem::Sessions,
         NavItem::Prompts,
+        NavItem::Usage,
         NavItem::Config,
     ]
     .map(nav_label_text);
@@ -5720,6 +6642,10 @@ fn workspace_non_openclaw_nav_keeps_generic_labels() {
         .collect::<Vec<_>>();
 
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{all}");
+    assert!(
+        !all.contains(&buffer_cell_text(texts::menu_pricing())),
+        "{all}"
+    );
     for item in [
         NavItem::OpenClawWorkspace,
         NavItem::OpenClawEnv,

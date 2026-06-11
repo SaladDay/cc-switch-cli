@@ -21,7 +21,9 @@ use crate::app_config::AppType;
 use crate::database::Database;
 use crate::services::ProxyService;
 
-use super::ipc::protocol::{Request, Response, TakeoverFlags, WorkerState};
+use super::ipc::protocol::{
+    Request, Response, TakeoverFlags, WorkerRuntimeStatus, WorkerState, WorkerTargetState,
+};
 use super::ipc::server::Handler;
 use super::restart::{Decision, RestartPolicy};
 
@@ -771,20 +773,27 @@ impl Supervisor {
     }
 
     async fn handle_status(&self) -> Response {
-        let inner = self.inner.lock().await;
+        let (worker_infos, restart_count, last_restart_at) = {
+            let inner = self.inner.lock().await;
+            let worker_infos = inner.workers.values().cloned().collect::<Vec<_>>();
+            (worker_infos, inner.restart_count, inner.last_restart_at)
+        };
         let takeovers = self.read_takeover_flags().await;
-        let mut workers = inner
-            .workers
-            .values()
-            .map(|info| WorkerState {
+        let mut worker_infos = worker_infos;
+        worker_infos.sort_by(|left, right| left.app_type.as_str().cmp(right.app_type.as_str()));
+        let mut workers = Vec::with_capacity(worker_infos.len());
+        for info in worker_infos {
+            let runtime_status = self.probe_worker_runtime_status(&info).await;
+            workers.push(WorkerState {
                 app_type: info.app_type.as_str().to_string(),
                 running: true,
                 address: info.address.clone(),
                 port: info.port,
                 pid: Some(info.pid),
                 started_at: Some(info.started_at.to_rfc3339()),
-            })
-            .collect::<Vec<_>>();
+                runtime_status,
+            });
+        }
         workers.sort_by(|left, right| left.app_type.cmp(&right.app_type));
         let primary = workers.first();
         Response::Status {
@@ -793,10 +802,57 @@ impl Supervisor {
             port: primary.map(|w| w.port).unwrap_or_default(),
             worker_pid: primary.and_then(|w| w.pid),
             takeovers,
-            restart_count: inner.restart_count,
-            last_restart_at: inner.last_restart_at.map(|d| d.to_rfc3339()),
+            restart_count,
+            last_restart_at: last_restart_at.map(|d| d.to_rfc3339()),
             workers,
         }
+    }
+
+    async fn probe_worker_runtime_status(&self, info: &WorkerInfo) -> Option<WorkerRuntimeStatus> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(500))
+            .build()
+            .ok()?;
+        let response = client
+            .get(worker_status_url(&info.address, info.port))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+
+        let status = response
+            .json::<crate::proxy::types::ProxyStatus>()
+            .await
+            .ok()?;
+        if status.managed_session_token.as_deref() != Some(info.session_token.as_str()) {
+            return None;
+        }
+
+        Some(WorkerRuntimeStatus {
+            active_connections: status.active_connections,
+            total_requests: status.total_requests,
+            estimated_input_tokens_total: status.estimated_input_tokens_total,
+            estimated_output_tokens_total: status.estimated_output_tokens_total,
+            success_requests: status.success_requests,
+            failed_requests: status.failed_requests,
+            uptime_seconds: status.uptime_seconds,
+            current_provider: status.current_provider,
+            current_provider_id: status.current_provider_id,
+            last_request_at: status.last_request_at,
+            last_error: status.last_error,
+            failover_count: status.failover_count,
+            active_targets: status
+                .active_targets
+                .into_iter()
+                .map(|target| WorkerTargetState {
+                    app_type: target.app_type,
+                    provider_name: target.provider_name,
+                    provider_id: target.provider_id,
+                })
+                .collect(),
+        })
     }
 
     pub async fn shutdown(&self) {
@@ -1141,6 +1197,20 @@ fn is_process_alive_for_signal(pid: u32) -> bool {
     }
 }
 
+fn worker_status_url(address: &str, port: u16) -> String {
+    let connect_host = match address {
+        "0.0.0.0" => "127.0.0.1".to_string(),
+        "::" => "::1".to_string(),
+        value => value.to_string(),
+    };
+    let connect_host = if connect_host.contains(':') && !connect_host.starts_with('[') {
+        format!("[{connect_host}]")
+    } else {
+        connect_host
+    };
+    format!("http://{connect_host}:{port}/status")
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -1385,6 +1455,82 @@ mod tests {
             payload["workers"]["claude"]["started_at"].as_str(),
             Some(started_at)
         );
+    }
+
+    #[tokio::test]
+    async fn daemon_status_includes_live_worker_runtime_totals() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake proxy status listener");
+        let port = listener
+            .local_addr()
+            .expect("read fake proxy listener addr")
+            .port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept status request");
+            let status = json!({
+                "running": true,
+                "address": "127.0.0.1",
+                "port": port,
+                "active_connections": 1,
+                "total_requests": 7,
+                "estimated_input_tokens_total": 52_726_211u64,
+                "estimated_output_tokens_total": 454_466u64,
+                "success_requests": 6,
+                "failed_requests": 1,
+                "success_rate": 85.7,
+                "uptime_seconds": 91_381,
+                "current_provider": "MiniMax My",
+                "current_provider_id": "minimax-my",
+                "last_request_at": "2026-06-01T02:58:44.732068565+00:00",
+                "last_error": null,
+                "failover_count": 2,
+                "managed_session_token": "token",
+                "active_targets": [{
+                    "app_type": "claude",
+                    "provider_name": "MiniMax My",
+                    "provider_id": "minimax-my"
+                }]
+            });
+            let body = status.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            use tokio::io::AsyncWriteExt;
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write fake status response");
+        });
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let supervisor = supervisor_for_test(db, Path::new("/tmp"));
+        let mut worker = worker_info_for_test(AppType::Claude, 1001);
+        worker.port = port;
+        {
+            let mut inner = supervisor.inner.lock().await;
+            inner.workers.insert(AppType::Claude, worker);
+        }
+
+        match supervisor.handle_status().await {
+            Response::Status { workers, .. } => {
+                assert_eq!(workers.len(), 1);
+                let runtime = workers[0]
+                    .runtime_status
+                    .as_ref()
+                    .expect("worker runtime status");
+                assert_eq!(runtime.total_requests, 7);
+                assert_eq!(runtime.estimated_input_tokens_total, 52_726_211);
+                assert_eq!(runtime.estimated_output_tokens_total, 454_466);
+                assert_eq!(runtime.current_provider.as_deref(), Some("MiniMax My"));
+                assert_eq!(runtime.active_targets.len(), 1);
+                assert_eq!(runtime.active_targets[0].provider_id, "minimax-my");
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
+        server.await.expect("fake status server should finish");
     }
 
     #[tokio::test]

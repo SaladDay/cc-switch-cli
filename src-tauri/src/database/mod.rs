@@ -32,6 +32,7 @@ mod schema;
 mod tests;
 
 // DAO 类型导出供外部使用
+pub(crate) use dao::model_pricing::ModelPricingUpdate;
 pub(crate) use dao::providers_seed::is_official_seed_id;
 pub use dao::FailoverQueueItem;
 
@@ -39,16 +40,19 @@ use crate::config::{
     get_app_config_dir, resolve_existing_or_new_child_path, restrict_dir_permissions,
 };
 use crate::error::AppError;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, Once};
+use std::sync::{Arc, Mutex, Once};
+use std::time::Duration;
 
 // DAO 方法通过 impl Database 提供，无需额外导出
 
 /// 数据库备份保留数量
 const DB_BACKUP_RETAIN: usize = 10;
+const USAGE_ROLLUP_RETAIN_DAYS: i64 = 30;
+const USAGE_MAINTENANCE_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
 static DATABASE_PERMISSION_CHECK: Once = Once::new();
 
@@ -129,6 +133,14 @@ pub struct Database {
 }
 
 impl Database {
+    fn configure_connection(conn: &Connection) -> Result<(), AppError> {
+        conn.execute("PRAGMA foreign_keys = ON;", [])
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     /// 初始化数据库连接并创建表
     ///
     /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
@@ -168,14 +180,10 @@ impl Database {
 
         let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 启用外键约束
-        conn.execute("PRAGMA foreign_keys = ON;", [])
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        Self::configure_connection(&conn)?;
         // 多进程并发：daemon 与 worker 都会打开这个文件，WAL + busy_timeout 让
         // 短暂的 SQLITE_BUSY 自动重试而不是直接失败。
         conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let db = Self {
@@ -205,8 +213,41 @@ impl Database {
         db.create_tables()?;
         db.apply_schema_migrations()?;
         db.ensure_model_pricing_seeded()?;
+        db.run_usage_maintenance("startup");
 
         Ok(db)
+    }
+
+    /// 打开当前 schema 的只读快照连接。
+    ///
+    /// 用于 TUI 后台热刷新等只读路径；不会创建目录、建表、迁移、seed 或执行启动维护。
+    pub fn open_readonly_current_schema() -> Result<Self, AppError> {
+        let db_path = get_app_config_dir().join("cc-switch.db");
+        if !db_path.exists() {
+            return Err(AppError::Database(format!(
+                "database is not initialized: {}",
+                db_path.display()
+            )));
+        }
+
+        let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Self::configure_connection(&conn)?;
+
+        let version = Self::get_user_version(&conn)?;
+        if version > SCHEMA_VERSION {
+            return Err(Self::future_schema_error(version));
+        }
+        if version != SCHEMA_VERSION {
+            return Err(AppError::Database(format!(
+                "database schema version {version} requires initialization before snapshot reads; current schema version is {SCHEMA_VERSION}"
+            )));
+        }
+
+        Ok(Self {
+            conn: Mutex::new(conn),
+            runtime_key: format!("file:{}", db_path.display()),
+        })
     }
 
     /// 创建内存数据库（用于测试）
@@ -215,9 +256,7 @@ impl Database {
 
         let conn = Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 启用外键约束
-        conn.execute("PRAGMA foreign_keys = ON;", [])
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        Self::configure_connection(&conn)?;
 
         let db = Self {
             conn: Mutex::new(conn),
@@ -252,6 +291,70 @@ impl Database {
 
     pub(crate) fn runtime_key(&self) -> &str {
         &self.runtime_key
+    }
+
+    pub(crate) fn spawn_periodic_usage_maintenance(
+        db: Arc<Self>,
+        context: &'static str,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(USAGE_MAINTENANCE_INTERVAL_SECS));
+            interval.tick().await;
+
+            loop {
+                interval.tick().await;
+                let db = db.clone();
+                let task_context = context.to_string();
+                let log_context = task_context.clone();
+                match tokio::task::spawn_blocking(move || {
+                    db.run_usage_maintenance(&task_context);
+                })
+                .await
+                {
+                    Ok(()) => {}
+                    Err(error) => {
+                        log::warn!(
+                            "Periodic usage maintenance task failed ({log_context}): {error}"
+                        )
+                    }
+                }
+            }
+        })
+    }
+
+    fn run_usage_maintenance(&self, context: &str) {
+        match self.backfill_missing_usage_costs() {
+            Ok(updated) if updated > 0 => {
+                log::info!("Usage maintenance backfilled costs ({context}): updated={updated}");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!("Usage maintenance cost backfill failed ({context}): {error}");
+                return;
+            }
+        }
+
+        match self.rollup_and_prune(USAGE_ROLLUP_RETAIN_DAYS) {
+            Ok(deleted) if deleted > 0 => match self.conn.lock() {
+                Ok(conn) => {
+                    if let Err(error) = conn.execute_batch("PRAGMA incremental_vacuum;") {
+                        log::warn!(
+                            "Usage maintenance incremental vacuum failed ({context}): {error}"
+                        );
+                    }
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Usage maintenance incremental vacuum lock failed ({context}): {error}"
+                    )
+                }
+            },
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!("Usage maintenance rollup_and_prune failed ({context}): {error}")
+            }
+        }
     }
 }
 

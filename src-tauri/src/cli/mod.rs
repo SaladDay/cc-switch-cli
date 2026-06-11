@@ -48,6 +48,12 @@ pub enum Commands {
     #[command(subcommand)]
     Provider(commands::provider::ProviderCommand),
 
+    /// Switch to a provider (shortcut for `provider switch <id>`)
+    Use {
+        /// Provider ID to switch to
+        id: String,
+    },
+
     /// Manage MCP servers (list, add, edit, delete, sync)
     #[command(subcommand)]
     Mcp(commands::mcp::McpCommand),
@@ -168,6 +174,27 @@ mod tests {
                 assert_eq!(listen_port, Some(0));
             }
             _ => panic!("expected proxy serve command"),
+        }
+    }
+
+    #[test]
+    fn parses_use_shortcut_command() {
+        let cli = Cli::parse_from(["cc-switch", "use", "demo"]);
+
+        match cli.command {
+            Some(Commands::Use { id }) => assert_eq!(id, "demo"),
+            _ => panic!("expected use shortcut command"),
+        }
+    }
+
+    #[test]
+    fn parses_use_shortcut_with_app_global() {
+        let cli = Cli::parse_from(["cc-switch", "--app", "codex", "use", "demo"]);
+
+        assert_eq!(cli.app, Some(AppType::Codex));
+        match cli.command {
+            Some(Commands::Use { id }) => assert_eq!(id, "demo"),
+            _ => panic!("expected use shortcut command"),
         }
     }
 
@@ -460,6 +487,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_sessions_sync_usage_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "sessions",
+            "sync-usage",
+            "--provider",
+            "codex",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Sessions(super::commands::sessions::SessionsCommand::SyncUsage {
+                provider,
+                all,
+                json,
+            })) => {
+                assert_eq!(provider, Some(super::AppType::Codex));
+                assert!(!all);
+                assert!(json);
+            }
+            _ => panic!("expected sessions sync-usage command"),
+        }
+    }
+
+    #[test]
     fn parses_sessions_show_with_provider() {
         let cli = Cli::parse_from([
             "cc-switch",
@@ -599,12 +651,33 @@ mod tests {
         match cli.command {
             Some(Commands::Start(super::commands::start::StartCommand::Claude {
                 selector,
+                dry_run,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
+                assert!(!dry_run);
                 assert!(native_args.is_empty());
             }
             _ => panic!("expected start claude command"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_start_claude_dry_run_option() {
+        let cli = Cli::parse_from(["cc-switch", "start", "claude", "demo", "--dry-run"]);
+
+        match cli.command {
+            Some(Commands::Start(super::commands::start::StartCommand::Claude {
+                selector,
+                dry_run,
+                native_args,
+            })) => {
+                assert_eq!(selector, "demo");
+                assert!(dry_run);
+                assert!(native_args.is_empty());
+            }
+            _ => panic!("expected start claude dry-run command"),
         }
     }
 
@@ -623,9 +696,11 @@ mod tests {
         match cli.command {
             Some(Commands::Start(super::commands::start::StartCommand::Claude {
                 selector,
+                dry_run,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
+                assert!(!dry_run);
                 assert_eq!(
                     native_args,
                     vec![OsString::from("--dangerously-skip-permissions")]
@@ -661,12 +736,45 @@ mod tests {
         match cli.command {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
+                dry_run,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
+                assert!(!dry_run);
                 assert!(native_args.is_empty());
             }
             _ => panic!("expected start codex command"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_start_codex_dry_run_with_native_args_after_double_dash() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "start",
+            "codex",
+            "demo",
+            "--dry-run",
+            "--",
+            "--model",
+            "gpt-5.4",
+        ]);
+
+        match cli.command {
+            Some(Commands::Start(super::commands::start::StartCommand::Codex {
+                selector,
+                dry_run,
+                native_args,
+            })) => {
+                assert_eq!(selector, "demo");
+                assert!(dry_run);
+                assert_eq!(
+                    native_args,
+                    vec![OsString::from("--model"), OsString::from("gpt-5.4")]
+                );
+            }
+            _ => panic!("expected start codex dry-run command with native args"),
         }
     }
 
@@ -688,9 +796,11 @@ mod tests {
         match cli.command {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
+                dry_run,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
+                assert!(!dry_run);
                 assert_eq!(
                     native_args,
                     vec![
@@ -717,7 +827,9 @@ mod tests {
             .expect("claude subcommand should exist");
         let help = claude.render_long_help().to_string();
 
+        assert!(help.contains("--dry-run"));
         assert!(help.contains("Native Claude CLI arguments to pass through after `--`"));
+        assert!(help.contains("cc-switch start claude demo --dry-run"));
         assert!(help.contains("cc-switch start claude demo -- --dangerously-skip-permissions"));
     }
 
@@ -733,7 +845,9 @@ mod tests {
             .expect("codex subcommand should exist");
         let help = codex.render_long_help().to_string();
 
+        assert!(help.contains("--dry-run"));
         assert!(help.contains("Native Codex CLI arguments to pass through after `--`"));
+        assert!(help.contains("cc-switch start codex demo --dry-run"));
         assert!(help.contains("cc-switch start codex demo -- --model gpt-5.4"));
     }
 

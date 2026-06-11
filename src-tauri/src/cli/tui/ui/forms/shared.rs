@@ -41,6 +41,7 @@ pub(crate) fn add_form_key_items(
                     Some(
                         ProviderAddField::ClaudeModelConfig
                         | ProviderAddField::CodexOAuthAccount
+                        | ProviderAddField::CodexLocalRouting
                         | ProviderAddField::CommonSnippet
                         | ProviderAddField::UsageQuery
                         | ProviderAddField::OpenClawModels
@@ -72,6 +73,48 @@ pub(crate) fn add_form_key_items(
         FormFocus::Content => {}
     }
 
+    keys
+}
+
+pub(crate) fn codex_local_routing_form_key_items(
+    selected_field: Option<super::form::CodexLocalRoutingField>,
+) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![
+        ("Ctrl+S", texts::tui_key_save()),
+        ("Esc", texts::tui_key_no()),
+        ("↑↓", texts::tui_key_select()),
+    ];
+
+    let enter_action = match selected_field {
+        Some(super::form::CodexLocalRoutingField::ModelCatalog) => texts::tui_key_open(),
+        Some(
+            super::form::CodexLocalRoutingField::Enabled
+            | super::form::CodexLocalRoutingField::SupportsThinking
+            | super::form::CodexLocalRoutingField::SupportsEffort,
+        ) => texts::tui_key_toggle(),
+        None => texts::tui_key_toggle(),
+    };
+    keys.push(("Enter", enter_action));
+    keys
+}
+
+pub(crate) fn codex_model_catalog_form_key_items(
+    has_rows: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![
+        ("Ctrl+S", texts::tui_key_save()),
+        ("Esc", texts::tui_key_no()),
+        ("f", texts::tui_key_fetch_model()),
+        ("+", texts::tui_key_add()),
+    ];
+    if has_rows {
+        keys.extend([
+            ("↑↓", texts::tui_key_select()),
+            ("←→", texts::tui_key_select()),
+            ("Enter", texts::tui_key_edit()),
+            ("Del", texts::tui_key_delete()),
+        ]);
+    }
     keys
 }
 

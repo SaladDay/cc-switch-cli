@@ -4,6 +4,7 @@ use super::*;
 pub struct FilterState {
     pub active: bool,
     pub input: TextInput,
+    pub scope: FilterScope,
 }
 
 impl FilterState {
@@ -11,6 +12,7 @@ impl FilterState {
         Self {
             active: false,
             input: TextInput::new(""),
+            scope: FilterScope::Global,
         }
     }
 
@@ -24,6 +26,12 @@ impl FilterState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterScope {
+    Global,
+    SessionMessages,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Nav,
     Content,
@@ -33,6 +41,105 @@ pub enum Focus {
 pub enum SessionsPane {
     List,
     Detail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsagePane {
+    Models,
+    Providers,
+    Recent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageMetric {
+    Cost,
+    Tokens,
+    Requests,
+    Errors,
+}
+
+#[derive(Debug, Clone)]
+pub struct UsageState {
+    pub range: crate::cli::tui::data::UsageRangePreset,
+    pub metric: UsageMetric,
+    pub pane: UsagePane,
+    pub selected_idx: usize,
+    pub logs_idx: usize,
+    loading_ranges: HashSet<(AppType, crate::cli::tui::data::UsageRangePreset)>,
+}
+
+impl Default for UsageState {
+    fn default() -> Self {
+        Self {
+            range: crate::cli::tui::data::UsageRangePreset::SevenDays,
+            metric: UsageMetric::Cost,
+            pane: UsagePane::Models,
+            selected_idx: 0,
+            logs_idx: 0,
+            loading_ranges: HashSet::new(),
+        }
+    }
+}
+
+impl UsageState {
+    pub(crate) fn start_loading(
+        &mut self,
+        app_type: AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+    ) {
+        self.loading_ranges.insert((app_type, range));
+    }
+
+    pub(crate) fn finish_loading(
+        &mut self,
+        app_type: &AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+    ) {
+        self.loading_ranges.remove(&(app_type.clone(), range));
+    }
+
+    pub(crate) fn clear_loading(&mut self) {
+        self.loading_ranges.clear();
+    }
+
+    pub(crate) fn clear_custom_loading_for_app(&mut self, app_type: &AppType) {
+        self.loading_ranges.retain(|(loading_app_type, range)| {
+            loading_app_type != app_type
+                || !matches!(range, crate::cli::tui::data::UsageRangePreset::Custom(_))
+        });
+    }
+
+    pub(crate) fn is_loading_for(
+        &self,
+        app_type: &AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+    ) -> bool {
+        self.loading_ranges
+            .iter()
+            .any(|(loading_app_type, loading_range)| {
+                loading_app_type == app_type && usage_loading_range_matches(*loading_range, range)
+            })
+    }
+}
+
+fn usage_loading_range_matches(
+    loading_range: crate::cli::tui::data::UsageRangePreset,
+    active_range: crate::cli::tui::data::UsageRangePreset,
+) -> bool {
+    match (loading_range, active_range) {
+        (
+            crate::cli::tui::data::UsageRangePreset::Custom(loading),
+            crate::cli::tui::data::UsageRangePreset::Custom(active),
+        ) => loading == active,
+        (crate::cli::tui::data::UsageRangePreset::Custom(_), _) => false,
+        (_, crate::cli::tui::data::UsageRangePreset::Custom(_)) => false,
+        _ => true,
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PricingState {
+    pub selected_idx: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +158,7 @@ pub struct SessionsState {
     pub detail_key: Option<String>,
     pub messages_key: Option<String>,
     pub messages: Vec<crate::session_manager::SessionMessage>,
+    pub message_filter: TextInput,
     pub messages_loading: bool,
     pub messages_loaded: bool,
     pub messages_error: Option<String>,
@@ -77,6 +185,7 @@ impl Default for SessionsState {
             detail_key: None,
             messages_key: None,
             messages: Vec::new(),
+            message_filter: TextInput::new(""),
             messages_loading: false,
             messages_loaded: false,
             messages_error: None,
@@ -152,6 +261,14 @@ impl SessionsState {
         }
         self.detail_key = Some(key);
         self.clear_messages();
+    }
+
+    pub(crate) fn message_query_lower(&self) -> Option<String> {
+        let trimmed = self.message_filter.value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(trimmed.to_lowercase())
     }
 
     pub(crate) fn clear_detail(&mut self) {
@@ -259,6 +376,7 @@ pub struct Toast {
     pub message: String,
     pub kind: ToastKind,
     pub remaining_ticks: u16,
+    pub persistent: bool,
 }
 
 impl Toast {
@@ -267,6 +385,16 @@ impl Toast {
             message: message.into(),
             kind,
             remaining_ticks: 12,
+            persistent: false,
+        }
+    }
+
+    pub fn persistent(message: impl Into<String>, kind: ToastKind) -> Self {
+        Self {
+            message: message.into(),
+            kind,
+            remaining_ticks: 0,
+            persistent: true,
         }
     }
 }
@@ -288,6 +416,9 @@ pub enum ConfirmAction {
     },
     PromptDelete {
         id: String,
+    },
+    PricingDelete {
+        model_id: String,
     },
     SessionDelete {
         key: String,
@@ -323,6 +454,7 @@ pub enum ConfirmAction {
     ProviderApiFormatProxyNotice,
     CommonConfigNotice,
     UsageQueryNotice,
+    ManagedAuthCancelLogin,
     ProxyEnableAndAutoFailover {
         app_type: AppType,
     },
@@ -370,6 +502,11 @@ pub enum TextSubmit {
     OpenClawAgentsRuntimeField {
         field: OpenClawAgentsRuntimeField,
     },
+    UsageCustomRange,
+    CodexModelCatalogField {
+        row: Option<usize>,
+        field: form::CodexModelCatalogField,
+    },
     WebDavJianguoyunUsername,
     WebDavJianguoyunPassword,
 }
@@ -412,8 +549,6 @@ pub enum CommonSnippetViewSource {
 pub struct ManagedAuthLoginState {
     pub auth_provider: String,
     pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
     pub expires_at_tick: u64,
     pub poll_interval_ticks: u64,
     pub next_poll_tick: u64,
@@ -459,7 +594,7 @@ impl McpEnvEntryEditorState {
 #[derive(Debug, Clone)]
 pub enum Overlay {
     None,
-    Help,
+    Help(crate::cli::tui::help::HelpState),
     Confirm(ConfirmOverlay),
     TextInput(TextInputState),
     BackupPicker {
@@ -594,6 +729,36 @@ impl Overlay {
         !matches!(self, Overlay::None)
     }
 
+    pub fn can_be_covered_by_help(&self) -> bool {
+        matches!(
+            self,
+            Overlay::BackupPicker { .. }
+                | Overlay::TextView(_)
+                | Overlay::CommonSnippetPicker { .. }
+                | Overlay::ProviderTestMenu { .. }
+                | Overlay::FailoverQueueManager { .. }
+                | Overlay::ClaudeApiFormatPicker { .. }
+                | Overlay::UsageQueryTemplatePicker { .. }
+                | Overlay::ManagedAccountPicker { .. }
+                | Overlay::ManagedAccountActionPicker { .. }
+                | Overlay::ClaudeModelPicker { editing: false, .. }
+                | Overlay::HermesModelsPicker { editing: false }
+                | Overlay::OpenClawToolsProfilePicker { .. }
+                | Overlay::OpenClawAgentsFallbackPicker { .. }
+                | Overlay::McpAppsPicker { .. }
+                | Overlay::VisibleAppsPicker { .. }
+                | Overlay::SkillsAppsPicker { .. }
+                | Overlay::SkillsImportPicker { .. }
+                | Overlay::SkillsSyncMethodPicker { .. }
+                | Overlay::McpEnvPicker { .. }
+                | Overlay::McpTypePicker { .. }
+                | Overlay::SpeedtestResult { .. }
+                | Overlay::StreamCheckResult { .. }
+                | Overlay::UpdateAvailable { .. }
+                | Overlay::UpdateResult { .. }
+        )
+    }
+
     /// Whether this overlay is actively accepting text input.
     /// This controls whether the main UI should consider itself in "editing mode" and e.g. respond to vim-style navigation.
     pub fn is_editing(&self) -> bool {
@@ -604,7 +769,7 @@ impl Overlay {
             Overlay::ModelFetchPicker { .. } => true,
             Overlay::McpEnvEntryEditor(editor) => editor.is_editing(),
             Overlay::None
-            | Overlay::Help
+            | Overlay::Help(_)
             | Overlay::Confirm(_)
             | Overlay::BackupPicker { .. }
             | Overlay::TextView(_)

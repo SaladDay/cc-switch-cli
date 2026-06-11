@@ -18,6 +18,7 @@ mod config;
 mod editor;
 mod helpers;
 mod mcp;
+mod pricing;
 mod prompts;
 mod providers;
 mod settings;
@@ -37,6 +38,10 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             super::route::Route::Main
             | super::route::Route::Providers
             | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Usage
+            | super::route::Route::UsageLogs
+            | super::route::Route::UsageLogDetail { .. }
+            | super::route::Route::Pricing
             | super::route::Route::Sessions
             | super::route::Route::ConfigOpenClawWorkspace
             | super::route::Route::ConfigOpenClawDailyMemory
@@ -52,6 +57,10 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             super::route::Route::Main
             | super::route::Route::Providers
             | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Usage
+            | super::route::Route::UsageLogs
+            | super::route::Route::UsageLogDetail { .. }
+            | super::route::Route::Pricing
             | super::route::Route::Sessions
             | super::route::Route::Mcp
             | super::route::Route::HermesMemory
@@ -76,7 +85,12 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
     }
 }
 
-fn apply_preloaded_app_switch(app: &mut App, data: &mut UiData, next: AppType, next_data: UiData) {
+pub(crate) fn apply_preloaded_app_switch(
+    app: &mut App,
+    data: &mut UiData,
+    next: AppType,
+    next_data: UiData,
+) {
     app.clear_openclaw_daily_memory_search_state();
     app.app_type = next;
     let original_route = app.route.clone();
@@ -389,6 +403,8 @@ pub(crate) fn handle_action(
             field,
             claude_idx,
         ),
+        Action::UsageCustomRange { .. } => Ok(()),
+        Action::PricingDelete { model_id } => pricing::delete(&mut ctx, model_id),
         Action::McpToggle { id, enabled } => mcp::toggle(&mut ctx, id, enabled),
         Action::McpSetApps { id, apps } => mcp::set_apps(&mut ctx, id, apps),
         Action::McpDelete { id } => mcp::delete(&mut ctx, id),

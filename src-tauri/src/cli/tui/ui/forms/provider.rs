@@ -2,8 +2,13 @@ use super::*;
 use serde_json::json;
 use std::collections::BTreeSet;
 
-fn claude_api_format_label(api_format: crate::cli::tui::form::ClaudeApiFormat) -> String {
-    texts::tui_claude_api_format_value(api_format.as_str()).to_string()
+fn provider_api_format_label(provider: &super::form::ProviderAddFormState) -> String {
+    let api_format = provider.claude_api_format.as_str();
+    if matches!(provider.app_type, AppType::Codex) {
+        texts::tui_codex_api_format_value(api_format).to_string()
+    } else {
+        texts::tui_claude_api_format_value(api_format).to_string()
+    }
 }
 
 fn should_redact_provider_field(
@@ -154,6 +159,22 @@ pub(crate) fn render_provider_add_form(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
+    if matches!(
+        provider.page,
+        super::form::ProviderFormPage::CodexLocalRouting
+    ) {
+        render_codex_local_routing_form(frame, app, provider, area, theme);
+        return;
+    }
+
+    if matches!(
+        provider.page,
+        super::form::ProviderFormPage::CodexModelCatalog
+    ) {
+        render_codex_model_catalog_form(frame, app, provider, area, theme);
+        return;
+    }
+
     if matches!(provider.page, super::form::ProviderFormPage::UsageQuery) {
         render_usage_query_form(frame, app, provider, area, theme);
         return;
@@ -434,6 +455,311 @@ pub(crate) fn render_provider_add_form(
             &highlighted_lines,
         );
     }
+}
+
+fn render_codex_local_routing_form(
+    frame: &mut Frame<'_>,
+    app: &App,
+    provider: &super::form::ProviderAddFormState,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let title = texts::tui_codex_local_routing_title(provider.name.value.trim());
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(title);
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let fields = provider.codex_local_routing_fields();
+    let selected_field = fields
+        .get(
+            provider
+                .codex_local_routing_field_idx
+                .min(fields.len().saturating_sub(1)),
+        )
+        .copied();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(inner);
+
+    render_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &codex_local_routing_form_key_items(selected_field),
+    );
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(chunks[1]);
+
+    let fields_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(focus_block_style(
+            matches!(provider.focus, FormFocus::Fields),
+            theme,
+        ))
+        .title(texts::tui_form_fields_title());
+    frame.render_widget(fields_block.clone(), body[0]);
+    let fields_inner = fields_block.inner(body[0]);
+
+    let rows_data = fields
+        .iter()
+        .map(|field| codex_local_routing_field_label_and_value(provider, *field))
+        .collect::<Vec<_>>();
+
+    let label_col_width = field_label_column_width(
+        rows_data
+            .iter()
+            .map(|(label, _value)| label.as_str())
+            .chain(std::iter::once(texts::tui_header_field())),
+        1,
+    );
+
+    let header = Row::new(vec![
+        Cell::from(cell_pad(texts::tui_header_field())),
+        Cell::from(texts::tui_header_value()),
+    ])
+    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+
+    let rows = rows_data.iter().map(|(label, value)| {
+        Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value.clone())])
+    });
+
+    let table = Table::new(
+        rows,
+        [Constraint::Length(label_col_width), Constraint::Min(10)],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::NONE))
+    .row_highlight_style(selection_style(theme))
+    .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = TableState::default();
+    if !fields.is_empty() {
+        state.select(Some(
+            provider.codex_local_routing_field_idx.min(fields.len() - 1),
+        ));
+    }
+    frame.render_stateful_widget(table, fields_inner, &mut state);
+
+    render_codex_model_catalog_preview(frame, provider, body[1], theme);
+    render_codex_local_routing_input(frame, provider, selected_field, chunks[2], theme);
+}
+
+fn render_codex_model_catalog_preview(
+    frame: &mut Frame<'_>,
+    provider: &super::form::ProviderAddFormState,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(theme.dim))
+        .title(texts::tui_codex_model_catalog_preview_title());
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+
+    if provider.codex_model_catalog.is_empty() {
+        frame.render_widget(
+            Paragraph::new(texts::tui_codex_model_catalog_empty())
+                .style(Style::default().fg(theme.dim))
+                .alignment(Alignment::Center),
+            inner,
+        );
+        return;
+    }
+
+    let rows = provider
+        .codex_model_catalog
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            Row::new(vec![Cell::from(cell_pad(&format!(
+                "{}. {}",
+                idx + 1,
+                row.summary_label()
+            )))])
+        })
+        .collect::<Vec<_>>();
+
+    let table =
+        Table::new(rows, [Constraint::Min(10)]).block(Block::default().borders(Borders::NONE));
+    frame.render_widget(table, inner);
+}
+
+fn render_codex_model_catalog_form(
+    frame: &mut Frame<'_>,
+    app: &App,
+    provider: &super::form::ProviderAddFormState,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let title = texts::tui_codex_model_catalog_title(provider.name.value.trim());
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(title);
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &codex_model_catalog_form_key_items(!provider.codex_model_catalog.is_empty()),
+    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(focus_block_style(true, theme))
+        .title(texts::tui_codex_model_catalog());
+    frame.render_widget(block.clone(), chunks[1]);
+    let table_area = block.inner(chunks[1]);
+
+    if provider.codex_model_catalog.is_empty() {
+        frame.render_widget(
+            Paragraph::new(texts::tui_codex_model_catalog_empty())
+                .style(Style::default().fg(theme.dim))
+                .alignment(Alignment::Center),
+            table_area,
+        );
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from(cell_pad(texts::tui_codex_model_catalog_model_header())),
+        Cell::from(texts::tui_codex_model_catalog_display_header()),
+        Cell::from(texts::tui_codex_model_catalog_context_header()),
+    ])
+    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+
+    let selected_idx = provider
+        .codex_model_catalog_idx
+        .min(provider.codex_model_catalog.len().saturating_sub(1));
+    let selected_field = provider.codex_model_catalog_field;
+    let rows = provider
+        .codex_model_catalog
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            let context_window =
+                super::form::codex_model_catalog_context_window_label(&row.context_window);
+            Row::new(vec![
+                codex_model_catalog_cell(
+                    &row.model,
+                    idx,
+                    selected_idx,
+                    super::form::CodexModelCatalogField::Model,
+                    selected_field,
+                    theme,
+                ),
+                codex_model_catalog_cell(
+                    &row.display_name,
+                    idx,
+                    selected_idx,
+                    super::form::CodexModelCatalogField::DisplayName,
+                    selected_field,
+                    theme,
+                ),
+                codex_model_catalog_cell(
+                    &context_window,
+                    idx,
+                    selected_idx,
+                    super::form::CodexModelCatalogField::ContextWindow,
+                    selected_field,
+                    theme,
+                ),
+            ])
+        });
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Percentage(45),
+            Constraint::Percentage(35),
+            Constraint::Percentage(20),
+        ],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::NONE));
+
+    frame.render_widget(table, table_area);
+}
+
+fn codex_model_catalog_cell<'a>(
+    value: &str,
+    row_idx: usize,
+    selected_idx: usize,
+    field: super::form::CodexModelCatalogField,
+    selected_field: super::form::CodexModelCatalogField,
+    theme: &super::theme::Theme,
+) -> Cell<'a> {
+    Cell::from(cell_pad(value)).style(codex_model_catalog_cell_style(
+        row_idx,
+        selected_idx,
+        field,
+        selected_field,
+        theme,
+    ))
+}
+
+fn codex_model_catalog_cell_style(
+    row_idx: usize,
+    selected_idx: usize,
+    field: super::form::CodexModelCatalogField,
+    selected_field: super::form::CodexModelCatalogField,
+    theme: &super::theme::Theme,
+) -> Style {
+    if row_idx == selected_idx && field == selected_field {
+        selection_style(theme)
+    } else if row_idx == selected_idx {
+        if theme.no_color {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.accent)
+        }
+    } else {
+        Style::default()
+    }
+}
+
+fn render_codex_local_routing_input(
+    frame: &mut Frame<'_>,
+    provider: &super::form::ProviderAddFormState,
+    selected: Option<super::form::CodexLocalRoutingField>,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(theme.dim))
+        .title(texts::tui_form_input_title());
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+
+    let (line, _cursor_col) = codex_local_routing_field_editor_line(provider, selected);
+    frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_usage_query_form(
@@ -850,6 +1176,7 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::CodexFastMode => texts::tui_label_codex_fast_mode().to_string(),
         ProviderAddField::CodexBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::CodexModel => texts::model_label().to_string(),
+        ProviderAddField::CodexLocalRouting => texts::tui_label_codex_local_routing().to_string(),
         ProviderAddField::CodexWireApi => {
             strip_trailing_colon(texts::codex_wire_api_label()).to_string()
         }
@@ -898,7 +1225,7 @@ pub(crate) fn provider_field_label_and_value(
     };
 
     let value = match field {
-        ProviderAddField::ClaudeApiFormat => claude_api_format_label(provider.claude_api_format),
+        ProviderAddField::ClaudeApiFormat => provider_api_format_label(provider),
         ProviderAddField::CodexWireApi => provider.codex_wire_api.as_str().to_string(),
         ProviderAddField::CodexRequiresOpenaiAuth => {
             if provider.codex_requires_openai_auth {
@@ -925,6 +1252,7 @@ pub(crate) fn provider_field_label_and_value(
                 "[ ]".to_string()
             }
         }
+        ProviderAddField::CodexLocalRouting => texts::tui_key_open().to_string(),
         ProviderAddField::IncludeCommonConfig => {
             if provider.include_common_config {
                 format!("[{}]", texts::tui_marker_active())
@@ -1005,10 +1333,12 @@ pub(crate) fn provider_field_editor_line(
     } else {
         let text = match field {
             ProviderAddField::ClaudeApiFormat => {
-                format!(
-                    "api_format = {}",
+                let value = if matches!(provider.app_type, AppType::Codex) {
+                    texts::tui_codex_api_format_value(provider.claude_api_format.as_str())
+                } else {
                     texts::tui_claude_api_format_value(provider.claude_api_format.as_str())
-                )
+                };
+                format!("api_format = {}", value)
             }
             ProviderAddField::CodexWireApi => {
                 format!("wire_api = {}", provider.codex_wire_api.as_str())
@@ -1034,6 +1364,9 @@ pub(crate) fn provider_field_editor_line(
             ProviderAddField::CodexFastMode => {
                 format!("codex_fast_mode = {}", provider.codex_fast_mode)
             }
+            ProviderAddField::CodexLocalRouting => {
+                format!("local_routing = {}", provider.codex_local_routing_enabled())
+            }
             ProviderAddField::CommonConfigDivider => String::new(),
             ProviderAddField::IncludeCommonConfig => {
                 format!("apply_common_config = {}", provider.include_common_config)
@@ -1057,6 +1390,81 @@ pub(crate) fn provider_field_editor_line(
         };
         (Line::raw(text), 0)
     }
+}
+
+pub(crate) fn codex_local_routing_field_label_and_value(
+    provider: &super::form::ProviderAddFormState,
+    field: super::form::CodexLocalRoutingField,
+) -> (String, String) {
+    let label = match field {
+        super::form::CodexLocalRoutingField::Enabled => {
+            texts::tui_codex_local_routing_enable().to_string()
+        }
+        super::form::CodexLocalRoutingField::SupportsThinking => {
+            texts::tui_codex_reasoning_supports_thinking().to_string()
+        }
+        super::form::CodexLocalRoutingField::SupportsEffort => {
+            texts::tui_codex_reasoning_supports_effort().to_string()
+        }
+        super::form::CodexLocalRoutingField::ModelCatalog => {
+            texts::tui_codex_model_catalog().to_string()
+        }
+    };
+
+    let value = match field {
+        super::form::CodexLocalRoutingField::Enabled => {
+            if provider.codex_local_routing_enabled() {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        super::form::CodexLocalRoutingField::SupportsThinking => {
+            if provider.codex_reasoning_supports_thinking() {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        super::form::CodexLocalRoutingField::SupportsEffort => {
+            if provider.codex_reasoning_supports_effort() {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        super::form::CodexLocalRoutingField::ModelCatalog => provider.codex_model_catalog_summary(),
+    };
+
+    (label, value)
+}
+
+pub(crate) fn codex_local_routing_field_editor_line(
+    provider: &super::form::ProviderAddFormState,
+    selected: Option<super::form::CodexLocalRoutingField>,
+) -> (Line<'static>, usize) {
+    let text = match selected {
+        Some(super::form::CodexLocalRoutingField::Enabled) => {
+            format!("local_routing = {}", provider.codex_local_routing_enabled())
+        }
+        Some(super::form::CodexLocalRoutingField::SupportsThinking) => {
+            format!(
+                "supportsThinking = {}",
+                provider.codex_reasoning_supports_thinking()
+            )
+        }
+        Some(super::form::CodexLocalRoutingField::SupportsEffort) => {
+            format!(
+                "supportsEffort = {}",
+                provider.codex_reasoning_supports_effort()
+            )
+        }
+        Some(super::form::CodexLocalRoutingField::ModelCatalog) => {
+            texts::tui_codex_model_catalog().to_string()
+        }
+        None => String::new(),
+    };
+    (Line::raw(text), 0)
 }
 
 fn provider_field_is_divider(field: ProviderAddField) -> bool {

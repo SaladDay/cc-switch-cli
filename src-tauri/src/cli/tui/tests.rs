@@ -7,7 +7,9 @@ use serde_json::json;
 use serial_test::serial;
 use tempfile::TempDir;
 
-use super::app::{App, LoadingKind, Overlay, ToastKind};
+use super::app::{
+    App, ConfirmAction, ConfirmOverlay, EditorSubmit, LoadingKind, Overlay, ToastKind,
+};
 use super::data::UiData;
 use super::form::ProviderAddField;
 use super::*;
@@ -17,10 +19,31 @@ use crate::test_support::{
 };
 use crate::{AppError, AppType};
 
+fn pending_snapshot_app_data(request_id: u64) -> PendingAppDataLoad {
+    PendingAppDataLoad {
+        kind: AppDataLoadKind::Snapshot,
+        request_id,
+        generation: 0,
+        app_state_epoch: 0,
+    }
+}
+
+fn pending_full_app_data(request_id: u64) -> PendingAppDataLoad {
+    PendingAppDataLoad {
+        kind: AppDataLoadKind::Full,
+        request_id,
+        generation: 0,
+        app_state_epoch: 0,
+    }
+}
+
 struct EnvGuard {
     _lock: TestHomeSettingsLock,
     old_home: Option<OsString>,
     old_userprofile: Option<OsString>,
+    old_cc_switch_config_dir: Option<OsString>,
+    old_claude_config_dir: Option<OsString>,
+    old_codex_home: Option<OsString>,
 }
 
 impl EnvGuard {
@@ -28,14 +51,23 @@ impl EnvGuard {
         let lock = lock_test_home_and_settings();
         let old_home = std::env::var_os("HOME");
         let old_userprofile = std::env::var_os("USERPROFILE");
+        let old_cc_switch_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+        let old_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let old_codex_home = std::env::var_os("CODEX_HOME");
         std::env::set_var("HOME", home);
         std::env::set_var("USERPROFILE", home);
+        std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
+        std::env::set_var("CODEX_HOME", home.join(".codex"));
         set_test_home_override(Some(home));
         crate::settings::reload_test_settings();
         Self {
             _lock: lock,
             old_home,
             old_userprofile,
+            old_cc_switch_config_dir,
+            old_claude_config_dir,
+            old_codex_home,
         }
     }
 }
@@ -49,6 +81,18 @@ impl Drop for EnvGuard {
         match &self.old_userprofile {
             Some(value) => std::env::set_var("USERPROFILE", value),
             None => std::env::remove_var("USERPROFILE"),
+        }
+        match &self.old_cc_switch_config_dir {
+            Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+            None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+        }
+        match &self.old_claude_config_dir {
+            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match &self.old_codex_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
         }
         set_test_home_override(self.old_home.as_deref().map(Path::new));
         crate::settings::reload_test_settings();
@@ -76,6 +120,1315 @@ fn mcp_import_uses_supported_apps_import_and_info_toast_kind() {
 #[test]
 fn tui_tick_rate_returns_to_200ms() {
     assert_eq!(TUI_TICK_RATE, std::time::Duration::from_millis(200));
+}
+
+#[test]
+fn app_switch_cache_miss_queues_background_load_without_blocking() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.config.common_snippets.codex = Some("codex shared config".to_string());
+
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    cache
+        .switch_to(&mut app, &mut data, Some(&tx), AppType::Codex)
+        .expect("switch should not synchronously load app data");
+
+    assert_eq!(app.app_type, AppType::Codex);
+    assert!(data.providers.rows.is_empty());
+    assert_eq!(data.config.common_snippet, "codex shared config");
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Codex).copied(),
+        Some(pending_snapshot_app_data(1))
+    );
+    assert!(cache.by_app.contains_key(&AppType::Claude));
+
+    let req = rx.recv().expect("app data request should be queued");
+    assert!(matches!(
+        req,
+        AppDataReq::Load {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+        }
+    ));
+}
+
+#[test]
+fn app_data_send_failure_does_not_block_retry() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+    drop(rx);
+
+    cache
+        .switch_to(&mut app, &mut data, Some(&tx), AppType::Codex)
+        .expect("switch should still use loading projection on send failure");
+
+    assert!(!cache.pending_by_app.contains_key(&AppType::Codex));
+    assert!(cache.incomplete_by_app.contains(&AppType::Codex));
+
+    let mut back_data = UiData::default();
+    cache
+        .switch_to(&mut app, &mut back_data, None, AppType::Claude)
+        .expect("switch back should work");
+
+    let (retry_tx, retry_rx) = mpsc::channel();
+    cache
+        .switch_to(&mut app, &mut back_data, Some(&retry_tx), AppType::Codex)
+        .expect("retry switch should queue another load");
+
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Codex).copied(),
+        Some(pending_snapshot_app_data(2))
+    );
+    assert!(matches!(
+        retry_rx.recv().expect("retry should send request"),
+        AppDataReq::Load {
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+        }
+    ));
+}
+
+#[test]
+fn stale_app_data_result_does_not_overwrite_current_app() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "claude-current".to_string();
+
+    let mut cache = UiDataByAppCache::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(1));
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "codex-loaded".to_string();
+
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Snapshot,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(app.app_type, AppType::Claude);
+    assert_eq!(data.providers.current_id, "claude-current");
+    assert_eq!(
+        cache
+            .by_app
+            .get(&AppType::Codex)
+            .map(|cached| cached.providers.current_id.as_str()),
+        Some("codex-loaded")
+    );
+}
+
+#[test]
+fn app_data_result_preserves_usage_pricing_that_finished_first() {
+    let mut app = App::new(Some(AppType::Codex));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(2));
+    cache.pending_usage_pricing_by_key.insert(
+        (AppType::Codex, data::UsageRangePreset::SevenDays),
+        PendingDataLoad {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+
+    let mut usage = data::UsageSnapshot::default();
+    usage.summary_7d.total_cost_usd = 12.5;
+    let pricing = data::ModelPricingSnapshot {
+        rows: vec![data::ModelPricingRow {
+            model_id: "gpt-5.4".to_string(),
+            display_name: "GPT 5.4".to_string(),
+            recent_total_cost_usd: 12.5,
+            ..data::ModelPricingRow::default()
+        }],
+        ..data::ModelPricingSnapshot::default()
+    };
+
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            range: data::UsageRangePreset::SevenDays,
+            result: Ok(data::UsagePricingData {
+                usage,
+                pricing: Some(pricing),
+            }),
+        },
+    );
+
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 12.5);
+    assert!(
+        !cache.by_app.contains_key(&AppType::Codex),
+        "pending base data should not be cached as a complete app snapshot"
+    );
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "codex-base".to_string();
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Snapshot,
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(data.providers.current_id, "codex-base");
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 12.5);
+    assert_eq!(data.pricing.rows.len(), 1);
+}
+
+#[test]
+fn current_app_data_changed_queues_full_load_without_caching_stale_data() {
+    let mut app = App::new(Some(AppType::Codex));
+    let mut data = UiData::default();
+    data.providers.current_id = "stale-current".to_string();
+    data.usage.summary_7d.total_cost_usd = 7.5;
+    data.pricing.rows.push(data::ModelPricingRow {
+        model_id: "gpt-stale".to_string(),
+        display_name: "GPT Stale".to_string(),
+        recent_total_cost_usd: 7.5,
+        ..data::ModelPricingRow::default()
+    });
+
+    let mut cached = UiData::default();
+    cached.providers.current_id = "cached-stale".to_string();
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Codex, cached);
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(99));
+    cache.incomplete_by_app.insert(AppType::Codex);
+    let (tx, rx) = mpsc::channel();
+
+    apply_cache_invalidation(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&tx),
+        None,
+        CacheInvalidation::CurrentAppDataChanged,
+    )
+    .expect("current app refresh should be queued");
+
+    assert_eq!(data.providers.current_id, "stale-current");
+    assert!(!cache.by_app.contains_key(&AppType::Codex));
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Codex).copied(),
+        Some(pending_full_app_data(1))
+    );
+    assert!(cache.incomplete_by_app.contains(&AppType::Codex));
+    assert!(!cache
+        .usage_pricing_by_key
+        .contains_key(&(AppType::Codex, data::UsageRangePreset::SevenDays)));
+    assert!(matches!(
+        rx.recv().expect("app data request should be queued"),
+        AppDataReq::FullLoad {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+        }
+    ));
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "fresh-current".to_string();
+    loaded.usage.summary_7d.total_cost_usd = 9.0;
+    loaded.pricing.rows.push(data::ModelPricingRow {
+        model_id: "gpt-fresh".to_string(),
+        display_name: "GPT Fresh".to_string(),
+        recent_total_cost_usd: 9.0,
+        ..data::ModelPricingRow::default()
+    });
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Full,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(data.providers.current_id, "fresh-current");
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 9.0);
+    assert_eq!(data.pricing.rows.len(), 1);
+    assert_eq!(data.pricing.rows[0].model_id, "gpt-fresh");
+    assert!(!cache.pending_by_app.contains_key(&AppType::Codex));
+    assert!(!cache.incomplete_by_app.contains(&AppType::Codex));
+    assert_eq!(
+        cache
+            .by_app
+            .get(&AppType::Codex)
+            .map(|cached| cached.providers.current_id.as_str()),
+        Some("fresh-current")
+    );
+}
+
+#[test]
+fn current_app_data_changed_full_load_requeues_custom_usage_and_invalidates_old_usage_loads() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let custom_range =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid range");
+    app.usage.range = data::UsageRangePreset::Custom(custom_range);
+    app.usage.start_loading(
+        AppType::Claude,
+        data::UsageRangePreset::Custom(custom_range),
+    );
+    data.usage.custom_range = Some(custom_range);
+    data.usage.summary_7d.total_requests = 10;
+    data.usage.summary_custom.total_requests = 5;
+    data.usage.recent_logs.push(data::UsageLogRow {
+        request_id: "fixed-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    data.usage.logs_total = 10;
+    data.usage.recent_logs_custom.push(data::UsageLogRow {
+        request_id: "custom-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    data.usage.logs_total_custom = 5;
+
+    let mut cache = UiDataByAppCache::default();
+    cache.usage_pricing_by_key.insert(
+        (AppType::Claude, data::UsageRangePreset::SevenDays),
+        data::UsagePricingData {
+            usage: data.usage.clone(),
+            pricing: Some(data.pricing.clone()),
+        },
+    );
+    cache.pending_usage_pricing_by_key.insert(
+        (AppType::Claude, data::UsageRangePreset::SevenDays),
+        PendingDataLoad {
+            request_id: 3,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+    let (app_tx, app_rx) = mpsc::channel();
+    let (usage_tx, usage_rx) = mpsc::channel();
+
+    apply_cache_invalidation(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&app_tx),
+        None,
+        CacheInvalidation::CurrentAppDataChanged,
+    )
+    .expect("current app refresh should be queued");
+
+    assert!(!cache
+        .pending_usage_pricing_by_key
+        .contains_key(&(AppType::Claude, data::UsageRangePreset::SevenDays)));
+    assert!(!cache
+        .usage_pricing_by_key
+        .contains_key(&(AppType::Claude, data::UsageRangePreset::SevenDays)));
+    assert!(app.usage.is_loading_for(
+        &AppType::Claude,
+        data::UsageRangePreset::Custom(custom_range)
+    ));
+    assert!(matches!(
+        app_rx.recv().expect("app data request should be queued"),
+        AppDataReq::FullLoad { request_id: 1, .. }
+    ));
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "fresh-current".to_string();
+    loaded.usage.summary_7d.total_requests = 11;
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&usage_tx),
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Full,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(data.providers.current_id, "fresh-current");
+    assert_eq!(data.usage.summary_7d.total_requests, 11);
+    assert_eq!(data.usage.summary_custom.total_requests, 0);
+    assert!(data.usage.recent_logs_custom.is_empty());
+    assert!(app.usage.is_loading_for(
+        &AppType::Claude,
+        data::UsageRangePreset::Custom(custom_range)
+    ));
+    assert!(matches!(
+        usage_rx
+            .recv()
+            .expect("custom usage/pricing request should be queued"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::Custom(range),
+            ..
+        } if range == custom_range
+    ));
+}
+
+#[test]
+#[serial(home_settings)]
+fn current_app_data_changed_falls_back_to_sync_load_when_worker_unavailable() {
+    use crate::provider::Provider;
+    use crate::services::ProviderService;
+
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    let state = data::load_state().expect("load isolated state");
+    ProviderService::add(
+        &state,
+        AppType::Claude,
+        Provider::with_id(
+            "fresh-provider".to_string(),
+            "Fresh Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://fallback.example.com",
+                    "ANTHROPIC_AUTH_TOKEN": "test-token"
+                }
+            }),
+            None,
+        ),
+    )
+    .expect("add provider to isolated state");
+
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "stale-current".to_string();
+    let mut cache = UiDataByAppCache::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Claude, pending_snapshot_app_data(9));
+    cache.incomplete_by_app.insert(AppType::Claude);
+
+    apply_cache_invalidation(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        CacheInvalidation::CurrentAppDataChanged,
+    )
+    .expect("fallback reload should succeed");
+
+    assert!(data
+        .providers
+        .rows
+        .iter()
+        .any(|row| row.id == "fresh-provider"));
+    assert!(!cache.pending_by_app.contains_key(&AppType::Claude));
+    assert!(!cache.incomplete_by_app.contains(&AppType::Claude));
+    assert_eq!(
+        cache
+            .by_app
+            .get(&AppType::Claude)
+            .map(|cached| cached.providers.rows.len()),
+        Some(data.providers.rows.len())
+    );
+}
+
+#[test]
+fn app_data_result_after_cache_invalidation_is_ignored() {
+    let mut app = App::new(Some(AppType::Codex));
+    let mut data = UiData::default();
+    data.providers.current_id = "current-after-reload".to_string();
+    let mut cache = UiDataByAppCache::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(4));
+
+    cache.handle_data_reloaded(&app, &data, CacheInvalidation::DataReloaded);
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "stale-worker-result".to_string();
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Snapshot,
+            request_id: 4,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(data.providers.current_id, "current-after-reload");
+    assert!(cache.pending_by_app.is_empty());
+    assert_eq!(cache.data_generation, 1);
+}
+
+#[test]
+fn no_op_reload_candidate_preserves_pending_app_data_load() {
+    let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut webdav_loading = RequestTracker::default();
+    let mut update_check = RequestTracker::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(7));
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        None,
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        None,
+        Action::EditorSubmit {
+            submit: EditorSubmit::ProviderAdd,
+            content: "{".to_string(),
+        },
+    )
+    .expect("invalid submit should be handled as a no-op");
+
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Codex).copied(),
+        Some(pending_snapshot_app_data(7))
+    );
+    assert_eq!(cache.data_generation, 0);
+}
+
+#[test]
+fn switch_to_sessions_queues_scan_without_waiting_for_next_tick() {
+    let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+    let mut app = App::new(Some(AppType::Codex));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut webdav_loading = RequestTracker::default();
+    let mut update_check = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        Some(&tx),
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        None,
+        Action::SwitchRoute(route::Route::Sessions),
+    )
+    .expect("switching to sessions should queue a scan");
+
+    assert!(matches!(app.route, route::Route::Sessions));
+    assert!(app.sessions.loading);
+    assert_eq!(app.sessions.provider_id.as_deref(), Some("codex"));
+    let request_id = app.sessions.scan_active.expect("scan should be active");
+    match rx.try_recv().expect("scan request should be queued") {
+        SessionReq::Refresh {
+            request_id: queued_request_id,
+            provider_id,
+        } => {
+            assert_eq!(queued_request_id, request_id);
+            assert_eq!(provider_id, "codex");
+        }
+        other => panic!("unexpected sessions request: {other:?}"),
+    }
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        Some(&tx),
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        None,
+        Action::SwitchRoute(route::Route::Sessions),
+    )
+    .expect("switching to an already-loading sessions route should not queue another scan");
+
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn switching_app_on_sessions_route_queues_scan_for_next_app() {
+    let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Sessions;
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Codex, UiData::default());
+    let mut proxy_loading = RequestTracker::default();
+    let mut webdav_loading = RequestTracker::default();
+    let mut update_check = RequestTracker::default();
+    let (session_tx, session_rx) = mpsc::channel();
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        Some(&session_tx),
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        None,
+        Action::SetAppType(AppType::Codex),
+    )
+    .expect("switching app on sessions route should queue a scan");
+
+    assert_eq!(app.app_type, AppType::Codex);
+    assert!(matches!(app.route, route::Route::Sessions));
+    assert!(app.sessions.loading);
+    assert_eq!(app.sessions.provider_id.as_deref(), Some("codex"));
+    let request_id = app.sessions.scan_active.expect("scan should be active");
+    match session_rx
+        .try_recv()
+        .expect("scan request should be queued")
+    {
+        SessionReq::Refresh {
+            request_id: queued_request_id,
+            provider_id,
+        } => {
+            assert_eq!(queued_request_id, request_id);
+            assert_eq!(provider_id, "codex");
+        }
+        other => panic!("unexpected sessions request: {other:?}"),
+    }
+}
+
+#[test]
+fn initial_app_data_result_restores_startup_overlay_and_caches_loaded_data() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    cache.pending_by_app.insert(
+        AppType::Claude,
+        PendingAppDataLoad {
+            kind: AppDataLoadKind::Initial,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+    cache.incomplete_by_app.insert(AppType::Claude);
+    app.overlay = startup_loading_overlay();
+    let mut startup_overlay = Some(Overlay::Confirm(ConfirmOverlay {
+        title: "Visible apps".to_string(),
+        message: "Review detected apps".to_string(),
+        action: ConfirmAction::VisibleAppsAutoDetection,
+    }));
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "loaded-current".to_string();
+    loaded.proxy.running = true;
+    loaded.proxy.estimated_input_tokens_total = 10;
+    loaded.proxy.estimated_output_tokens_total = 20;
+
+    let handled = handle_initial_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut startup_overlay,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Initial,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            result: Ok(loaded),
+        },
+    )
+    .expect("initial app data result should be handled");
+
+    assert!(handled);
+    assert_eq!(data.providers.current_id, "loaded-current");
+    assert_eq!(
+        cache
+            .by_app
+            .get(&AppType::Claude)
+            .map(|cached| cached.providers.current_id.as_str()),
+        Some("loaded-current")
+    );
+    assert!(cache.pending_by_app.is_empty());
+    assert!(!cache.incomplete_by_app.contains(&AppType::Claude));
+    assert!(startup_overlay.is_none());
+    assert!(matches!(
+        app.overlay,
+        Overlay::Confirm(ConfirmOverlay {
+            action: ConfirmAction::VisibleAppsAutoDetection,
+            ..
+        })
+    ));
+    assert_eq!(app.proxy_visual_state, Some(true));
+    assert!(app.proxy_visual_transition.is_none());
+    assert_eq!(app.proxy_activity_last_input_tokens, Some(10));
+    assert_eq!(app.proxy_activity_last_output_tokens, Some(20));
+}
+
+#[test]
+fn initial_app_data_error_returns_before_empty_shell_is_marked_loaded() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "empty-shell".to_string();
+    let mut cache = UiDataByAppCache::default();
+    cache.pending_by_app.insert(
+        AppType::Claude,
+        PendingAppDataLoad {
+            kind: AppDataLoadKind::Initial,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+    cache.incomplete_by_app.insert(AppType::Claude);
+    let mut startup_overlay = None;
+
+    let err = handle_initial_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut startup_overlay,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Initial,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            result: Err("boom".to_string()),
+        },
+    )
+    .expect_err("initial load failure should be returned");
+
+    assert_eq!(err.to_string(), "boom");
+    assert_eq!(data.providers.current_id, "empty-shell");
+    assert!(cache.by_app.is_empty());
+    assert!(cache.incomplete_by_app.contains(&AppType::Claude));
+}
+
+#[test]
+fn initial_app_data_drain_prioritizes_error_before_quit_input() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    cache.pending_by_app.insert(
+        AppType::Claude,
+        PendingAppDataLoad {
+            kind: AppDataLoadKind::Initial,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+    cache.incomplete_by_app.insert(AppType::Claude);
+    let mut startup_overlay = None;
+    let (_tx, rx) = mpsc::channel();
+    _tx.send(AppDataMsg::Loaded {
+        kind: AppDataLoadKind::Initial,
+        request_id: 1,
+        generation: 0,
+        app_state_epoch: 0,
+        app_type: AppType::Claude,
+        result: Err("boom".to_string()),
+    })
+    .expect("queue initial load error");
+
+    let quit_key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    assert!(is_initial_loading_quit_key(&quit_key));
+    let err = drain_initial_app_data_messages(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut startup_overlay,
+        None,
+        &rx,
+    )
+    .expect_err("initial load error should win over quit input");
+
+    assert_eq!(err.to_string(), "boom");
+    assert!(cache.by_app.is_empty());
+    assert!(cache.incomplete_by_app.contains(&AppType::Claude));
+}
+
+#[test]
+fn initial_loading_input_polling_stops_after_success_or_failure() {
+    assert!(should_poll_initial_loading_input(true, false));
+    assert!(!should_poll_initial_loading_input(false, false));
+    assert!(!should_poll_initial_loading_input(true, true));
+    assert!(!should_poll_initial_loading_input(false, true));
+}
+
+#[test]
+fn initial_loading_quit_waits_for_success_and_never_hides_error() {
+    assert!(!should_exit_after_initial_loading(true, false, true));
+    assert!(!should_exit_after_initial_loading(false, true, true));
+    assert!(!should_exit_after_initial_loading(false, false, false));
+    assert!(should_exit_after_initial_loading(false, false, true));
+}
+
+#[test]
+fn initial_loading_only_accepts_quit_keys() {
+    assert!(is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Char('q'),
+        KeyModifiers::NONE,
+    )));
+    assert!(is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Char('Q'),
+        KeyModifiers::NONE,
+    )));
+    assert!(is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    )));
+    assert!(is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(!is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Char('1'),
+        KeyModifiers::NONE,
+    )));
+    assert!(!is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(!is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::NONE,
+    )));
+}
+
+#[test]
+fn initial_loading_event_quit_detection_only_uses_pressed_quit_keys() {
+    let pressed_quit = event::Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(initial_loading_event_requests_quit(&pressed_quit));
+
+    let mut released_quit = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    released_quit.kind = KeyEventKind::Release;
+    assert!(!initial_loading_event_requests_quit(&event::Event::Key(
+        released_quit
+    )));
+
+    assert!(!initial_loading_event_requests_quit(&event::Event::Mouse(
+        event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        },
+    )));
+}
+
+#[test]
+fn initial_loading_quit_recording_ignores_non_quit_events() {
+    let mut quit_requested = false;
+
+    record_initial_loading_quit_event(
+        &mut quit_requested,
+        &event::Event::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+    );
+    assert!(!quit_requested);
+
+    record_initial_loading_quit_event(
+        &mut quit_requested,
+        &event::Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+    );
+    assert!(quit_requested);
+}
+
+#[test]
+fn usage_pricing_results_are_tracked_per_app() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    cache.queue_usage_pricing_load(
+        &mut app,
+        Some(&tx),
+        &AppType::Claude,
+        data::UsageRangePreset::SevenDays,
+    );
+    cache.queue_usage_pricing_load(
+        &mut app,
+        Some(&tx),
+        &AppType::Codex,
+        data::UsageRangePreset::SevenDays,
+    );
+
+    let requests = [rx.recv().unwrap(), rx.recv().unwrap()];
+    assert!(requests.iter().any(|req| matches!(
+        req,
+        UsagePricingReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            ..
+        }
+    )));
+    assert!(requests.iter().any(|req| matches!(
+        req,
+        UsagePricingReq::Load {
+            request_id: 2,
+            app_type: AppType::Codex,
+            ..
+        }
+    )));
+
+    let mut claude_usage = data::UsageSnapshot::default();
+    claude_usage.summary_7d.total_cost_usd = 1.0;
+    let mut codex_usage = data::UsageSnapshot::default();
+    codex_usage.summary_7d.total_cost_usd = 2.0;
+
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            range: data::UsageRangePreset::SevenDays,
+            result: Ok(data::UsagePricingData {
+                usage: codex_usage,
+                pricing: Some(data::ModelPricingSnapshot::default()),
+            }),
+        },
+    );
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            result: Ok(data::UsagePricingData {
+                usage: claude_usage,
+                pricing: Some(data::ModelPricingSnapshot::default()),
+            }),
+        },
+    );
+
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 1.0);
+    assert_eq!(
+        cache
+            .usage_pricing_by_key
+            .get(&(AppType::Codex, data::UsageRangePreset::SevenDays))
+            .map(|usage_pricing| usage_pricing.usage.summary_7d.total_cost_usd),
+        Some(2.0)
+    );
+}
+
+#[test]
+fn usage_pricing_load_updates_non_blocking_loading_state() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    cache.queue_usage_pricing_load(
+        &mut app,
+        Some(&tx),
+        &AppType::Claude,
+        data::UsageRangePreset::SevenDays,
+    );
+
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::Today));
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::SevenDays));
+    assert!(!app
+        .usage
+        .is_loading_for(&AppType::Codex, data::UsageRangePreset::SevenDays));
+    assert!(matches!(
+        rx.recv().expect("usage/pricing request should be queued"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            ..
+        }
+    ));
+
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            result: Ok(data::UsagePricingData::default()),
+        },
+    );
+
+    assert!(!app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::SevenDays));
+}
+
+#[test]
+fn usage_custom_range_action_queues_range_specific_load() {
+    let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut webdav_loading = RequestTracker::default();
+    let mut update_check = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+    let range =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid custom range");
+    data.usage.recent_logs.push(data::UsageLogRow {
+        request_id: "stale-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    data.usage.logs_total = 1;
+    data.usage.recent_logs_custom.push(data::UsageLogRow {
+        request_id: "stale-custom-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    data.usage.logs_total_custom = 1;
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        None,
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        Some(&tx),
+        Action::UsageCustomRange { range },
+    )
+    .expect("custom range action should be handled");
+
+    assert!(matches!(
+        app.usage.range,
+        data::UsageRangePreset::Custom(active) if active == range
+    ));
+    assert_eq!(data.usage.custom_range, Some(range));
+    assert!(!data.usage.trends_custom.is_empty());
+    assert_eq!(data.usage.recent_logs.len(), 1);
+    assert_eq!(data.usage.logs_total, 1);
+    assert!(data
+        .usage
+        .recent_logs_for(data::UsageRangePreset::Custom(range))
+        .is_empty());
+    assert_eq!(
+        data.usage
+            .logs_total_for(data::UsageRangePreset::Custom(range)),
+        0
+    );
+    assert_eq!(
+        cache
+            .pending_usage_pricing_by_key
+            .get(&(AppType::Claude, data::UsageRangePreset::Custom(range)))
+            .copied(),
+        Some(PendingDataLoad {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        })
+    );
+    assert!(matches!(
+        rx.recv().expect("custom usage/pricing request should be queued"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::Custom(queued_range),
+        } if queued_range == range
+    ));
+}
+
+#[test]
+fn usage_custom_range_app_switch_does_not_show_stale_custom_cache() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let active_range =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid active range");
+    let stale_range =
+        data::parse_usage_custom_range("2026-05-01..2026-05-05").expect("valid stale range");
+
+    app.usage.range = data::UsageRangePreset::Custom(active_range);
+    data.usage.begin_custom_range(active_range);
+
+    let mut stale_usage = data::UsageSnapshot::default();
+    stale_usage.custom_range = Some(stale_range);
+    stale_usage.summary_custom.total_requests = 99;
+    stale_usage.summary_custom.total_cost_usd = 12.34;
+    cache.usage_pricing_by_key.insert(
+        (AppType::Codex, data::UsageRangePreset::Custom(stale_range)),
+        data::UsagePricingData {
+            usage: stale_usage,
+            pricing: None,
+        },
+    );
+    cache.by_app.insert(AppType::Codex, UiData::default());
+
+    cache
+        .switch_to(&mut app, &mut data, None, AppType::Codex)
+        .expect("switch should work");
+
+    assert_eq!(app.app_type, AppType::Codex);
+    assert_eq!(data.usage.custom_range, Some(active_range));
+    assert_eq!(data.usage.summary_custom.total_requests, 0);
+    assert_eq!(data.usage.summary_custom.total_cost_usd, 0.0);
+}
+
+#[test]
+fn usage_fixed_result_does_not_replace_active_custom_logs() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let active_range =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid active range");
+    app.usage.range = data::UsageRangePreset::Custom(active_range);
+    data.usage.begin_custom_range(active_range);
+    data.usage.recent_logs_custom.push(data::UsageLogRow {
+        request_id: "custom-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    data.usage.logs_total_custom = 1;
+    cache.pending_usage_pricing_by_key.insert(
+        (AppType::Claude, data::UsageRangePreset::SevenDays),
+        PendingDataLoad {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+
+    let mut fixed_usage = data::UsageSnapshot::default();
+    fixed_usage.summary_7d.total_requests = 10;
+    fixed_usage.recent_logs.push(data::UsageLogRow {
+        request_id: "fixed-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    fixed_usage.logs_total = 10;
+
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            result: Ok(data::UsagePricingData {
+                usage: fixed_usage,
+                pricing: Some(data::ModelPricingSnapshot::default()),
+            }),
+        },
+    );
+
+    assert_eq!(data.usage.summary_7d.total_requests, 10);
+    assert_eq!(
+        data.usage
+            .logs_total_for(data::UsageRangePreset::Custom(active_range)),
+        1
+    );
+    assert_eq!(
+        data.usage
+            .recent_logs_for(data::UsageRangePreset::Custom(active_range))[0]
+            .request_id,
+        "custom-log"
+    );
+    assert_eq!(
+        data.usage.logs_total_for(data::UsageRangePreset::SevenDays),
+        10
+    );
+    assert_eq!(
+        data.usage
+            .recent_logs_for(data::UsageRangePreset::SevenDays)[0]
+            .request_id,
+        "fixed-log"
+    );
+}
+
+#[test]
+#[serial]
+fn usage_custom_range_reload_requeues_active_custom_range() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut webdav_loading = RequestTracker::default();
+    let mut update_check = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+    let range =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid custom range");
+
+    app.usage.range = data::UsageRangePreset::Custom(range);
+    data.usage.custom_range = Some(range);
+    data.usage.summary_custom.total_requests = 42;
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        None,
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        Some(&tx),
+        Action::ReloadData,
+    )
+    .expect("reload data should be handled");
+
+    assert_eq!(data.usage.custom_range, Some(range));
+    assert_eq!(data.usage.summary_custom.total_requests, 0);
+    assert!(matches!(
+        rx.recv().expect("custom usage/pricing reload should be queued"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::Custom(queued_range),
+            ..
+        } if queued_range == range
+    ));
 }
 
 #[test]
