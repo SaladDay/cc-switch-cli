@@ -1255,14 +1255,44 @@ fn settings_proxy_route_hides_edit_key_when_proxy_is_running() {
 
     let mut data = minimal_data(&app.app_type);
     data.proxy.running = true;
+    data.proxy.active_worker_apps =
+        std::collections::HashSet::from([AppType::Claude.as_str().to_string()]);
     data.proxy.configured_listen_address = "127.0.0.1".to_string();
     data.proxy.configured_listen_port = 15722;
 
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    assert!(!all.contains("Enter Edit"));
-    assert!(all.contains("Stop the local proxy before editing listen address or port"));
+    assert!(!all.contains("Enter edit"));
+    assert!(all.contains("Listen address: stop the proxy to edit"));
+    assert!(all.contains("Listen port: stop this app's route to edit"));
+}
+
+#[test]
+fn settings_proxy_shows_edit_key_when_running_but_app_not_routed() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SettingsProxy;
+    app.focus = Focus::Content;
+    app.settings_proxy_idx = app::LocalProxySettingsItem::ALL
+        .iter()
+        .position(|item| matches!(item, app::LocalProxySettingsItem::ListenPort))
+        .expect("ListenPort missing");
+
+    let mut data = minimal_data(&app.app_type);
+    data.proxy.running = true;
+    data.proxy.claude_takeover = false;
+    data.proxy.configured_listen_address = "127.0.0.1".to_string();
+    data.proxy.configured_listen_port = 15722;
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains("Enter edit"));
+    assert!(all.contains("Listen port can be edited"));
+    assert!(!all.contains("Listen port: stop this app's route to edit"));
 }
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());

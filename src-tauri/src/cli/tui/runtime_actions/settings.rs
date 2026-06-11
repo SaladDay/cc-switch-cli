@@ -72,7 +72,7 @@ pub(super) fn set_proxy_listen_port(
     if app_running {
         *ctx.data = UiData::load(&ctx.app.app_type)?;
         ctx.app.push_toast(
-            texts::tui_toast_proxy_settings_stop_before_edit(),
+            texts::tui_toast_proxy_settings_stop_app_route_before_edit_port(),
             super::super::app::ToastKind::Info,
         );
         return Ok(());
@@ -527,7 +527,7 @@ fn update_proxy_config(
     if status.running {
         *ctx.data = UiData::load(&ctx.app.app_type)?;
         ctx.app.push_toast(
-            texts::tui_toast_proxy_settings_stop_before_edit(),
+            texts::tui_toast_proxy_settings_stop_proxy_before_edit_address(),
             super::super::app::ToastKind::Info,
         );
         return Ok(());

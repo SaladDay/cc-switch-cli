@@ -299,6 +299,11 @@ pub struct ProxySnapshot {
 }
 
 impl ProxySnapshot {
+    pub fn has_active_worker_for(&self, app_type: &AppType) -> bool {
+        self.active_worker_apps
+            .contains(&app_type.as_str().to_ascii_lowercase())
+    }
+
     pub fn takeover_enabled_for(&self, app_type: &AppType) -> Option<bool> {
         match app_type {
             AppType::Claude => Some(self.claude_takeover),
@@ -317,10 +322,7 @@ impl ProxySnapshot {
         }
 
         if self.managed_runtime && !self.active_worker_apps.is_empty() {
-            return Some(
-                self.active_worker_apps
-                    .contains(&app_type.as_str().to_ascii_lowercase()),
-            );
+            return Some(self.has_active_worker_for(app_type));
         }
 
         Some(true)
