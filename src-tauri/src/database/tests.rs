@@ -2017,13 +2017,239 @@ fn schema_migration_v10_adds_model_routes_table() {
         "model_routes table should exist after v10 -> v11 migration"
     );
     assert!(
-        Database::has_column(&conn, "model_routes", "pattern")
-            .expect("check pattern column"),
+        Database::has_column(&conn, "model_routes", "pattern").expect("check pattern column"),
         "model_routes.pattern column should exist"
     );
     assert!(
-        Database::has_column(&conn, "model_routes", "priority")
-            .expect("check priority column"),
+        Database::has_column(&conn, "model_routes", "priority").expect("check priority column"),
         "model_routes.priority column should exist"
+    );
+}
+
+#[test]
+fn model_route_dao_crud_roundtrip() {
+    let db = Database::memory().expect("create memory db");
+
+    // Seed a provider for FK validation
+    let conn = db.conn.lock().expect("lock conn");
+    conn.execute(
+        "INSERT INTO providers (id, app_type, name, settings_config, meta)
+         VALUES ('test-prov', 'claude', 'Test Provider', '{}', '{}')",
+        [],
+    )
+    .expect("seed provider");
+    drop(conn);
+
+    // Create
+    let created = db
+        .create_model_route(&ModelRoute {
+            id: None,
+            app_type: "claude".into(),
+            pattern: "*-sonnet".into(),
+            provider_id: "test-prov".into(),
+            priority: 10,
+            enabled: true,
+            created_at: None,
+            updated_at: None,
+        })
+        .expect("create model route");
+
+    assert_eq!(created.id, Some(1));
+    assert_eq!(created.pattern, "*-sonnet");
+    assert_eq!(created.provider_id, "test-prov");
+    assert_eq!(created.priority, 10);
+    assert!(created.enabled);
+    assert!(created.created_at.is_some());
+
+    // Get by id
+    let got = db.get_model_route(1).expect("get model route");
+    assert!(got.is_some());
+    assert_eq!(got.unwrap().pattern, "*-sonnet");
+
+    // Create second route
+    db.create_model_route(&ModelRoute {
+        id: None,
+        app_type: "claude".into(),
+        pattern: "gpt-*".into(),
+        provider_id: "test-prov".into(),
+        priority: 20,
+        enabled: true,
+        created_at: None,
+        updated_at: None,
+    })
+    .expect("create second route");
+
+    // FK constraint: reject non-existent provider
+    let result = db.create_model_route(&ModelRoute {
+        id: None,
+        app_type: "claude".into(),
+        pattern: "bad-*".into(),
+        provider_id: "nonexistent".into(),
+        priority: 1,
+        enabled: true,
+        created_at: None,
+        updated_at: None,
+    });
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not found"),
+        "expected 'not found' error, got: {err_msg}"
+    );
+
+    // Update
+    let updated = db
+        .update_model_route(
+            1,
+            &ModelRoute {
+                id: None,
+                app_type: "claude".into(),
+                pattern: "claude-*".into(),
+                provider_id: "test-prov".into(),
+                priority: 5,
+                enabled: false,
+                created_at: None,
+                updated_at: None,
+            },
+        )
+        .expect("update model route");
+
+    assert_eq!(updated.pattern, "claude-*");
+    assert_eq!(updated.priority, 5);
+    assert!(!updated.enabled);
+
+    // Toggle
+    let toggled_off = db.toggle_model_route(1).expect("toggle off");
+    assert!(toggled_off.enabled, "toggle off should re-enable");
+
+    let toggled_on = db.toggle_model_route(1).expect("toggle on");
+    assert!(!toggled_on.enabled, "toggle on should disable");
+
+    // Delete
+    db.delete_model_route(1).expect("delete model route");
+    let gone = db.get_model_route(1).expect("get deleted route");
+    assert!(gone.is_none());
+
+    // Clean up the second route (created before the ordering test)
+    db.delete_model_route(2).expect("delete second route");
+
+    // List ordering: create 3 routes with priorities 5, 1, 3
+    db.create_model_route(&ModelRoute {
+        id: None,
+        app_type: "claude".into(),
+        pattern: "mid".into(),
+        provider_id: "test-prov".into(),
+        priority: 5,
+        enabled: true,
+        created_at: None,
+        updated_at: None,
+    })
+    .expect("create priority 5");
+    db.create_model_route(&ModelRoute {
+        id: None,
+        app_type: "claude".into(),
+        pattern: "low".into(),
+        provider_id: "test-prov".into(),
+        priority: 1,
+        enabled: true,
+        created_at: None,
+        updated_at: None,
+    })
+    .expect("create priority 1");
+    db.create_model_route(&ModelRoute {
+        id: None,
+        app_type: "claude".into(),
+        pattern: "high".into(),
+        provider_id: "test-prov".into(),
+        priority: 3,
+        enabled: true,
+        created_at: None,
+        updated_at: None,
+    })
+    .expect("create priority 3");
+
+    let routes = db.list_model_routes("claude").expect("list routes");
+    assert_eq!(routes.len(), 3);
+    assert_eq!(routes[0].priority, 1);
+    assert_eq!(routes[1].priority, 3);
+    assert_eq!(routes[2].priority, 5);
+
+    // List filtering: create a codex route
+    let conn2 = db.conn.lock().expect("lock conn");
+    conn2
+        .execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta)
+             VALUES ('codex-prov', 'codex', 'Codex Provider', '{}', '{}')",
+            [],
+        )
+        .expect("seed codex provider");
+    drop(conn2);
+
+    db.create_model_route(&ModelRoute {
+        id: None,
+        app_type: "codex".into(),
+        pattern: "*-codex".into(),
+        provider_id: "codex-prov".into(),
+        priority: 1,
+        enabled: true,
+        created_at: None,
+        updated_at: None,
+    })
+    .expect("create codex route");
+
+    let claude_routes = db.list_model_routes("claude").expect("list claude routes");
+    assert_eq!(claude_routes.len(), 3, "only claude routes listed");
+
+    let codex_routes = db.list_model_routes("codex").expect("list codex routes");
+    assert_eq!(codex_routes.len(), 1);
+    assert_eq!(codex_routes[0].pattern, "*-codex");
+}
+
+#[test]
+fn model_route_cascade_delete_on_provider_removal() {
+    let db = Database::memory().expect("create memory db");
+
+    // Seed provider
+    let conn = db.conn.lock().expect("lock conn");
+    conn.execute(
+        "INSERT INTO providers (id, app_type, name, settings_config, meta)
+         VALUES ('cascade-prov', 'claude', 'Cascade Provider', '{}', '{}')",
+        [],
+    )
+    .expect("seed provider");
+    drop(conn);
+
+    // Create a model_route pointing to this provider
+    db.create_model_route(&ModelRoute {
+        id: None,
+        app_type: "claude".into(),
+        pattern: "*-test".into(),
+        provider_id: "cascade-prov".into(),
+        priority: 1,
+        enabled: true,
+        created_at: None,
+        updated_at: None,
+    })
+    .expect("create model route");
+
+    assert_eq!(
+        db.list_model_routes("claude").expect("list routes").len(),
+        1
+    );
+
+    // Delete the provider — should cascade delete the model_route
+    let conn2 = db.conn.lock().expect("lock conn");
+    conn2
+        .execute(
+            "DELETE FROM providers WHERE id = 'cascade-prov' AND app_type = 'claude'",
+            [],
+        )
+        .expect("delete provider");
+    drop(conn2);
+
+    let routes = db.list_model_routes("claude").expect("list after cascade");
+    assert!(
+        routes.is_empty(),
+        "model_routes should be empty after provider cascade delete"
     );
 }
