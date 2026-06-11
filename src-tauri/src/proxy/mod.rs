@@ -5,6 +5,7 @@ pub mod copilot_optimizer;
 pub mod error;
 pub mod forwarder;
 pub mod gemini_url;
+pub mod model_router;
 pub mod handler_context;
 pub mod handlers;
 pub mod http_client;
