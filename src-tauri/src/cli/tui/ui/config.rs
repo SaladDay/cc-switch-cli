@@ -3163,7 +3163,12 @@ pub(super) fn render_settings_proxy(
     if app.focus == Focus::Content {
         let key_label = match LocalProxySettingsItem::ALL.get(app.settings_proxy_idx) {
             Some(LocalProxySettingsItem::AutoFailover) => texts::tui_key_toggle(),
-            _ if data.proxy.running => "",
+            Some(LocalProxySettingsItem::ListenAddress) if data.proxy.running => "",
+            Some(LocalProxySettingsItem::ListenPort)
+                if data.proxy.has_active_worker_for(&app.app_type) =>
+            {
+                ""
+            }
             _ => texts::tui_key_edit(),
         };
         if !key_label.is_empty() {
@@ -3184,14 +3189,16 @@ pub(super) fn render_settings_proxy(
     state.select(Some(app.settings_proxy_idx));
     frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
 
+    let hint = if !data.proxy.running {
+        texts::tui_settings_proxy_restart_hint()
+    } else {
+        let current_app_has_active_worker = data.proxy.has_active_worker_for(&app.app_type);
+        texts::tui_settings_proxy_stop_before_edit_hint(current_app_has_active_worker)
+    };
     frame.render_widget(
-        Paragraph::new(if data.proxy.running {
-            texts::tui_settings_proxy_stop_before_edit_hint()
-        } else {
-            texts::tui_settings_proxy_restart_hint()
-        })
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(theme.dim)),
+        Paragraph::new(hint)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.dim)),
         chunks[2],
     );
 }

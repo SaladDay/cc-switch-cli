@@ -9868,6 +9868,7 @@ mod tests {
 
         let mut data = UiData::default();
         data.proxy.running = true;
+        data.proxy.claude_takeover = true;
         data.proxy.configured_listen_address = "127.0.0.1".to_string();
         data.proxy.configured_listen_port = 15721;
 
@@ -9880,7 +9881,106 @@ mod tests {
                 message,
                 kind: ToastKind::Info,
                 ..
-            }) if message == "The local proxy is running. Stop it before editing listen address or port."
+            }) if message == "The local proxy is running. Stop it before editing listen address."
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_port_editable_when_proxy_running_but_app_not_routed() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.settings_proxy_idx = LocalProxySettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, LocalProxySettingsItem::ListenPort))
+            .expect("ListenPort missing");
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.claude_takeover = false;
+        data.proxy.configured_listen_port = 15721;
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsProxyListenPort,
+                ..
+            })
+        ));
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Listen Port".to_string(),
+            prompt: "port".to_string(),
+            input: TextInput::new("15721".to_string()),
+            submit: TextSubmit::SettingsProxyListenPort,
+            secret: false,
+        });
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(
+            action,
+            Action::SetProxyListenPort { port } if port == 15721
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_port_blocked_when_active_worker_exists() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.settings_proxy_idx = LocalProxySettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, LocalProxySettingsItem::ListenPort))
+            .expect("ListenPort missing");
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.active_worker_apps =
+            std::collections::HashSet::from([AppType::Claude.as_str().to_string()]);
+        data.proxy.configured_listen_port = 15721;
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                message,
+                kind: ToastKind::Info,
+                ..
+            }) if message == "This app is using the proxy. Stop this app's proxy route before editing listen port."
+        ));
+    }
+
+    #[test]
+    fn settings_proxy_port_submit_blocked_when_active_worker_starts_before_confirm() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SettingsProxy;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Listen Port".to_string(),
+            prompt: "port".to_string(),
+            input: TextInput::new("15721".to_string()),
+            submit: TextSubmit::SettingsProxyListenPort,
+            secret: false,
+        });
+
+        let mut data = UiData::default();
+        data.proxy.running = true;
+        data.proxy.active_worker_apps =
+            std::collections::HashSet::from([AppType::Claude.as_str().to_string()]);
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                message,
+                kind: ToastKind::Info,
+                ..
+            }) if message == "This app is using the proxy. Stop this app's proxy route before editing listen port."
         ));
     }
 
@@ -9975,6 +10075,7 @@ mod tests {
 
         let mut data = UiData::default();
         data.proxy.running = true;
+        data.proxy.claude_takeover = true;
 
         let action = app.on_key(key(KeyCode::Enter), &data);
         assert!(matches!(action, Action::None));
@@ -9985,7 +10086,7 @@ mod tests {
                 message,
                 kind: ToastKind::Info,
                 ..
-            }) if message == "The local proxy is running. Stop it before editing listen address or port."
+            }) if message == "The local proxy is running. Stop it before editing listen address."
         ));
     }
 

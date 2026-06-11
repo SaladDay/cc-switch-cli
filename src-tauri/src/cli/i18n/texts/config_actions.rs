@@ -7,11 +7,19 @@ pub fn tui_settings_proxy_restart_hint() -> &'static str {
     }
 }
 
-pub fn tui_settings_proxy_stop_before_edit_hint() -> &'static str {
+pub fn tui_settings_proxy_stop_before_edit_hint(current_app_has_active_worker: bool) -> &'static str {
     if is_chinese() {
-        "请先停止本地代理，再修改监听地址或端口"
+        if current_app_has_active_worker {
+            "修改监听地址：需先停止本地代理。修改监听端口：需先停止当前应用的代理路由。改完后重新启动路由生效。"
+        } else {
+            "修改监听地址：需先停止本地代理。监听端口可以修改。改完后重新启动路由生效。"
+        }
     } else {
-        "Stop the local proxy before editing listen address or port"
+        if current_app_has_active_worker {
+            "Listen address: stop the proxy to edit. Listen port: stop this app's route to edit. Restart routing after changes."
+        } else {
+            "Listen address: stop the proxy to edit. Listen port can be edited. Restart routing after changes."
+        }
     }
 }
 
@@ -47,11 +55,19 @@ pub fn tui_toast_proxy_settings_restart_required() -> &'static str {
     }
 }
 
-pub fn tui_toast_proxy_settings_stop_before_edit() -> &'static str {
+pub fn tui_toast_proxy_settings_stop_proxy_before_edit_address() -> &'static str {
     if is_chinese() {
-        "本地代理正在运行。请先停止代理，再修改监听地址或端口。"
+        "本地代理正在运行。请先停止代理，再修改监听地址。"
     } else {
-        "The local proxy is running. Stop it before editing listen address or port."
+        "The local proxy is running. Stop it before editing listen address."
+    }
+}
+
+pub fn tui_toast_proxy_settings_stop_app_route_before_edit_port() -> &'static str {
+    if is_chinese() {
+        "当前应用正在使用代理。请先停止当前应用的代理路由，再修改监听端口。"
+    } else {
+        "This app is using the proxy. Stop this app's proxy route before editing listen port."
     }
 }
 

@@ -876,7 +876,7 @@ impl App {
                 Some(LocalProxySettingsItem::ListenAddress) => {
                     if data.proxy.running {
                         self.push_toast(
-                            texts::tui_toast_proxy_settings_stop_before_edit(),
+                            texts::tui_toast_proxy_settings_stop_proxy_before_edit_address(),
                             ToastKind::Info,
                         );
                         return Action::None;
@@ -891,9 +891,9 @@ impl App {
                     Action::None
                 }
                 Some(LocalProxySettingsItem::ListenPort) => {
-                    if data.proxy.running {
+                    if data.proxy.has_active_worker_for(&self.app_type) {
                         self.push_toast(
-                            texts::tui_toast_proxy_settings_stop_before_edit(),
+                            texts::tui_toast_proxy_settings_stop_app_route_before_edit_port(),
                             ToastKind::Info,
                         );
                         return Action::None;
@@ -1110,6 +1110,10 @@ impl App {
                 ),
             ]);
         } else {
+            let current_app_has_active_worker = data.proxy.has_active_worker_for(&self.app_type);
+            let port_edit_hint =
+                texts::tui_settings_proxy_stop_before_edit_hint(current_app_has_active_worker)
+                    .to_string();
             lines.extend([
                 format!(
                     "{}: {}:{}",
@@ -1117,11 +1121,7 @@ impl App {
                     data.proxy.configured_listen_address,
                     data.proxy.configured_listen_port
                 ),
-                crate::t!(
-                    "Stop the local proxy before editing listen address or port. Restart routing after those settings change.",
-                    "修改监听地址或端口前需要先停止本地代理；改完后重新启动路由才会生效。"
-                )
-                .to_string(),
+                port_edit_hint,
             ]);
         }
 
