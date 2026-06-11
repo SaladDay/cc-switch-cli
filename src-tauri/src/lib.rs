@@ -18,6 +18,7 @@ mod import_export;
 #[allow(dead_code)]
 mod init_status;
 mod mcp;
+mod model_route;
 mod openclaw_config;
 mod opencode_config;
 mod prompt;
@@ -49,6 +50,7 @@ pub use config::{
     get_app_config_dir, get_claude_mcp_path, get_claude_settings_path, read_json_file,
 };
 pub use database::{Database, FailoverQueueItem};
+pub use model_route::ModelRoute;
 pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkImportRequest};
 pub use error::AppError;
 pub use import_export::export_config_to_file;
