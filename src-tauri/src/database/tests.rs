@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::app_config::MultiAppConfig;
+use crate::model_route::ModelRoute;
 use crate::prompt::Prompt;
 use crate::provider::{Provider, ProviderManager};
 use indexmap::IndexMap;
@@ -2287,4 +2288,206 @@ fn model_pricing_upsert_rejects_invalid_values() {
 
     assert!(ModelPricingUpdate::new("bad-negative", "Bad Negative", "-1", "1", "0", "0").is_err());
     assert!(ModelPricingUpdate::new("", "Blank Model", "1", "1", "0", "0").is_err());
+}
+
+#[test]
+fn schema_migration_v10_adds_model_routes_table() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE providers (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            settings_config TEXT NOT NULL,
+            website_url TEXT,
+            category TEXT,
+            created_at INTEGER,
+            sort_index INTEGER,
+            notes TEXT,
+            icon TEXT,
+            icon_color TEXT,
+            meta TEXT NOT NULL DEFAULT '{}',
+            is_current BOOLEAN NOT NULL DEFAULT 0,
+            in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE mcp_servers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            server_config TEXT NOT NULL,
+            description TEXT,
+            homepage TEXT,
+            docs TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+            enabled_codex BOOLEAN NOT NULL DEFAULT 0,
+            enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
+            enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            enabled_hermes BOOLEAN NOT NULL DEFAULT 0
+        );
+        CREATE TABLE skills (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            directory TEXT NOT NULL,
+            repo_owner TEXT,
+            repo_name TEXT,
+            repo_branch TEXT DEFAULT 'main',
+            readme_url TEXT,
+            enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+            enabled_codex BOOLEAN NOT NULL DEFAULT 0,
+            enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
+            enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            enabled_hermes BOOLEAN NOT NULL DEFAULT 0,
+            installed_at INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE prompts (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            content TEXT NOT NULL,
+            description TEXT,
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            created_at INTEGER,
+            updated_at INTEGER,
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE skill_repos (
+            owner TEXT NOT NULL,
+            name TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            PRIMARY KEY (owner, name)
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE proxy_config (
+            app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini')),
+            proxy_enabled INTEGER NOT NULL DEFAULT 0,
+            listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
+            listen_port INTEGER NOT NULL DEFAULT 15721,
+            enable_logging INTEGER NOT NULL DEFAULT 1,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
+            streaming_idle_timeout INTEGER NOT NULL DEFAULT 120,
+            non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
+            circuit_failure_threshold INTEGER NOT NULL DEFAULT 4,
+            circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
+            circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60,
+            circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
+            circuit_min_requests INTEGER NOT NULL DEFAULT 10,
+            default_cost_multiplier TEXT NOT NULL DEFAULT '1',
+            pricing_model_source TEXT NOT NULL DEFAULT 'response',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_model TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            input_cost_usd TEXT NOT NULL DEFAULT '0',
+            output_cost_usd TEXT NOT NULL DEFAULT '0',
+            cache_read_cost_usd TEXT NOT NULL DEFAULT '0',
+            cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            latency_ms INTEGER NOT NULL,
+            first_token_ms INTEGER,
+            duration_ms INTEGER,
+            status_code INTEGER NOT NULL,
+            error_message TEXT,
+            session_id TEXT,
+            provider_type TEXT,
+            is_streaming INTEGER NOT NULL DEFAULT 0,
+            cost_multiplier TEXT NOT NULL DEFAULT '1.0',
+            created_at INTEGER NOT NULL,
+            data_source TEXT NOT NULL DEFAULT 'proxy'
+        );
+        CREATE TABLE stream_check_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id TEXT NOT NULL,
+            provider_name TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            response_time_ms INTEGER,
+            http_status INTEGER,
+            model_used TEXT,
+            retry_count INTEGER DEFAULT 0,
+            tested_at INTEGER NOT NULL
+        );
+        CREATE TABLE model_pricing (
+            model_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            input_cost_per_million TEXT NOT NULL,
+            output_cost_per_million TEXT NOT NULL,
+            cache_read_cost_per_million TEXT NOT NULL DEFAULT '0',
+            cache_creation_cost_per_million TEXT NOT NULL DEFAULT '0'
+        );
+        INSERT INTO model_pricing (
+            model_id, display_name, input_cost_per_million, output_cost_per_million,
+            cache_read_cost_per_million, cache_creation_cost_per_million
+        ) VALUES ('test-model', 'Test Model', '1.0', '2.0', '0.1', '0');
+        CREATE TABLE proxy_live_backup (
+            app_type TEXT PRIMARY KEY,
+            original_config TEXT NOT NULL,
+            backed_up_at TEXT NOT NULL
+        );
+        CREATE TABLE usage_daily_rollups (
+            date TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, app_type, provider_id, model)
+        );
+        CREATE TABLE session_log_sync (
+            file_path TEXT PRIMARY KEY,
+            last_modified INTEGER NOT NULL,
+            last_line_offset INTEGER NOT NULL DEFAULT 0,
+            last_synced_at INTEGER NOT NULL
+        );
+        "#,
+    )
+    .expect("seed v10 schema");
+
+    Database::set_user_version(&conn, 10).expect("set user_version=10");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+
+    assert!(
+        Database::table_exists(&conn, "model_routes").expect("check model_routes exists"),
+        "model_routes table should exist after v10 -> v11 migration"
+    );
+    assert!(
+        Database::has_column(&conn, "model_routes", "pattern")
+            .expect("check pattern column"),
+        "model_routes.pattern column should exist"
+    );
+    assert!(
+        Database::has_column(&conn, "model_routes", "priority")
+            .expect("check priority column"),
+        "model_routes.priority column should exist"
+    );
 }
