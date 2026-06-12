@@ -479,13 +479,15 @@ impl SettingsItem {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalProxySettingsItem {
+    ProxySwitch,
     ListenAddress,
     ListenPort,
     AutoFailover,
 }
 
 impl LocalProxySettingsItem {
-    pub const ALL: [LocalProxySettingsItem; 3] = [
+    pub const ALL: [LocalProxySettingsItem; 4] = [
+        LocalProxySettingsItem::ProxySwitch,
         LocalProxySettingsItem::ListenAddress,
         LocalProxySettingsItem::ListenPort,
         LocalProxySettingsItem::AutoFailover,
