@@ -8,9 +8,7 @@ use crate::provider::Provider;
 
 use super::{
     error::ProxyError,
-    model_router::ModelRouter,
     provider_router::ProviderRouter,
-    providers::gemini_shadow::GeminiShadowStore,
     server::ProxyServerState,
     session::extract_session_id,
     types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
@@ -21,7 +19,6 @@ pub struct HandlerContext {
     pub state: ProxyServerState,
     pub app_type: AppType,
     pub provider_router: Arc<ProviderRouter>,
-    pub model_router: Arc<ModelRouter>,
     pub route_source: Option<String>,
     providers: Vec<Provider>,
     pub app_proxy: AppProxyConfig,
@@ -105,7 +102,6 @@ impl HandlerContext {
             state: state.clone(),
             app_type,
             provider_router,
-            model_router,
             route_source,
             providers,
             app_proxy,
@@ -170,7 +166,13 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::RwLock;
 
-    use crate::{database::Database, proxy::types::ProxyConfig};
+    use crate::{
+        database::Database,
+        proxy::{
+            model_router::ModelRouter, providers::gemini_shadow::GeminiShadowStore,
+            types::ProxyConfig,
+        },
+    };
 
     struct TempHome {
         #[allow(dead_code)]

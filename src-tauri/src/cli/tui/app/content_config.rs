@@ -972,7 +972,7 @@ impl App {
                         title: texts::tui_model_route_edit_pattern_title().to_string(),
                         prompt: texts::tui_model_route_edit_pattern_prompt().to_string(),
                         input: TextInput::new(row.pattern.clone()),
-                        submit: TextSubmit::ModelRouteEditPattern { id: row.id },
+                        submit: TextSubmit::ModelRouteEditPattern { id: row.id.clone() },
                         secret: false,
                     });
                 }
@@ -983,14 +983,14 @@ impl App {
                     self.overlay = Overlay::Confirm(ConfirmOverlay {
                         title: texts::tui_model_route_confirm_delete_title().to_string(),
                         message: texts::tui_model_route_confirm_delete_message(&row.pattern),
-                        action: ConfirmAction::ModelRouteDelete { id: row.id },
+                        action: ConfirmAction::ModelRouteDelete { id: row.id.clone() },
                     });
                 }
                 Action::None
             }
             KeyCode::Char(' ') => {
                 if let Some(row) = data.model_routes.rows.get(self.model_routes_idx) {
-                    return Action::ModelRouteToggle { id: row.id };
+                    return Action::ModelRouteToggle { id: row.id.clone() };
                 }
                 Action::None
             }

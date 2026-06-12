@@ -143,7 +143,9 @@ impl App {
                         };
                         return Some(Action::None);
                     }
-                    ConfirmAction::ModelRouteDelete { id } => Action::ModelRouteDelete { id: *id },
+                    ConfirmAction::ModelRouteDelete { id } => {
+                        Action::ModelRouteDelete { id: id.clone() }
+                    }
                 };
                 self.close_overlay();
                 action

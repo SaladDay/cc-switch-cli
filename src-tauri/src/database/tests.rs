@@ -2043,7 +2043,7 @@ fn model_route_dao_crud_roundtrip() {
     // Create
     let created = db
         .create_model_route(&ModelRoute {
-            id: None,
+            id: String::new(),
             app_type: "claude".into(),
             pattern: "*-sonnet".into(),
             provider_id: "test-prov".into(),
@@ -2054,7 +2054,7 @@ fn model_route_dao_crud_roundtrip() {
         })
         .expect("create model route");
 
-    assert_eq!(created.id, Some(1));
+    assert_eq!(created.id.len(), 36); // UUID v4
     assert_eq!(created.pattern, "*-sonnet");
     assert_eq!(created.provider_id, "test-prov");
     assert_eq!(created.priority, 10);
@@ -2062,26 +2062,27 @@ fn model_route_dao_crud_roundtrip() {
     assert!(created.created_at.is_some());
 
     // Get by id
-    let got = db.get_model_route(1).expect("get model route");
+    let got = db.get_model_route(&created.id).expect("get model route");
     assert!(got.is_some());
     assert_eq!(got.unwrap().pattern, "*-sonnet");
 
     // Create second route
-    db.create_model_route(&ModelRoute {
-        id: None,
-        app_type: "claude".into(),
-        pattern: "gpt-*".into(),
-        provider_id: "test-prov".into(),
-        priority: 20,
-        enabled: true,
-        created_at: None,
-        updated_at: None,
-    })
-    .expect("create second route");
+    let second = db
+        .create_model_route(&ModelRoute {
+            id: String::new(),
+            app_type: "claude".into(),
+            pattern: "gpt-*".into(),
+            provider_id: "test-prov".into(),
+            priority: 20,
+            enabled: true,
+            created_at: None,
+            updated_at: None,
+        })
+        .expect("create second route");
 
     // FK constraint: reject non-existent provider
     let result = db.create_model_route(&ModelRoute {
-        id: None,
+        id: String::new(),
         app_type: "claude".into(),
         pattern: "bad-*".into(),
         provider_id: "nonexistent".into(),
@@ -2100,9 +2101,9 @@ fn model_route_dao_crud_roundtrip() {
     // Update
     let updated = db
         .update_model_route(
-            1,
+            &created.id,
             &ModelRoute {
-                id: None,
+                id: String::new(),
                 app_type: "claude".into(),
                 pattern: "claude-*".into(),
                 provider_id: "test-prov".into(),
@@ -2119,23 +2120,25 @@ fn model_route_dao_crud_roundtrip() {
     assert!(!updated.enabled);
 
     // Toggle
-    let toggled_off = db.toggle_model_route(1).expect("toggle off");
+    let toggled_off = db.toggle_model_route(&created.id).expect("toggle off");
     assert!(toggled_off.enabled, "toggle off should re-enable");
 
-    let toggled_on = db.toggle_model_route(1).expect("toggle on");
+    let toggled_on = db.toggle_model_route(&created.id).expect("toggle on");
     assert!(!toggled_on.enabled, "toggle on should disable");
 
     // Delete
-    db.delete_model_route(1).expect("delete model route");
-    let gone = db.get_model_route(1).expect("get deleted route");
+    db.delete_model_route(&created.id)
+        .expect("delete model route");
+    let gone = db.get_model_route(&created.id).expect("get deleted route");
     assert!(gone.is_none());
 
-    // Clean up the second route (created before the ordering test)
-    db.delete_model_route(2).expect("delete second route");
+    // Clean up the second route
+    db.delete_model_route(&second.id)
+        .expect("delete second route");
 
     // List ordering: create 3 routes with priorities 5, 1, 3
     db.create_model_route(&ModelRoute {
-        id: None,
+        id: String::new(),
         app_type: "claude".into(),
         pattern: "mid".into(),
         provider_id: "test-prov".into(),
@@ -2146,7 +2149,7 @@ fn model_route_dao_crud_roundtrip() {
     })
     .expect("create priority 5");
     db.create_model_route(&ModelRoute {
-        id: None,
+        id: String::new(),
         app_type: "claude".into(),
         pattern: "low".into(),
         provider_id: "test-prov".into(),
@@ -2157,7 +2160,7 @@ fn model_route_dao_crud_roundtrip() {
     })
     .expect("create priority 1");
     db.create_model_route(&ModelRoute {
-        id: None,
+        id: String::new(),
         app_type: "claude".into(),
         pattern: "high".into(),
         provider_id: "test-prov".into(),
@@ -2186,7 +2189,7 @@ fn model_route_dao_crud_roundtrip() {
     drop(conn2);
 
     db.create_model_route(&ModelRoute {
-        id: None,
+        id: String::new(),
         app_type: "codex".into(),
         pattern: "*-codex".into(),
         provider_id: "codex-prov".into(),
@@ -2221,7 +2224,7 @@ fn model_route_cascade_delete_on_provider_removal() {
 
     // Create a model_route pointing to this provider
     db.create_model_route(&ModelRoute {
-        id: None,
+        id: String::new(),
         app_type: "claude".into(),
         pattern: "*-test".into(),
         provider_id: "cascade-prov".into(),

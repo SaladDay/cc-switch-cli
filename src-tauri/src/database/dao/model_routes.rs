@@ -2,6 +2,7 @@
 //!
 //! 管理 model_routes 表的 CRUD 操作，为 per-model provider routing 提供持久化层。
 //! 支持按 app_type 列出路由、创建/更新/删除路由、切换启用状态。
+//! id 使用 UUID v4 (TEXT PRIMARY KEY)，与上游 cc-switch 一致。
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
@@ -24,7 +25,7 @@ impl Database {
         let items = stmt
             .query_map([app_type], |row| {
                 Ok(ModelRoute {
-                    id: Some(row.get(0)?),
+                    id: row.get(0)?,
                     app_type: row.get(1)?,
                     pattern: row.get(2)?,
                     provider_id: row.get(3)?,
@@ -42,7 +43,7 @@ impl Database {
     }
 
     /// 根据 ID 获取单个模型路由
-    pub fn get_model_route(&self, id: i64) -> Result<Option<ModelRoute>, AppError> {
+    pub fn get_model_route(&self, id: &str) -> Result<Option<ModelRoute>, AppError> {
         let conn = lock_conn!(self.conn);
 
         let mut stmt = conn
@@ -56,7 +57,7 @@ impl Database {
         let mut rows = stmt
             .query_map([id], |row| {
                 Ok(ModelRoute {
-                    id: Some(row.get(0)?),
+                    id: row.get(0)?,
                     app_type: row.get(1)?,
                     pattern: row.get(2)?,
                     provider_id: row.get(3)?,
@@ -73,7 +74,7 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))
     }
 
-    /// 创建模型路由（验证 provider_id 存在）
+    /// 创建模型路由（生成 UUID id，验证 provider_id 存在）
     pub fn create_model_route(&self, route: &ModelRoute) -> Result<ModelRoute, AppError> {
         let conn = lock_conn!(self.conn);
 
@@ -93,16 +94,24 @@ impl Database {
             )));
         }
 
+        // 生成 UUID v4 作为 id
+        let id = if route.id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            route.id.clone()
+        };
+
         let mut stmt = conn
             .prepare(
-                "INSERT INTO model_routes (app_type, pattern, provider_id, priority, enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO model_routes (id, app_type, pattern, provider_id, priority, enabled)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  RETURNING id, app_type, pattern, provider_id, priority, enabled, created_at, updated_at",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         stmt.query_row(
             rusqlite::params![
+                &id,
                 &route.app_type,
                 &route.pattern,
                 &route.provider_id,
@@ -111,7 +120,7 @@ impl Database {
             ],
             |row| {
                 Ok(ModelRoute {
-                    id: Some(row.get(0)?),
+                    id: row.get(0)?,
                     app_type: row.get(1)?,
                     pattern: row.get(2)?,
                     provider_id: row.get(3)?,
@@ -126,7 +135,7 @@ impl Database {
     }
 
     /// 更新模型路由
-    pub fn update_model_route(&self, id: i64, route: &ModelRoute) -> Result<ModelRoute, AppError> {
+    pub fn update_model_route(&self, id: &str, route: &ModelRoute) -> Result<ModelRoute, AppError> {
         let conn = lock_conn!(self.conn);
 
         // 如果 provider_id 变更，验证新 provider 存在
@@ -175,7 +184,7 @@ impl Database {
             ],
             |row| {
                 Ok(ModelRoute {
-                    id: Some(row.get(0)?),
+                    id: row.get(0)?,
                     app_type: row.get(1)?,
                     pattern: row.get(2)?,
                     provider_id: row.get(3)?,
@@ -190,7 +199,7 @@ impl Database {
     }
 
     /// 删除模型路由
-    pub fn delete_model_route(&self, id: i64) -> Result<(), AppError> {
+    pub fn delete_model_route(&self, id: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
 
         let changes = conn
@@ -205,7 +214,7 @@ impl Database {
     }
 
     /// 切换模型路由的启用状态
-    pub fn toggle_model_route(&self, id: i64) -> Result<ModelRoute, AppError> {
+    pub fn toggle_model_route(&self, id: &str) -> Result<ModelRoute, AppError> {
         let conn = lock_conn!(self.conn);
 
         let mut stmt = conn
@@ -220,7 +229,7 @@ impl Database {
 
         stmt.query_row([id], |row| {
             Ok(ModelRoute {
-                id: Some(row.get(0)?),
+                id: row.get(0)?,
                 app_type: row.get(1)?,
                 pattern: row.get(2)?,
                 provider_id: row.get(3)?,
@@ -253,7 +262,7 @@ mod tests {
 
     fn test_route(pattern: &str, provider_id: &str, priority: i32) -> ModelRoute {
         ModelRoute {
-            id: None,
+            id: String::new(),
             app_type: "claude".into(),
             pattern: pattern.into(),
             provider_id: provider_id.into(),
@@ -271,14 +280,15 @@ mod tests {
 
         let created = db.create_model_route(&test_route("*-sonnet", "test-prov", 10))?;
 
-        assert_eq!(created.id, Some(1));
+        // id 应为 UUID v4 (36 字符)
+        assert_eq!(created.id.len(), 36);
         assert_eq!(created.pattern, "*-sonnet");
         assert_eq!(created.provider_id, "test-prov");
         assert_eq!(created.priority, 10);
         assert!(created.enabled);
         assert!(created.created_at.is_some());
 
-        let got = db.get_model_route(1)?;
+        let got = db.get_model_route(&created.id)?;
         assert!(got.is_some());
         assert_eq!(got.unwrap().pattern, "*-sonnet");
 
@@ -307,14 +317,18 @@ mod tests {
         let db = Database::memory()?;
         seed_provider(&db, "claude", "p1")?;
 
-        db.create_model_route(&test_route("mid", "p1", 5))?;
-        db.create_model_route(&test_route("low", "p1", 1))?;
-        db.create_model_route(&test_route("high", "p1", 3))?;
+        let r1 = db.create_model_route(&test_route("mid", "p1", 5))?;
+        let r2 = db.create_model_route(&test_route("low", "p1", 1))?;
+        let r3 = db.create_model_route(&test_route("high", "p1", 3))?;
 
         let routes = db.list_model_routes("claude")?;
         assert_eq!(routes.len(), 3);
+        // 按 priority ASC 排序
+        assert_eq!(routes[0].id, r2.id);
         assert_eq!(routes[0].priority, 1);
+        assert_eq!(routes[1].id, r3.id);
         assert_eq!(routes[1].priority, 3);
+        assert_eq!(routes[2].id, r1.id);
         assert_eq!(routes[2].priority, 5);
 
         Ok(())
@@ -326,12 +340,12 @@ mod tests {
         seed_provider(&db, "claude", "p1")?;
         seed_provider(&db, "claude", "p2")?;
 
-        db.create_model_route(&test_route("*-sonnet", "p1", 10))?;
+        let created = db.create_model_route(&test_route("*-sonnet", "p1", 10))?;
 
         let updated = db.update_model_route(
-            1,
+            &created.id,
             &ModelRoute {
-                id: None,
+                id: created.id.clone(),
                 app_type: "claude".into(),
                 pattern: "claude-*".into(),
                 provider_id: "p2".into(),
@@ -348,7 +362,7 @@ mod tests {
         assert!(!updated.enabled);
 
         // Verify persistence
-        let got = db.get_model_route(1)?;
+        let got = db.get_model_route(&created.id)?;
         assert!(got.is_some());
         let got = got.unwrap();
         assert_eq!(got.pattern, "claude-*");
@@ -365,10 +379,10 @@ mod tests {
         let created = db.create_model_route(&test_route("*-sonnet", "p1", 10))?;
         assert!(created.enabled);
 
-        let toggled_off = db.toggle_model_route(1)?;
+        let toggled_off = db.toggle_model_route(&created.id)?;
         assert!(!toggled_off.enabled);
 
-        let toggled_on = db.toggle_model_route(1)?;
+        let toggled_on = db.toggle_model_route(&created.id)?;
         assert!(toggled_on.enabled);
 
         Ok(())
@@ -379,15 +393,15 @@ mod tests {
         let db = Database::memory()?;
         seed_provider(&db, "claude", "p1")?;
 
-        db.create_model_route(&test_route("*-sonnet", "p1", 10))?;
+        let created = db.create_model_route(&test_route("*-sonnet", "p1", 10))?;
 
-        db.delete_model_route(1)?;
+        db.delete_model_route(&created.id)?;
 
-        let got = db.get_model_route(1)?;
+        let got = db.get_model_route(&created.id)?;
         assert!(got.is_none());
 
         // delete non-existent should error
-        let result = db.delete_model_route(999);
+        let result = db.delete_model_route("nonexistent-id");
         assert!(result.is_err());
 
         Ok(())
