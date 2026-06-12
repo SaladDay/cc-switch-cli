@@ -98,11 +98,11 @@ Phases 3, 4, 5 可并行执行（都只依赖 Phase 2）。
 **Depends on:** Phase 1（仅需 DAO，可与 Phase 2 并行）
 **Estimated effort:** 1-2 小时
 **Files to touch:** ~2 files, ~70 lines
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 ### Plans
 
-- [ ] 03-01-PLAN.md — ModelRouteCommand enum definition + ProxyCommand integration + command handler implementation + tests
+- [x] 03-01-PLAN.md — ModelRouteCommand enum definition + ProxyCommand integration + command handler implementation + tests
 
 **Covers:** CL-01 ~ CL-06, TE-06
 

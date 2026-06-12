@@ -2,22 +2,22 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: Phase 3 (planned, ready to execute)
+current_phase: Phase 3 (complete)
 status: in_progress
-last_updated: "2026-06-12T00:30:00.000Z"
+last_updated: "2026-06-12T00:33:54.574Z"
 progress:
   total_phases: 6
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 3
-  completed_plans: 2
-  percent: 33
+  completed_plans: 3
+  percent: 50
 ---
 
 # State: CC-Switch CLI
 
 **Last updated:** 2026-06-12
 **Active milestone:** Milestone 1 — Per-Model Provider Routing
-**Current phase:** Phase 3 (planned, ready to execute)
+**Current phase:** Phase 3 (complete)
 
 ## Project Reference
 
@@ -32,7 +32,7 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 |-------|--------|-------------|---------|-----------|
 | Phase 1: Database | ✅ Complete | 2-3h | 2026-06-11 | 2026-06-11 |
 | Phase 2: Router Engine | ✅ Complete | 4-6h | 2026-06-11 | 2026-06-12 |
-| Phase 3: CLI Commands | 🔲 Planned | 1-2h | — | — |
+| Phase 3: CLI Commands | ✅ Complete | 1-2h | 2026-06-11 | 2026-06-12 |
 | Phase 4: TUI Interface | ⬜ Pending | 6-10h | — | — |
 | Phase 5: Sync Integration | ⬜ Pending | 0.5-1h | — | — |
 | Phase 6: Testing & PR Prep | ⬜ Pending | 3-5h | — | — |
@@ -52,14 +52,16 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 ## Working State
 
 - **Branch:** `main` (clean)
-- **Last commit:** `db3389a test(02-router): add integration tests and formatting fixes`
+- **Last commit:** `992c60a refactor(03-cli): apply cargo fmt formatting fixes`
 - **Schema version:** v11
 
 ## Quick Start (Next Session)
 
 ```bash
-# Phase 3 is planned — CLI commands for model-route management
-/gsd-execute-phase 03-cli
+
+# Phase 3 is complete. Phase 4 (TUI) is next.
+
+/gsd-plan-phase 04-tui
 ```
 
 ## Notes
@@ -69,7 +71,8 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 - Phase 4 (TUI) 是最大的工作量来源（35-40%），取决于现有 TUI 组件的复用程度
 - Phase 1 completed: model_routes table, ModelRoute type, CRUD DAO — all foundations in place
 - Phase 2 completed: ModelRouter engine, proxy integration — route matching works end-to-end
-- Phase 3 planned: CLI commands for model-route CRUD (1 plan, 2 tasks, 1 wave)
+- Phase 3 complete: CLI commands for model-route CRUD (1 plan, 2 tasks, 1 wave)
+- Phase 3 Summary: `.planning/phases/03-cli/03-01-SUMMARY.md`
 
 ## Performance Metrics
 
@@ -77,9 +80,11 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 |-------|------|----------|-------|
 | Phase 01-database P01 | 18 min | 3 tasks | 7 files |
 | Phase 02-router P01 | 67 min | 3 tasks | 6 files |
+| Phase 03-cli P01 | 7 min | 2 tasks | 1 file |
 
 ## Decisions
 
 - [Phase 1]: ModelRoute type in separate model_route.rs module (matches upstream PR #4081 structure)
 - [Phase 2]: ModelRouter holds Arc<Database> only — no caching, reads routes fresh on every request
 - [Phase 2]: Single provider for matched routes (no failover queue) — matches upstream design decision
+- [Phase 3]: cli/mod.rs unchanged — Clap derive auto-discovers ProxyCommand::ModelRoute via existing dispatch
