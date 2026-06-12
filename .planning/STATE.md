@@ -4,12 +4,12 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: Phase 3 (complete)
 status: in_progress
-last_updated: "2026-06-12T00:33:54.574Z"
+last_updated: "2026-06-12T01:03:14.090Z"
 progress:
   total_phases: 6
   completed_phases: 3
-  total_plans: 3
-  completed_plans: 3
+  total_plans: 5
+  completed_plans: 4
   percent: 50
 ---
 
@@ -33,7 +33,7 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 | Phase 1: Database | ✅ Complete | 2-3h | 2026-06-11 | 2026-06-11 |
 | Phase 2: Router Engine | ✅ Complete | 4-6h | 2026-06-11 | 2026-06-12 |
 | Phase 3: CLI Commands | ✅ Complete | 1-2h | 2026-06-11 | 2026-06-12 |
-| Phase 4: TUI Interface | ⬜ Pending | 6-10h | — | — |
+| Phase 4: TUI Interface | 🔄 In Progress | 6-10h | 2026-06-12 | — |
 | Phase 5: Sync Integration | ⬜ Pending | 0.5-1h | — | — |
 | Phase 6: Testing & PR Prep | ⬜ Pending | 3-5h | — | — |
 
@@ -47,7 +47,9 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 - Phase 2 Plan: `.planning/phases/02-router/02-01-PLAN.md` (1 plan, 3 tasks, 1 wave)
 - Phase 2 Summary: `.planning/phases/02-router/02-01-SUMMARY.md`
 - Phase 3 Research: `.planning/phase-3/RESEARCH.md`
-- Phase 3 Plan: `.planning/phases/03-cli/03-01-PLAN.md` (1 plan, 2 tasks, 1 wave)
+- Phase 3 Summary: `.planning/phases/03-cli/03-01-SUMMARY.md`
+- Phase 4 Plan 01: `.planning/phases/04-tui-interface/04-01-PLAN.md` (1 plan, 2 tasks, 1 wave)
+- Phase 4 Summary 01: `.planning/phases/04-tui-interface/04-01-SUMMARY.md`
 
 ## Working State
 
@@ -59,9 +61,9 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 
 ```bash
 
-# Phase 3 is complete. Phase 4 (TUI) is next.
+# Phase 4 Wave 1 (04-01) is complete. Wave 2 (04-02) is next.
 
-/gsd-plan-phase 04-tui
+/gsd-execute-phase 04-tui --wave 2
 ```
 
 ## Notes
@@ -73,6 +75,9 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 - Phase 2 completed: ModelRouter engine, proxy integration — route matching works end-to-end
 - Phase 3 complete: CLI commands for model-route CRUD (1 plan, 2 tasks, 1 wave)
 - Phase 3 Summary: `.planning/phases/03-cli/03-01-SUMMARY.md`
+- Phase 4 Plan 01: `.planning/phases/04-tui-interface/04-01-PLAN.md` (1 plan, 2 tasks, 1 wave)
+- Phase 4 Summary 01: `.planning/phases/04-tui-interface/04-01-SUMMARY.md`
+- Phase 4 Wave 1 (04-01) complete: model routes TUI scaffolding (data types, navigation, table rendering)
 
 ## Performance Metrics
 
@@ -81,6 +86,7 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 | Phase 01-database P01 | 18 min | 3 tasks | 7 files |
 | Phase 02-router P01 | 67 min | 3 tasks | 6 files |
 | Phase 03-cli P01 | 7 min | 2 tasks | 1 file |
+| Phase 04-tui-interface P01 | 10 min | 2 tasks | 8 files + 1 new |
 
 ## Decisions
 
@@ -88,3 +94,4 @@ See: `.planning/PROJECT.md` (updated 2026-06-11)
 - [Phase 2]: ModelRouter holds Arc<Database> only — no caching, reads routes fresh on every request
 - [Phase 2]: Single provider for matched routes (no failover queue) — matches upstream design decision
 - [Phase 3]: cli/mod.rs unchanged — Clap derive auto-discovers ProxyCommand::ModelRoute via existing dispatch
+- [Phase 4]: Model routes rendering uses dedicated ui/model_routes.rs module (matches existing config.rs sub-page pattern)
