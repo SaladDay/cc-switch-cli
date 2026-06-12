@@ -1532,6 +1532,10 @@ impl ProviderService {
         });
         Self::validate_common_config_snippet(&app_type, normalized_snippet.as_deref())?;
 
+        // 清空（None）→ 记录 cleared=true，避免下次启动自动重新播种；
+        // 设置非空片段 → cleared=false。
+        let snippet_cleared = normalized_snippet.is_none();
+
         let app_type_clone = app_type.clone();
         let (effective_current_provider, db_providers) = if app_type.is_additive_mode() {
             (None, None)
@@ -1648,7 +1652,15 @@ impl ProviderService {
                 )?;
                 Ok(((), action))
             },
-        )
+        )?;
+
+        // 与启动期 best-effort 播种不同，这里传播错误：若该标记写入失败，
+        // 下次启动会误判为"未清空"并把刚清空的片段重新播种回来。
+        state
+            .db
+            .set_config_snippet_cleared(app_type.as_str(), snippet_cleared)?;
+
+        Ok(())
     }
 
     pub fn clear_common_config_snippet(

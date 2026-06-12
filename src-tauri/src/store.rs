@@ -102,6 +102,8 @@ impl AppState {
 
         state.import_live_provider_configs_on_startup()?;
 
+        state.initialize_common_config_snippets();
+
         let owned_managed_session_active = state
             .proxy_service
             .should_skip_startup_recovery_for_active_managed_session_blocking()
@@ -210,6 +212,89 @@ impl AppState {
         }
 
         self.refresh_config_from_db()
+    }
+
+    /// 首次配置时从干净的 live 文件自动播种通用配置片段（Claude + Codex + Gemini）。
+    ///
+    /// 仅当某 app 的通用配置为空且未被用户显式清空时执行；读取 live 文件失败或
+    /// 无可提取内容时静默跳过。必须在代理接管恢复之前调用，避免读到占位符配置。
+    ///
+    /// OpenCode/Hermes/OpenClaw 不在此列：这三个 app 的通用配置合并机制
+    /// （`apply_common_config_to_settings` / `remove_common_config_from_settings`）
+    /// 是 no-op，自动播种对它们没有实际效果，反而可能把整份 live 配置（含密钥）
+    /// 复制进 `common_config_<app>`。
+    fn initialize_common_config_snippets(&self) {
+        use crate::app_config::AppType;
+        use crate::services::provider::ProviderService;
+
+        let mut seeded = false;
+
+        for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            match self
+                .db
+                .should_auto_extract_config_snippet(app_type.as_str())
+            {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    log::warn!(
+                        "✗ Failed to check auto-extract gate for {}: {error}",
+                        app_type.as_str()
+                    );
+                    continue;
+                }
+            }
+
+            let settings = match ProviderService::read_live_settings(app_type.clone()) {
+                Ok(settings) => settings,
+                Err(_) => continue,
+            };
+
+            let snippet = match ProviderService::extract_common_config_snippet_from_settings(
+                app_type.clone(),
+                &settings,
+            ) {
+                Ok(snippet) => snippet,
+                Err(error) => {
+                    log::warn!(
+                        "✗ Failed to extract common config snippet for {}: {error}",
+                        app_type.as_str()
+                    );
+                    continue;
+                }
+            };
+
+            if snippet.is_empty() || snippet == "{}" {
+                log::debug!(
+                    "○ Live config for {} has no extractable common fields",
+                    app_type.as_str()
+                );
+                continue;
+            }
+
+            match self.db.set_config_snippet(app_type.as_str(), Some(snippet)) {
+                Ok(()) => {
+                    let _ = self.db.set_config_snippet_cleared(app_type.as_str(), false);
+                    seeded = true;
+                    log::info!(
+                        "✓ Auto-extracted common config snippet for {}",
+                        app_type.as_str()
+                    );
+                }
+                Err(error) => log::warn!(
+                    "✗ Failed to save common config snippet for {}: {error}",
+                    app_type.as_str()
+                ),
+            }
+        }
+
+        if seeded {
+            if let Err(error) = self.refresh_config_from_db() {
+                log::warn!(
+                    "✗ Failed to refresh config after seeding common config snippets: {error}"
+                );
+            }
+        }
     }
 
     fn import_live_current_provider_configs_on_startup(&self) -> Result<(), AppError> {
@@ -783,5 +868,198 @@ requires_openai_auth = true
                 .as_deref(),
             Some("default")
         );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn startup_seeds_claude_common_config_snippet_from_live() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+
+        write_json(
+            crate::config::get_claude_settings_path(),
+            json!({
+                "env": { "ANTHROPIC_API_KEY": "live-key", "ANTHROPIC_BASE_URL": "https://x" },
+                "permissions": { "allow": ["Bash"] },
+                "statusLine": { "type": "command", "command": "echo hi" }
+            }),
+        );
+
+        let state = AppState::try_new_with_startup_recovery().expect("create startup state");
+
+        let snippet = state
+            .db
+            .get_config_snippet("claude")
+            .expect("read snippet")
+            .expect("claude snippet should be seeded");
+        let parsed: serde_json::Value = serde_json::from_str(&snippet).expect("snippet json");
+        assert!(parsed.get("permissions").is_some());
+        assert!(parsed.get("statusLine").is_some());
+        // 鉴权/endpoint 字段不进通用配置
+        assert!(parsed
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .is_none());
+        // 非破坏式：default 供应商仍保留完整 settings
+        let provider = state
+            .db
+            .get_provider_by_id("default", "claude")
+            .expect("read provider")
+            .expect("default provider");
+        assert_eq!(
+            provider.settings_config["env"]["ANTHROPIC_API_KEY"],
+            json!("live-key")
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn startup_seeds_codex_common_config_snippet_from_live() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+
+        write_json(
+            crate::codex_config::get_codex_auth_path(),
+            json!({ "OPENAI_API_KEY": "live-codex-key" }),
+        );
+        write_text(
+            crate::codex_config::get_codex_config_path(),
+            "model_provider = \"legacy\"\nmodel = \"gpt-4\"\n\n[tui]\ntheme = \"dark\"\n\n[model_providers.legacy]\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\n",
+        );
+
+        let state = AppState::try_new_with_startup_recovery().expect("create startup state");
+
+        let snippet = state
+            .db
+            .get_config_snippet("codex")
+            .expect("read snippet")
+            .expect("codex snippet should be seeded");
+        assert!(snippet.contains("[tui]"));
+        assert!(snippet.contains("theme"));
+        // 供应商专属字段被剥离
+        assert!(!snippet.contains("model_providers"));
+        assert!(!snippet.contains("model ="));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn startup_seeds_gemini_common_config_snippet_from_live() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+
+        write_text(
+            crate::gemini_config::get_gemini_env_path(),
+            "GEMINI_API_KEY=live-key\nGOOGLE_GEMINI_BASE_URL=https://x\nHTTPS_PROXY=http://proxy.local:8080\n",
+        );
+
+        let state = AppState::try_new_with_startup_recovery().expect("create startup state");
+
+        let snippet = state
+            .db
+            .get_config_snippet("gemini")
+            .expect("read snippet")
+            .expect("gemini snippet should be seeded");
+        let parsed: serde_json::Value = serde_json::from_str(&snippet).expect("snippet json");
+        assert_eq!(
+            parsed.get("HTTPS_PROXY"),
+            Some(&json!("http://proxy.local:8080"))
+        );
+        // 鉴权/endpoint 字段不进通用配置
+        assert!(parsed.get("GEMINI_API_KEY").is_none());
+        assert!(parsed.get("GOOGLE_GEMINI_BASE_URL").is_none());
+
+        // 非破坏式：default 供应商仍保留完整 settings
+        let provider = state
+            .db
+            .get_provider_by_id("default", "gemini")
+            .expect("read provider")
+            .expect("default provider");
+        assert_eq!(
+            provider.settings_config["env"]["GEMINI_API_KEY"],
+            json!("live-key")
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn startup_does_not_overwrite_existing_common_config_snippet() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+
+        write_json(
+            crate::config::get_claude_settings_path(),
+            json!({ "permissions": { "allow": ["Bash"] } }),
+        );
+
+        // 首次启动播种，然后用户改成自定义值
+        {
+            let state = AppState::try_new_with_startup_recovery().expect("first startup");
+            assert!(state.db.get_config_snippet("claude").unwrap().is_some());
+            state
+                .db
+                .set_config_snippet("claude", Some("{\"custom\":true}".to_string()))
+                .expect("override snippet");
+        }
+
+        // 再次启动不得覆盖已有片段
+        let state = AppState::try_new_with_startup_recovery().expect("second startup");
+        let snippet = state.db.get_config_snippet("claude").unwrap().unwrap();
+        assert!(snippet.contains("custom"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn startup_skips_seeding_when_no_common_fields() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+
+        // 仅含鉴权/endpoint，无可提取的共享字段
+        write_json(
+            crate::config::get_claude_settings_path(),
+            json!({ "env": { "ANTHROPIC_API_KEY": "k", "ANTHROPIC_BASE_URL": "u" } }),
+        );
+
+        let state = AppState::try_new_with_startup_recovery().expect("startup");
+        assert!(state
+            .db
+            .get_config_snippet("claude")
+            .expect("read")
+            .is_none());
+        assert!(!state
+            .db
+            .is_config_snippet_cleared("claude")
+            .expect("cleared flag"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn startup_does_not_reseed_after_user_clears_snippet() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+
+        write_json(
+            crate::config::get_claude_settings_path(),
+            json!({ "permissions": { "allow": ["Bash"] } }),
+        );
+
+        // 首次启动播种，随后用户清空
+        {
+            let state = AppState::try_new_with_startup_recovery().expect("first startup");
+            assert!(state.db.get_config_snippet("claude").unwrap().is_some());
+
+            crate::services::provider::ProviderService::clear_common_config_snippet(
+                &state,
+                crate::app_config::AppType::Claude,
+            )
+            .expect("clear snippet");
+
+            assert!(state.db.is_config_snippet_cleared("claude").unwrap());
+            assert!(state.db.get_config_snippet("claude").unwrap().is_none());
+        }
+
+        // 再次启动不得重新播种（用户已显式清空）
+        let state = AppState::try_new_with_startup_recovery().expect("second startup");
+        assert!(state.db.get_config_snippet("claude").unwrap().is_none());
+        assert!(state.db.is_config_snippet_cleared("claude").unwrap());
     }
 }
