@@ -158,37 +158,11 @@ Phases 3, 4, 5 可并行执行（都只依赖 Phase 2）。
 
 **Depends on:** Phase 3, 4, 5（全部完成）
 **Estimated effort:** 3-5 小时
+**Plans:** 1 plan
 
-### Tasks
+### Plans
 
-1. **Integration Testing**
-   - E2E 代理测试：Model matches enabled route → route-selected provider used
-   - E2E 代理测试：No matching route → falls back to app-level provider
-   - E2E 代理测试：Empty routes → no behavior change
-   - E2E 代理测试：Route points to missing provider → warning logged, falls back
-   - CLI 命令集成测试
-
-2. **Regression Testing**
-   - `cargo test` — 全部测试通过
-   - `cargo clippy` — 无新增 warning
-   - `cargo fmt --check` — 格式正确
-
-3. **PR Branch Preparation**
-   - 创建功能分支 `feat/model-based-routing`
-   - 仅提交功能代码（排除 `.planning/` 目录）
-   - 写 PR 描述：参考上游 PR #4081 的结构
-   - Self-review 检查清单
-
-4. **Documentation**
-   - 更新 README（如需要）
-   - 确保 CLI help 文本完整
-
-### Verification
-- [ ] 全部测试通过（`cargo test`）
-- [ ] 无 clippy warning
-- [ ] 格式检查通过
-- [ ] PR 分支干净（`.planning/` 在 .gitignore 或未提交）
-- [ ] 手工 smoke test：启动代理 → 配置路由规则 → 发请求验证
+- [ ] 06-01-PLAN.md — Verify integration tests (TE-04/TE-05 already exist), run full test suite + quality gates, prepare clean PR branch with .planning/ excluded
 
 **Covers:** TE-04, TE-05
 
