@@ -16,12 +16,12 @@
 
 ### 路由引擎 (Router)
 
-- [ ] **RT-01**: ModelRouter 在代理请求处理流程中先于 ProviderRouter 执行
-- [ ] **RT-02**: 支持 `*` 通配符匹配 model 名称（如 `*sonnet*`、`claude-*`、`*-4-5`）
-- [ ] **RT-03**: 多个规则匹配时，选择 priority 最高（数字最小）的 enabled 规则
-- [ ] **RT-04**: 无匹配规则时，回退到现有的 ProviderRouter 逻辑（行为不变）
-- [ ] **RT-05**: 规则指向的 provider 不存在时，记录 warning 日志并回退
-- [ ] **RT-06**: 路由选中的 provider 为单 provider（不使用 failover 队列）
+- [x] **RT-01**: ModelRouter 在代理请求处理流程中先于 ProviderRouter 执行
+- [x] **RT-02**: 支持 `*` 通配符匹配 model 名称（如 `*sonnet*`、`claude-*`、`*-4-5`）
+- [x] **RT-03**: 多个规则匹配时，选择 priority 最高（数字最小）的 enabled 规则
+- [x] **RT-04**: 无匹配规则时，回退到现有的 ProviderRouter 逻辑（行为不变）
+- [x] **RT-05**: 规则指向的 provider 不存在时，记录 warning 日志并回退
+- [x] **RT-06**: 路由选中的 provider 为单 provider（不使用 failover 队列）
 
 ### CLI 命令 (CLI)
 
@@ -48,7 +48,7 @@
 ### 测试 (TEST)
 
 - [x] **TE-01**: model_routes DAO 的 CRUD 单元测试
-- [ ] **TE-02**: ModelRouter 通配符匹配逻辑的单元测试
+- [x] **TE-02**: ModelRouter 通配符匹配逻辑的单元测试
 - [x] **TE-03**: Schema v10→v11 迁移测试
 - [ ] **TE-04**: 代理路由集成测试：匹配规则→选中正确 provider
 - [ ] **TE-05**: 代理回退集成测试：无匹配→回退到现有逻辑
