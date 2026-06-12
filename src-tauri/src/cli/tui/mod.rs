@@ -979,6 +979,10 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ProviderDelete { .. }
         | Action::ProviderSetFailoverQueue { .. }
         | Action::ProviderMoveFailoverQueue { .. }
+        | Action::ModelRouteAdd { .. }
+        | Action::ModelRouteEdit { .. }
+        | Action::ModelRouteDelete { .. }
+        | Action::ModelRouteToggle { .. }
         | Action::EditorSubmit {
             submit: EditorSubmit::ProviderAdd | EditorSubmit::ProviderEdit { .. },
             ..

@@ -143,6 +143,9 @@ impl App {
                         };
                         return Some(Action::None);
                     }
+                    ConfirmAction::ModelRouteDelete { id } => {
+                        Action::ModelRouteDelete { id: *id }
+                    }
                 };
                 self.close_overlay();
                 action
@@ -363,6 +366,124 @@ impl App {
             }
             TextSubmit::WebDavJianguoyunUsername => self.handle_webdav_username_submit(raw),
             TextSubmit::WebDavJianguoyunPassword => self.handle_webdav_password_submit(raw),
+            TextSubmit::ModelRouteAddPattern => {
+                if raw.is_empty() {
+                    self.push_toast(texts::tui_toast_provider_add_missing_fields(), ToastKind::Warning);
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_model_route_add_pattern_title().to_string(),
+                        prompt: texts::tui_model_route_add_pattern_prompt().to_string(),
+                        input: TextInput::new(raw),
+                        submit: TextSubmit::ModelRouteAddPattern,
+                        secret: false,
+                    });
+                    return Action::None;
+                }
+                self.overlay = Overlay::TextInput(TextInputState {
+                    title: texts::tui_model_route_add_provider_title().to_string(),
+                    prompt: texts::tui_model_route_add_provider_prompt().to_string(),
+                    input: TextInput::new(String::new()),
+                    submit: TextSubmit::ModelRouteAddProvider { pattern: raw },
+                    secret: false,
+                });
+                Action::None
+            }
+            TextSubmit::ModelRouteAddProvider { pattern } => {
+                if raw.is_empty() {
+                    self.push_toast(texts::tui_toast_provider_add_missing_fields(), ToastKind::Warning);
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_model_route_add_provider_title().to_string(),
+                        prompt: texts::tui_model_route_add_provider_prompt().to_string(),
+                        input: TextInput::new(raw),
+                        submit: TextSubmit::ModelRouteAddProvider { pattern },
+                        secret: false,
+                    });
+                    return Action::None;
+                }
+                self.overlay = Overlay::TextInput(TextInputState {
+                    title: texts::tui_model_route_add_priority_title().to_string(),
+                    prompt: texts::tui_model_route_add_priority_prompt().to_string(),
+                    input: TextInput::new("0".to_string()),
+                    submit: TextSubmit::ModelRouteAddPriority {
+                        pattern,
+                        provider_id: raw,
+                    },
+                    secret: false,
+                });
+                Action::None
+            }
+            TextSubmit::ModelRouteAddPriority {
+                pattern,
+                provider_id,
+            } => {
+                let priority: i32 = raw.trim().parse().unwrap_or(0);
+                Action::ModelRouteAdd {
+                    pattern,
+                    provider_id,
+                    priority,
+                }
+            }
+            TextSubmit::ModelRouteEditPattern { id } => {
+                if raw.is_empty() {
+                    self.push_toast(texts::tui_toast_provider_add_missing_fields(), ToastKind::Warning);
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_model_route_edit_pattern_title().to_string(),
+                        prompt: texts::tui_model_route_edit_pattern_prompt().to_string(),
+                        input: TextInput::new(raw),
+                        submit: TextSubmit::ModelRouteEditPattern { id },
+                        secret: false,
+                    });
+                    return Action::None;
+                }
+                self.overlay = Overlay::TextInput(TextInputState {
+                    title: texts::tui_model_route_edit_provider_title().to_string(),
+                    prompt: texts::tui_model_route_edit_provider_prompt().to_string(),
+                    input: TextInput::new(String::new()),
+                    submit: TextSubmit::ModelRouteEditProvider {
+                        id,
+                        pattern: raw,
+                    },
+                    secret: false,
+                });
+                Action::None
+            }
+            TextSubmit::ModelRouteEditProvider { id, pattern } => {
+                if raw.is_empty() {
+                    self.push_toast(texts::tui_toast_provider_add_missing_fields(), ToastKind::Warning);
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_model_route_edit_provider_title().to_string(),
+                        prompt: texts::tui_model_route_edit_provider_prompt().to_string(),
+                        input: TextInput::new(raw),
+                        submit: TextSubmit::ModelRouteEditProvider { id, pattern },
+                        secret: false,
+                    });
+                    return Action::None;
+                }
+                self.overlay = Overlay::TextInput(TextInputState {
+                    title: texts::tui_model_route_edit_priority_title().to_string(),
+                    prompt: texts::tui_model_route_edit_priority_prompt().to_string(),
+                    input: TextInput::new("0".to_string()),
+                    submit: TextSubmit::ModelRouteEditPriority {
+                        id,
+                        pattern,
+                        provider_id: raw,
+                    },
+                    secret: false,
+                });
+                Action::None
+            }
+            TextSubmit::ModelRouteEditPriority {
+                id,
+                pattern,
+                provider_id,
+            } => {
+                let priority: i32 = raw.trim().parse().unwrap_or(0);
+                Action::ModelRouteEdit {
+                    id,
+                    pattern,
+                    provider_id,
+                    priority,
+                }
+            }
         }
     }
 
