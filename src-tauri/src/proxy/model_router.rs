@@ -65,9 +65,7 @@ impl ModelRouter {
                 return self
                     .db
                     .get_provider_by_id(&route.provider_id, app_type)
-                    .map_err(|e| {
-                        ProxyError::DatabaseError(format!("get_provider_by_id: {e}"))
-                    });
+                    .map_err(|e| ProxyError::DatabaseError(format!("get_provider_by_id: {e}")));
             }
         }
 
@@ -106,8 +104,6 @@ mod tests {
     use crate::model_route::ModelRoute;
 
     fn seed_provider(db: &Database, app_type: &str, id: &str) {
-        use std::sync::Mutex;
-
         // lock_conn! macro expands to a scope that uses AppError — we call the raw
         // Mutex::lock to avoid requiring an AppError import here.
         let guard = db.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -273,8 +269,10 @@ mod tests {
         // Higher priority (lower number) should win
         let route_high = test_route("claude", "*-sonnet", "prov-high", 1, true);
         let route_low = test_route("claude", "*-sonnet", "prov-low", 10, true);
-        db.create_model_route(&route_high).expect("create high-priority route");
-        db.create_model_route(&route_low).expect("create low-priority route");
+        db.create_model_route(&route_high)
+            .expect("create high-priority route");
+        db.create_model_route(&route_low)
+            .expect("create low-priority route");
 
         let router = ModelRouter::new(db);
         let result = router
@@ -291,7 +289,8 @@ mod tests {
         seed_provider(&db, "claude", "prov-disabled");
 
         let route = test_route("claude", "*-sonnet", "prov-disabled", 1, false);
-        db.create_model_route(&route).expect("create disabled route");
+        db.create_model_route(&route)
+            .expect("create disabled route");
 
         let router = ModelRouter::new(db);
         assert!(router
