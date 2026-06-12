@@ -84,7 +84,7 @@ Phases 3, 4, 5 可并行执行（都只依赖 Phase 2）。
 
 ### Plans
 
-- [ ] 02-01-PLAN.md — ModelRouter engine creation, HandlerContext integration, ProxyServerState wiring, integration tests
+- [x] 02-01-PLAN.md — ModelRouter engine creation, HandlerContext integration, ProxyServerState wiring, integration tests
 
 **Covers:** RT-01 ~ RT-06, TE-02
 
