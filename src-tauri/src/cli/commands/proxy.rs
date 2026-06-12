@@ -108,27 +108,112 @@ pub fn execute(cmd: ProxyCommand, app: Option<AppType>) -> Result<(), AppError> 
     }
 }
 
+fn print_model_routes(routes: &[ModelRoute]) {
+    if routes.is_empty() {
+        println!("{}", info("No model routing rules found."));
+        return;
+    }
+    let mut table = comfy_table::Table::new();
+    table.load_preset(comfy_table::presets::UTF8_FULL);
+    table.set_header(vec!["ID", "Pattern", "Provider", "Priority", "Enabled"]);
+    for r in routes {
+        table.add_row(vec![
+            r.id.map(|i| i.to_string()).unwrap_or_default(),
+            r.pattern.clone(),
+            r.provider_id.clone(),
+            r.priority.to_string(),
+            if r.enabled { "yes" } else { "no" }.to_string(),
+        ]);
+    }
+    println!("{table}");
+}
+
 fn handle_model_route(
     state: &AppState,
     app: &AppType,
     cmd: ModelRouteCommand,
 ) -> Result<(), AppError> {
     match cmd {
-        ModelRouteCommand::List => todo!(),
+        ModelRouteCommand::List => {
+            let routes = state.db.list_model_routes(app.as_str())?;
+            print_model_routes(&routes);
+        }
         ModelRouteCommand::Add {
-            pattern: _,
-            provider_id: _,
-            priority: _,
-        } => todo!(),
-        ModelRouteCommand::Remove { id: _ } => todo!(),
-        ModelRouteCommand::Toggle { id: _ } => todo!(),
+            pattern,
+            provider_id,
+            priority,
+        } => {
+            let route = ModelRoute {
+                id: None,
+                app_type: app.as_str().to_string(),
+                pattern: pattern.clone(),
+                provider_id: provider_id.clone(),
+                priority,
+                enabled: true,
+                created_at: None,
+                updated_at: None,
+            };
+            let created = state.db.create_model_route(&route)?;
+            println!(
+                "{}",
+                success(&format!(
+                    "Model route created: id={}, pattern=\"{}\" → provider={}, priority={}",
+                    created.id.unwrap_or_default(),
+                    created.pattern,
+                    created.provider_id,
+                    created.priority
+                ))
+            );
+        }
+        ModelRouteCommand::Remove { id } => {
+            state.db.delete_model_route(id)?;
+            println!(
+                "{}",
+                success(&format!("Model route {id} removed."))
+            );
+        }
+        ModelRouteCommand::Toggle { id } => {
+            let toggled = state.db.toggle_model_route(id)?;
+            let status = if toggled.enabled { "enabled" } else { "disabled" };
+            println!(
+                "{}",
+                success(&format!(
+                    "Model route {id} toggled: pattern=\"{}\" now {status}.",
+                    toggled.pattern
+                ))
+            );
+        }
         ModelRouteCommand::Update {
-            id: _,
-            pattern: _,
-            provider_id: _,
-            priority: _,
-        } => todo!(),
+            id,
+            pattern,
+            provider_id,
+            priority,
+        } => {
+            let existing = state
+                .db
+                .get_model_route(id)?
+                .ok_or_else(|| AppError::Database("model_route not found".to_string()))?;
+            let updated = ModelRoute {
+                id: None,
+                app_type: app.as_str().to_string(),
+                pattern: pattern.unwrap_or(existing.pattern),
+                provider_id: provider_id.unwrap_or(existing.provider_id),
+                priority: priority.unwrap_or(existing.priority),
+                enabled: existing.enabled,
+                created_at: None,
+                updated_at: None,
+            };
+            let result = state.db.update_model_route(id, &updated)?;
+            println!(
+                "{}",
+                success(&format!(
+                    "Model route {id} updated: pattern=\"{}\" → provider={}, priority={}.",
+                    result.pattern, result.provider_id, result.priority
+                ))
+            );
+        }
     }
+    Ok(())
 }
 
 fn get_state() -> Result<AppState, AppError> {
