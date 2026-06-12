@@ -25,12 +25,12 @@
 
 ### CLI 命令 (CLI)
 
-- [ ] **CL-01**: `cc-switch proxy model-route list [--app <app>]` — 列出所有路由规则
-- [ ] **CL-02**: `cc-switch proxy model-route add <pattern> <provider-id> [--priority <n>] [--app <app>]` — 添加路由
-- [ ] **CL-03**: `cc-switch proxy model-route remove <id>` — 删除路由
-- [ ] **CL-04**: `cc-switch proxy model-route toggle <id>` — 切换启用/禁用
-- [ ] **CL-05**: `cc-switch proxy model-route update <id> [--pattern] [--provider] [--priority]` — 更新路由
-- [ ] **CL-06**: 命令输出人类可读的表格格式（与现有 proxy 命令风格一致）
+- [x] **CL-01**: `cc-switch proxy model-route list [--app <app>]` — 列出所有路由规则
+- [x] **CL-02**: `cc-switch proxy model-route add <pattern> <provider-id> [--priority <n>] [--app <app>]` — 添加路由
+- [x] **CL-03**: `cc-switch proxy model-route remove <id>` — 删除路由
+- [x] **CL-04**: `cc-switch proxy model-route toggle <id>` — 切换启用/禁用
+- [x] **CL-05**: `cc-switch proxy model-route update <id> [--pattern] [--provider] [--priority]` — 更新路由
+- [x] **CL-06**: 命令输出人类可读的表格格式（与现有 proxy 命令风格一致）
 
 ### TUI 界面 (TUI)
 
@@ -52,7 +52,7 @@
 - [x] **TE-03**: Schema v10→v11 迁移测试
 - [ ] **TE-04**: 代理路由集成测试：匹配规则→选中正确 provider
 - [ ] **TE-05**: 代理回退集成测试：无匹配→回退到现有逻辑
-- [ ] **TE-06**: CLI 命令集成测试
+- [x] **TE-06**: CLI 命令集成测试
 
 ## Out of Scope
 
