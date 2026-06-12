@@ -111,6 +111,23 @@ pub enum Action {
         field: ProviderAddField,
         claude_idx: Option<usize>,
     },
+    ModelRouteAdd {
+        pattern: String,
+        provider_id: String,
+        priority: i32,
+    },
+    ModelRouteEdit {
+        id: i64,
+        pattern: String,
+        provider_id: String,
+        priority: i32,
+    },
+    ModelRouteDelete {
+        id: i64,
+    },
+    ModelRouteToggle {
+        id: i64,
+    },
     UsageCustomRange {
         range: data::UsageCustomRange,
     },

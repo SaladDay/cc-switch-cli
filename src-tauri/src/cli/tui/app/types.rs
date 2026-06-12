@@ -473,6 +473,9 @@ pub enum ConfirmAction {
     ClaudeModelFillAll {
         source_idx: usize,
     },
+    ModelRouteDelete {
+        id: i64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -509,6 +512,26 @@ pub enum TextSubmit {
     },
     WebDavJianguoyunUsername,
     WebDavJianguoyunPassword,
+    ModelRouteAddPattern,
+    ModelRouteAddProvider {
+        pattern: String,
+    },
+    ModelRouteAddPriority {
+        pattern: String,
+        provider_id: String,
+    },
+    ModelRouteEditPattern {
+        id: i64,
+    },
+    ModelRouteEditProvider {
+        id: i64,
+        pattern: String,
+    },
+    ModelRouteEditPriority {
+        id: i64,
+        pattern: String,
+        provider_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
