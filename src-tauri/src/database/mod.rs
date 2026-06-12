@@ -265,6 +265,7 @@ pub(crate) use lock_conn;
 pub struct Database {
     pub(crate) conn: Mutex<Connection>,
     runtime_key: String,
+    db_path: Option<PathBuf>,
 }
 
 impl Database {
@@ -329,6 +330,7 @@ impl Database {
         let db = Self {
             conn: Mutex::new(conn),
             runtime_key: format!("file:{}", db_path.display()),
+            db_path: Some(db_path.clone()),
         };
 
         {
@@ -389,6 +391,7 @@ impl Database {
         Ok(Self {
             conn: Mutex::new(conn),
             runtime_key: format!("file:{}", db_path.display()),
+            db_path: Some(db_path),
         })
     }
 
@@ -406,6 +409,7 @@ impl Database {
                 "memory:{}",
                 NEXT_MEMORY_DB_ID.fetch_add(1, Ordering::Relaxed)
             ),
+            db_path: None,
         };
         db.create_tables()?;
         db.ensure_model_pricing_seeded()?;
