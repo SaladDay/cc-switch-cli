@@ -30,12 +30,12 @@ impl ModelRouter {
     ///
     /// Routes are ordered by priority ASC (lowest number = highest priority).
     /// The first enabled route whose pattern matches `model` wins.
-    /// Returns the matched Provider if found, or None if no route matches.
+    /// Returns the matched (route_id, Provider) if found, or None if no route matches.
     pub async fn match_route(
         &self,
         app_type: &str,
         model: &str,
-    ) -> Result<Option<Provider>, ProxyError> {
+    ) -> Result<Option<(String, Provider)>, ProxyError> {
         if model.is_empty() {
             return Ok(None);
         }
@@ -62,10 +62,35 @@ impl ModelRouter {
             };
 
             if regex.is_match(model) {
-                return self
+                let provider_opt = self
                     .db
                     .get_provider_by_id(&route.provider_id, app_type)
-                    .map_err(|e| ProxyError::DatabaseError(format!("get_provider_by_id: {e}")));
+                    .map_err(|e| ProxyError::DatabaseError(format!("get_provider_by_id: {e}")))?;
+                let Some(provider) = provider_opt else {
+                    log::warn!(
+                        "model route matched but provider '{}' not found for app '{}' (route={}, pattern={})",
+                        route.provider_id, app_type, route.id, route.pattern
+                    );
+                    continue;
+                };
+                // 记录命中（异步 + spawn_blocking 避免阻塞）
+                let db = self.db.clone();
+                let route_id = route.id.clone();
+                let model_str = model.to_string();
+                let pattern = route.pattern.clone();
+                let provider_name = provider.name.clone();
+                let provider_id = provider.id.clone();
+                let app_type_owned = app_type.to_string();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = db.record_model_route_hit(&route_id) {
+                        log::warn!("failed to record model_route hit: {e}");
+                    } else {
+                        log::info!(
+                            "model route matched: app={app_type_owned}, model={model_str}, pattern={pattern} → provider={provider_name} (id={provider_id})"
+                        );
+                    }
+                });
+                return Ok(Some((route.id, provider)));
             }
         }
 
@@ -124,12 +149,14 @@ mod tests {
         enabled: bool,
     ) -> ModelRoute {
         ModelRoute {
-            id: None,
+            id: String::new(),
             app_type: app_type.into(),
             pattern: pattern.into(),
             provider_id: provider_id.into(),
             priority,
             enabled,
+            hit_count: 0,
+            last_hit_at: None,
             created_at: None,
             updated_at: None,
         }
@@ -194,7 +221,7 @@ mod tests {
             .await
             .expect("match_route");
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id, "prov-sonnet");
+        assert_eq!(result.unwrap().1.id, "prov-sonnet");
     }
 
     #[tokio::test]
@@ -280,7 +307,7 @@ mod tests {
             .await
             .expect("match_route");
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id, "prov-high");
+        assert_eq!(result.unwrap().1.id, "prov-high");
     }
 
     #[tokio::test]
@@ -346,7 +373,7 @@ mod tests {
             .await
             .expect("match_route");
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id, "prov-case");
+        assert_eq!(result.unwrap().1.id, "prov-case");
     }
 
     #[tokio::test]
@@ -364,7 +391,7 @@ mod tests {
             .await
             .expect("match_route");
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id, "prov-meta");
+        assert_eq!(result.unwrap().1.id, "prov-meta");
     }
 
     #[tokio::test]

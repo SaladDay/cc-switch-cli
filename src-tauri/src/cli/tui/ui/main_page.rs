@@ -291,6 +291,8 @@ pub(super) fn render_main(
         .split(chunks[1]);
 
     if current_app_routed {
+        // 收集路由命中按 provider 聚合（用于多色图例）
+        let route_hits = collect_route_hits_for_dashboard(data);
         render_proxy_activity_dashboard(
             frame,
             hero_chunks[0],
@@ -305,6 +307,7 @@ pub(super) fn render_main(
             auto_failover_queue_len,
             data.proxy.estimated_input_tokens_total,
             data.proxy.estimated_output_tokens_total,
+            &route_hits,
         );
     } else {
         render_logo_hero(frame, hero_chunks[0], theme);
@@ -336,6 +339,7 @@ fn render_proxy_activity_dashboard(
     auto_failover_queue_len: usize,
     input_tokens_total: u64,
     output_tokens_total: u64,
+    route_hits: &[ProviderHitInfo],
 ) -> Rect {
     let has_token_traffic = input_tokens_total > 0 || output_tokens_total > 0;
     let title_output_style = if has_token_traffic {
@@ -422,6 +426,36 @@ fn render_proxy_activity_dashboard(
         );
     }
 
+    // 多色 Provider 命中图例（model_routes 命中按 provider 分配不同颜色）
+    if !route_hits.is_empty() {
+        let total_hits: i64 = route_hits.iter().map(|h| h.hits).sum();
+        if total_hits > 0 {
+            let legend_label = crate::t!("Route hits", "路由命中");
+            meta_spans.push(Span::raw("  "));
+            meta_spans.push(Span::styled(format!("{legend_label}: "), label_style));
+            meta_plain.push_str("  ");
+            meta_plain.push_str(&legend_label);
+            meta_plain.push_str(": ");
+            for (i, hit) in route_hits.iter().take(5).enumerate() {
+                if i > 0 {
+                    meta_spans.push(Span::raw(", "));
+                    meta_plain.push_str(", ");
+                }
+                let pct = if total_hits > 0 {
+                    (hit.hits as f64 / total_hits as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let text = format!("{} {}% ({}h)", hit.display_name, pct as i32, hit.hits);
+                meta_spans.push(Span::styled(
+                    text.clone(),
+                    Style::default().fg(hit.color).add_modifier(Modifier::BOLD),
+                ));
+                meta_plain.push_str(&text);
+            }
+        }
+    }
+
     let max_text_height = inner.height.saturating_sub(2).clamp(1, 4);
     let text_height = wrapped_display_line_count(&meta_plain, inner.width).min(max_text_height);
     let graph_height = inner.height.saturating_sub(text_height).max(2);
@@ -489,6 +523,75 @@ fn wrapped_display_line_count(text: &str, width: u16) -> u16 {
     }
 
     UnicodeWidthStr::width(text).max(1).div_ceil(width as usize) as u16
+}
+
+/// Provider 命中信息（用于仪表盘多色图例）
+#[derive(Clone)]
+struct ProviderHitInfo {
+    display_name: String,
+    hits: i64,
+    color: Color,
+}
+
+/// 从 model_routes 数据按 provider 聚合命中数，分配不同颜色
+fn collect_route_hits_for_dashboard(data: &UiData) -> Vec<ProviderHitInfo> {
+    use std::collections::HashMap;
+    let mut agg: HashMap<String, i64> = HashMap::new();
+    for row in &data.model_routes.rows {
+        if !row.enabled {
+            continue;
+        }
+        if row.hit_count == 0 {
+            continue;
+        }
+        // 用 provider_id 作为聚合 key（可能多个 route 指向同一 provider）
+        *agg.entry(row.provider_id.clone()).or_insert(0) += row.hit_count;
+    }
+    if agg.is_empty() {
+        return Vec::new();
+    }
+    let mut v: Vec<(String, i64)> = agg.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    // 预定义 8 种循环颜色（彩色方案）
+    let palette = [
+        Color::Cyan,
+        Color::Magenta,
+        Color::Yellow,
+        Color::Green,
+        Color::Blue,
+        Color::LightRed,
+        Color::LightGreen,
+        Color::LightMagenta,
+    ];
+    v.into_iter()
+        .enumerate()
+        .map(|(i, (provider_id, hits))| {
+            let display_name = data
+                .providers
+                .rows
+                .iter()
+                .find(|p| p.id == provider_id)
+                .map(|p| {
+                    // 截断过长的 provider 名
+                    let s = p.provider.name.clone();
+                    if s.chars().count() > 8 {
+                        let truncated: String = s.chars().take(6).collect();
+                        format!("{truncated}…")
+                    } else {
+                        s
+                    }
+                })
+                .unwrap_or_else(|| {
+                    // provider 已被删除时使用 id 前 8 字符
+                    provider_id.chars().take(8).collect()
+                });
+            ProviderHitInfo {
+                display_name,
+                hits,
+                color: palette[i % palette.len()],
+            }
+        })
+        .collect()
 }
 
 fn render_logo_hero(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {

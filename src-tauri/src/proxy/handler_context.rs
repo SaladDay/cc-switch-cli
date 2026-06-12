@@ -56,17 +56,13 @@ impl HandlerContext {
             .to_string();
 
         // Try model route matching first (RT-01, RT-04)
+        // Note: hit_count is recorded inside match_route via spawn_blocking
         let (providers, route_source) = match model_router
             .match_route(app_type.as_str(), &request_model)
             .await
         {
-            Ok(Some(provider)) => {
-                log::info!(
-                    "model route matched: model={}, provider={}, provider_id={}",
-                    request_model,
-                    provider.name,
-                    provider.id
-                );
+            Ok(Some((_route_id, provider))) => {
+                // log::info! moved into match_route (with route id)
                 (vec![provider], Some("model_route".to_string()))
             }
             Ok(None) => {

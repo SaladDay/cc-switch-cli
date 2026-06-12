@@ -81,6 +81,8 @@ pub struct ModelRouteRow {
     pub provider_name: String,
     pub priority: i32,
     pub enabled: bool,
+    pub hit_count: i64,
+    pub last_hit_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2645,6 +2647,8 @@ fn load_model_routes_snapshot(
                 provider_name,
                 priority: route.priority,
                 enabled: route.enabled,
+                hit_count: route.hit_count,
+                last_hit_at: route.last_hit_at,
             }
         })
         .collect::<Vec<_>>();

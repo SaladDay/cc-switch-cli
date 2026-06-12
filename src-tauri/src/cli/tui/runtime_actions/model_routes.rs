@@ -29,6 +29,8 @@ fn refresh_model_routes_data(ctx: &mut RuntimeActionContext<'_>) -> Result<(), A
                 provider_name,
                 priority: route.priority,
                 enabled: route.enabled,
+                hit_count: route.hit_count,
+                last_hit_at: route.last_hit_at,
             }
         })
         .collect();
@@ -54,6 +56,10 @@ pub(super) fn handle_add(
         priority,
         enabled: true,
         created_at: None,
+
+        hit_count: 0,
+
+        last_hit_at: None,
         updated_at: None,
     };
 
@@ -81,6 +87,10 @@ pub(super) fn handle_edit(
         priority,
         enabled: true,
         created_at: None,
+
+        hit_count: 0,
+
+        last_hit_at: None,
         updated_at: None,
     };
 

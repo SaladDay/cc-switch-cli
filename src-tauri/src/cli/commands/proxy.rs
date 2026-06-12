@@ -152,6 +152,8 @@ fn handle_model_route(
                 enabled: true,
                 created_at: None,
                 updated_at: None,
+                hit_count: 0,
+                last_hit_at: None,
             };
             let created = state.db.create_model_route(&route)?;
             println!(
@@ -200,6 +202,8 @@ fn handle_model_route(
                 enabled: existing.enabled,
                 created_at: None,
                 updated_at: None,
+                hit_count: 0,
+                last_hit_at: None,
             };
             let result = state.db.update_model_route(&id, &updated)?;
             println!(
@@ -1091,6 +1095,8 @@ mod tests {
             priority: 0,
             enabled: true,
             created_at: None,
+            hit_count: 0,
+            last_hit_at: None,
             updated_at: None,
         })
         .expect("create route");
@@ -1136,6 +1142,8 @@ mod tests {
             priority: 0,
             enabled: true,
             created_at: None,
+            hit_count: 0,
+            last_hit_at: None,
             updated_at: None,
         })
         .expect("create route");
@@ -1192,6 +1200,8 @@ mod tests {
             priority: 5,
             enabled: true,
             created_at: None,
+            hit_count: 0,
+            last_hit_at: None,
             updated_at: None,
         })
         .expect("create route");
@@ -1237,6 +1247,8 @@ mod tests {
             priority: 5,
             enabled: true,
             created_at: None,
+            hit_count: 0,
+            last_hit_at: None,
             updated_at: None,
         })
         .expect("create route");
@@ -1280,6 +1292,8 @@ mod tests {
             priority: 5,
             enabled: true,
             created_at: None,
+            hit_count: 0,
+            last_hit_at: None,
             updated_at: None,
         })
         .expect("create route");

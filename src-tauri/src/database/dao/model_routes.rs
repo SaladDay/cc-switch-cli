@@ -1,12 +1,14 @@
 //! 模型路由 DAO (Model Route Data Access Object)
 //!
 //! 管理 model_routes 表的 CRUD 操作，为 per-model provider routing 提供持久化层。
-//! 支持按 app_type 列出路由、创建/更新/删除路由、切换启用状态。
+//! 支持按 app_type 列出路由、创建/更新/删除路由、切换启用状态、记录命中统计。
 //! id 使用 UUID v4 (TEXT PRIMARY KEY)，与上游 cc-switch 一致。
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::model_route::ModelRoute;
+
+const SELECT_COLS: &str = "id, app_type, pattern, provider_id, priority, enabled, hit_count, last_hit_at, created_at, updated_at";
 
 impl Database {
     /// 列出指定 app_type 的所有模型路由，按 priority ASC, created_at ASC 排序
@@ -14,27 +16,13 @@ impl Database {
         let conn = lock_conn!(self.conn);
 
         let mut stmt = conn
-            .prepare(
-                "SELECT id, app_type, pattern, provider_id, priority, enabled, created_at, updated_at
-                 FROM model_routes
-                 WHERE app_type = ?1
-                 ORDER BY priority ASC, created_at ASC",
-            )
+            .prepare(&format!(
+                "SELECT {SELECT_COLS} FROM model_routes WHERE app_type = ?1 ORDER BY priority ASC, created_at ASC"
+            ))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let items = stmt
-            .query_map([app_type], |row| {
-                Ok(ModelRoute {
-                    id: row.get(0)?,
-                    app_type: row.get(1)?,
-                    pattern: row.get(2)?,
-                    provider_id: row.get(3)?,
-                    priority: row.get(4)?,
-                    enabled: row.get::<_, i32>(5)? != 0,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
+            .query_map([app_type], |row| Ok(row_to_route(row)))
             .map_err(|e| AppError::Database(e.to_string()))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -47,26 +35,13 @@ impl Database {
         let conn = lock_conn!(self.conn);
 
         let mut stmt = conn
-            .prepare(
-                "SELECT id, app_type, pattern, provider_id, priority, enabled, created_at, updated_at
-                 FROM model_routes
-                 WHERE id = ?1",
-            )
+            .prepare(&format!(
+                "SELECT {SELECT_COLS} FROM model_routes WHERE id = ?1"
+            ))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut rows = stmt
-            .query_map([id], |row| {
-                Ok(ModelRoute {
-                    id: row.get(0)?,
-                    app_type: row.get(1)?,
-                    pattern: row.get(2)?,
-                    provider_id: row.get(3)?,
-                    priority: row.get(4)?,
-                    enabled: row.get::<_, i32>(5)? != 0,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
+            .query_map([id], |row| Ok(row_to_route(row)))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         rows.next()
@@ -78,7 +53,6 @@ impl Database {
     pub fn create_model_route(&self, route: &ModelRoute) -> Result<ModelRoute, AppError> {
         let conn = lock_conn!(self.conn);
 
-        // 验证 provider 存在
         let provider_exists: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM providers WHERE id = ?1 AND app_type = ?2",
@@ -94,7 +68,6 @@ impl Database {
             )));
         }
 
-        // 生成 UUID v4 作为 id
         let id = if route.id.is_empty() {
             uuid::Uuid::new_v4().to_string()
         } else {
@@ -102,11 +75,11 @@ impl Database {
         };
 
         let mut stmt = conn
-            .prepare(
+            .prepare(&format!(
                 "INSERT INTO model_routes (id, app_type, pattern, provider_id, priority, enabled)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 RETURNING id, app_type, pattern, provider_id, priority, enabled, created_at, updated_at",
-            )
+                 RETURNING {SELECT_COLS}"
+            ))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         stmt.query_row(
@@ -118,18 +91,7 @@ impl Database {
                 route.priority,
                 route.enabled as i32,
             ],
-            |row| {
-                Ok(ModelRoute {
-                    id: row.get(0)?,
-                    app_type: row.get(1)?,
-                    pattern: row.get(2)?,
-                    provider_id: row.get(3)?,
-                    priority: row.get(4)?,
-                    enabled: row.get::<_, i32>(5)? != 0,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            },
+            |row| Ok(row_to_route(row)),
         )
         .map_err(|e| AppError::Database(e.to_string()))
     }
@@ -138,7 +100,6 @@ impl Database {
     pub fn update_model_route(&self, id: &str, route: &ModelRoute) -> Result<ModelRoute, AppError> {
         let conn = lock_conn!(self.conn);
 
-        // 如果 provider_id 变更，验证新 provider 存在
         let current_provider: String = conn
             .query_row(
                 "SELECT provider_id FROM model_routes WHERE id = ?1",
@@ -165,13 +126,13 @@ impl Database {
         }
 
         let mut stmt = conn
-            .prepare(
+            .prepare(&format!(
                 "UPDATE model_routes SET
                      pattern = ?1, provider_id = ?2, priority = ?3, enabled = ?4,
                      updated_at = datetime('now')
                  WHERE id = ?5
-                 RETURNING id, app_type, pattern, provider_id, priority, enabled, created_at, updated_at",
-            )
+                 RETURNING {SELECT_COLS}"
+            ))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         stmt.query_row(
@@ -182,18 +143,7 @@ impl Database {
                 route.enabled as i32,
                 id,
             ],
-            |row| {
-                Ok(ModelRoute {
-                    id: row.get(0)?,
-                    app_type: row.get(1)?,
-                    pattern: row.get(2)?,
-                    provider_id: row.get(3)?,
-                    priority: row.get(4)?,
-                    enabled: row.get::<_, i32>(5)? != 0,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            },
+            |row| Ok(row_to_route(row)),
         )
         .map_err(|e| AppError::Database(e.to_string()))
     }
@@ -218,28 +168,80 @@ impl Database {
         let conn = lock_conn!(self.conn);
 
         let mut stmt = conn
-            .prepare(
+            .prepare(&format!(
                 "UPDATE model_routes SET
                      enabled = NOT enabled,
                      updated_at = datetime('now')
                  WHERE id = ?1
-                 RETURNING id, app_type, pattern, provider_id, priority, enabled, created_at, updated_at",
+                 RETURNING {SELECT_COLS}"
+            ))
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        stmt.query_row([id], |row| Ok(row_to_route(row)))
+            .map_err(|e| AppError::Database(e.to_string()))
+    }
+
+    /// 记录一次命中（增加 hit_count 并更新 last_hit_at）
+    /// 使用 UPDATE 而非事务，性能更好；last_hit_at 只在每次调用时更新（不频繁）
+    pub fn record_model_route_hit(&self, id: &str) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+
+        let changes = conn
+            .execute(
+                "UPDATE model_routes SET
+                     hit_count = hit_count + 1,
+                     last_hit_at = datetime('now')
+                 WHERE id = ?1",
+                [id],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
 
-        stmt.query_row([id], |row| {
-            Ok(ModelRoute {
-                id: row.get(0)?,
-                app_type: row.get(1)?,
-                pattern: row.get(2)?,
-                provider_id: row.get(3)?,
-                priority: row.get(4)?,
-                enabled: row.get::<_, i32>(5)? != 0,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+        if changes == 0 {
+            return Err(AppError::Database("model_route not found".to_string()));
+        }
+
+        Ok(())
+    }
+
+    /// 获取所有启用的 model_routes（按 app_type + provider_id 聚合用于仪表盘）
+    /// 返回 (app_type, provider_id, total_hits) 列表
+    pub fn aggregate_route_hits_by_provider(&self) -> Result<Vec<(String, String, i64)>, AppError> {
+        let conn = lock_conn!(self.conn);
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT app_type, provider_id, SUM(hit_count) as total
+                 FROM model_routes
+                 WHERE enabled = 1
+                 GROUP BY app_type, provider_id
+                 ORDER BY total DESC",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)?))
             })
-        })
-        .map_err(|e| AppError::Database(e.to_string()))
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        Ok(rows)
+    }
+}
+
+fn row_to_route(row: &rusqlite::Row) -> ModelRoute {
+    ModelRoute {
+        id: row.get(0).expect("id"),
+        app_type: row.get(1).expect("app_type"),
+        pattern: row.get(2).expect("pattern"),
+        provider_id: row.get(3).expect("provider_id"),
+        priority: row.get(4).expect("priority"),
+        enabled: row.get::<_, i32>(5).expect("enabled") != 0,
+        hit_count: row.get(6).expect("hit_count"),
+        last_hit_at: row.get(7).expect("last_hit_at"),
+        created_at: row.get(8).expect("created_at"),
+        updated_at: row.get(9).expect("updated_at"),
     }
 }
 
@@ -248,7 +250,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// 在内存数据库中准备一个 provider 供测试使用
     fn seed_provider(db: &Database, app_type: &str, id: &str) -> Result<(), AppError> {
         let conn = lock_conn!(db.conn);
         conn.execute(
@@ -268,6 +269,8 @@ mod tests {
             provider_id: provider_id.into(),
             priority,
             enabled: true,
+            hit_count: 0,
+            last_hit_at: None,
             created_at: None,
             updated_at: None,
         }
@@ -280,12 +283,12 @@ mod tests {
 
         let created = db.create_model_route(&test_route("*-sonnet", "test-prov", 10))?;
 
-        // id 应为 UUID v4 (36 字符)
         assert_eq!(created.id.len(), 36);
         assert_eq!(created.pattern, "*-sonnet");
         assert_eq!(created.provider_id, "test-prov");
         assert_eq!(created.priority, 10);
         assert!(created.enabled);
+        assert_eq!(created.hit_count, 0);
         assert!(created.created_at.is_some());
 
         let got = db.get_model_route(&created.id)?;
@@ -323,7 +326,6 @@ mod tests {
 
         let routes = db.list_model_routes("claude")?;
         assert_eq!(routes.len(), 3);
-        // 按 priority ASC 排序
         assert_eq!(routes[0].id, r2.id);
         assert_eq!(routes[0].priority, 1);
         assert_eq!(routes[1].id, r3.id);
@@ -351,6 +353,8 @@ mod tests {
                 provider_id: "p2".into(),
                 priority: 5,
                 enabled: false,
+                hit_count: 0,
+                last_hit_at: None,
                 created_at: None,
                 updated_at: None,
             },
@@ -361,7 +365,6 @@ mod tests {
         assert_eq!(updated.priority, 5);
         assert!(!updated.enabled);
 
-        // Verify persistence
         let got = db.get_model_route(&created.id)?;
         assert!(got.is_some());
         let got = got.unwrap();
@@ -400,9 +403,69 @@ mod tests {
         let got = db.get_model_route(&created.id)?;
         assert!(got.is_none());
 
-        // delete non-existent should error
         let result = db.delete_model_route("nonexistent-id");
         assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn record_model_route_hit_increments_count() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_provider(&db, "claude", "p1")?;
+
+        let created = db.create_model_route(&test_route("*-sonnet", "p1", 10))?;
+        assert_eq!(created.hit_count, 0);
+
+        db.record_model_route_hit(&created.id)?;
+        db.record_model_route_hit(&created.id)?;
+        db.record_model_route_hit(&created.id)?;
+
+        let got = db.get_model_route(&created.id)?.unwrap();
+        assert_eq!(got.hit_count, 3);
+        assert!(got.last_hit_at.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_route_hits_by_provider_groups_correctly() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_provider(&db, "claude", "p1")?;
+        seed_provider(&db, "claude", "p2")?;
+        seed_provider(&db, "codex", "cx1")?;
+
+        let r1 = db.create_model_route(&test_route("*sonnet*", "p1", 1))?;
+        let r2 = db.create_model_route(&test_route("*opus*", "p2", 2))?;
+        let r3 = db.create_model_route(&test_route("*codex*", "cx1", 1))?;
+        let _r4 = db.create_model_route(&test_route("disabled", "p1", 5))?;
+
+        // r4 is disabled
+        db.toggle_model_route(
+            &db.list_model_routes("claude")?
+                .iter()
+                .find(|r| r.pattern == "disabled")
+                .unwrap()
+                .id,
+        )?;
+
+        // 5 hits to claude/p1, 3 to claude/p2, 2 to codex/cx1
+        for _ in 0..5 {
+            db.record_model_route_hit(&r1.id)?;
+        }
+        for _ in 0..3 {
+            db.record_model_route_hit(&r2.id)?;
+        }
+        for _ in 0..2 {
+            db.record_model_route_hit(&r3.id)?;
+        }
+
+        let agg = db.aggregate_route_hits_by_provider()?;
+        // r4 was disabled but got 0 hits, so it should be filtered out
+        assert_eq!(agg.len(), 3);
+        assert_eq!(agg[0], ("claude".to_string(), "p1".to_string(), 5));
+        assert_eq!(agg[1], ("claude".to_string(), "p2".to_string(), 3));
+        assert_eq!(agg[2], ("codex".to_string(), "cx1".to_string(), 2));
 
         Ok(())
     }
