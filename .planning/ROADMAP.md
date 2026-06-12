@@ -114,38 +114,13 @@ Phases 3, 4, 5 可并行执行（都只依赖 Phase 2）。
 
 **Depends on:** Phase 1 + Phase 2（需要 DAO 和 ModelRouter 工作正常）
 **Estimated effort:** 6-10 小时（最大工作量）
-**Files to touch:** ~4 files, ~350 lines
+**Files to touch:** ~10 files, ~400 lines
+**Plans:** 2/2 plans complete
 
-### Tasks
+### Plans
 
-1. **路由列表表格**
-   - 在代理设置页面添加 "Model Routes" 区域/标签
-   - 表格列：Pattern | Provider | Priority | Enabled | Actions
-   - 集成到现有的 TUI 布局系统（`tui/ui/` 或 `tui/app/`）
-
-2. **创建/编辑表单**
-   - pattern 输入框（文本）
-   - provider 选择器（复用现有 provider picker）
-   - priority 数字输入
-   - 保存/取消
-
-3. **操作处理**
-   - runtime_actions 中新增 model_route 相关 action handler
-   - 调用 DAO 的 CRUD 方法
-   - 操作后刷新列表
-
-4. **界面一致性**
-   - 复用现有 TUI 组件库（form、table、overlay）
-   - 配色参考现有 proxy 设置页面的风格
-   - 键盘快捷键与现有界面一致
-
-### Verification
-- [ ] TUI 中能查看路由规则列表
-- [ ] 能创建新规则（输入 pattern + 选 provider + 设 priority）
-- [ ] 能编辑已有规则
-- [ ] 能删除规则（带确认）
-- [ ] 能切换启用/禁用
-- [ ] 界面无渲染异常（layout 不溢出、颜色正确）
+- [x] 04-01-PLAN.md — ModelRouteSnapshot data type, Route::SettingsModelRoutes, Settings menu entry, table rendering placeholder
+- [x] 04-02-PLAN.md — Action variants, runtime action handlers, multi-step Add/Edit overlays, delete confirmation, toggle, keyboard wiring
 
 **Covers:** UI-01 ~ UI-05
 
