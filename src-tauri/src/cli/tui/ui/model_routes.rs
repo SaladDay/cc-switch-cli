@@ -66,11 +66,21 @@ pub(super) fn render_settings_model_routes(
         .split(inner);
 
     if app.focus == Focus::Content {
+        let selected = data.model_routes.rows.get(app.model_routes_idx);
+        let mut key_items: Vec<(&str, &str)> = vec![
+            ("a", texts::tui_key_add()),
+            ("Space", texts::tui_key_toggle()),
+        ];
+        if selected.is_some() {
+            key_items.push(("e", texts::tui_key_edit()));
+            key_items.push(("d", texts::tui_key_delete()));
+        };
+        key_items.push(("\u{2191}\u{2193}", texts::tui_key_move()));
         render_key_bar_center(
             frame,
             chunks[0],
             theme,
-            &[("\u{2191}\u{2193}", texts::tui_key_move())],
+            &key_items,
         );
     }
 

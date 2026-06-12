@@ -956,6 +956,44 @@ impl App {
                 }
                 Action::None
             }
+            KeyCode::Char('a') => {
+                self.overlay = Overlay::TextInput(TextInputState {
+                    title: texts::tui_model_route_add_pattern_title().to_string(),
+                    prompt: texts::tui_model_route_add_pattern_prompt().to_string(),
+                    input: TextInput::new(String::new()),
+                    submit: TextSubmit::ModelRouteAddPattern,
+                    secret: false,
+                });
+                Action::None
+            }
+            KeyCode::Char('e') => {
+                if let Some(row) = data.model_routes.rows.get(self.model_routes_idx) {
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_model_route_edit_pattern_title().to_string(),
+                        prompt: texts::tui_model_route_edit_pattern_prompt().to_string(),
+                        input: TextInput::new(row.pattern.clone()),
+                        submit: TextSubmit::ModelRouteEditPattern { id: row.id },
+                        secret: false,
+                    });
+                }
+                Action::None
+            }
+            KeyCode::Char('d') => {
+                if let Some(row) = data.model_routes.rows.get(self.model_routes_idx) {
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_model_route_confirm_delete_title().to_string(),
+                        message: texts::tui_model_route_confirm_delete_message(&row.pattern),
+                        action: ConfirmAction::ModelRouteDelete { id: row.id },
+                    });
+                }
+                Action::None
+            }
+            KeyCode::Char(' ') => {
+                if let Some(row) = data.model_routes.rows.get(self.model_routes_idx) {
+                    return Action::ModelRouteToggle { id: row.id };
+                }
+                Action::None
+            }
             _ => Action::None,
         }
     }
