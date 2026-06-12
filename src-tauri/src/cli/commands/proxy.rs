@@ -4,6 +4,7 @@ use crate::app_config::AppType;
 use crate::cli::proxy_settings::{validate_proxy_listen_address, validate_proxy_listen_port};
 use crate::cli::ui::{highlight, info, success};
 use crate::error::AppError;
+use crate::model_route::ModelRoute;
 use crate::{AppState, ProxyConfig};
 
 #[cfg(unix)]
@@ -14,9 +15,43 @@ use crate::daemon::ipc::protocol::{Request as DaemonRequest, Response as DaemonR
 use crate::daemon::supervisor::{DAEMON_SOCKET_ENV, SESSION_TOKEN_ENV};
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum ModelRouteCommand {
+    /// List model routing rules
+    List,
+    /// Add a model routing rule
+    Add {
+        /// Wildcard pattern (e.g., *sonnet*, claude-*)
+        pattern: String,
+        /// Provider ID to route matching models to
+        provider_id: String,
+        /// Priority (lower = higher priority)
+        #[arg(long, default_value = "0")]
+        priority: i32,
+    },
+    /// Remove a model routing rule
+    Remove { id: i64 },
+    /// Toggle a model routing rule on/off
+    Toggle { id: i64 },
+    /// Update a model routing rule
+    Update {
+        id: i64,
+        #[arg(long)]
+        pattern: Option<String>,
+        #[arg(long)]
+        provider_id: Option<String>,
+        #[arg(long)]
+        priority: Option<i32>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum ProxyCommand {
     /// Show current proxy configuration and routes
     Show,
+
+    /// Manage model-based routing rules
+    #[command(subcommand)]
+    ModelRoute(ModelRouteCommand),
 
     /// Enable the persisted proxy switch
     Enable,
@@ -54,6 +89,10 @@ pub enum ProxyCommand {
 pub fn execute(cmd: ProxyCommand, app: Option<AppType>) -> Result<(), AppError> {
     let app_type = app.unwrap_or(AppType::Claude);
     match cmd {
+        ProxyCommand::ModelRoute(subcmd) => {
+            let state = get_state()?;
+            handle_model_route(&state, &app_type, subcmd)
+        }
         ProxyCommand::Show => show_proxy(),
         ProxyCommand::Enable => set_proxy_enabled(app_type, true),
         ProxyCommand::Disable => set_proxy_enabled(app_type, false),
@@ -66,6 +105,29 @@ pub fn execute(cmd: ProxyCommand, app: Option<AppType>) -> Result<(), AppError> 
             listen_port,
             takeovers,
         } => serve_proxy(listen_address, listen_port, takeovers),
+    }
+}
+
+fn handle_model_route(
+    state: &AppState,
+    app: &AppType,
+    cmd: ModelRouteCommand,
+) -> Result<(), AppError> {
+    match cmd {
+        ModelRouteCommand::List => todo!(),
+        ModelRouteCommand::Add {
+            pattern: _,
+            provider_id: _,
+            priority: _,
+        } => todo!(),
+        ModelRouteCommand::Remove { id: _ } => todo!(),
+        ModelRouteCommand::Toggle { id: _ } => todo!(),
+        ModelRouteCommand::Update {
+            id: _,
+            pattern: _,
+            provider_id: _,
+            priority: _,
+        } => todo!(),
     }
 }
 
