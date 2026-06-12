@@ -168,9 +168,7 @@ impl App {
             Route::Settings
             | Route::SettingsProxy
             | Route::SettingsManagedAccounts
-            | Route::SettingsModelRoutes => {
-                NavItem::Settings
-            }
+            | Route::SettingsModelRoutes => NavItem::Settings,
         }
     }
 
