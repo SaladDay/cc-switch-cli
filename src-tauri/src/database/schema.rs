@@ -273,6 +273,8 @@ impl Database {
                 provider_id TEXT NOT NULL,
                 priority INTEGER NOT NULL DEFAULT 0,
                 enabled INTEGER NOT NULL DEFAULT 1,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                last_hit_at TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
@@ -554,6 +556,17 @@ impl Database {
             "in_failover_queue",
             "BOOLEAN NOT NULL DEFAULT 0",
         )?;
+
+        // model_routes 统计字段（cc-switch v12 未含，留作向后兼容 + 命中追踪）
+        if Self::table_exists(conn, "model_routes")? {
+            Self::add_column_if_missing(
+                conn,
+                "model_routes",
+                "hit_count",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            Self::add_column_if_missing(conn, "model_routes", "last_hit_at", "TEXT")?;
+        }
 
         // 添加代理超时配置字段
         if Self::table_exists(conn, "proxy_config")? {

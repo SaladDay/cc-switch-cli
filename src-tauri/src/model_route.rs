@@ -14,6 +14,8 @@ pub struct ModelRoute {
     pub provider_id: String,
     pub priority: i32,
     pub enabled: bool,
+    pub hit_count: i64,
+    pub last_hit_at: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -31,6 +33,8 @@ mod tests {
             provider_id: "test-prov".into(),
             priority: 10,
             enabled: true,
+            hit_count: 0,
+            last_hit_at: None,
             created_at: Some("2025-01-01 00:00:00".into()),
             updated_at: Some("2025-01-01 00:00:00".into()),
         };
