@@ -873,6 +873,12 @@ fn create_secure_config_dir_all_no_symlink(
                         fs::DirBuilder::new()
                             .mode(0o700)
                             .create(&current)
+                            .or_else(|create_err| {
+                                if create_err.kind() != std::io::ErrorKind::AlreadyExists {
+                                    return Err(create_err);
+                                }
+                                ensure_existing_secure_config_dir(&current)
+                            })
                             .map_err(|e| AppError::io(&current, e))?;
                     }
                     Err(err) => return Err(AppError::io(&current, err)),
@@ -882,6 +888,22 @@ fn create_secure_config_dir_all_no_symlink(
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_existing_secure_config_dir(path: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "path is a symlink",
+        )),
+        Ok(meta) if meta.is_dir() => restrict_dir_permissions(path),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "path exists and is not a directory",
+        )),
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(unix)]
@@ -1726,6 +1748,42 @@ mod tests {
         assert_eq!(mode, 0o600);
         assert_eq!(dir_mode, 0o700);
         assert!(check_permissions().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_secure_config_dir_recheck_restricts_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let dir = temp.path().join("cc-switch");
+        std::fs::create_dir(&dir).expect("create dir");
+        std::fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("set dir perms");
+
+        ensure_existing_secure_config_dir(&dir).expect("existing directory should be accepted");
+
+        let mode = std::fs::metadata(&dir)
+            .expect("metadata dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_secure_config_dir_recheck_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let target = temp.path().join("target");
+        let link = temp.path().join("link");
+        std::fs::create_dir(&target).expect("create target");
+        symlink(&target, &link).expect("create symlink");
+
+        let err = ensure_existing_secure_config_dir(&link)
+            .expect_err("existing symlink must not be accepted");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
     }
 
     #[cfg(target_os = "macos")]
