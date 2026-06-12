@@ -2565,6 +2565,10 @@ pub(super) fn render_settings(
                     data.proxy.configured_listen_address, data.proxy.configured_listen_port,
                 ),
             ),
+            super::app::SettingsItem::ModelRoutes => (
+                texts::tui_settings_model_routes_title().to_string(),
+                format!("{} rules", data.model_routes.rows.len()),
+            ),
             super::app::SettingsItem::CheckForUpdates => (
                 texts::tui_settings_check_for_updates().to_string(),
                 format!("v{}", env!("CARGO_PKG_VERSION")),

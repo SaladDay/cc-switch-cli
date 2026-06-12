@@ -800,6 +800,9 @@ impl App {
                     Action::None
                 }
                 Some(SettingsItem::Proxy) => self.push_route_and_switch(Route::SettingsProxy),
+                Some(SettingsItem::ModelRoutes) => {
+                    self.push_route_and_switch(Route::SettingsModelRoutes)
+                }
                 Some(SettingsItem::CheckForUpdates) => Action::CheckUpdate,
                 None => Action::None,
             },
@@ -936,6 +939,27 @@ impl App {
             },
             KeyCode::Char(' ') => self.switch_selected_managed_account(),
             KeyCode::Enter => self.activate_managed_account_row(),
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn on_settings_model_routes_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Action {
+        let routes_len = data.model_routes.rows.len();
+        match key.code {
+            KeyCode::Up => {
+                self.model_routes_idx = self.model_routes_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                if routes_len > 0 {
+                    self.model_routes_idx = (self.model_routes_idx + 1).min(routes_len - 1);
+                }
+                Action::None
+            }
             _ => Action::None,
         }
     }

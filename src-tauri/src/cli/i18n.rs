@@ -3936,6 +3936,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_model_routes_title() -> &'static str {
+        if is_chinese() {
+            "模型路由"
+        } else {
+            "Model Routes"
+        }
+    }
+
     pub fn tui_managed_accounts_not_loaded() -> &'static str {
         if is_chinese() {
             "未加载"

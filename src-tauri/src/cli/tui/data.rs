@@ -73,6 +73,21 @@ pub(crate) struct ProviderQuotaState {
     pub(crate) updated_at: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ModelRouteRow {
+    pub id: i64,
+    pub pattern: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub priority: i32,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelRouteSnapshot {
+    pub rows: Vec<ModelRouteRow>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct QuotaSnapshot {
     by_provider: HashMap<String, ProviderQuotaState>,
@@ -838,6 +853,7 @@ pub struct UiData {
     pub proxy: ProxySnapshot,
     pub usage: UsageSnapshot,
     pub pricing: ModelPricingSnapshot,
+    pub model_routes: ModelRouteSnapshot,
     pub(crate) quota: QuotaSnapshot,
     pub(crate) reload_token: UiDataReloadToken,
 }
@@ -853,6 +869,7 @@ impl Default for UiData {
             proxy: ProxySnapshot::default(),
             usage: UsageSnapshot::default(),
             pricing: ModelPricingSnapshot::default(),
+            model_routes: ModelRouteSnapshot::default(),
             quota: QuotaSnapshot::default(),
             reload_token: UiDataReloadToken::default(),
         }
@@ -930,6 +947,8 @@ impl UiData {
         };
         let proxy = load_proxy_snapshot_from_state(state, app_type)?;
 
+        let model_routes = load_model_routes_snapshot(state, app_type, &providers)?;
+
         Ok(Self {
             providers,
             mcp,
@@ -937,6 +956,7 @@ impl UiData {
             config,
             skills,
             proxy,
+            model_routes,
             usage: UsageSnapshot::default(),
             pricing: ModelPricingSnapshot::default(),
             quota: QuotaSnapshot::default(),
@@ -962,6 +982,7 @@ impl UiData {
             config: self.config.loading_projection(app_type),
             skills: self.skills.clone(),
             proxy,
+            model_routes: ModelRouteSnapshot::default(),
             usage: UsageSnapshot::default(),
             pricing: ModelPricingSnapshot::default(),
             quota: QuotaSnapshot::default(),
@@ -2598,6 +2619,43 @@ fn load_proxy_snapshot_from_state(
             current_app_target,
         })
     })
+}
+
+fn load_model_routes_snapshot(
+    state: &AppState,
+    app_type: &AppType,
+    providers: &ProvidersSnapshot,
+) -> Result<ModelRouteSnapshot, AppError> {
+    let model_routes = state.db.list_model_routes(app_type.as_str())?;
+
+    let mut rows = model_routes
+        .into_iter()
+        .map(|route| {
+            let provider_name = providers
+                .rows
+                .iter()
+                .find(|p| p.id == route.provider_id)
+                .map(|p| crate::cli::tui::data::provider_display_name(app_type, p))
+                .unwrap_or_else(|| route.provider_id.clone());
+
+            ModelRouteRow {
+                id: route.id.unwrap_or(0),
+                pattern: route.pattern,
+                provider_id: route.provider_id,
+                provider_name,
+                priority: route.priority,
+                enabled: route.enabled,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|a, b| {
+        a.priority
+            .cmp(&b.priority)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    Ok(ModelRouteSnapshot { rows })
 }
 
 fn load_skills_snapshot() -> Result<SkillsSnapshot, AppError> {

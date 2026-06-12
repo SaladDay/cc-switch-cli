@@ -441,11 +441,12 @@ pub enum SettingsItem {
     SkipClaudeOnboarding,
     ClaudePluginIntegration,
     Proxy,
+    ModelRoutes,
     CheckForUpdates,
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 9] = [
+    pub const ALL: [SettingsItem; 10] = [
         SettingsItem::ManagedAccounts,
         SettingsItem::Language,
         SettingsItem::VisibleAppsMode,
@@ -454,6 +455,7 @@ impl SettingsItem {
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,
         SettingsItem::Proxy,
+        SettingsItem::ModelRoutes,
         SettingsItem::CheckForUpdates,
     ];
 }
@@ -584,6 +586,8 @@ pub struct App {
     pub settings_idx: usize,
     pub settings_proxy_idx: usize,
     pub settings_managed_accounts_idx: usize,
+    /// Selected index in the model routes table.
+    pub model_routes_idx: usize,
     pub managed_auth_status: Option<crate::services::ManagedAuthStatus>,
     pub managed_auth_loading: bool,
     pub managed_auth_login: Option<ManagedAuthLoginState>,
