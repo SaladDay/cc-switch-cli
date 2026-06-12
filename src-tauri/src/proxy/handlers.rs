@@ -287,6 +287,7 @@ async fn handle_claude_request(
             app_type: context.app_type.clone(),
             provider: forward_result.provider.clone(),
             current_provider_id_at_start: context.current_provider_id_at_start.clone(),
+            is_model_routed: context.route_source.as_deref() == Some("model_route"),
         });
         let first_byte_timeout = remaining_timeout(first_byte_timeout, request_started_at);
         let idle_timeout = context.streaming_idle_timeout();
@@ -404,6 +405,7 @@ async fn handle_claude_request(
         app_type: context.app_type.clone(),
         provider: provider.clone(),
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
+        is_model_routed: context.route_source.as_deref() == Some("model_route"),
     });
     let api_format = super::providers::get_claude_api_format(provider);
     let response_result = if adapter.needs_transform(provider) {
@@ -636,6 +638,7 @@ async fn handle_passthrough_request(
             app_type: context.app_type.clone(),
             provider: forward_result.provider.clone(),
             current_provider_id_at_start: context.current_provider_id_at_start.clone(),
+            is_model_routed: context.route_source.as_deref() == Some("model_route"),
         });
         let response_result = match response {
             super::forwarder::StreamingResponse::Live(response)
@@ -787,6 +790,7 @@ async fn handle_passthrough_request(
         app_type: context.app_type.clone(),
         provider: forward_result.provider.clone(),
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
+        is_model_routed: context.route_source.as_deref() == Some("model_route"),
     });
     let status = response.status;
     let request_log = Some(RequestLogContext::from_handler(
@@ -1016,6 +1020,7 @@ async fn finish_codex_live_aware_response(
         app_type: context.app_type.clone(),
         provider: provider.clone(),
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
+        is_model_routed: context.route_source.as_deref() == Some("model_route"),
     });
 
     if super::providers::should_convert_codex_responses_to_chat(&provider, endpoint) {
