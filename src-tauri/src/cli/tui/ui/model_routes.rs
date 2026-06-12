@@ -76,12 +76,7 @@ pub(super) fn render_settings_model_routes(
             key_items.push(("d", texts::tui_key_delete()));
         };
         key_items.push(("\u{2191}\u{2193}", texts::tui_key_move()));
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &key_items,
-        );
+        render_key_bar_center(frame, chunks[0], theme, &key_items);
     }
 
     let table = Table::new(rows, constraints)
