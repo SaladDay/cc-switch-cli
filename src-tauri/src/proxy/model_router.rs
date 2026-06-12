@@ -129,9 +129,12 @@ fn compile_pattern(pattern: &str) -> Result<Regex, regex::Error> {
         return Regex::new(&format!("(?i)^{escaped}$"));
     }
 
-    // Split on *, escape each segment, join with .*
+    // Split on *, escape each segment, join with .* and anchor at start only.
+    // ^ prevents substring matches (e.g. "claude-*" matching "xclaude-opus").
+    // No $ — trailing * means open-ended, and patterns like "*-sonnet" should
+    // match "claude-sonnet-4-6" (which does not end with "-sonnet").
     let segments: Vec<&str> = pattern.split('*').collect();
-    let mut regex_str = String::from("(?i)");
+    let mut regex_str = String::from("(?i)^");
     for (i, segment) in segments.iter().enumerate() {
         if i > 0 {
             regex_str.push_str(".*");
@@ -204,6 +207,30 @@ mod tests {
     fn compile_pattern_star_suffix() {
         let re = compile_pattern("claude-*").expect("compile claude-*");
         assert!(re.is_match("claude-opus-4-8"));
+        assert!(!re.is_match("gemini-2.5-pro"));
+        // 锚定保证：前缀匹配，不可中间包含
+        assert!(!re.is_match("xclaude-opus"));
+    }
+
+    #[test]
+    fn compile_pattern_star_middle_anchored() {
+        // *sonnet* 加 ^ 锚定后，必须从开头匹配，但 .* 仍允许中间任意内容
+        let re = compile_pattern("*sonnet*").expect("compile *sonnet*");
+        assert!(re.is_match("sonnet"));
+        assert!(re.is_match("claude-sonnet-4-6"));
+        assert!(re.is_match("claude-sonnet"));
+        // 包含 "sonnet" 的都匹配（.*sonnet.* 语义）
+        assert!(re.is_match("claude- haikuxxsonnetyy"));
+        assert!(!re.is_match("claude-haiku-4-6"));
+    }
+
+    #[test]
+    fn compile_pattern_prefix_anchor_prevents_substring() {
+        // claude-* 加 ^ 后，不再匹配 xclaude-opus
+        let re = compile_pattern("claude-*").expect("compile claude-*");
+        assert!(re.is_match("claude-opus-4-8"));
+        assert!(re.is_match("claude-"));
+        assert!(!re.is_match("xclaude-opus"));
         assert!(!re.is_match("gemini-2.5-pro"));
     }
 
