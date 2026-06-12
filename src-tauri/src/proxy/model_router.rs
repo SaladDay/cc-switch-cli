@@ -36,6 +36,25 @@ impl ModelRouter {
         app_type: &str,
         model: &str,
     ) -> Result<Option<(String, Provider)>, ProxyError> {
+        self.match_route_internal(app_type, model).await
+    }
+
+    pub async fn match_route_respecting_manual_provider(
+        &self,
+        app_type: &str,
+        model: &str,
+        _manual_provider: Option<&Provider>,
+    ) -> Result<Option<(String, Provider)>, ProxyError> {
+        // Model routes always take priority — even when a manual provider is set,
+        // an explicit matching route fires regardless.
+        self.match_route_internal(app_type, model).await
+    }
+
+    async fn match_route_internal(
+        &self,
+        app_type: &str,
+        model: &str,
+    ) -> Result<Option<(String, Provider)>, ProxyError> {
         if model.is_empty() {
             return Ok(None);
         }
@@ -406,9 +425,16 @@ mod tests {
             .expect("disable foreign keys");
         guard
             .execute(
-                "INSERT INTO model_routes (app_type, pattern, provider_id, priority, enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params!["claude", "*-missing", "prov-missing", 1, true],
+                "INSERT INTO model_routes (id, app_type, pattern, provider_id, priority, enabled)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    "claude",
+                    "*-missing",
+                    "prov-missing",
+                    1,
+                    true
+                ],
             )
             .expect("insert dangling model route");
         guard

@@ -8,6 +8,7 @@ use crate::provider::Provider;
 
 use super::{
     error::ProxyError,
+    model_mapper::provider_has_explicit_role_mapping,
     provider_router::ProviderRouter,
     server::ProxyServerState,
     session::extract_session_id,
@@ -55,26 +56,62 @@ impl HandlerContext {
             .unwrap_or("unknown")
             .to_string();
 
-        // Try model route matching first (RT-01, RT-04)
-        // Note: hit_count is recorded inside match_route via spawn_blocking
+        let manual_provider = current_provider_id_at_start
+            .is_empty()
+            .then_some(None)
+            .unwrap_or_else(|| {
+                state
+                    .db
+                    .get_provider_by_id(&current_provider_id_at_start, app_type.as_str())
+                    .ok()
+                    .flatten()
+            });
+
+        // A manual Claude provider switch writes role-model mappings into live config
+        // (for example claude-opus-4-8[1M] -> deepseek-v4-pro[1m]). We treat these
+        // as a fallback that only overrides broad default role routes (*opus*, *sonnet*,
+        // *haiku*). Explicit, specific model routes still fire normally.
+        let manual_role_provider = if matches!(app_type, AppType::Claude) {
+            manual_provider
+                .clone()
+                .filter(|provider| provider_has_explicit_role_mapping(provider, &request_model))
+        } else {
+            None
+        };
+
+        // Model route matching first — the router internally skips only
+        // default role patterns (*opus*, etc.) when a manual provider has an
+        // explicit role mapping, but specific routes like "claude-opus-4-8*"
+        // still match normally.
         let (providers, route_source) = match model_router
-            .match_route(app_type.as_str(), &request_model)
+            .match_route_respecting_manual_provider(
+                app_type.as_str(),
+                &request_model,
+                manual_provider.as_ref(),
+            )
             .await
         {
-            Ok(Some((_route_id, provider))) => {
-                // log::info! moved into match_route (with route id)
-                (vec![provider], Some("model_route".to_string()))
-            }
+            Ok(Some((_route_id, provider))) => (vec![provider], Some("model_route".to_string())),
             Ok(None) => {
-                // RT-04: no match, fallback to existing ProviderRouter
-                let providers = provider_router.select_providers(app_type.as_str()).await?;
-                (providers, None)
+                if let Some(provider) = manual_role_provider {
+                    // No model route matched — use manual role mapping as fallback
+                    (vec![provider], Some("manual_provider_model".to_string()))
+                } else {
+                    // RT-04: no match, fallback to existing ProviderRouter
+                    let providers = provider_router.select_providers(app_type.as_str()).await?;
+                    (providers, None)
+                }
             }
             Err(e) => {
-                // RT-05: match_route error (DB error), log warning and fallback
-                log::warn!("model route lookup failed: {e}, falling back to provider router");
-                let providers = provider_router.select_providers(app_type.as_str()).await?;
-                (providers, None)
+                if let Some(provider) = manual_role_provider {
+                    log::warn!("model route lookup failed: {e}, using manual role mapping");
+                    (vec![provider], Some("manual_provider_model".to_string()))
+                } else {
+                    // RT-05: match_route error (DB error), log warning and fallback
+                    log::warn!("model route lookup failed: {e}, falling back to provider router");
+                    let providers = provider_router.select_providers(app_type.as_str()).await?;
+                    (providers, None)
+                }
             }
         };
 
@@ -158,6 +195,7 @@ mod tests {
 
     use serde_json::json;
     use serial_test::serial;
+    use std::collections::HashMap;
     use std::env;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
@@ -248,6 +286,7 @@ mod tests {
             model_router: Arc::new(ModelRouter::new(db)),
             codex_chat_history: Arc::new(Default::default()),
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
+            provider_token_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -410,12 +449,14 @@ mod tests {
         // Create model route: pattern "*sonnet*" → claude-current (priority 1)
         use crate::model_route::ModelRoute;
         let route = ModelRoute {
-            id: None,
+            id: String::new(),
             app_type: "claude".into(),
             pattern: "*sonnet*".into(),
             provider_id: "claude-current".into(),
             priority: 1,
             enabled: true,
+            hit_count: 0,
+            last_hit_at: None,
             created_at: None,
             updated_at: None,
         };
@@ -434,6 +475,137 @@ mod tests {
         // Model route matched — single provider, not the failover queue
         assert_eq!(context.providers().len(), 1);
         assert_eq!(context.providers()[0].id, "claude-current");
+        assert_eq!(context.route_source, Some("model_route".to_string()));
+    }
+
+    #[tokio::test]
+    #[serial(home_settings)]
+    async fn model_route_always_takes_priority_over_manual_provider() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let mut current = test_provider("deepseek-current", 1);
+        current.name = "DeepSeek".to_string();
+        current.settings_config = json!({
+            "env": {
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro[1m]"
+            }
+        });
+        let route_target = test_provider("pp-coder", 0);
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.save_provider("claude", &route_target)
+            .expect("save route target provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider");
+
+        let mut config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read app proxy config");
+        config.enabled = true;
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config)
+            .await
+            .expect("enable auto failover");
+
+        use crate::model_route::ModelRoute;
+        let route = ModelRoute {
+            id: String::new(),
+            app_type: "claude".into(),
+            pattern: "*opus*".into(),
+            provider_id: route_target.id.clone(),
+            priority: 0,
+            enabled: true,
+            hit_count: 0,
+            last_hit_at: None,
+            created_at: None,
+            updated_at: None,
+        };
+        db.create_model_route(&route).expect("create model route");
+
+        let state = test_state(db);
+        let context = HandlerContext::load(
+            &state,
+            AppType::Claude,
+            &HeaderMap::new(),
+            &json!({"model": "claude-opus-4-8[1M]"}),
+        )
+        .await
+        .expect("load handler context");
+
+        // Model routes always take priority — even when a manual provider
+        // with a role mapping is active, *opus* (p0) → route_target wins.
+        assert_eq!(context.providers().len(), 1);
+        assert_eq!(context.providers()[0].id, "pp-coder");
+        assert_eq!(context.route_source, Some("model_route".to_string()));
+    }
+
+    #[tokio::test]
+    #[serial(home_settings)]
+    async fn specific_model_route_beats_manual_role_mapping() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("create memory database"));
+
+        // Manual provider: deepseek-current, with explicit opus role mapping
+        let mut current = test_provider("deepseek-current", 1);
+        current.name = "DeepSeek".to_string();
+        current.settings_config = json!({
+            "env": {
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro[1m]"
+            }
+        });
+
+        // Another provider that a *specific* model route should direct to
+        let specific_target = test_provider("specific-opus-prov", 0);
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.save_provider("claude", &specific_target)
+            .expect("save specific target provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider");
+
+        let mut config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read app proxy config");
+        config.enabled = true;
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config)
+            .await
+            .expect("enable auto failover");
+
+        // Specific model route (NOT a default role pattern like "*opus*")
+        use crate::model_route::ModelRoute;
+        let specific_route = ModelRoute {
+            id: String::new(),
+            app_type: "claude".into(),
+            pattern: "claude-opus-4-8*".into(),
+            provider_id: specific_target.id.clone(),
+            priority: 10,
+            enabled: true,
+            hit_count: 0,
+            last_hit_at: None,
+            created_at: None,
+            updated_at: None,
+        };
+        db.create_model_route(&specific_route)
+            .expect("create specific model route");
+
+        let state = test_state(db);
+        let context = HandlerContext::load(
+            &state,
+            AppType::Claude,
+            &HeaderMap::new(),
+            &json!({"model": "claude-opus-4-8[1M]"}),
+        )
+        .await
+        .expect("load handler context");
+
+        // Specific route wins over manual role mapping
+        assert_eq!(context.providers().len(), 1);
+        assert_eq!(context.providers()[0].id, "specific-opus-prov");
         assert_eq!(context.route_source, Some("model_route".to_string()));
     }
 

@@ -151,9 +151,9 @@ fn handle_model_route(
                 priority,
                 enabled: true,
                 created_at: None,
-                updated_at: None,
                 hit_count: 0,
                 last_hit_at: None,
+                updated_at: None,
             };
             let created = state.db.create_model_route(&route)?;
             println!(
@@ -201,9 +201,9 @@ fn handle_model_route(
                 priority: priority.unwrap_or(existing.priority),
                 enabled: existing.enabled,
                 created_at: None,
-                updated_at: None,
                 hit_count: 0,
                 last_hit_at: None,
+                updated_at: None,
             };
             let result = state.db.update_model_route(&id, &updated)?;
             println!(
@@ -1087,21 +1087,29 @@ mod tests {
         let app = AppType::Claude;
 
         // Add then remove
-        db.create_model_route(&ModelRoute {
-            id: None,
-            app_type: "claude".to_string(),
-            pattern: "*-sonnet".to_string(),
-            provider_id: "test-prov".to_string(),
-            priority: 0,
-            enabled: true,
-            created_at: None,
-            hit_count: 0,
-            last_hit_at: None,
-            updated_at: None,
-        })
-        .expect("create route");
+        let route_id = db
+            .create_model_route(&ModelRoute {
+                id: String::new(),
+                app_type: "claude".to_string(),
+                pattern: "*-sonnet".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 0,
+                enabled: true,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            })
+            .expect("create route")
+            .id;
 
-        let result = handle_model_route(&state, &app, ModelRouteCommand::Remove { id: 1 });
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Remove {
+                id: route_id.clone(),
+            },
+        );
         assert!(result.is_ok(), "remove should succeed");
 
         let routes = db.list_model_routes("claude").expect("list routes");
@@ -1118,7 +1126,13 @@ mod tests {
         };
         let app = AppType::Claude;
 
-        let result = handle_model_route(&state, &app, ModelRouteCommand::Remove { id: 999 });
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Remove {
+                id: "missing-route".to_string(),
+            },
+        );
         assert!(result.is_err(), "remove nonexistent should fail");
     }
 
@@ -1134,34 +1148,49 @@ mod tests {
         let app = AppType::Claude;
 
         // Create an enabled route
-        db.create_model_route(&ModelRoute {
-            id: None,
-            app_type: "claude".to_string(),
-            pattern: "*-sonnet".to_string(),
-            provider_id: "test-prov".to_string(),
-            priority: 0,
-            enabled: true,
-            created_at: None,
-            hit_count: 0,
-            last_hit_at: None,
-            updated_at: None,
-        })
-        .expect("create route");
+        let route_id = db
+            .create_model_route(&ModelRoute {
+                id: String::new(),
+                app_type: "claude".to_string(),
+                pattern: "*-sonnet".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 0,
+                enabled: true,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            })
+            .expect("create route")
+            .id;
 
         // Toggle off
-        let result = handle_model_route(&state, &app, ModelRouteCommand::Toggle { id: 1 });
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Toggle {
+                id: route_id.clone(),
+            },
+        );
         assert!(result.is_ok(), "toggle should succeed");
 
         let route = db
-            .get_model_route(1)
+            .get_model_route(&route_id)
             .expect("get route")
             .expect("route exists");
         assert!(!route.enabled, "should be disabled after toggle");
 
         // Toggle on
-        handle_model_route(&state, &app, ModelRouteCommand::Toggle { id: 1 }).expect("toggle back");
+        handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Toggle {
+                id: route_id.clone(),
+            },
+        )
+        .expect("toggle back");
         let route = db
-            .get_model_route(1)
+            .get_model_route(&route_id)
             .expect("get route")
             .expect("route exists");
         assert!(route.enabled, "should be enabled after second toggle");
@@ -1177,7 +1206,13 @@ mod tests {
         };
         let app = AppType::Claude;
 
-        let result = handle_model_route(&state, &app, ModelRouteCommand::Toggle { id: 999 });
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Toggle {
+                id: "missing-route".to_string(),
+            },
+        );
         assert!(result.is_err(), "toggle nonexistent should fail");
     }
 
@@ -1192,25 +1227,27 @@ mod tests {
         };
         let app = AppType::Claude;
 
-        db.create_model_route(&ModelRoute {
-            id: None,
-            app_type: "claude".to_string(),
-            pattern: "original-*".to_string(),
-            provider_id: "test-prov".to_string(),
-            priority: 5,
-            enabled: true,
-            created_at: None,
-            hit_count: 0,
-            last_hit_at: None,
-            updated_at: None,
-        })
-        .expect("create route");
+        let route_id = db
+            .create_model_route(&ModelRoute {
+                id: String::new(),
+                app_type: "claude".to_string(),
+                pattern: "original-*".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 5,
+                enabled: true,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            })
+            .expect("create route")
+            .id;
 
         let result = handle_model_route(
             &state,
             &app,
             ModelRouteCommand::Update {
-                id: 1,
+                id: route_id.clone(),
                 pattern: Some("new-pattern-*".to_string()),
                 provider_id: None,
                 priority: None,
@@ -1219,7 +1256,7 @@ mod tests {
         assert!(result.is_ok(), "update pattern should succeed");
 
         let route = db
-            .get_model_route(1)
+            .get_model_route(&route_id)
             .expect("get route")
             .expect("route exists");
         assert_eq!(route.pattern, "new-pattern-*");
@@ -1239,25 +1276,27 @@ mod tests {
         };
         let app = AppType::Claude;
 
-        db.create_model_route(&ModelRoute {
-            id: None,
-            app_type: "claude".to_string(),
-            pattern: "*-sonnet".to_string(),
-            provider_id: "test-prov".to_string(),
-            priority: 5,
-            enabled: true,
-            created_at: None,
-            hit_count: 0,
-            last_hit_at: None,
-            updated_at: None,
-        })
-        .expect("create route");
+        let route_id = db
+            .create_model_route(&ModelRoute {
+                id: String::new(),
+                app_type: "claude".to_string(),
+                pattern: "*-sonnet".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 5,
+                enabled: true,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            })
+            .expect("create route")
+            .id;
 
         let result = handle_model_route(
             &state,
             &app,
             ModelRouteCommand::Update {
-                id: 1,
+                id: route_id.clone(),
                 pattern: None,
                 provider_id: Some("other-prov".to_string()),
                 priority: None,
@@ -1266,7 +1305,7 @@ mod tests {
         assert!(result.is_ok(), "update provider should succeed");
 
         let route = db
-            .get_model_route(1)
+            .get_model_route(&route_id)
             .expect("get route")
             .expect("route exists");
         assert_eq!(route.provider_id, "other-prov");
@@ -1284,25 +1323,27 @@ mod tests {
         };
         let app = AppType::Claude;
 
-        db.create_model_route(&ModelRoute {
-            id: None,
-            app_type: "claude".to_string(),
-            pattern: "*-sonnet".to_string(),
-            provider_id: "test-prov".to_string(),
-            priority: 5,
-            enabled: true,
-            created_at: None,
-            hit_count: 0,
-            last_hit_at: None,
-            updated_at: None,
-        })
-        .expect("create route");
+        let route_id = db
+            .create_model_route(&ModelRoute {
+                id: String::new(),
+                app_type: "claude".to_string(),
+                pattern: "*-sonnet".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 5,
+                enabled: true,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            })
+            .expect("create route")
+            .id;
 
         let result = handle_model_route(
             &state,
             &app,
             ModelRouteCommand::Update {
-                id: 1,
+                id: route_id.clone(),
                 pattern: None,
                 provider_id: None,
                 priority: Some(99),
@@ -1311,7 +1352,7 @@ mod tests {
         assert!(result.is_ok(), "update priority should succeed");
 
         let route = db
-            .get_model_route(1)
+            .get_model_route(&route_id)
             .expect("get route")
             .expect("route exists");
         assert_eq!(route.priority, 99);
@@ -1331,7 +1372,7 @@ mod tests {
             &state,
             &app,
             ModelRouteCommand::Update {
-                id: 999,
+                id: "missing-route".to_string(),
                 pattern: Some("new-*".to_string()),
                 provider_id: None,
                 priority: None,

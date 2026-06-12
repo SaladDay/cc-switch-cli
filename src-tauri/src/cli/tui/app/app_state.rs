@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -564,6 +565,9 @@ pub struct App {
     pub proxy_output_activity_samples: Vec<u64>,
     pub proxy_activity_last_input_tokens: Option<u64>,
     pub proxy_activity_last_output_tokens: Option<u64>,
+    /// 按 provider 聚合的 activity 样本（provider_id → samples），用于仪表盘点阵图多色展示
+    pub proxy_provider_activity_samples: HashMap<String, Vec<u64>>,
+    pub proxy_activity_last_provider_tokens: Option<HashMap<String, u64>>,
     pub proxy_visual_state: Option<bool>,
     pub proxy_visual_transition: Option<ProxyVisualTransition>,
     pub quota_auto_target_key: Option<String>,

@@ -39,6 +39,7 @@ pub struct ProxyServerState {
     pub model_router: Arc<ModelRouter>,
     pub codex_chat_history: Arc<CodexChatHistoryStore>,
     pub gemini_shadow: Arc<GeminiShadowStore>,
+    pub provider_token_map: Arc<RwLock<HashMap<String, u64>>>,
 }
 
 impl ProxyServerState {
@@ -62,6 +63,8 @@ impl ProxyServerState {
             .collect::<Vec<_>>();
         active_targets.sort_by(|left, right| left.app_type.cmp(&right.app_type));
         status.active_targets = active_targets;
+
+        status.provider_token_map = self.provider_token_map.read().await.clone();
 
         status
     }
@@ -91,6 +94,15 @@ impl ProxyServerState {
         let mut status = self.status.write().await;
         status.estimated_output_tokens_total =
             status.estimated_output_tokens_total.saturating_add(tokens);
+    }
+
+    /// 按 provider 记录预估 token 数，用于仪表盘点阵图多色展示
+    pub async fn record_provider_activity(&self, provider_id: &str, tokens: u64) {
+        if tokens == 0 {
+            return;
+        }
+        let mut map = self.provider_token_map.write().await;
+        *map.entry(provider_id.to_string()).or_default() += tokens;
     }
 
     pub async fn record_active_target(&self, app_type: &AppType, provider: &Provider) {
@@ -285,6 +297,7 @@ mod tests {
             model_router: Arc::new(ModelRouter::new(db)),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
+            provider_token_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -514,6 +527,7 @@ impl ProxyServer {
                 model_router,
                 codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
                 gemini_shadow: Arc::new(GeminiShadowStore::default()),
+                provider_token_map: Arc::new(RwLock::new(HashMap::new())),
             },
             shutdown_tx: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),
@@ -629,6 +643,7 @@ impl ProxyServer {
         Router::new()
             .route("/health", get(handlers::health_check))
             .route("/status", get(handlers::get_status))
+            .route("/v1/models", get(handlers::handle_models))
             .route("/v1/messages", post(handlers::handle_messages))
             .route("/claude/v1/messages", post(handlers::handle_messages))
             .route("/chat/completions", post(handlers::handle_chat_completions))

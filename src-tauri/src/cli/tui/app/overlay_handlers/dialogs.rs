@@ -381,40 +381,17 @@ impl App {
                     });
                     return Action::None;
                 }
-                self.overlay = Overlay::TextInput(TextInputState {
-                    title: texts::tui_model_route_add_provider_title().to_string(),
-                    prompt: texts::tui_model_route_add_provider_prompt().to_string(),
-                    input: TextInput::new(String::new()),
-                    submit: TextSubmit::ModelRouteAddProvider { pattern: raw },
-                    secret: false,
-                });
+                // 打开 provider 选择器而非文本输入
+                self.overlay = Overlay::ModelRouteProviderPicker {
+                    pattern: raw,
+                    selected: 0,
+                    editing: false,
+                    existing_id: None,
+                };
                 Action::None
             }
-            TextSubmit::ModelRouteAddProvider { pattern } => {
-                if raw.is_empty() {
-                    self.push_toast(
-                        texts::tui_toast_provider_add_missing_fields(),
-                        ToastKind::Warning,
-                    );
-                    self.overlay = Overlay::TextInput(TextInputState {
-                        title: texts::tui_model_route_add_provider_title().to_string(),
-                        prompt: texts::tui_model_route_add_provider_prompt().to_string(),
-                        input: TextInput::new(raw),
-                        submit: TextSubmit::ModelRouteAddProvider { pattern },
-                        secret: false,
-                    });
-                    return Action::None;
-                }
-                self.overlay = Overlay::TextInput(TextInputState {
-                    title: texts::tui_model_route_add_priority_title().to_string(),
-                    prompt: texts::tui_model_route_add_priority_prompt().to_string(),
-                    input: TextInput::new("0".to_string()),
-                    submit: TextSubmit::ModelRouteAddPriority {
-                        pattern,
-                        provider_id: raw,
-                    },
-                    secret: false,
-                });
+            TextSubmit::ModelRouteAddProvider { .. } => {
+                // 不再使用 — provider 选择器直接跳到优先级步骤
                 Action::None
             }
             TextSubmit::ModelRouteAddPriority {
@@ -443,43 +420,21 @@ impl App {
                     });
                     return Action::None;
                 }
-                self.overlay = Overlay::TextInput(TextInputState {
-                    title: texts::tui_model_route_edit_provider_title().to_string(),
-                    prompt: texts::tui_model_route_edit_provider_prompt().to_string(),
-                    input: TextInput::new(String::new()),
-                    submit: TextSubmit::ModelRouteEditProvider { id, pattern: raw },
-                    secret: false,
-                });
+                self.overlay = Overlay::ModelRouteProviderPicker {
+                    pattern: raw,
+
+                    selected: 0,
+
+                    editing: true,
+
+                    existing_id: Some(id),
+                };
+
                 Action::None
             }
-            TextSubmit::ModelRouteEditProvider { id, pattern } => {
-                if raw.is_empty() {
-                    self.push_toast(
-                        texts::tui_toast_provider_add_missing_fields(),
-                        ToastKind::Warning,
-                    );
-                    self.overlay = Overlay::TextInput(TextInputState {
-                        title: texts::tui_model_route_edit_provider_title().to_string(),
-                        prompt: texts::tui_model_route_edit_provider_prompt().to_string(),
-                        input: TextInput::new(raw),
-                        submit: TextSubmit::ModelRouteEditProvider { id, pattern },
-                        secret: false,
-                    });
-                    return Action::None;
-                }
-                self.overlay = Overlay::TextInput(TextInputState {
-                    title: texts::tui_model_route_edit_priority_title().to_string(),
-                    prompt: texts::tui_model_route_edit_priority_prompt().to_string(),
-                    input: TextInput::new("0".to_string()),
-                    submit: TextSubmit::ModelRouteEditPriority {
-                        id,
-                        pattern,
-                        provider_id: raw,
-                    },
-                    secret: false,
-                });
-                Action::None
-            }
+
+            TextSubmit::ModelRouteEditProvider { .. } => Action::None,
+
             TextSubmit::ModelRouteEditPriority {
                 id,
                 pattern,

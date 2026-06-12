@@ -70,6 +70,32 @@ impl ModelMapping {
 
         original_model.to_string()
     }
+
+    pub fn map_explicit_role_model(&self, original_model: &str) -> Option<String> {
+        let model_lower = original_model.to_lowercase();
+
+        if model_lower.contains("haiku") {
+            return self.haiku_model.clone();
+        }
+        if model_lower.contains("opus") {
+            return self.opus_model.clone();
+        }
+        if model_lower.contains("sonnet") {
+            return self.sonnet_model.clone();
+        }
+
+        None
+    }
+}
+
+pub fn provider_has_explicit_role_mapping(provider: &Provider, original_model: &str) -> bool {
+    let Some(mapped) =
+        ModelMapping::from_provider(provider).map_explicit_role_model(original_model)
+    else {
+        return false;
+    };
+
+    mapped.trim() != original_model.trim()
 }
 
 pub fn apply_model_mapping(
@@ -185,5 +211,20 @@ mod tests {
         let body = json!({"model": "deepseek-v4-pro"});
         let result = strip_one_m_suffix_for_upstream_from_body(body);
         assert_eq!(result["model"], "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn detects_explicit_role_mapping_without_using_default_model() {
+        let mut provider = provider_with_mapping("deepseek-v4-pro [1M]");
+        provider.settings_config["env"]["ANTHROPIC_MODEL"] = json!("default-model");
+
+        assert!(provider_has_explicit_role_mapping(
+            &provider,
+            "claude-sonnet-4-6[1M]"
+        ));
+        assert!(!provider_has_explicit_role_mapping(
+            &provider,
+            "some-custom-model"
+        ));
     }
 }
