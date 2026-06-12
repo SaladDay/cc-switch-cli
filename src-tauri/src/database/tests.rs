@@ -209,13 +209,13 @@ fn schema_migration_sets_user_version_when_missing() {
 fn schema_migration_rejects_future_version() {
     let conn = Connection::open_in_memory().expect("open memory db");
     Database::create_tables_on_conn(&conn).expect("create tables");
-    Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");
+    Database::set_user_version(&conn, SCHEMA_VERSION + 2).expect("set future version");
 
     let err =
         Database::apply_schema_migrations_on_conn(&conn).expect_err("should reject higher version");
     let message = err.to_string();
     assert!(message.contains("由较新版本的 CC Switch 创建"));
-    assert!(message.contains(&format!("数据库版本: {}", SCHEMA_VERSION + 1)));
+    assert!(message.contains(&format!("数据库版本: {}", SCHEMA_VERSION + 2)));
     assert!(message.contains(&format!("最高支持数据库版本: {SCHEMA_VERSION}")));
     assert!(message.contains("cc-switch update"));
 }
@@ -228,7 +228,7 @@ fn init_rejects_future_schema_before_creating_tables() {
     let _guard = ConfigDirEnvGuard::set(temp.path());
     let db_path = temp.path().join("cc-switch.db");
     let conn = Connection::open(&db_path).expect("open db");
-    Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");
+    Database::set_user_version(&conn, SCHEMA_VERSION + 2).expect("set future version");
     drop(conn);
 
     let err = match Database::init() {
