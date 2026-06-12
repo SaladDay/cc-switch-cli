@@ -24,9 +24,10 @@ use crate::{
         },
         data::{
             ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot,
-            OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
-            ProxySnapshot, SkillsSnapshot, UiData, UsageLogRow, UsageProviderStatsRow,
-            UsageRangePreset, UsageSnapshot, UsageSummarySnapshot, UsageTrendBucket,
+            ModelRouteSnapshot, OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow,
+            ProvidersSnapshot, ProxySnapshot, SkillsSnapshot, UiData, UsageLogRow,
+            UsageProviderStatsRow, UsageRangePreset, UsageSnapshot, UsageSummarySnapshot,
+            UsageTrendBucket,
         },
         form::{FormFocus, FormState, PromptMetaFormState, ProviderAddField, TextInput},
         route::{NavItem, Route},
@@ -1562,6 +1563,7 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
         usage: UsageSnapshot::default(),
         pricing: Default::default(),
         quota: Default::default(),
+        model_routes: ModelRouteSnapshot::default(),
         reload_token: Default::default(),
     }
 }
