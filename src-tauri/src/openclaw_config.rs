@@ -1,4 +1,4 @@
-use crate::config::{atomic_write, get_app_config_dir, home_dir};
+use crate::config::{atomic_write, create_managed_config_dir_all, get_app_config_dir, home_dir};
 use crate::error::AppError;
 use crate::provider::OpenClawProviderConfig;
 use crate::settings::{effective_backup_retain_count, get_openclaw_override_dir};
@@ -326,7 +326,7 @@ fn write_root_section(section: &str, value: &Value) -> Result<OpenClawWriteOutco
 
 fn create_openclaw_backup(source: &str) -> Result<PathBuf, AppError> {
     let backup_dir = get_app_config_dir().join("backups").join("openclaw");
-    fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+    create_managed_config_dir_all(&backup_dir)?;
 
     let base_id = format!("openclaw_{}", Local::now().format("%Y%m%d_%H%M%S"));
     let mut filename = format!("{base_id}.json5");

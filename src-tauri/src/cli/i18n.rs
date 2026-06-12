@@ -11136,6 +11136,108 @@ pub mod texts {
             "No live providers were imported"
         }
     }
+
+    // -----------------------------------------------------------------
+    // config.rs - validate_config_dir & prompt_fix_permissions
+    // -----------------------------------------------------------------
+
+    pub fn config_dir_is_system_dir(dir: &str, resolved: &str) -> String {
+        if is_chinese() {
+            format!("CC_SWITCH_CONFIG_DIR 不能设置为系统目录: {dir}（解析后: {resolved}）")
+        } else {
+            format!(
+                "CC_SWITCH_CONFIG_DIR must not be a system directory: {dir} (resolved: {resolved})"
+            )
+        }
+    }
+
+    pub fn config_dir_invalid_last_component(path: &str) -> String {
+        if is_chinese() {
+            format!("配置目录路径无效，无法解析最后一层目录: {path}")
+        } else {
+            format!("Invalid config directory path; unable to resolve the final directory component: {path}")
+        }
+    }
+
+    pub fn config_dir_only_final_component_may_be_missing(path: &str) -> String {
+        if is_chinese() {
+            format!("配置目录路径无效，仅允许最后一层目录不存在: {path}")
+        } else {
+            format!("Invalid config directory path; only the final directory component may be missing: {path}")
+        }
+    }
+
+    pub fn config_permissions_insecure_header() -> &'static str {
+        if is_chinese() {
+            "⚠ 检测到以下文件/目录权限不安全："
+        } else {
+            "⚠ Insecure file/directory permissions detected:"
+        }
+    }
+
+    pub fn config_permissions_detail(path: &str, current: u32, expected: u32) -> String {
+        if is_chinese() {
+            format!("  {path}  当前 {current:04o}，期望 {expected:04o}")
+        } else {
+            format!("  {path}  current {current:04o}, expected {expected:04o}")
+        }
+    }
+
+    pub fn config_permissions_fix_prompt() -> &'static str {
+        if is_chinese() {
+            "是否现在修复权限？（仅所有者可访问）"
+        } else {
+            "Fix permissions now? (owner-only access)"
+        }
+    }
+
+    pub fn config_permissions_fixed() -> &'static str {
+        if is_chinese() {
+            "✓ 权限已修复"
+        } else {
+            "✓ Permissions fixed"
+        }
+    }
+
+    pub fn config_permissions_fix_warn_interactive() -> &'static str {
+        if is_chinese() {
+            "⚠ 未来版本将拒绝在权限不安全的情况下启动，请尽快修复。"
+        } else {
+            "⚠ Future versions will refuse to start with insecure permissions. Please fix soon."
+        }
+    }
+
+    pub fn config_permissions_fix_warn_noninteractive() -> &'static str {
+        if is_chinese() {
+            "⚠ 检测到配置文件权限不安全（非交互模式），跳过修复。未来版本将拒绝启动。"
+        } else {
+            "⚠ Insecure config permissions detected (non-interactive). Skipped. Future versions will refuse to start."
+        }
+    }
+
+    pub fn config_permissions_custom_dir_notice(path: &str) -> String {
+        if is_chinese() {
+            format!("检测到自定义配置目录: {path}，请核实此目录不是关键系统目录")
+        } else {
+            format!("Custom config directory detected: {path}, please verify this is not a critical system directory")
+        }
+    }
+
+    pub fn config_permissions_confirm_custom_dir() -> &'static str {
+        if is_chinese() {
+            "确认要修改此目录的权限吗？"
+        } else {
+            "Confirm modifying permissions on this directory?"
+        }
+    }
+
+    pub fn config_permissions_custom_dir_skipped() -> &'static str {
+        if is_chinese() {
+            "已跳过权限修复。"
+        } else {
+            "Skipped permission fix."
+        }
+    }
 }
 
 #[cfg(test)]
@@ -11181,6 +11283,33 @@ mod tests {
         assert!(!help.contains("Skills:"));
         assert!(!help.contains("Config:"));
         assert!(!help.contains("Settings:"));
+    }
+
+    #[test]
+    fn config_dir_validation_messages_are_localized() {
+        {
+            let _lang = use_test_language(Language::English);
+            assert_eq!(
+                texts::config_dir_invalid_last_component("/tmp/child/.."),
+                "Invalid config directory path; unable to resolve the final directory component: /tmp/child/.."
+            );
+            assert_eq!(
+                texts::config_dir_only_final_component_may_be_missing("/tmp/child/.."),
+                "Invalid config directory path; only the final directory component may be missing: /tmp/child/.."
+            );
+        }
+
+        {
+            let _lang = use_test_language(Language::Chinese);
+            assert_eq!(
+                texts::config_dir_invalid_last_component("/tmp/child/.."),
+                "配置目录路径无效，无法解析最后一层目录: /tmp/child/.."
+            );
+            assert_eq!(
+                texts::config_dir_only_final_component_may_be_missing("/tmp/child/.."),
+                "配置目录路径无效，仅允许最后一层目录不存在: /tmp/child/.."
+            );
+        }
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::env_checker::EnvConflict;
-use crate::config::get_app_config_dir;
+use crate::config::{create_managed_config_dir_all, get_app_config_dir, write_json_file};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -44,7 +44,7 @@ pub fn delete_env_vars(conflicts: Vec<EnvConflict>) -> Result<BackupInfo, String
 fn create_backup(conflicts: &[EnvConflict]) -> Result<BackupInfo, String> {
     // Get backup directory
     let backup_dir = get_backup_dir()?;
-    fs::create_dir_all(&backup_dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
+    create_managed_config_dir_all(&backup_dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
 
     // Generate backup file name with timestamp
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
@@ -57,11 +57,7 @@ fn create_backup(conflicts: &[EnvConflict]) -> Result<BackupInfo, String> {
         conflicts: conflicts.to_vec(),
     };
 
-    // Write backup file
-    let json = serde_json::to_string_pretty(&backup_info)
-        .map_err(|e| format!("序列化备份数据失败: {e}"))?;
-
-    fs::write(&backup_file, json).map_err(|e| format!("写入备份文件失败: {e}"))?;
+    write_json_file(&backup_file, &backup_info).map_err(|e| format!("写入备份文件失败: {e}"))?;
 
     Ok(backup_info)
 }
@@ -236,5 +232,48 @@ mod tests {
     fn test_backup_dir_creation() {
         let backup_dir = get_backup_dir();
         assert!(backup_dir.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_backup_json_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+
+        let backup = create_backup(&[]).expect("create backup");
+        let backup_path = PathBuf::from(&backup.backup_path);
+        let mode = std::fs::metadata(&backup_path)
+            .expect("metadata backup")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(
+            crate::config::check_permissions().is_empty(),
+            "fresh env backup should not be reported as insecure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_backup_rejects_parent_dir_config_path_before_creating_intermediate_dirs() {
+        let root = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(root.path());
+        unsafe {
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", root.path().join("child").join(".."));
+        }
+
+        create_backup(&[]).expect_err("invalid config dir should be rejected before backup");
+
+        assert!(
+            !root.path().join("child").exists(),
+            "backup creation must not pre-create unvalidated path components"
+        );
+        assert!(
+            !root.path().join("backups").exists(),
+            "backup creation must not write to the normalized parent directory"
+        );
     }
 }

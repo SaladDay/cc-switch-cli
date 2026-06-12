@@ -108,13 +108,13 @@ impl Database {
         let effective_filter = effective_usage_log_filter("l");
         let aggregation_sql = format!(
             "INSERT OR REPLACE INTO usage_daily_rollups
-                (date, app_type, provider_id, model,
+                (date, app_type, provider_id, model, request_model, pricing_model,
                  request_count, success_count,
                  input_tokens, output_tokens,
                  cache_read_tokens, cache_creation_tokens,
                  total_cost_usd, avg_latency_ms)
             SELECT
-                d, a, p, m,
+                d, a, p, m, rm, pm,
                 COALESCE(old.request_count, 0) + new_req,
                 COALESCE(old.success_count, 0) + new_succ,
                 COALESCE(old.input_tokens, 0) + new_in,
@@ -131,6 +131,8 @@ impl Database {
                 SELECT
                     date(l.created_at, 'unixepoch', 'localtime') as d,
                     l.app_type as a, l.provider_id as p, l.model as m,
+                    COALESCE(l.request_model, '') as rm,
+                    COALESCE(l.pricing_model, '') as pm,
                     COUNT(*) as new_req,
                     SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END) as new_succ,
                     COALESCE(SUM(l.input_tokens), 0) as new_in,
@@ -141,11 +143,12 @@ impl Database {
                     COALESCE(AVG(l.latency_ms), 0) as new_lat
                 FROM proxy_request_logs l
                 WHERE l.created_at < ?1 AND {effective_filter}
-                GROUP BY d, a, p, m
+                GROUP BY d, a, p, m, rm, pm
             ) agg
             LEFT JOIN usage_daily_rollups old
                 ON old.date = agg.d AND old.app_type = agg.a
-                AND old.provider_id = agg.p AND old.model = agg.m"
+                AND old.provider_id = agg.p AND old.model = agg.m
+                AND old.request_model = agg.rm AND old.pricing_model = agg.pm"
         );
 
         conn.execute(&aggregation_sql, [cutoff])
@@ -329,6 +332,77 @@ mod tests {
     fn test_rollup_noop_when_no_old_data() -> Result<(), AppError> {
         let db = Database::memory()?;
         assert_eq!(db.rollup_and_prune(30)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rollup_preserves_request_and_pricing_model_dimensions() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let now = chrono::Utc::now().timestamp();
+        let old_ts = now - 40 * 86400;
+
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            for (request_id, request_model, pricing_model, cost) in [
+                ("dim-a", "claude-sonnet-4", "claude-sonnet-4", "0.10"),
+                ("dim-b", "claude-haiku-4", "claude-haiku-4", "0.01"),
+                ("dim-c", "claude-sonnet-4", "kimi-k2", "0.02"),
+            ] {
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (
+                        request_id, provider_id, app_type, model, request_model, pricing_model,
+                        input_tokens, output_tokens, total_cost_usd,
+                        latency_ms, status_code, created_at
+                    ) VALUES (?1, 'p1', 'claude', 'kimi-k2', ?2, ?3, 100, 50, ?4, 200, 200, ?5)",
+                    rusqlite::params![request_id, request_model, pricing_model, cost, old_ts],
+                )?;
+            }
+        }
+
+        let deleted = db.rollup_and_prune(30)?;
+        assert_eq!(deleted, 3);
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let mut stmt = conn.prepare(
+            "SELECT request_model, pricing_model, request_count, total_cost_usd
+             FROM usage_daily_rollups
+             WHERE model = 'kimi-k2'
+             ORDER BY request_model, pricing_model",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "claude-haiku-4".to_string(),
+                    "claude-haiku-4".to_string(),
+                    1,
+                    "0.01".to_string(),
+                ),
+                (
+                    "claude-sonnet-4".to_string(),
+                    "claude-sonnet-4".to_string(),
+                    1,
+                    "0.1".to_string(),
+                ),
+                (
+                    "claude-sonnet-4".to_string(),
+                    "kimi-k2".to_string(),
+                    1,
+                    "0.02".to_string(),
+                ),
+            ]
+        );
         Ok(())
     }
 

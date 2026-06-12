@@ -59,11 +59,13 @@ impl ConfigService {
             .ok_or_else(|| AppError::Config("Invalid config path".into()))?
             .join("backups");
 
-        fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+        crate::database::create_secure_dir_all(&backup_dir)?;
 
         let backup_path = backup_dir.join(format!("{backup_id}.sql"));
         let db = Database::init()?;
         db.export_sql(&backup_path)?;
+        crate::config::restrict_file_permissions(&backup_path)
+            .map_err(|e| AppError::io(&backup_path, e))?;
 
         Self::cleanup_old_backups(&backup_dir, MAX_BACKUPS)?;
 

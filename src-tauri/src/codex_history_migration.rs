@@ -6,14 +6,16 @@
 use crate::codex_config::{
     get_codex_config_dir, read_codex_config_text, CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
 };
-use crate::config::{atomic_write, copy_file, get_app_config_dir};
+use crate::config::{
+    atomic_write, copy_file, create_managed_config_parent_dirs, get_app_config_dir,
+};
 use crate::database::{is_official_seed_id, Database};
 use crate::error::AppError;
 use crate::settings::{
     CodexProviderTemplateMigration, CodexThirdPartyHistoryProviderBucketMigration,
 };
 use chrono::{Local, Utc};
-use rusqlite::{backup::Backup, params_from_iter, Connection};
+use rusqlite::{backup::Backup, params_from_iter, Connection, OpenFlags};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
@@ -732,18 +734,73 @@ fn backup_codex_state_db(
     let backup_path = backup_root
         .join("state")
         .join(relative_backup_path(db_path, codex_dir));
-    if let Some(parent) = backup_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+    create_managed_config_parent_dirs(&backup_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::symlink_metadata(&backup_path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(AppError::InvalidInput(format!(
+                    "Codex state DB 备份文件不能是符号链接: {}",
+                    backup_path.display()
+                )));
+            }
+            Ok(meta) if meta.is_file() => {
+                return Err(AppError::InvalidInput(format!(
+                    "Codex state DB 备份文件已存在: {}",
+                    backup_path.display()
+                )));
+            }
+            Ok(_) => {
+                return Err(AppError::InvalidInput(format!(
+                    "Codex state DB 备份路径不是普通文件: {}",
+                    backup_path.display()
+                )));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&backup_path)
+                    .map_err(|e| AppError::io(&backup_path, e))?;
+            }
+            Err(err) => return Err(AppError::io(&backup_path, err)),
+        }
     }
 
-    let mut backup_conn = Connection::open(&backup_path)
-        .map_err(|e| AppError::Database(format!("创建 Codex state DB 备份失败: {e}")))?;
+    let mut backup_conn = open_codex_state_backup_connection(&backup_path)?;
     let backup = Backup::new(source_conn, &mut backup_conn)
         .map_err(|e| AppError::Database(format!("初始化 Codex state DB 备份失败: {e}")))?;
     backup
         .run_to_completion(5, Duration::from_millis(25), None)
         .map_err(|e| AppError::Database(format!("写入 Codex state DB 备份失败: {e}")))?;
     Ok(())
+}
+
+fn open_codex_state_backup_connection(backup_path: &Path) -> Result<Connection, AppError> {
+    let open_path = canonicalize_existing_parent(backup_path)?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+
+    Connection::open_with_flags(&open_path, flags)
+        .map_err(|e| AppError::Database(format!("创建 Codex state DB 备份失败: {e}")))
+}
+
+fn canonicalize_existing_parent(path: &Path) -> Result<PathBuf, AppError> {
+    let Some(file_name) = path.file_name() else {
+        return Err(AppError::InvalidInput(format!(
+            "Codex state DB 备份路径缺少文件名: {}",
+            path.display()
+        )));
+    };
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::InvalidInput(format!("无效路径: {}", path.display())))?;
+    let parent = parent.canonicalize().map_err(|e| AppError::io(parent, e))?;
+    Ok(parent.join(file_name))
 }
 
 fn backup_provider_settings_config(
@@ -754,9 +811,7 @@ fn backup_provider_settings_config(
     let backup_path = backup_root
         .join("providers")
         .join(provider_settings_backup_filename(provider_id));
-    if let Some(parent) = backup_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
+    create_managed_config_parent_dirs(&backup_path)?;
 
     let payload = serde_json::json!({
         "providerId": provider_id,
@@ -793,9 +848,7 @@ fn provider_settings_backup_filename(provider_id: &str) -> String {
 }
 
 fn copy_existing_file(source: &Path, target: &Path) -> Result<(), AppError> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
+    create_managed_config_parent_dirs(target)?;
     copy_file(source, target)
 }
 
@@ -1259,6 +1312,157 @@ base_url = "https://proxy.example/v1"
             )
             .expect("count backed up source providers");
         assert_eq!(backed_up_source_count, 2);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&backup_path)
+                .expect("metadata backup db")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_migration_backups_reject_parent_dir_config_path_before_creating_dirs() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("config-root");
+        fs::create_dir(&root).expect("create root");
+        let backup_root = root.join("child").join("..").join("backups");
+        let _env = crate::test_support::TestEnvGuard::isolated(dir.path());
+        unsafe {
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", root.join("child").join(".."));
+        }
+
+        let codex_dir = dir.path().join(".codex");
+        let session_dir = codex_dir.join("sessions");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        let jsonl = session_dir.join("session.jsonl");
+        fs::write(&jsonl, "{}\n").expect("write jsonl");
+        copy_existing_file(&jsonl, &backup_root.join("jsonl").join("session.jsonl"))
+            .expect_err("jsonl backup should reject invalid config dir");
+
+        backup_provider_settings_config(
+            "provider",
+            &serde_json::json!({ "config": "model_provider = \"custom\"" }),
+            &backup_root,
+        )
+        .expect_err("provider backup should reject invalid config dir");
+
+        let state_db = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&state_db).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT NOT NULL
+            );",
+        )
+        .expect("seed state db");
+        backup_codex_state_db(&state_db, &codex_dir, &backup_root, &conn)
+            .expect_err("state db backup should reject invalid config dir");
+
+        assert!(
+            !root.join("child").exists(),
+            "backup helpers must not pre-create unvalidated path components"
+        );
+        assert!(
+            !root.join("backups").exists(),
+            "backup helpers must not write to the normalized parent directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_state_db_backup_rejects_symlink_backup_path_without_writing_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let _env = crate::test_support::TestEnvGuard::isolated(dir.path());
+
+        let codex_dir = dir.path().join(".codex");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let state_db = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&state_db).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT NOT NULL
+            );",
+        )
+        .expect("seed state db");
+
+        let backup_root = get_app_config_dir().join("backups").join("migration");
+        let backup_path = backup_root.join("state").join(CODEX_STATE_DB_FILENAME);
+        fs::create_dir_all(backup_path.parent().expect("backup parent"))
+            .expect("create backup parent");
+        let external_target = dir.path().join("external-state.sqlite");
+        symlink(&external_target, &backup_path).expect("create dangling backup symlink");
+
+        let err = backup_codex_state_db(&state_db, &codex_dir, &backup_root, &conn)
+            .expect_err("state db backup must reject symlink backup path");
+
+        assert!(
+            err.to_string().contains("符号链接") || err.to_string().contains("symlink"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !external_target.exists(),
+            "state db backup must not follow symlink target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_state_db_backup_rejects_existing_backup_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let _env = crate::test_support::TestEnvGuard::isolated(dir.path());
+
+        let codex_dir = dir.path().join(".codex");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let state_db = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&state_db).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT NOT NULL
+            );",
+        )
+        .expect("seed state db");
+
+        let backup_root = get_app_config_dir().join("backups").join("migration");
+        let backup_path = backup_root.join("state").join(CODEX_STATE_DB_FILENAME);
+        fs::create_dir_all(backup_path.parent().expect("backup parent"))
+            .expect("create backup parent");
+        fs::write(&backup_path, b"existing").expect("write existing backup");
+        fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o644))
+            .expect("set existing backup permissions");
+
+        let err = backup_codex_state_db(&state_db, &codex_dir, &backup_root, &conn)
+            .expect_err("existing state db backup path must be rejected");
+
+        assert!(
+            err.to_string().contains("已存在") || err.to_string().contains("exists"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            fs::read(&backup_path).expect("read existing backup"),
+            b"existing",
+            "state db backup must not overwrite an existing backup file"
+        );
+        let mode = fs::metadata(&backup_path)
+            .expect("metadata existing backup")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o644,
+            "rejected existing backup path should be left untouched"
+        );
     }
 
     #[test]

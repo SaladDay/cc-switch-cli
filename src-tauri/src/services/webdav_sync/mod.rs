@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
-use crate::database::Database;
+use crate::database::{Database, SCHEMA_VERSION};
 use crate::error::AppError;
 use crate::services::webdav;
 use crate::settings::{
@@ -576,13 +576,15 @@ fn apply_snapshot(db_sql: &[u8], skills_zip: &[u8]) -> Result<(), AppError> {
             format!("SQL is not valid UTF-8: {e}"),
         )
     })?;
+    validate_sql_user_version_for_import(sql_str)?;
 
     let skills_backup = SkillsBackup::backup_current_skills()?;
 
     // 先替换 skills，再导入数据库；若导入失败则回滚 skills，避免"半恢复"。
     restore_skills_zip(skills_zip)?;
 
-    if let Err(db_err) = Database::init()?.import_sql_string_for_sync(sql_str) {
+    let import_result = Database::init().and_then(|db| db.import_sql_string_for_sync(sql_str));
+    if let Err(db_err) = import_result {
         if let Err(rollback_err) = skills_backup.restore() {
             return Err(localized(
                 "webdav.sync.db_import_and_rollback_failed",
@@ -596,6 +598,39 @@ fn apply_snapshot(db_sql: &[u8], skills_zip: &[u8]) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+fn validate_sql_user_version_for_import(sql: &str) -> Result<(), AppError> {
+    let Some(version) = extract_sql_user_version(sql) else {
+        return Ok(());
+    };
+
+    if version > SCHEMA_VERSION {
+        return Err(localized(
+            "webdav.sync.db_schema_too_new",
+            format!(
+                "远端数据库版本过新（{version}），当前应用仅支持 {SCHEMA_VERSION}，请先升级应用后再同步"
+            ),
+            format!(
+                "Remote database schema is too new ({version}); this app supports up to {SCHEMA_VERSION}. Upgrade before syncing."
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn extract_sql_user_version(sql: &str) -> Option<i32> {
+    sql.lines().find_map(|line| {
+        let trimmed = line.trim_start_matches('\u{feff}').trim();
+        let value = trimmed
+            .strip_prefix("PRAGMA user_version")
+            .and_then(|rest| rest.trim_start().strip_prefix('='))
+            .map(|rest| rest.trim().trim_end_matches(';').trim())
+            .or_else(|| trimmed.strip_prefix("-- user_version:").map(str::trim))?;
+
+        value.parse::<i32>().ok()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,6 +1175,253 @@ mod tests {
     #[test]
     fn validate_artifact_size_limit_exceeded() {
         assert!(validate_artifact_size_limit("db.sql", MAX_SYNC_ARTIFACT_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn extract_sql_user_version_reads_pragma_and_comment() {
+        assert_eq!(
+            extract_sql_user_version("-- header\nPRAGMA user_version=10;\n"),
+            Some(10)
+        );
+        assert_eq!(
+            extract_sql_user_version("-- user_version: 11\nPRAGMA foreign_keys=OFF;\n"),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn validate_sql_user_version_rejects_future_schema_before_restore() {
+        let sql = format!(
+            "-- CC Switch SQLite 导出\nPRAGMA user_version={};\n",
+            SCHEMA_VERSION + 1
+        );
+        let err = validate_sql_user_version_for_import(&sql)
+            .expect_err("future schema should be rejected before applying snapshot");
+        assert!(
+            err.to_string().contains("版本过新") || err.to_string().contains("schema is too new"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_snapshot_accepts_current_schema_v11_sync_export() -> Result<(), AppError> {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+
+        let remote_db = Database::memory().expect("create remote db");
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
+                [],
+            )
+            .expect("insert remote provider");
+        }
+        let db_sql = remote_db
+            .export_sql_string_for_sync()
+            .expect("export v11 sync sql");
+
+        let zip_path = temp.path().join("remote-skills.zip");
+        {
+            let file = std::fs::File::create(&zip_path).expect("create remote skills zip");
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file(
+                    "remote-skill/SKILL.md",
+                    crate::services::webdav_sync::archive::zip_file_options(),
+                )
+                .expect("start remote skill");
+            use std::io::Write;
+            writer.write_all(b"remote").expect("write remote skill");
+            writer.finish().expect("finish remote skills zip");
+        }
+        let skills_zip = std::fs::read(&zip_path).expect("read remote skills zip");
+
+        apply_snapshot(db_sql.as_bytes(), &skills_zip).expect("apply current-schema snapshot");
+
+        let local_db = Database::init().expect("open local db");
+        let conn = crate::database::lock_conn!(local_db.conn);
+        let provider_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM providers WHERE id = 'remote-provider'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count imported provider");
+        assert_eq!(provider_count, 1);
+        assert!(
+            crate::services::skill::SkillService::get_ssot_dir()
+                .expect("ssot dir")
+                .join("remote-skill")
+                .join("SKILL.md")
+                .exists(),
+            "current-schema restore should unpack remote skills"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_snapshot_rejects_future_schema_without_touching_existing_skills() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+
+        let existing_skill = crate::services::skill::SkillService::get_ssot_dir()
+            .expect("ssot dir")
+            .join("existing")
+            .join("SKILL.md");
+        std::fs::create_dir_all(existing_skill.parent().expect("skill parent"))
+            .expect("create existing skill parent");
+        std::fs::write(&existing_skill, "existing").expect("write existing skill");
+
+        let zip_path = temp.path().join("replacement-skills.zip");
+        {
+            let file = std::fs::File::create(&zip_path).expect("create replacement zip");
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file(
+                    "replacement/SKILL.md",
+                    crate::services::webdav_sync::archive::zip_file_options(),
+                )
+                .expect("start replacement skill");
+            use std::io::Write;
+            writer
+                .write_all(b"replacement")
+                .expect("write replacement skill");
+            writer.finish().expect("finish replacement zip");
+        }
+        let skills_zip = std::fs::read(&zip_path).expect("read replacement zip");
+        let sql = format!(
+            "-- CC Switch SQLite 导出\nPRAGMA user_version={};\n",
+            SCHEMA_VERSION + 1
+        );
+
+        apply_snapshot(sql.as_bytes(), &skills_zip)
+            .expect_err("future schema should be rejected before restoring skills");
+
+        assert_eq!(
+            std::fs::read_to_string(&existing_skill).expect("read existing skill"),
+            "existing",
+            "future schema restore must leave existing skills untouched"
+        );
+        assert!(
+            !crate::services::skill::SkillService::get_ssot_dir()
+                .expect("ssot dir")
+                .join("replacement")
+                .exists(),
+            "future schema restore must not unpack replacement skills"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_snapshot_rolls_back_skills_when_database_init_fails() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+
+        let ssot = crate::services::skill::SkillService::get_ssot_dir().expect("ssot dir");
+        let existing_skill = ssot.join("existing").join("SKILL.md");
+        std::fs::create_dir_all(existing_skill.parent().expect("skill parent"))
+            .expect("create existing skill parent");
+        std::fs::write(&existing_skill, "existing").expect("write existing skill");
+
+        let zip_path = temp.path().join("replacement-skills.zip");
+        {
+            let file = std::fs::File::create(&zip_path).expect("create replacement zip");
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file(
+                    "replacement/SKILL.md",
+                    crate::services::webdav_sync::archive::zip_file_options(),
+                )
+                .expect("start replacement skill");
+            use std::io::Write;
+            writer
+                .write_all(b"replacement")
+                .expect("write replacement skill");
+            writer.finish().expect("finish replacement zip");
+        }
+        let skills_zip = std::fs::read(&zip_path).expect("read replacement zip");
+
+        let db_target = temp.path().join("external.db");
+        std::fs::write(&db_target, b"not sqlite").expect("write external db");
+        let db_link = temp.path().join(".cc-switch").join("cc-switch.db");
+        symlink(&db_target, &db_link).expect("create db symlink");
+
+        apply_snapshot(
+            b"-- CC Switch SQLite export\nPRAGMA user_version=0;\n",
+            &skills_zip,
+        )
+        .expect_err("db init failure should fail the restore");
+
+        assert_eq!(
+            std::fs::read_to_string(&existing_skill).expect("read existing skill"),
+            "existing",
+            "DB init failure must roll back restored skills"
+        );
+        assert!(
+            !ssot.join("replacement").exists(),
+            "DB init failure must remove replacement skills"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_snapshot_rejects_symlink_parent_config_dir_before_restoring_skills() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let real_parent = temp.path().join("real-parent");
+        let external_parent = temp.path().join("external-parent");
+        std::fs::create_dir(&real_parent).expect("create real parent");
+        std::fs::create_dir(&external_parent).expect("create external parent");
+        symlink(&external_parent, real_parent.join("link")).expect("create symlink parent");
+        unsafe {
+            std::env::set_var(
+                "CC_SWITCH_CONFIG_DIR",
+                real_parent.join("link").join("..").join("cc-switch"),
+            );
+        }
+
+        let zip_path = temp.path().join("replacement-skills.zip");
+        {
+            let file = std::fs::File::create(&zip_path).expect("create replacement zip");
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file(
+                    "replacement/SKILL.md",
+                    crate::services::webdav_sync::archive::zip_file_options(),
+                )
+                .expect("start replacement skill");
+            use std::io::Write;
+            writer
+                .write_all(b"replacement")
+                .expect("write replacement skill");
+            writer.finish().expect("finish replacement zip");
+        }
+        let skills_zip = std::fs::read(&zip_path).expect("read replacement zip");
+
+        let err = apply_snapshot(
+            b"-- CC Switch SQLite export\nPRAGMA user_version=0;\n",
+            &skills_zip,
+        )
+        .expect_err("symlink parent config dir should fail before restoring skills");
+
+        assert!(
+            err.to_string().contains("符号链接") || err.to_string().contains("symlink"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !real_parent.join("cc-switch/skills").exists(),
+            "restore must not create the normalized skills directory"
+        );
+        assert!(
+            !external_parent.join("cc-switch/skills").exists(),
+            "restore must not follow the symlinked parent into external storage"
+        );
     }
 
     #[test]

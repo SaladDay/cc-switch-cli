@@ -108,9 +108,10 @@ async fn proxy_claude_openai_chat_non_success_error_is_transformed_to_anthropic_
     assert_eq!(log_values[1], "claude-openai-chat-error");
     assert_eq!(log_values[3], "claude-3-7-sonnet");
     assert_eq!(log_values[4], "claude-3-7-sonnet");
-    assert_eq!(log_values[17], "400");
-    assert_eq!(log_values[19], "claude-session-non-success");
-    assert!(log_values[18].contains("upstream rejected the request"));
+    assert_eq!(log_values[5], "");
+    assert_eq!(log_values[18], "400");
+    assert_eq!(log_values[20], "claude-session-non-success");
+    assert!(log_values[19].contains("upstream rejected the request"));
 
     service.stop().await.expect("stop proxy service");
     upstream_handle.abort();

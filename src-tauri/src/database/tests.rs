@@ -248,6 +248,19 @@ fn init_rejects_future_schema_before_creating_tables() {
 
 #[test]
 #[serial_test::serial]
+fn init_rejects_unsafe_config_dir() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let _guard = ConfigDirEnvGuard::set(Path::new("/tmp"));
+
+    let err = match Database::init() {
+        Ok(_) => panic!("unsafe config dir should fail init"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("CC_SWITCH_CONFIG_DIR"),
+        "unexpected error: {err}"
+    );
+}
 fn readonly_snapshot_rejects_missing_database_without_creating_file() {
     let _lock = crate::test_support::lock_test_home_and_settings();
     let temp = tempfile::tempdir().expect("create temp dir");
@@ -558,6 +571,22 @@ fn schema_create_tables_include_usage_daily_rollups() {
         Some("0")
     );
 
+    let request_model = get_column_info(&conn, "usage_daily_rollups", "request_model");
+    assert_eq!(request_model.r#type, "TEXT");
+    assert_eq!(request_model.notnull, 1);
+    assert_eq!(
+        normalize_default(&request_model.default).as_deref(),
+        Some("")
+    );
+
+    let pricing_model = get_column_info(&conn, "usage_daily_rollups", "pricing_model");
+    assert_eq!(pricing_model.r#type, "TEXT");
+    assert_eq!(pricing_model.notnull, 1);
+    assert_eq!(
+        normalize_default(&pricing_model.default).as_deref(),
+        Some("")
+    );
+
     assert!(
         Database::table_exists(&conn, "session_log_sync").expect("check session_log_sync table"),
         "session_log_sync should exist after create_tables"
@@ -579,6 +608,10 @@ fn schema_create_tables_include_usage_daily_rollups() {
         normalize_default(&data_source.default).as_deref(),
         Some("proxy")
     );
+
+    let request_pricing_model = get_column_info(&conn, "proxy_request_logs", "pricing_model");
+    assert_eq!(request_pricing_model.r#type, "TEXT");
+    assert_eq!(request_pricing_model.notnull, 0);
 
     let mcp_enabled_hermes = get_column_info(&conn, "mcp_servers", "enabled_hermes");
     assert_eq!(mcp_enabled_hermes.r#type, "BOOLEAN");
@@ -1068,7 +1101,7 @@ fn schema_migration_v7_adds_session_log_tracking_and_corrects_pricing() {
 }
 
 #[test]
-fn schema_migration_v8_refreshes_model_pricing_and_reaches_v10() {
+fn schema_migration_v8_refreshes_model_pricing_and_reaches_v11() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute_batch(
         r#"
@@ -1219,6 +1252,112 @@ fn schema_migration_v8_refreshes_model_pricing_and_reaches_v10() {
         Database::has_column(&conn, "skills", "enabled_hermes")
             .expect("check skills enabled_hermes"),
         "v9 -> v10 should add enabled_hermes to skills"
+    );
+    assert!(
+        Database::has_column(&conn, "proxy_request_logs", "pricing_model")
+            .expect("check proxy_request_logs pricing_model"),
+        "v10 -> v11 should add pricing_model to proxy_request_logs"
+    );
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "request_model")
+            .expect("check rollup request_model"),
+        "v10 -> v11 should add request_model to usage_daily_rollups"
+    );
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "pricing_model")
+            .expect("check rollup pricing_model"),
+        "v10 -> v11 should add pricing_model to usage_daily_rollups"
+    );
+}
+
+#[test]
+fn schema_migration_v10_to_v11_preserves_rollup_rows_with_empty_new_dimensions() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_model TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            input_cost_usd TEXT NOT NULL DEFAULT '0',
+            output_cost_usd TEXT NOT NULL DEFAULT '0',
+            cache_read_cost_usd TEXT NOT NULL DEFAULT '0',
+            cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            latency_ms INTEGER NOT NULL,
+            status_code INTEGER NOT NULL,
+            cost_multiplier TEXT NOT NULL DEFAULT '1.0',
+            created_at INTEGER NOT NULL,
+            data_source TEXT NOT NULL DEFAULT 'proxy'
+        );
+        INSERT INTO proxy_request_logs (
+            request_id, provider_id, app_type, model, request_model,
+            input_tokens, output_tokens, total_cost_usd, latency_ms, status_code, created_at
+        ) VALUES ('log-1', 'provider-a', 'claude', 'kimi-k2', 'claude-sonnet-4', 10, 20, '0.03', 123, 200, 1);
+        CREATE TABLE usage_daily_rollups (
+            date TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, app_type, provider_id, model)
+        );
+        INSERT INTO usage_daily_rollups (
+            date, app_type, provider_id, model, request_count, success_count,
+            input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+            total_cost_usd, avg_latency_ms
+        ) VALUES ('2026-06-01', 'claude', 'provider-a', 'kimi-k2', 2, 2, 100, 50, 7, 3, '0.42', 222);
+        "#,
+    )
+    .expect("seed v10 schema");
+
+    Database::set_user_version(&conn, 10).expect("set user_version=10");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply v11 migration");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+    assert!(
+        Database::has_column(&conn, "proxy_request_logs", "pricing_model")
+            .expect("check request pricing_model"),
+        "v11 migration should add proxy_request_logs.pricing_model"
+    );
+
+    let rollup: (String, String, i64, i64, String) = conn
+        .query_row(
+            "SELECT request_model, pricing_model, request_count, input_tokens, total_cost_usd
+             FROM usage_daily_rollups
+             WHERE date = '2026-06-01' AND app_type = 'claude'
+               AND provider_id = 'provider-a' AND model = 'kimi-k2'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("read migrated rollup");
+    assert_eq!(
+        rollup,
+        ("".to_string(), "".to_string(), 2, 100, "0.42".to_string())
     );
 }
 
@@ -1759,6 +1898,331 @@ fn schema_model_pricing_is_seeded_on_init() {
 }
 
 #[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_creates_db_file_with_restrictive_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+
+    let _db = Database::init().expect("init db");
+
+    let db_perms = std::fs::metadata(temp.path().join("cc-switch.db"))
+        .expect("metadata db")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(db_perms, 0o600, "new db file should be created with 0o600");
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_creates_config_dir_with_restrictive_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let config_dir = temp.path().join("new-config-dir");
+    let _guard = ConfigDirEnvGuard::set(&config_dir);
+
+    let _db = Database::init().expect("init db");
+
+    let dir_perms = std::fs::metadata(&config_dir)
+        .expect("metadata dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(dir_perms, 0o700, "new config dir should be 0o700");
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn concurrent_init_on_fresh_config_dir_all_succeeds() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let config_dir = temp.path().join("fresh-config-dir");
+    let _guard = ConfigDirEnvGuard::set(&config_dir);
+
+    let thread_count = 8;
+    let barrier = Arc::new(Barrier::new(thread_count));
+    let mut handles = Vec::with_capacity(thread_count);
+
+    for _ in 0..thread_count {
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            Database::init().map(|_| ())
+        }));
+    }
+
+    for handle in handles {
+        handle
+            .join()
+            .expect("init thread should not panic")
+            .expect("concurrent init should succeed");
+    }
+
+    let conn =
+        Connection::open(config_dir.join("cc-switch.db")).expect("open initialized database");
+    let version = Database::get_user_version(&conn).expect("read schema version");
+    assert_eq!(version, SCHEMA_VERSION);
+
+    let lock_path = config_dir.join("cc-switch.db.init.lock");
+    let lock_mode = std::fs::metadata(&lock_path)
+        .expect("metadata init lock")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(lock_mode, 0o600, "init lock should be owner-only");
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_rejects_symlinked_config_dir_without_writing_target() {
+    use std::os::unix::fs::symlink;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let external_dir = temp.path().join("external");
+    let config_link = temp.path().join("cc-switch-link");
+    std::fs::create_dir(&external_dir).expect("create external dir");
+    symlink(&external_dir, &config_link).expect("create config symlink");
+
+    let _guard = ConfigDirEnvGuard::set(&config_link);
+    let err = match Database::init() {
+        Ok(_) => panic!("symlinked config dir should be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains("符号链接") || err.to_string().contains("symlink"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !external_dir.join("cc-switch.db").exists(),
+        "init should not follow the config-dir symlink and create the database outside cc-switch"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_rejects_symlinked_db_file_without_opening_target() {
+    use std::os::unix::fs::symlink;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let config_dir = temp.path().join("cc-switch");
+    let external_db = temp.path().join("external.db");
+    std::fs::create_dir(&config_dir).expect("create config dir");
+    std::fs::write(&external_db, b"not sqlite").expect("write external db");
+    symlink(&external_db, config_dir.join("cc-switch.db")).expect("create db symlink");
+
+    let _guard = ConfigDirEnvGuard::set(&config_dir);
+    let err = match Database::init() {
+        Ok(_) => panic!("symlinked db file should be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains("符号链接") || err.to_string().contains("symlink"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        std::fs::read(&external_db).expect("read external db"),
+        b"not sqlite",
+        "init should not open or modify the symlink target"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_rejects_hardlinked_db_file_without_opening_target() {
+    use std::os::unix::fs::MetadataExt;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let config_dir = temp.path().join("cc-switch");
+    let external_db = temp.path().join("external.db");
+    let linked_db = config_dir.join("cc-switch.db");
+    std::fs::create_dir(&config_dir).expect("create config dir");
+    std::fs::write(&external_db, b"not sqlite").expect("write external db");
+    std::fs::hard_link(&external_db, &linked_db).expect("create db hardlink");
+    assert_eq!(
+        std::fs::metadata(&external_db)
+            .expect("metadata external db")
+            .nlink(),
+        2,
+        "test setup should create a multi-link inode"
+    );
+
+    let _guard = ConfigDirEnvGuard::set(&config_dir);
+    let err = match Database::init() {
+        Ok(_) => panic!("hardlinked db file should be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains("硬链接") || err.to_string().contains("hardlink"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        std::fs::read(&external_db).expect("read external db"),
+        b"not sqlite",
+        "init should not open or modify a hardlinked database target"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn create_secure_dir_all_rejects_unresolved_parent_dir_components_without_chmodding_parent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("create temp dir");
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("set parent dir perms");
+
+    let path = temp.path().join("child").join("..");
+    let err = create_secure_dir_all(&path).expect_err("unresolved parent should be rejected");
+    let message = err.to_string();
+
+    assert!(
+        message.contains("父目录组件") || message.contains("parent"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        !temp.path().join("child").exists(),
+        "rejected path should not create intermediate directories"
+    );
+
+    let parent_perms = std::fs::metadata(temp.path())
+        .expect("metadata parent")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        parent_perms, 0o755,
+        "rejected path should not chmod the parent directory"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_rejects_parent_dir_config_path_even_when_child_exists() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let parent = temp.path().join("parent");
+    let child = parent.join("child");
+    std::fs::create_dir_all(&child).expect("create child dir");
+
+    let _guard = ConfigDirEnvGuard::set(&child.join(".."));
+    if Database::init().is_ok() {
+        panic!("parent-dir config path should be rejected");
+    }
+
+    assert!(
+        !parent.join("cc-switch.db").exists(),
+        "init must not normalize child/.. and create the database in the parent"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn create_secure_dir_all_rejects_symlink_component_without_writing_target() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let external_dir = temp.path().join("external");
+    let link_dir = temp.path().join("link");
+    std::fs::create_dir(&external_dir).expect("create external dir");
+    symlink(&external_dir, &link_dir).expect("create symlink");
+
+    let err = create_secure_dir_all(&link_dir.join("nested"))
+        .expect_err("symlink components should be rejected");
+
+    assert!(
+        err.to_string().contains("符号链接") || err.to_string().contains("symlink"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !external_dir.join("nested").exists(),
+        "rejected path should not create directories through the symlink target"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn create_secure_dir_all_accepts_existing_directory_after_create_race() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let dir = temp.path().join("existing");
+    std::fs::create_dir(&dir).expect("create existing dir");
+
+    assert!(
+        !create_secure_dir_all(&dir).expect("existing directory should be accepted"),
+        "existing directory should not be reported as newly created"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn backup_database_connection_rejects_symlink_path_without_writing_target() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let backup_path = temp.path().join("backup.db");
+    let external_target = temp.path().join("external.db");
+    symlink(&external_target, &backup_path).expect("create dangling backup symlink");
+
+    let err = Database::create_backup_db_connection(&backup_path)
+        .expect_err("backup connection should reject symlink path");
+
+    assert!(
+        err.to_string().contains("符号链接") || err.to_string().contains("symlink"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !external_target.exists(),
+        "backup creation must not follow symlink target"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
+fn init_does_not_silently_fix_existing_dir_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let _guard = ConfigDirEnvGuard::set(temp.path());
+
+    // Set dir to a permissive mode before init
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("set dir perms");
+
+    let _db = Database::init().expect("init db");
+
+    let dir_perms = std::fs::metadata(temp.path())
+        .expect("metadata dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        dir_perms, 0o755,
+        "init should not silently change existing dir permissions"
+    );
+}
 fn model_pricing_delete_survives_reseed_until_user_upserts() {
     let db = Database::memory().expect("create memory db");
 

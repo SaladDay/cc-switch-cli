@@ -2,15 +2,16 @@
 //!
 //! 提供 SQL 导出/导入和二进制快照备份功能。
 
-use super::{lock_conn, Database, DB_BACKUP_RETAIN};
-use crate::config::get_app_config_dir;
+use super::{create_secure_dir_all, lock_conn, Database, DB_BACKUP_RETAIN};
 use crate::error::AppError;
 use chrono::Utc;
 use rusqlite::backup::Backup;
 use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::NamedTempFile;
 
 const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- CC Switch SQLite 导出";
@@ -123,7 +124,7 @@ impl Database {
         let dump = self.export_sql_string()?;
 
         if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+            create_secure_dir_all(parent)?;
         }
 
         crate::config::atomic_write(target_path, dump.as_bytes())
@@ -470,7 +471,9 @@ impl Database {
 
     /// 生成一致性快照备份，返回备份文件路径（不存在主库时返回 None）
     pub(crate) fn backup_database_file(&self) -> Result<Option<PathBuf>, AppError> {
-        let db_path = get_app_config_dir().join("cc-switch.db");
+        let Some(db_path) = self.db_path.as_deref() else {
+            return Ok(None);
+        };
         if !db_path.exists() {
             return Ok(None);
         }
@@ -480,31 +483,140 @@ impl Database {
             .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
             .join("backups");
 
-        fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+        create_secure_dir_all(&backup_dir)?;
 
-        let base_id = format!("db_backup_{}", Utc::now().format("%Y%m%d_%H%M%S"));
-        let mut backup_id = base_id.clone();
-        let mut backup_path = backup_dir.join(format!("{backup_id}.db"));
-        let mut counter = 1;
-        while backup_path.exists() {
-            backup_id = format!("{base_id}_{counter}");
-            backup_path = backup_dir.join(format!("{backup_id}.db"));
-            counter += 1;
-        }
-
-        {
+        let backup_path = {
             let conn = lock_conn!(self.conn);
-            let mut dest_conn =
-                Connection::open(&backup_path).map_err(|e| AppError::Database(e.to_string()))?;
-            let backup = Backup::new(&conn, &mut dest_conn)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            backup
-                .step(-1)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-        }
+            let (backup_path, mut dest_conn) =
+                Self::create_unique_backup_db_connection(&backup_dir)?;
+            {
+                let backup = Backup::new(&conn, &mut dest_conn)
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                backup
+                    .step(-1)
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+            }
+            backup_path
+        };
 
         Self::cleanup_db_backups(&backup_dir)?;
         Ok(Some(backup_path))
+    }
+
+    fn create_unique_backup_db_connection(
+        backup_dir: &Path,
+    ) -> Result<(PathBuf, Connection), AppError> {
+        for _ in 0..100 {
+            let backup_path = backup_dir.join(format!("{}.db", Self::new_db_backup_id()));
+            match Self::try_create_backup_db_connection(&backup_path)? {
+                Some(conn) => return Ok((backup_path, conn)),
+                None => continue,
+            }
+        }
+
+        Err(AppError::Io {
+            path: backup_dir.display().to_string(),
+            source: std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "failed to allocate a unique database backup path",
+            ),
+        })
+    }
+
+    fn new_db_backup_id() -> String {
+        static NEXT_BACKUP_ID: AtomicU64 = AtomicU64::new(0);
+
+        format!(
+            "db_backup_{}_{}_{}",
+            Utc::now().format("%Y%m%d_%H%M%S_%f"),
+            std::process::id(),
+            NEXT_BACKUP_ID.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_backup_db_connection(backup_path: &Path) -> Result<Connection, AppError> {
+        Self::try_create_backup_db_connection(backup_path)?.ok_or_else(|| AppError::Io {
+            path: backup_path.display().to_string(),
+            source: std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "database backup path already exists",
+            ),
+        })
+    }
+
+    fn try_create_backup_db_connection(backup_path: &Path) -> Result<Option<Connection>, AppError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            match std::fs::symlink_metadata(backup_path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(AppError::InvalidInput(format!(
+                        "数据库备份文件不能是符号链接: {}",
+                        backup_path.display()
+                    )));
+                }
+                Ok(meta) if meta.is_file() => return Ok(None),
+                Ok(_) => {
+                    return Err(AppError::InvalidInput(format!(
+                        "数据库备份路径不是普通文件: {}",
+                        backup_path.display()
+                    )));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    match std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(backup_path)
+                    {
+                        Ok(_) => {}
+                        Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(None),
+                        Err(err) => return Err(AppError::io(backup_path, err)),
+                    }
+                }
+                Err(err) => return Err(AppError::io(backup_path, err)),
+            }
+
+            let open_path = Self::canonicalize_existing_parent(backup_path)?;
+            let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+            Connection::open_with_flags(&open_path, flags)
+                .map(Some)
+                .map_err(|e| AppError::Database(e.to_string()))
+        }
+
+        #[cfg(not(unix))]
+        {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(backup_path)
+            {
+                Ok(_) => {}
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(None),
+                Err(err) => return Err(AppError::io(backup_path, err)),
+            }
+            Connection::open(backup_path)
+                .map(Some)
+                .map_err(|e| AppError::Database(e.to_string()))
+        }
+    }
+
+    fn canonicalize_existing_parent(path: &Path) -> Result<PathBuf, AppError> {
+        let Some(file_name) = path.file_name() else {
+            return Err(AppError::InvalidInput(format!(
+                "数据库备份路径缺少文件名: {}",
+                path.display()
+            )));
+        };
+        let parent = path
+            .parent()
+            .ok_or_else(|| AppError::InvalidInput(format!("无效路径: {}", path.display())))?;
+        let parent = parent.canonicalize().map_err(|e| AppError::io(parent, e))?;
+        Ok(parent.join(file_name))
     }
 
     /// 清理旧的数据库备份，保留最新的 N 个
@@ -720,10 +832,7 @@ impl Database {
             return Ok(true);
         };
 
-        Ok(!policy
-            .local_settings_keys
-            .iter()
-            .any(|local_key| *local_key == key))
+        Ok(!policy.local_settings_keys.contains(&key))
     }
 
     fn neutralize_export_row(
@@ -914,6 +1023,60 @@ mod tests {
             stream_logs, 1,
             "local stream check logs should be preserved"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn memory_import_does_not_create_global_database_backup() -> Result<(), AppError> {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+
+        let global_db = Database::init()?;
+        {
+            let conn = crate::database::lock_conn!(global_db.conn);
+            seed_provider(&conn, "global-provider")?;
+        }
+
+        let remote_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            seed_provider(&conn, "remote-provider")?;
+        }
+        let remote_sql = remote_db.export_sql_string_for_sync()?;
+
+        let local_db = Database::memory()?;
+        local_db.import_sql_string_for_sync(&remote_sql)?;
+
+        assert!(
+            !temp.path().join(".cc-switch").join("backups").exists(),
+            "importing into an in-memory database must not back up the process-global database"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn file_database_backups_use_unique_paths() -> Result<(), AppError> {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+
+        let db = Database::init()?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            seed_provider(&conn, "local-provider")?;
+        }
+
+        let first = db
+            .backup_database_file()?
+            .expect("first backup should be created");
+        let second = db
+            .backup_database_file()?
+            .expect("second backup should be created");
+
+        assert_ne!(first, second, "backup paths should not collide");
+        assert!(first.exists(), "first backup should exist");
+        assert!(second.exists(), "second backup should exist");
 
         Ok(())
     }
