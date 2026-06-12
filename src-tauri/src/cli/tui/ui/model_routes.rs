@@ -1,14 +1,18 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    text::Text,
     widgets::{Block, BorderType, Borders, Cell, Row, Table, TableState},
     Frame,
 };
 
+use crate::cli::i18n::texts;
+
 use super::{
     app::{App, Focus},
-    shared::{highlight_symbol, inset_left, pane_border_style, selection_style, CONTENT_INSET_LEFT},
+    shared::{
+        highlight_symbol, inset_left, pane_border_style, render_key_bar_center, selection_style,
+        CONTENT_INSET_LEFT,
+    },
     theme::Theme,
 };
 
@@ -21,14 +25,16 @@ pub(super) fn render_settings_model_routes(
     area: Rect,
     theme: &Theme,
 ) {
+    let title = texts::tui_settings_model_routes_title();
+
     let header_cells = vec![
         Cell::from("Pattern"),
         Cell::from("Provider"),
         Cell::from("Priority"),
         Cell::from("Enabled"),
     ];
-    let header = Row::new(header_cells)
-        .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+    let header =
+        Row::new(header_cells).style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     let rows = data.model_routes.rows.iter().map(|r| {
         Row::new(vec![
@@ -50,7 +56,7 @@ pub(super) fn render_settings_model_routes(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(pane_border_style(app, Focus::Content, theme))
-        .title("Model Routes");
+        .title(title);
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
@@ -58,6 +64,15 @@ pub(super) fn render_settings_model_routes(
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
+
+    if app.focus == Focus::Content {
+        render_key_bar_center(
+            frame,
+            chunks[0],
+            theme,
+            &[("\u{2191}\u{2193}", texts::tui_key_move())],
+        );
+    }
 
     let table = Table::new(rows, constraints)
         .header(header)

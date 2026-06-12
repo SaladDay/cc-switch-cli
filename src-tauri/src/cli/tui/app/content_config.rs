@@ -943,11 +943,7 @@ impl App {
         }
     }
 
-    pub(crate) fn on_settings_model_routes_key(
-        &mut self,
-        key: KeyEvent,
-        data: &UiData,
-    ) -> Action {
+    pub(crate) fn on_settings_model_routes_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         let routes_len = data.model_routes.rows.len();
         match key.code {
             KeyCode::Up => {

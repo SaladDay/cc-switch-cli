@@ -2649,11 +2649,7 @@ fn load_model_routes_snapshot(
         })
         .collect::<Vec<_>>();
 
-    rows.sort_by(|a, b| {
-        a.priority
-            .cmp(&b.priority)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    rows.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
 
     Ok(ModelRouteSnapshot { rows })
 }
