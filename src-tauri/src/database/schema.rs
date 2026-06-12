@@ -264,10 +264,10 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 17. Model Routes 表 (per-model provider routing, v11)
+        // 17. Model Routes 表 (per-model provider routing, v11+)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS model_routes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,
                 app_type TEXT NOT NULL,
                 pattern TEXT NOT NULL,
                 provider_id TEXT NOT NULL,
@@ -280,6 +280,18 @@ impl Database {
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // model_routes 索引 (与上游 cc-switch 一致)
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_routes_lookup
+             ON model_routes(app_type, enabled, priority DESC, created_at ASC, id ASC)",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_routes_provider
+             ON model_routes(provider_id, app_type)",
+            [],
+        );
 
         // 尝试添加 live_takeover_active 列到 proxy_config 表
         let _ = conn.execute(
@@ -363,6 +375,12 @@ impl Database {
         let mut version = Self::get_user_version(conn)?;
 
         if version > SCHEMA_VERSION {
+            // 上游 cc-switch 可能已升级到更高版本（如 v12）。若 schema 兼容则跳过迁移。
+            if version == 12 {
+                log::warn!("数据库版本 {version} 高于 SCHEMA_VERSION={SCHEMA_VERSION}，跳过迁移（兼容模式）");
+                conn.execute("RELEASE schema_migration;", []).ok();
+                return Ok(());
+            }
             conn.execute("ROLLBACK TO schema_migration;", []).ok();
             conn.execute("RELEASE schema_migration;", []).ok();
             return Err(Self::future_schema_error(version));

@@ -29,12 +29,12 @@ pub enum ModelRouteCommand {
         priority: i32,
     },
     /// Remove a model routing rule
-    Remove { id: i64 },
+    Remove { id: String },
     /// Toggle a model routing rule on/off
-    Toggle { id: i64 },
+    Toggle { id: String },
     /// Update a model routing rule
     Update {
-        id: i64,
+        id: String,
         #[arg(long)]
         pattern: Option<String>,
         #[arg(long)]
@@ -118,7 +118,7 @@ fn print_model_routes(routes: &[ModelRoute]) {
     table.set_header(vec!["ID", "Pattern", "Provider", "Priority", "Enabled"]);
     for r in routes {
         table.add_row(vec![
-            r.id.map(|i| i.to_string()).unwrap_or_default(),
+            r.id.clone(),
             r.pattern.clone(),
             r.provider_id.clone(),
             r.priority.to_string(),
@@ -144,7 +144,7 @@ fn handle_model_route(
             priority,
         } => {
             let route = ModelRoute {
-                id: None,
+                id: String::new(),
                 app_type: app.as_str().to_string(),
                 pattern: pattern.clone(),
                 provider_id: provider_id.clone(),
@@ -158,19 +158,16 @@ fn handle_model_route(
                 "{}",
                 success(&format!(
                     "Model route created: id={}, pattern=\"{}\" → provider={}, priority={}",
-                    created.id.unwrap_or_default(),
-                    created.pattern,
-                    created.provider_id,
-                    created.priority
+                    created.id, created.pattern, created.provider_id, created.priority
                 ))
             );
         }
         ModelRouteCommand::Remove { id } => {
-            state.db.delete_model_route(id)?;
+            state.db.delete_model_route(&id)?;
             println!("{}", success(&format!("Model route {id} removed.")));
         }
         ModelRouteCommand::Toggle { id } => {
-            let toggled = state.db.toggle_model_route(id)?;
+            let toggled = state.db.toggle_model_route(&id)?;
             let status = if toggled.enabled {
                 "enabled"
             } else {
@@ -192,10 +189,10 @@ fn handle_model_route(
         } => {
             let existing = state
                 .db
-                .get_model_route(id)?
+                .get_model_route(&id)?
                 .ok_or_else(|| AppError::Database("model_route not found".to_string()))?;
             let updated = ModelRoute {
-                id: None,
+                id: existing.id.clone(),
                 app_type: app.as_str().to_string(),
                 pattern: pattern.unwrap_or(existing.pattern),
                 provider_id: provider_id.unwrap_or(existing.provider_id),
@@ -204,7 +201,7 @@ fn handle_model_route(
                 created_at: None,
                 updated_at: None,
             };
-            let result = state.db.update_model_route(id, &updated)?;
+            let result = state.db.update_model_route(&id, &updated)?;
             println!(
                 "{}",
                 success(&format!(

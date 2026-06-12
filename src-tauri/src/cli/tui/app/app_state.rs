@@ -117,16 +117,16 @@ pub enum Action {
         priority: i32,
     },
     ModelRouteEdit {
-        id: i64,
+        id: String,
         pattern: String,
         provider_id: String,
         priority: i32,
     },
     ModelRouteDelete {
-        id: i64,
+        id: String,
     },
     ModelRouteToggle {
-        id: i64,
+        id: String,
     },
     UsageCustomRange {
         range: data::UsageCustomRange,

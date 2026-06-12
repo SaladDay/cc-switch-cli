@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRoute {
-    pub id: Option<i64>,
+    pub id: String,
     pub app_type: String,
     pub pattern: String,
     pub provider_id: String,
@@ -25,7 +25,7 @@ mod tests {
     #[test]
     fn model_route_serialization_roundtrip_camelcase() {
         let route = ModelRoute {
-            id: Some(1),
+            id: "test-id-001".into(),
             app_type: "claude".into(),
             pattern: "*-sonnet".into(),
             provider_id: "test-prov".into(),
@@ -42,7 +42,7 @@ mod tests {
         assert!(json.contains("\"updatedAt\""), "camelCase: {}", json);
 
         let deserialized: ModelRoute = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(deserialized.id, Some(1));
+        assert_eq!(deserialized.id, "test-id-001");
         assert_eq!(deserialized.created_at, Some("2025-01-01 00:00:00".into()));
         assert_eq!(deserialized.updated_at, Some("2025-01-01 00:00:00".into()));
     }

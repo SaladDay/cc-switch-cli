@@ -23,7 +23,7 @@ fn refresh_model_routes_data(ctx: &mut RuntimeActionContext<'_>) -> Result<(), A
                 .unwrap_or_else(|| route.provider_id.clone());
 
             ModelRouteRow {
-                id: route.id.unwrap_or(0),
+                id: route.id,
                 pattern: route.pattern,
                 provider_id: route.provider_id,
                 provider_name,
@@ -47,7 +47,7 @@ pub(super) fn handle_add(
 ) -> Result<(), AppError> {
     let state = load_state()?;
     let route = ModelRoute {
-        id: None,
+        id: String::new(),
         app_type: ctx.app.app_type.as_str().to_string(),
         pattern,
         provider_id,
@@ -67,14 +67,14 @@ pub(super) fn handle_add(
 
 pub(super) fn handle_edit(
     ctx: &mut RuntimeActionContext<'_>,
-    id: i64,
+    id: String,
     pattern: String,
     provider_id: String,
     priority: i32,
 ) -> Result<(), AppError> {
     let state = load_state()?;
     let route = ModelRoute {
-        id: None,
+        id: String::new(),
         app_type: ctx.app.app_type.as_str().to_string(),
         pattern,
         provider_id,
@@ -84,7 +84,7 @@ pub(super) fn handle_edit(
         updated_at: None,
     };
 
-    state.db.update_model_route(id, &route)?;
+    state.db.update_model_route(&id, &route)?;
     refresh_model_routes_data(ctx)?;
     ctx.app
         .push_toast(texts::tui_toast_model_route_updated(), ToastKind::Success);
@@ -92,18 +92,24 @@ pub(super) fn handle_edit(
     Ok(())
 }
 
-pub(super) fn handle_delete(ctx: &mut RuntimeActionContext<'_>, id: i64) -> Result<(), AppError> {
+pub(super) fn handle_delete(
+    ctx: &mut RuntimeActionContext<'_>,
+    id: String,
+) -> Result<(), AppError> {
     let state = load_state()?;
-    state.db.delete_model_route(id)?;
+    state.db.delete_model_route(&id)?;
     refresh_model_routes_data(ctx)?;
     ctx.app
         .push_toast(texts::tui_toast_model_route_deleted(), ToastKind::Success);
     Ok(())
 }
 
-pub(super) fn handle_toggle(ctx: &mut RuntimeActionContext<'_>, id: i64) -> Result<(), AppError> {
+pub(super) fn handle_toggle(
+    ctx: &mut RuntimeActionContext<'_>,
+    id: String,
+) -> Result<(), AppError> {
     let state = load_state()?;
-    state.db.toggle_model_route(id)?;
+    state.db.toggle_model_route(&id)?;
     refresh_model_routes_data(ctx)?;
     Ok(())
 }

@@ -474,7 +474,7 @@ pub enum ConfirmAction {
         source_idx: usize,
     },
     ModelRouteDelete {
-        id: i64,
+        id: String,
     },
 }
 
@@ -521,14 +521,14 @@ pub enum TextSubmit {
         provider_id: String,
     },
     ModelRouteEditPattern {
-        id: i64,
+        id: String,
     },
     ModelRouteEditProvider {
-        id: i64,
+        id: String,
         pattern: String,
     },
     ModelRouteEditPriority {
-        id: i64,
+        id: String,
         pattern: String,
         provider_id: String,
     },

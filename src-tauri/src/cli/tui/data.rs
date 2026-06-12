@@ -75,7 +75,7 @@ pub(crate) struct ProviderQuotaState {
 
 #[derive(Debug, Clone)]
 pub struct ModelRouteRow {
-    pub id: i64,
+    pub id: String,
     pub pattern: String,
     pub provider_id: String,
     pub provider_name: String,
@@ -2639,7 +2639,7 @@ fn load_model_routes_snapshot(
                 .unwrap_or_else(|| route.provider_id.clone());
 
             ModelRouteRow {
-                id: route.id.unwrap_or(0),
+                id: route.id,
                 pattern: route.pattern,
                 provider_id: route.provider_id,
                 provider_name,
