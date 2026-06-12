@@ -313,6 +313,8 @@ pub struct ProxySnapshot {
     pub last_error: Option<String>,
     #[allow(dead_code)]
     pub current_app_target: Option<ProxyTargetSnapshot>,
+    /// 按 provider 聚合的预估 token 数（provider_id → token_count）
+    pub provider_token_map: HashMap<String, u64>,
 }
 
 impl ProxySnapshot {
@@ -2619,6 +2621,7 @@ fn load_proxy_snapshot_from_state(
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
             current_app_target,
+            provider_token_map: runtime_status.provider_token_map,
         })
     })
 }

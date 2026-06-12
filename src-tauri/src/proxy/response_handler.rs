@@ -55,6 +55,11 @@ impl ResponseHandler {
                 state
                     .record_estimated_output_tokens(estimated_output_tokens)
                     .await;
+                if let Some(ref sync) = success_sync {
+                    state
+                        .record_provider_activity(&sync.provider.id, estimated_output_tokens)
+                        .await;
+                }
                 if status.is_success() {
                     if let Some(success_sync) = success_sync {
                         state
@@ -281,12 +286,15 @@ impl StreamingOutcomeRecorder {
                     state
                         .record_estimated_output_tokens(estimated_output_tokens)
                         .await;
-                    if let Some(success_sync) = success_sync {
+                    if let Some(ref sync) = success_sync {
+                        state
+                            .record_provider_activity(&sync.provider.id, estimated_output_tokens)
+                            .await;
                         state
                             .sync_successful_provider_selection(
-                                &success_sync.app_type,
-                                &success_sync.provider,
-                                &success_sync.current_provider_id_at_start,
+                                &sync.app_type,
+                                &sync.provider,
+                                &sync.current_provider_id_at_start,
                             )
                             .await;
                     }
@@ -306,12 +314,15 @@ impl StreamingOutcomeRecorder {
                     state
                         .record_estimated_output_tokens(estimated_output_tokens)
                         .await;
-                    if let Some(success_sync) = success_sync {
+                    if let Some(ref sync) = success_sync {
+                        state
+                            .record_provider_activity(&sync.provider.id, estimated_output_tokens)
+                            .await;
                         state
                             .sync_successful_provider_selection(
-                                &success_sync.app_type,
-                                &success_sync.provider,
-                                &success_sync.current_provider_id_at_start,
+                                &sync.app_type,
+                                &sync.provider,
+                                &sync.current_provider_id_at_start,
                             )
                             .await;
                     }

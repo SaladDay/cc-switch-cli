@@ -1984,6 +1984,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         data.proxy.estimated_input_tokens_total,
                         data.proxy.estimated_output_tokens_total,
                     );
+                    app.observe_proxy_provider_activity(&data.proxy.provider_token_map);
                 }
             }
             queue_current_quota_refresh_if_due(

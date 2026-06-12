@@ -2049,6 +2049,8 @@ fn model_route_dao_crud_roundtrip() {
             provider_id: "test-prov".into(),
             priority: 10,
             enabled: true,
+            hit_count: 0,
+            last_hit_at: None,
             created_at: None,
             updated_at: None,
         })
@@ -2075,6 +2077,8 @@ fn model_route_dao_crud_roundtrip() {
             provider_id: "test-prov".into(),
             priority: 20,
             enabled: true,
+            hit_count: 0,
+            last_hit_at: None,
             created_at: None,
             updated_at: None,
         })
@@ -2088,6 +2092,8 @@ fn model_route_dao_crud_roundtrip() {
         provider_id: "nonexistent".into(),
         priority: 1,
         enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
         created_at: None,
         updated_at: None,
     });
@@ -2109,6 +2115,8 @@ fn model_route_dao_crud_roundtrip() {
                 provider_id: "test-prov".into(),
                 priority: 5,
                 enabled: false,
+                hit_count: 0,
+                last_hit_at: None,
                 created_at: None,
                 updated_at: None,
             },
@@ -2144,6 +2152,8 @@ fn model_route_dao_crud_roundtrip() {
         provider_id: "test-prov".into(),
         priority: 5,
         enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
         created_at: None,
         updated_at: None,
     })
@@ -2155,6 +2165,8 @@ fn model_route_dao_crud_roundtrip() {
         provider_id: "test-prov".into(),
         priority: 1,
         enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
         created_at: None,
         updated_at: None,
     })
@@ -2166,6 +2178,8 @@ fn model_route_dao_crud_roundtrip() {
         provider_id: "test-prov".into(),
         priority: 3,
         enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
         created_at: None,
         updated_at: None,
     })
@@ -2195,6 +2209,8 @@ fn model_route_dao_crud_roundtrip() {
         provider_id: "codex-prov".into(),
         priority: 1,
         enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
         created_at: None,
         updated_at: None,
     })
@@ -2230,6 +2246,8 @@ fn model_route_cascade_delete_on_provider_removal() {
         provider_id: "cascade-prov".into(),
         priority: 1,
         enabled: true,
+        hit_count: 0,
+        last_hit_at: None,
         created_at: None,
         updated_at: None,
     })

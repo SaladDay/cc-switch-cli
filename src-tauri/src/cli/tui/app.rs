@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::Size;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use unicode_width::UnicodeWidthChar;
 

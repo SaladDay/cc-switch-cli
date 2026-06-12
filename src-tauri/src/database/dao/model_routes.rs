@@ -437,7 +437,9 @@ mod tests {
 
         let r1 = db.create_model_route(&test_route("*sonnet*", "p1", 1))?;
         let r2 = db.create_model_route(&test_route("*opus*", "p2", 2))?;
-        let r3 = db.create_model_route(&test_route("*codex*", "cx1", 1))?;
+        let mut codex_route = test_route("*codex*", "cx1", 1);
+        codex_route.app_type = "codex".to_string();
+        let r3 = db.create_model_route(&codex_route)?;
         let _r4 = db.create_model_route(&test_route("disabled", "p1", 5))?;
 
         // r4 is disabled

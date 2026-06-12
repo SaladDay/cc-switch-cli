@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use crate::{app_config::AppType, provider::Provider};
 
+use super::model_mapper::strip_one_m_suffix_for_upstream;
+
 use super::{
     error::ProxyError,
     forwarder::{ForwardOptions, RequestForwarder},
@@ -36,6 +38,82 @@ pub async fn health_check() -> impl IntoResponse {
 
 pub async fn get_status(State(state): State<ProxyServerState>) -> impl IntoResponse {
     Json(state.snapshot_status().await)
+}
+
+/// Handle `GET /v1/models` — return merged model list from model routes
+/// and provider env configs, so Claude Code's `/model` command shows
+/// all routeable models.
+pub async fn handle_models(State(state): State<ProxyServerState>) -> impl IntoResponse {
+    let db = state.db;
+    let app_type = "claude";
+
+    let mut model_ids: Vec<String> = Vec::new();
+
+    // 1. Collect model names from all providers' env config
+    if let Ok(providers) = db.get_all_providers(app_type) {
+        for provider in providers.values() {
+            let env = provider.settings_config.get("env");
+            if let Some(env) = env {
+                let keys = [
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                    "ANTHROPIC_MODEL",
+                ];
+                for key in &keys {
+                    if let Some(val) = env
+                        .get(*key)
+                        .and_then(|v| v.as_str())
+                        .filter(|v| !v.is_empty())
+                    {
+                        let cleaned = strip_one_m_suffix_for_upstream(val).to_string();
+                        if !model_ids.contains(&cleaned) {
+                            model_ids.push(cleaned);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Add standard Claude role models from route patterns
+    if let Ok(routes) = db.list_model_routes(app_type) {
+        for route in &routes {
+            if !route.enabled {
+                continue;
+            }
+            let pattern_lower = route.pattern.trim().to_ascii_lowercase();
+            let standard_models = match pattern_lower.as_str() {
+                "*haiku*" | "haiku" => vec!["claude-haiku-4-5-20251001"],
+                "*sonnet*" | "sonnet" => vec!["claude-sonnet-4-6"],
+                "*opus*" | "opus" => vec!["claude-opus-4-8"],
+                _ => Vec::new(),
+            };
+            for m in standard_models {
+                if !model_ids.contains(&m.to_string()) {
+                    model_ids.push(m.to_string());
+                }
+            }
+        }
+    }
+
+    // 3. Build OpenAI-compatible model list
+    let data: Vec<Value> = model_ids
+        .iter()
+        .map(|id| {
+            json!({
+                "id": id,
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "cc-switch"
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "object": "list",
+        "data": data
+    }))
 }
 
 pub async fn handle_messages(
@@ -1224,6 +1302,7 @@ mod tests {
             model_router: Arc::new(ModelRouter::new(db)),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
+            provider_token_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

@@ -56,6 +56,7 @@ fn test_state_with_db(db: Arc<Database>) -> ProxyServerState {
         model_router: Arc::new(ModelRouter::new(db)),
         codex_chat_history: Arc::new(Default::default()),
         gemini_shadow: Arc::new(GeminiShadowStore::default()),
+        provider_token_map: Arc::new(RwLock::new(HashMap::new())),
     }
 }
 
