@@ -16,10 +16,8 @@ use crate::{
     database::Database,
     provider::Provider,
     proxy::{
-        model_router::ModelRouter,
-        provider_router::ProviderRouter,
-        providers::gemini_shadow::GeminiShadowStore,
-        types::ProxyConfig,
+        model_router::ModelRouter, provider_router::ProviderRouter,
+        providers::gemini_shadow::GeminiShadowStore, types::ProxyConfig,
     },
     test_support::TestEnvGuard,
 };

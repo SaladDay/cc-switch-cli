@@ -59,36 +59,31 @@ impl HandlerContext {
             .to_string();
 
         // Try model route matching first (RT-01, RT-04)
-        let (providers, route_source) =
-            match model_router
-                .match_route(app_type.as_str(), &request_model)
-                .await
-            {
-                Ok(Some(provider)) => {
-                    log::info!(
-                        "model route matched: model={}, provider={}, provider_id={}",
-                        request_model,
-                        provider.name,
-                        provider.id
-                    );
-                    (vec![provider], Some("model_route".to_string()))
-                }
-                Ok(None) => {
-                    // RT-04: no match, fallback to existing ProviderRouter
-                    let providers =
-                        provider_router.select_providers(app_type.as_str()).await?;
-                    (providers, None)
-                }
-                Err(e) => {
-                    // RT-05: match_route error (DB error), log warning and fallback
-                    log::warn!(
-                        "model route lookup failed: {e}, falling back to provider router"
-                    );
-                    let providers =
-                        provider_router.select_providers(app_type.as_str()).await?;
-                    (providers, None)
-                }
-            };
+        let (providers, route_source) = match model_router
+            .match_route(app_type.as_str(), &request_model)
+            .await
+        {
+            Ok(Some(provider)) => {
+                log::info!(
+                    "model route matched: model={}, provider={}, provider_id={}",
+                    request_model,
+                    provider.name,
+                    provider.id
+                );
+                (vec![provider], Some("model_route".to_string()))
+            }
+            Ok(None) => {
+                // RT-04: no match, fallback to existing ProviderRouter
+                let providers = provider_router.select_providers(app_type.as_str()).await?;
+                (providers, None)
+            }
+            Err(e) => {
+                // RT-05: match_route error (DB error), log warning and fallback
+                log::warn!("model route lookup failed: {e}, falling back to provider router");
+                let providers = provider_router.select_providers(app_type.as_str()).await?;
+                (providers, None)
+            }
+        };
 
         let app_proxy = state
             .db
@@ -386,5 +381,102 @@ mod tests {
 
         assert_eq!(context.providers()[0].id, "claude-failover");
         assert_eq!(context.current_provider_id_at_start, "claude-current");
+    }
+
+    #[tokio::test]
+    #[serial(home_settings)]
+    async fn model_route_match_bypasses_failover_queue() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let current = test_provider("claude-current", 1);
+        let failover = test_provider("claude-failover", 0);
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.save_provider("claude", &failover)
+            .expect("save failover provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider");
+
+        // Enable auto failover so select_providers would normally return the queue
+        let mut config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read app proxy config");
+        config.enabled = true;
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config)
+            .await
+            .expect("enable auto failover");
+
+        // Create model route: pattern "*sonnet*" → claude-current (priority 1)
+        use crate::model_route::ModelRoute;
+        let route = ModelRoute {
+            id: None,
+            app_type: "claude".into(),
+            pattern: "*sonnet*".into(),
+            provider_id: "claude-current".into(),
+            priority: 1,
+            enabled: true,
+            created_at: None,
+            updated_at: None,
+        };
+        db.create_model_route(&route).expect("create model route");
+
+        let state = test_state(db);
+        let context = HandlerContext::load(
+            &state,
+            AppType::Claude,
+            &HeaderMap::new(),
+            &json!({"model": "claude-sonnet-4-6"}),
+        )
+        .await
+        .expect("load handler context");
+
+        // Model route matched — single provider, not the failover queue
+        assert_eq!(context.providers().len(), 1);
+        assert_eq!(context.providers()[0].id, "claude-current");
+        assert_eq!(context.route_source, Some("model_route".to_string()));
+    }
+
+    #[tokio::test]
+    #[serial(home_settings)]
+    async fn no_model_route_falls_back_to_provider_router() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        let current = test_provider("claude-current", 1);
+        let failover = test_provider("claude-failover", 0);
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.save_provider("claude", &failover)
+            .expect("save failover provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider");
+
+        let mut config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read app proxy config");
+        config.enabled = true;
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config)
+            .await
+            .expect("enable auto failover");
+
+        // No model route matches "gemini-2.5-pro"
+        let state = test_state(db);
+        let context = HandlerContext::load(
+            &state,
+            AppType::Claude,
+            &HeaderMap::new(),
+            &json!({"model": "gemini-2.5-pro"}),
+        )
+        .await
+        .expect("load handler context");
+
+        // Falls back to normal ProviderRouter behavior (failover queue)
+        assert_eq!(context.providers()[0].id, "claude-failover");
+        assert_eq!(context.route_source, None);
     }
 }
