@@ -673,12 +673,12 @@ fn collect_route_hits_for_dashboard(data: &UiData) -> Vec<ProviderHitInfo> {
                     // provider 已被删除时使用 id 前 8 字符
                     provider_id.chars().take(8).collect()
                 });
-                ProviderHitInfo {
-                    provider_id: provider_id.clone(),
-                    display_name,
-                    hits,
-                    color: palette[i % palette.len()],
-                }
+            ProviderHitInfo {
+                provider_id: provider_id.clone(),
+                display_name,
+                hits,
+                color: palette[i % palette.len()],
+            }
         })
         .collect()
 }
