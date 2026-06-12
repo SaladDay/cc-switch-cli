@@ -275,6 +275,7 @@ async fn streaming_success_syncs_failover_state_after_body_drains() {
             app_type: AppType::Claude,
             provider: failover.clone(),
             current_provider_id_at_start: current.id.clone(),
+            is_model_routed: false,
         }),
         None,
     )

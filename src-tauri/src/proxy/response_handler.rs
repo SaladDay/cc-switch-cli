@@ -28,6 +28,9 @@ pub struct SuccessSyncInfo {
     pub app_type: AppType,
     pub provider: Provider,
     pub current_provider_id_at_start: String,
+    /// 当为 true 时，跳过 set_current_provider / update_live_backup，
+    /// 因为 provider 是模型路由命中选中的，不是用户主动切换的。
+    pub is_model_routed: bool,
 }
 
 impl ResponseHandler {
@@ -67,6 +70,7 @@ impl ResponseHandler {
                                 &success_sync.app_type,
                                 &success_sync.provider,
                                 &success_sync.current_provider_id_at_start,
+                                success_sync.is_model_routed,
                             )
                             .await;
                     }
@@ -295,6 +299,7 @@ impl StreamingOutcomeRecorder {
                                 &sync.app_type,
                                 &sync.provider,
                                 &sync.current_provider_id_at_start,
+                                sync.is_model_routed,
                             )
                             .await;
                     }
@@ -323,6 +328,7 @@ impl StreamingOutcomeRecorder {
                                 &sync.app_type,
                                 &sync.provider,
                                 &sync.current_provider_id_at_start,
+                                sync.is_model_routed,
                             )
                             .await;
                     }

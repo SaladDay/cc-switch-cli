@@ -121,10 +121,17 @@ impl ProxyServerState {
         app_type: &AppType,
         provider: &Provider,
         current_provider_id_at_start: &str,
+        is_model_routed: bool,
     ) {
         self.record_active_target(app_type, provider).await;
 
         if provider.id == current_provider_id_at_start {
+            return;
+        }
+
+        // 模型路由选中的 provider 不应切换当前 provider / 更新 live backup。
+        // 路由命中是瞬态行为，不应覆盖用户主动选择的 provider。
+        if is_model_routed {
             return;
         }
 
@@ -346,7 +353,7 @@ mod tests {
 
         let state = test_state(db.clone());
         state
-            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id)
+            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id, false)
             .await;
 
         assert_eq!(
@@ -397,7 +404,7 @@ mod tests {
 
         let state = test_state(db.clone());
         state
-            .sync_successful_provider_selection(&AppType::Claude, &current, &current.id)
+            .sync_successful_provider_selection(&AppType::Claude, &current, &current.id, false)
             .await;
 
         assert_eq!(
@@ -451,7 +458,7 @@ mod tests {
 
         let state = test_state(db.clone());
         state
-            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id)
+            .sync_successful_provider_selection(&AppType::Claude, &failover, &current.id, false)
             .await;
 
         assert_eq!(
