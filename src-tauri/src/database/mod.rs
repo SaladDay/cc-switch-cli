@@ -114,6 +114,70 @@ fn validate_existing_database_file(path: &Path) -> Result<(), AppError> {
     reject_hardlinked_database_file(path, &meta)
 }
 
+#[cfg(unix)]
+fn validate_existing_database_init_lock(path: &Path) -> Result<(), AppError> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| AppError::io(path, e))?;
+    if meta.file_type().is_symlink() {
+        return Err(AppError::InvalidInput(format!(
+            "数据库初始化锁不能是符号链接: {}",
+            path.display()
+        )));
+    }
+    if !meta.is_file() {
+        return Err(AppError::InvalidInput(format!(
+            "数据库初始化锁不是普通文件: {}",
+            path.display()
+        )));
+    }
+
+    reject_hardlinked_database_file(path, &meta)
+}
+
+#[cfg(unix)]
+struct DatabaseInitLock {
+    _file: std::fs::File,
+}
+
+#[cfg(unix)]
+fn acquire_database_init_lock(config_dir: &Path) -> Result<DatabaseInitLock, AppError> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::io::AsRawFd;
+
+    let path = config_dir.join("cc-switch.db.init.lock");
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => validate_existing_database_init_lock(&path)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(AppError::io(&path, err)),
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .map_err(|e| AppError::io(&path, e))?;
+
+    let meta = file.metadata().map_err(|e| AppError::io(&path, e))?;
+    if !meta.is_file() {
+        return Err(AppError::InvalidInput(format!(
+            "数据库初始化锁不是普通文件: {}",
+            path.display()
+        )));
+    }
+    reject_hardlinked_database_file(&path, &meta)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| AppError::io(&path, e))?;
+
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if rc != 0 {
+        return Err(AppError::io(&path, std::io::Error::last_os_error()));
+    }
+
+    Ok(DatabaseInitLock { _file: file })
+}
+
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
     serde_json::to_string(value)
@@ -214,11 +278,15 @@ fn create_secure_dir_all_no_symlink(path: &Path) -> Result<bool, AppError> {
                         )));
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                        std::fs::DirBuilder::new()
-                            .mode(0o700)
-                            .create(&current)
-                            .map_err(|e| AppError::io(&current, e))?;
-                        created_any = true;
+                        match std::fs::DirBuilder::new().mode(0o700).create(&current) {
+                            Ok(()) => created_any = true,
+                            Err(create_err)
+                                if create_err.kind() == std::io::ErrorKind::AlreadyExists =>
+                            {
+                                ensure_existing_secure_dir_component(&current)?;
+                            }
+                            Err(create_err) => return Err(AppError::io(&current, create_err)),
+                        }
                     }
                     Err(err) => return Err(AppError::io(&current, err)),
                 }
@@ -227,6 +295,22 @@ fn create_secure_dir_all_no_symlink(path: &Path) -> Result<bool, AppError> {
     }
 
     Ok(created_any)
+}
+
+#[cfg(unix)]
+fn ensure_existing_secure_dir_component(path: &Path) -> Result<(), AppError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(AppError::InvalidInput(format!(
+            "配置目录路径不能包含符号链接: {}",
+            path.display()
+        ))),
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(AppError::InvalidInput(format!(
+            "配置目录路径组件不是目录: {}",
+            path.display()
+        ))),
+        Err(err) => Err(AppError::io(path, err)),
+    }
 }
 
 #[cfg(unix)]
@@ -294,6 +378,12 @@ impl Database {
             create_secure_dir_all(parent)?;
         }
 
+        #[cfg(unix)]
+        let _init_lock = db_path
+            .parent()
+            .map(acquire_database_init_lock)
+            .transpose()?;
+
         // 新建数据库文件时以 0o600 原子创建，已有文件的权限由 prompt_fix_permissions 处理
         #[cfg(unix)]
         {
@@ -301,12 +391,20 @@ impl Database {
             match std::fs::symlink_metadata(&db_path) {
                 Ok(_) => validate_existing_database_file(&db_path)?,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    std::fs::OpenOptions::new()
+                    match std::fs::OpenOptions::new()
                         .write(true)
                         .create_new(true)
                         .mode(0o600)
                         .open(&db_path)
-                        .map_err(|e| AppError::io(&db_path, e))?;
+                    {
+                        Ok(_) => {}
+                        Err(create_err)
+                            if create_err.kind() == std::io::ErrorKind::AlreadyExists =>
+                        {
+                            validate_existing_database_file(&db_path)?;
+                        }
+                        Err(create_err) => return Err(AppError::io(&db_path, create_err)),
+                    }
                 }
                 Err(err) => return Err(AppError::io(&db_path, err)),
             }

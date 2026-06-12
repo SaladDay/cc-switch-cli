@@ -1941,6 +1941,52 @@ fn init_creates_config_dir_with_restrictive_permissions() {
 #[test]
 #[serial_test::serial]
 #[cfg(unix)]
+fn concurrent_init_on_fresh_config_dir_all_succeeds() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let _lock = crate::test_support::lock_test_home_and_settings();
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let config_dir = temp.path().join("fresh-config-dir");
+    let _guard = ConfigDirEnvGuard::set(&config_dir);
+
+    let thread_count = 8;
+    let barrier = Arc::new(Barrier::new(thread_count));
+    let mut handles = Vec::with_capacity(thread_count);
+
+    for _ in 0..thread_count {
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            Database::init().map(|_| ())
+        }));
+    }
+
+    for handle in handles {
+        handle
+            .join()
+            .expect("init thread should not panic")
+            .expect("concurrent init should succeed");
+    }
+
+    let conn =
+        Connection::open(config_dir.join("cc-switch.db")).expect("open initialized database");
+    let version = Database::get_user_version(&conn).expect("read schema version");
+    assert_eq!(version, SCHEMA_VERSION);
+
+    let lock_path = config_dir.join("cc-switch.db.init.lock");
+    let lock_mode = std::fs::metadata(&lock_path)
+        .expect("metadata init lock")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(lock_mode, 0o600, "init lock should be owner-only");
+}
+
+#[test]
+#[serial_test::serial]
+#[cfg(unix)]
 fn init_rejects_symlinked_config_dir_without_writing_target() {
     use std::os::unix::fs::symlink;
 
@@ -2112,6 +2158,19 @@ fn create_secure_dir_all_rejects_symlink_component_without_writing_target() {
     assert!(
         !external_dir.join("nested").exists(),
         "rejected path should not create directories through the symlink target"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn create_secure_dir_all_accepts_existing_directory_after_create_race() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let dir = temp.path().join("existing");
+    std::fs::create_dir(&dir).expect("create existing dir");
+
+    assert!(
+        !create_secure_dir_all(&dir).expect("existing directory should be accepted"),
+        "existing directory should not be reported as newly created"
     );
 }
 
