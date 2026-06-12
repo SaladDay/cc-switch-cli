@@ -19,6 +19,7 @@ use super::{
     circuit_breaker::CircuitBreakerConfig,
     error::ProxyError,
     handlers,
+    model_router::ModelRouter,
     provider_router::ProviderRouter,
     providers::codex_chat_history::CodexChatHistoryStore,
     providers::gemini_shadow::GeminiShadowStore,
@@ -35,6 +36,7 @@ pub struct ProxyServerState {
     pub start_time: Arc<RwLock<Option<Instant>>>,
     pub current_providers: Arc<RwLock<HashMap<String, (String, String)>>>,
     pub provider_router: Arc<ProviderRouter>,
+    pub model_router: Arc<ModelRouter>,
     pub codex_chat_history: Arc<CodexChatHistoryStore>,
     pub gemini_shadow: Arc<GeminiShadowStore>,
 }
@@ -279,7 +281,8 @@ mod tests {
             status: Arc::new(RwLock::new(ProxyStatus::default())),
             start_time: Arc::new(RwLock::new(None)),
             current_providers: Arc::new(RwLock::new(HashMap::new())),
-            provider_router: Arc::new(ProviderRouter::new(db)),
+            provider_router: Arc::new(ProviderRouter::new(db.clone())),
+            model_router: Arc::new(ModelRouter::new(db)),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
         }
@@ -491,6 +494,7 @@ pub struct ProxyServer {
 impl ProxyServer {
     pub fn new(config: ProxyConfig, db: Arc<Database>) -> Self {
         let provider_router = Arc::new(ProviderRouter::new(db.clone()));
+        let model_router = Arc::new(ModelRouter::new(db.clone()));
         let managed_session_token = std::env::var(PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY)
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -507,6 +511,7 @@ impl ProxyServer {
                 start_time: Arc::new(RwLock::new(None)),
                 current_providers: Arc::new(RwLock::new(HashMap::new())),
                 provider_router,
+                model_router,
                 codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
                 gemini_shadow: Arc::new(GeminiShadowStore::default()),
             },
