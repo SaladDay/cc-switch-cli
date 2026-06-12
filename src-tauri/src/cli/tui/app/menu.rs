@@ -102,6 +102,7 @@ impl App {
             settings_idx: 0,
             settings_proxy_idx: 0,
             settings_managed_accounts_idx: 0,
+            model_routes_idx: 0,
             managed_auth_status: None,
             managed_auth_loading: false,
             managed_auth_login: None,
@@ -164,7 +165,10 @@ impl App {
             | Route::SkillsDiscover
             | Route::SkillsRepos
             | Route::SkillDetail { .. } => NavItem::Skills,
-            Route::Settings | Route::SettingsProxy | Route::SettingsManagedAccounts => {
+            Route::Settings
+            | Route::SettingsProxy
+            | Route::SettingsManagedAccounts
+            | Route::SettingsModelRoutes => {
                 NavItem::Settings
             }
         }
@@ -764,6 +768,7 @@ impl App {
             Route::Settings => self.on_settings_key(key, data),
             Route::SettingsProxy => self.on_settings_proxy_key(key, data),
             Route::SettingsManagedAccounts => self.on_settings_managed_accounts_key(key, data),
+            Route::SettingsModelRoutes => self.on_settings_model_routes_key(key, data),
             Route::Main => match key.code {
                 KeyCode::Char('r') => Action::LocalEnvRefresh,
                 KeyCode::Char('p') | KeyCode::Char('P') => self.main_proxy_action(data),
@@ -932,6 +937,13 @@ impl App {
             self.config_webdav_idx = 0;
         } else {
             self.config_webdav_idx = self.config_webdav_idx.min(config_webdav_len - 1);
+        }
+
+        let routes_len = data.model_routes.rows.len();
+        if routes_len == 0 {
+            self.model_routes_idx = 0;
+        } else {
+            self.model_routes_idx = self.model_routes_idx.min(routes_len - 1);
         }
     }
 }
