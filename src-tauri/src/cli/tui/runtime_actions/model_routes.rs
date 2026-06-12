@@ -79,13 +79,21 @@ pub(super) fn handle_edit(
     priority: i32,
 ) -> Result<(), AppError> {
     let state = load_state()?;
+    // 保留已有的 enabled 状态，不因编辑而静默恢复已禁用的路由
+    let enabled = state
+        .db
+        .get_model_route(&id)
+        .ok()
+        .flatten()
+        .map(|existing| existing.enabled)
+        .unwrap_or(true);
     let route = ModelRoute {
         id: String::new(),
         app_type: ctx.app.app_type.as_str().to_string(),
         pattern,
         provider_id,
         priority,
-        enabled: true,
+        enabled,
         created_at: None,
 
         hit_count: 0,
