@@ -167,14 +167,15 @@ fn handle_model_route(
         }
         ModelRouteCommand::Remove { id } => {
             state.db.delete_model_route(id)?;
-            println!(
-                "{}",
-                success(&format!("Model route {id} removed."))
-            );
+            println!("{}", success(&format!("Model route {id} removed.")));
         }
         ModelRouteCommand::Toggle { id } => {
             let toggled = state.db.toggle_model_route(id)?;
-            let status = if toggled.enabled { "enabled" } else { "disabled" };
+            let status = if toggled.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
             println!(
                 "{}",
                 success(&format!(
@@ -983,8 +984,7 @@ mod tests {
         };
         let app = AppType::Claude;
 
-        let result =
-            handle_model_route(&state, &app, ModelRouteCommand::List);
+        let result = handle_model_route(&state, &app, ModelRouteCommand::List);
         assert!(result.is_ok(), "list should succeed");
     }
 
@@ -1098,8 +1098,7 @@ mod tests {
         })
         .expect("create route");
 
-        let result =
-            handle_model_route(&state, &app, ModelRouteCommand::Remove { id: 1 });
+        let result = handle_model_route(&state, &app, ModelRouteCommand::Remove { id: 1 });
         assert!(result.is_ok(), "remove should succeed");
 
         let routes = db.list_model_routes("claude").expect("list routes");
@@ -1116,12 +1115,8 @@ mod tests {
         };
         let app = AppType::Claude;
 
-        let result =
-            handle_model_route(&state, &app, ModelRouteCommand::Remove { id: 999 });
-        assert!(
-            result.is_err(),
-            "remove nonexistent should fail"
-        );
+        let result = handle_model_route(&state, &app, ModelRouteCommand::Remove { id: 999 });
+        assert!(result.is_err(), "remove nonexistent should fail");
     }
 
     #[test]
@@ -1149,8 +1144,7 @@ mod tests {
         .expect("create route");
 
         // Toggle off
-        let result =
-            handle_model_route(&state, &app, ModelRouteCommand::Toggle { id: 1 });
+        let result = handle_model_route(&state, &app, ModelRouteCommand::Toggle { id: 1 });
         assert!(result.is_ok(), "toggle should succeed");
 
         let route = db
@@ -1160,8 +1154,7 @@ mod tests {
         assert!(!route.enabled, "should be disabled after toggle");
 
         // Toggle on
-        handle_model_route(&state, &app, ModelRouteCommand::Toggle { id: 1 })
-            .expect("toggle back");
+        handle_model_route(&state, &app, ModelRouteCommand::Toggle { id: 1 }).expect("toggle back");
         let route = db
             .get_model_route(1)
             .expect("get route")
@@ -1179,8 +1172,7 @@ mod tests {
         };
         let app = AppType::Claude;
 
-        let result =
-            handle_model_route(&state, &app, ModelRouteCommand::Toggle { id: 999 });
+        let result = handle_model_route(&state, &app, ModelRouteCommand::Toggle { id: 999 });
         assert!(result.is_err(), "toggle nonexistent should fail");
     }
 
@@ -1367,9 +1359,10 @@ mod tests {
         assert_eq!(routes[0].pattern, "gpt-*");
 
         // Codex routes should NOT appear in claude listing
-        let claude_routes = db
-            .list_model_routes("claude")
-            .expect("list claude routes");
-        assert!(claude_routes.is_empty(), "codex routes should not leak to claude");
+        let claude_routes = db.list_model_routes("claude").expect("list claude routes");
+        assert!(
+            claude_routes.is_empty(),
+            "codex routes should not leak to claude"
+        );
     }
 }
