@@ -8,6 +8,7 @@ use crate::provider::Provider;
 
 use super::{
     error::ProxyError,
+    model_router::ModelRouter,
     provider_router::ProviderRouter,
     providers::gemini_shadow::GeminiShadowStore,
     server::ProxyServerState,
@@ -20,6 +21,8 @@ pub struct HandlerContext {
     pub state: ProxyServerState,
     pub app_type: AppType,
     pub provider_router: Arc<ProviderRouter>,
+    pub model_router: Arc<ModelRouter>,
+    pub route_source: Option<String>,
     providers: Vec<Provider>,
     pub app_proxy: AppProxyConfig,
     pub rectifier_config: RectifierConfig,
@@ -48,7 +51,44 @@ impl HandlerContext {
         let start_time = Instant::now();
 
         let provider_router = state.provider_router.clone();
-        let providers = provider_router.select_providers(app_type.as_str()).await?;
+        let model_router = state.model_router.clone();
+        let request_model = body
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        // Try model route matching first (RT-01, RT-04)
+        let (providers, route_source) =
+            match model_router
+                .match_route(app_type.as_str(), &request_model)
+                .await
+            {
+                Ok(Some(provider)) => {
+                    log::info!(
+                        "model route matched: model={}, provider={}, provider_id={}",
+                        request_model,
+                        provider.name,
+                        provider.id
+                    );
+                    (vec![provider], Some("model_route".to_string()))
+                }
+                Ok(None) => {
+                    // RT-04: no match, fallback to existing ProviderRouter
+                    let providers =
+                        provider_router.select_providers(app_type.as_str()).await?;
+                    (providers, None)
+                }
+                Err(e) => {
+                    // RT-05: match_route error (DB error), log warning and fallback
+                    log::warn!(
+                        "model route lookup failed: {e}, falling back to provider router"
+                    );
+                    let providers =
+                        provider_router.select_providers(app_type.as_str()).await?;
+                    (providers, None)
+                }
+            };
 
         let app_proxy = state
             .db
@@ -63,11 +103,6 @@ impl HandlerContext {
         let rectifier_config = state.db.get_rectifier_config().unwrap_or_default();
         let optimizer_config = state.db.get_optimizer_config().unwrap_or_default();
         let copilot_optimizer_config = state.db.get_copilot_optimizer_config().unwrap_or_default();
-        let request_model = body
-            .get("model")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown")
-            .to_string();
         let session_result = extract_session_id(headers, body, app_type.as_str());
 
         Ok(Self {
@@ -75,6 +110,8 @@ impl HandlerContext {
             state: state.clone(),
             app_type,
             provider_router,
+            model_router,
+            route_source,
             providers,
             app_proxy,
             rectifier_config,
@@ -214,7 +251,8 @@ mod tests {
             status: Arc::new(RwLock::new(Default::default())),
             start_time: Arc::new(RwLock::new(None)),
             current_providers: Arc::new(RwLock::new(Default::default())),
-            provider_router: Arc::new(ProviderRouter::new(db)),
+            provider_router: Arc::new(ProviderRouter::new(db.clone())),
+            model_router: Arc::new(ModelRouter::new(db)),
             codex_chat_history: Arc::new(Default::default()),
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
         }
