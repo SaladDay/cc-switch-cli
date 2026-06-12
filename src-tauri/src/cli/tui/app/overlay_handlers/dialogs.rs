@@ -143,9 +143,7 @@ impl App {
                         };
                         return Some(Action::None);
                     }
-                    ConfirmAction::ModelRouteDelete { id } => {
-                        Action::ModelRouteDelete { id: *id }
-                    }
+                    ConfirmAction::ModelRouteDelete { id } => Action::ModelRouteDelete { id: *id },
                 };
                 self.close_overlay();
                 action
@@ -368,7 +366,10 @@ impl App {
             TextSubmit::WebDavJianguoyunPassword => self.handle_webdav_password_submit(raw),
             TextSubmit::ModelRouteAddPattern => {
                 if raw.is_empty() {
-                    self.push_toast(texts::tui_toast_provider_add_missing_fields(), ToastKind::Warning);
+                    self.push_toast(
+                        texts::tui_toast_provider_add_missing_fields(),
+                        ToastKind::Warning,
+                    );
                     self.overlay = Overlay::TextInput(TextInputState {
                         title: texts::tui_model_route_add_pattern_title().to_string(),
                         prompt: texts::tui_model_route_add_pattern_prompt().to_string(),
@@ -389,7 +390,10 @@ impl App {
             }
             TextSubmit::ModelRouteAddProvider { pattern } => {
                 if raw.is_empty() {
-                    self.push_toast(texts::tui_toast_provider_add_missing_fields(), ToastKind::Warning);
+                    self.push_toast(
+                        texts::tui_toast_provider_add_missing_fields(),
+                        ToastKind::Warning,
+                    );
                     self.overlay = Overlay::TextInput(TextInputState {
                         title: texts::tui_model_route_add_provider_title().to_string(),
                         prompt: texts::tui_model_route_add_provider_prompt().to_string(),
@@ -424,7 +428,10 @@ impl App {
             }
             TextSubmit::ModelRouteEditPattern { id } => {
                 if raw.is_empty() {
-                    self.push_toast(texts::tui_toast_provider_add_missing_fields(), ToastKind::Warning);
+                    self.push_toast(
+                        texts::tui_toast_provider_add_missing_fields(),
+                        ToastKind::Warning,
+                    );
                     self.overlay = Overlay::TextInput(TextInputState {
                         title: texts::tui_model_route_edit_pattern_title().to_string(),
                         prompt: texts::tui_model_route_edit_pattern_prompt().to_string(),
@@ -438,17 +445,17 @@ impl App {
                     title: texts::tui_model_route_edit_provider_title().to_string(),
                     prompt: texts::tui_model_route_edit_provider_prompt().to_string(),
                     input: TextInput::new(String::new()),
-                    submit: TextSubmit::ModelRouteEditProvider {
-                        id,
-                        pattern: raw,
-                    },
+                    submit: TextSubmit::ModelRouteEditProvider { id, pattern: raw },
                     secret: false,
                 });
                 Action::None
             }
             TextSubmit::ModelRouteEditProvider { id, pattern } => {
                 if raw.is_empty() {
-                    self.push_toast(texts::tui_toast_provider_add_missing_fields(), ToastKind::Warning);
+                    self.push_toast(
+                        texts::tui_toast_provider_add_missing_fields(),
+                        ToastKind::Warning,
+                    );
                     self.overlay = Overlay::TextInput(TextInputState {
                         title: texts::tui_model_route_edit_provider_title().to_string(),
                         prompt: texts::tui_model_route_edit_provider_prompt().to_string(),

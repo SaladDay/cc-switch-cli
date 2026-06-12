@@ -19,9 +19,7 @@ fn refresh_model_routes_data(ctx: &mut RuntimeActionContext<'_>) -> Result<(), A
                 .rows
                 .iter()
                 .find(|p| p.id == route.provider_id)
-                .map(|p| {
-                    super::super::data::provider_display_name(&ctx.app.app_type, p)
-                })
+                .map(|p| super::super::data::provider_display_name(&ctx.app.app_type, p))
                 .unwrap_or_else(|| route.provider_id.clone());
 
             ModelRouteRow {
@@ -94,10 +92,7 @@ pub(super) fn handle_edit(
     Ok(())
 }
 
-pub(super) fn handle_delete(
-    ctx: &mut RuntimeActionContext<'_>,
-    id: i64,
-) -> Result<(), AppError> {
+pub(super) fn handle_delete(ctx: &mut RuntimeActionContext<'_>, id: i64) -> Result<(), AppError> {
     let state = load_state()?;
     state.db.delete_model_route(id)?;
     refresh_model_routes_data(ctx)?;
@@ -106,10 +101,7 @@ pub(super) fn handle_delete(
     Ok(())
 }
 
-pub(super) fn handle_toggle(
-    ctx: &mut RuntimeActionContext<'_>,
-    id: i64,
-) -> Result<(), AppError> {
+pub(super) fn handle_toggle(ctx: &mut RuntimeActionContext<'_>, id: i64) -> Result<(), AppError> {
     let state = load_state()?;
     state.db.toggle_model_route(id)?;
     refresh_model_routes_data(ctx)?;
