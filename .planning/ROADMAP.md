@@ -98,31 +98,11 @@ Phases 3, 4, 5 可并行执行（都只依赖 Phase 2）。
 **Depends on:** Phase 1（仅需 DAO，可与 Phase 2 并行）
 **Estimated effort:** 1-2 小时
 **Files to touch:** ~2 files, ~70 lines
+**Plans:** 1 plan
 
-### Tasks
+### Plans
 
-1. **Clap 子命令定义**
-   - 在 `cli/commands/proxy.rs` 中新增 `ModelRouteCommand` enum
-   - 变体：List, Add { pattern, provider_id, priority }, Remove { id }, Toggle { id }, Update { id, pattern?, provider_id?, priority? }
-   - 在 `ProxyCommand` enum 中添加 `ModelRoute(ModelRouteCommand)` 变体
-
-2. **命令实现**
-   - `list` — 调用 DAO list_routes，表格格式输出（pattern, provider, priority, enabled）
-   - `add` — 验证 pattern 和 provider_id 有效性，调用 DAO create
-   - `remove` — 验证 id 存在，确认后删除
-   - `toggle` — 切换 enabled 状态
-   - `update` — 部分更新（只更新提供的字段）
-   - 所有命令支持 `--app` 全局标志
-
-3. **CLI mod 集成**
-   - 在 `cli/mod.rs` 中添加 model-route 子命令的 dispatch 逻辑
-
-### Verification
-- [ ] `cargo run -- proxy model-route list` — 显示空列表或已有规则
-- [ ] `cargo run -- proxy model-route add "*-4-5" <provider-id>` — 成功添加
-- [ ] `cargo run -- proxy model-route toggle <id>` — 成功切换
-- [ ] `cargo run -- proxy model-route remove <id>` — 成功删除
-- [ ] 错误处理：无效 provider_id → 友好错误信息
+- [ ] 03-01-PLAN.md — ModelRouteCommand enum definition + ProxyCommand integration + command handler implementation + tests
 
 **Covers:** CL-01 ~ CL-06, TE-06
 
