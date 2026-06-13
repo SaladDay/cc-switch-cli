@@ -41,8 +41,11 @@ pub async fn get_status(State(state): State<ProxyServerState>) -> impl IntoRespo
 }
 
 /// Handle `GET /v1/models` — return merged model list from model routes
-/// and provider env configs, so Claude Code's `/model` command shows
-/// all routeable models.
+/// and provider env configs.
+///
+/// Emits a protocol superset (Anthropic + OpenAI) so that both
+/// Anthropic clients (via `ANTHROPIC_BASE_URL`) and OpenAI-style
+/// clients can consume the response.
 pub async fn handle_models(State(state): State<ProxyServerState>) -> impl IntoResponse {
     let db = state.db;
     let app_type = "claude";
@@ -97,11 +100,17 @@ pub async fn handle_models(State(state): State<ProxyServerState>) -> impl IntoRe
         }
     }
 
-    // 3. Build OpenAI-compatible model list
+    // 3. Build protocol superset: Anthropic + OpenAI fields
     let data: Vec<Value> = model_ids
         .iter()
         .map(|id| {
+            let display_name = model_display_name(id);
             json!({
+                // Anthropic fields
+                "type": "model",
+                "display_name": display_name,
+                "created_at": "2025-01-01T00:00:00Z",
+                // OpenAI fields
                 "id": id,
                 "object": "model",
                 "created": 1700000000,
@@ -110,10 +119,79 @@ pub async fn handle_models(State(state): State<ProxyServerState>) -> impl IntoRe
         })
         .collect();
 
+    let first_id = model_ids.first().cloned();
+    let last_id = model_ids.last().cloned();
+
     Json(json!({
+        // Anthropic pagination
+        "type": "page",
+        "has_more": false,
+        "first_id": first_id,
+        "last_id": last_id,
+        // OpenAI
         "object": "list",
         "data": data
     }))
+}
+
+/// Map a model id to a human-readable display name for Anthropic's
+/// `display_name` field on GET /v1/models.
+fn model_display_name(id: &str) -> String {
+    // Some common well-known model patterns
+    let mapping: &[(&str, &str)] = &[
+        ("claude-opus-4-8-20250514", "Claude 4.8 Opus"),
+        ("claude-opus-4-8", "Claude 4.8 Opus"),
+        ("claude-sonnet-4-6-20250514", "Claude 4.6 Sonnet"),
+        ("claude-sonnet-4-6", "Claude 4.6 Sonnet"),
+        ("claude-haiku-4-5-20251001", "Claude 4.5 Haiku"),
+        ("claude-haiku-4-5", "Claude 4.5 Haiku"),
+        ("claude-opus-4-5-20251101", "Claude 4.5 Opus"),
+        ("claude-opus-4-5", "Claude 4.5 Opus"),
+        ("claude-sonnet-4-5-20250915", "Claude 4.5 Sonnet"),
+        ("claude-sonnet-4-5", "Claude 4.5 Sonnet"),
+        ("claude-haiku-3-5-20250112", "Claude 3.5 Haiku"),
+        ("claude-haiku-3-5", "Claude 3.5 Haiku"),
+        ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+        ("deepseek-v4", "DeepSeek V4"),
+        ("deepseek-v3-1", "DeepSeek V3.1"),
+        ("deepseek-v3", "DeepSeek V3"),
+        ("deepseek-r1", "DeepSeek R1"),
+        ("gpt-5", "GPT-5"),
+        ("gpt-5-mini", "GPT-5 Mini"),
+        ("gpt-5-nano", "GPT-5 Nano"),
+        ("gpt-4.1", "GPT-4.1"),
+        ("gpt-4.1-mini", "GPT-4.1 Mini"),
+        ("gpt-4.1-nano", "GPT-4.1 Nano"),
+        ("gemini-3.0-pro", "Gemini 3.0 Pro"),
+        ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+        ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+        ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite"),
+        ("minimax-m2.5", "MiniMax M2.5"),
+        ("minimax-m1", "MiniMax M1"),
+        ("kimi-k2.5", "Kimi K2.5"),
+        ("kimi-k2", "Kimi K2"),
+        ("qwen3-coder", "Qwen3 Coder"),
+        ("qwen3-235b", "Qwen3 235B"),
+    ];
+
+    let id_lower = id.to_ascii_lowercase();
+    for (pattern, name) in mapping {
+        if id_lower == *pattern {
+            return name.to_string();
+        }
+    }
+
+    // Fallback: title-case the segments
+    id.split('-')
+        .map(|seg| {
+            let mut chars = seg.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub async fn handle_messages(
@@ -1214,7 +1292,7 @@ fn remaining_timeout(timeout: Option<Duration>, started_at: Instant) -> Option<D
 mod tests {
     use super::{
         build_buffered_claude_transform_response, endpoint_with_query, handle_responses,
-        handle_responses_compact, responses_sse_to_response_value,
+        handle_responses_compact, model_display_name, responses_sse_to_response_value,
         should_use_claude_transform_streaming,
     };
     use crate::{
@@ -1776,5 +1854,21 @@ data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"upstr
 data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n\n";
 
         assert!(responses_sse_to_response_value(sse).is_err());
+    }
+
+    #[test]
+    fn model_display_name_known_patterns() {
+        assert_eq!(model_display_name("claude-opus-4-8"), "Claude 4.8 Opus");
+        assert_eq!(model_display_name("claude-sonnet-4-6"), "Claude 4.6 Sonnet");
+        assert_eq!(model_display_name("claude-haiku-4-5"), "Claude 4.5 Haiku");
+        assert_eq!(model_display_name("deepseek-v4-pro"), "DeepSeek V4 Pro");
+        assert_eq!(model_display_name("gemini-2.5-pro"), "Gemini 2.5 Pro");
+    }
+
+    #[test]
+    fn model_display_name_fallback() {
+        // Unknown models get title-cased segments
+        assert_eq!(model_display_name("my-custom-model"), "My Custom Model");
+        assert_eq!(model_display_name("test"), "Test");
     }
 }
