@@ -65,6 +65,8 @@ impl App {
             proxy_output_activity_samples: Vec::new(),
             proxy_activity_last_input_tokens: None,
             proxy_activity_last_output_tokens: None,
+            proxy_provider_activity_samples: HashMap::new(),
+            proxy_activity_last_provider_tokens: None,
             proxy_visual_state: None,
             proxy_visual_transition: None,
             quota_auto_target_key: None,
@@ -102,6 +104,7 @@ impl App {
             settings_idx: 0,
             settings_proxy_idx: 0,
             settings_managed_accounts_idx: 0,
+            model_routes_idx: 0,
             managed_auth_status: None,
             managed_auth_loading: false,
             managed_auth_login: None,
@@ -164,9 +167,10 @@ impl App {
             | Route::SkillsDiscover
             | Route::SkillsRepos
             | Route::SkillDetail { .. } => NavItem::Skills,
-            Route::Settings | Route::SettingsProxy | Route::SettingsManagedAccounts => {
-                NavItem::Settings
-            }
+            Route::Settings
+            | Route::SettingsProxy
+            | Route::SettingsManagedAccounts
+            | Route::SettingsModelRoutes => NavItem::Settings,
         }
     }
 
@@ -324,8 +328,10 @@ impl App {
     pub(crate) fn reset_proxy_activity(&mut self, input_tokens: u64, output_tokens: u64) {
         self.proxy_input_activity_samples.clear();
         self.proxy_output_activity_samples.clear();
+        self.proxy_provider_activity_samples.clear();
         self.proxy_activity_last_input_tokens = Some(input_tokens);
         self.proxy_activity_last_output_tokens = Some(output_tokens);
+        self.proxy_activity_last_provider_tokens = None;
     }
 
     pub(crate) fn observe_proxy_token_activity(&mut self, input_tokens: u64, output_tokens: u64) {
@@ -363,6 +369,45 @@ impl App {
             let overflow = self.proxy_output_activity_samples.len() - PROXY_ACTIVITY_WINDOW;
             self.proxy_output_activity_samples.drain(0..overflow);
         }
+    }
+
+    /// 按 provider 记录 token activity 样本，用于仪表盘点阵图多色展示
+    pub(crate) fn observe_proxy_provider_activity(
+        &mut self,
+        provider_token_map: &HashMap<String, u64>,
+    ) {
+        let Some(prev_map) = &self.proxy_activity_last_provider_tokens else {
+            self.proxy_activity_last_provider_tokens = Some(provider_token_map.clone());
+            return;
+        };
+
+        // Compute per-provider deltas
+        for (provider_id, current_tokens) in provider_token_map {
+            let prev = prev_map.get(provider_id).copied().unwrap_or(0);
+            let delta = if *current_tokens < prev {
+                0 // proxy restarted, skip this round
+            } else {
+                current_tokens.saturating_sub(prev)
+            };
+            let samples = self
+                .proxy_provider_activity_samples
+                .entry(provider_id.clone())
+                .or_default();
+            samples.push(delta);
+            while samples.len() > PROXY_ACTIVITY_WINDOW {
+                samples.remove(0);
+            }
+        }
+
+        // Pad all provider samples to match input/output sample length
+        let target_len = self.proxy_input_activity_samples.len();
+        for samples in self.proxy_provider_activity_samples.values_mut() {
+            while samples.len() < target_len {
+                samples.insert(0, 0);
+            }
+        }
+
+        self.proxy_activity_last_provider_tokens = Some(provider_token_map.clone());
     }
 
     pub fn push_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
@@ -764,6 +809,7 @@ impl App {
             Route::Settings => self.on_settings_key(key, data),
             Route::SettingsProxy => self.on_settings_proxy_key(key, data),
             Route::SettingsManagedAccounts => self.on_settings_managed_accounts_key(key, data),
+            Route::SettingsModelRoutes => self.on_settings_model_routes_key(key, data),
             Route::Main => match key.code {
                 KeyCode::Char('r') => Action::LocalEnvRefresh,
                 KeyCode::Char('p') | KeyCode::Char('P') => self.main_proxy_action(data),
@@ -932,6 +978,13 @@ impl App {
             self.config_webdav_idx = 0;
         } else {
             self.config_webdav_idx = self.config_webdav_idx.min(config_webdav_len - 1);
+        }
+
+        let routes_len = data.model_routes.rows.len();
+        if routes_len == 0 {
+            self.model_routes_idx = 0;
+        } else {
+            self.model_routes_idx = self.model_routes_idx.min(routes_len - 1);
         }
     }
 }

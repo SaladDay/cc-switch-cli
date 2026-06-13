@@ -23,7 +23,7 @@ use crate::{
             Focus, Overlay, TextInputState, TextSubmit, UsagePane,
         },
         data::{
-            ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot,
+            ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot, ModelRouteSnapshot,
             OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
             ProxySnapshot, SkillsSnapshot, UiData, UsageLogRow, UsageProviderStatsRow,
             UsageRangePreset, UsageSnapshot, UsageSummarySnapshot, UsageTrendBucket,
@@ -1562,6 +1562,7 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
         usage: UsageSnapshot::default(),
         pricing: Default::default(),
         quota: Default::default(),
+        model_routes: ModelRouteSnapshot::default(),
         reload_token: Default::default(),
     }
 }

@@ -28,6 +28,9 @@ pub struct SuccessSyncInfo {
     pub app_type: AppType,
     pub provider: Provider,
     pub current_provider_id_at_start: String,
+    /// 当为 true 时，跳过 set_current_provider / update_live_backup，
+    /// 因为 provider 是模型路由命中选中的，不是用户主动切换的。
+    pub is_model_routed: bool,
 }
 
 impl ResponseHandler {
@@ -55,6 +58,11 @@ impl ResponseHandler {
                 state
                     .record_estimated_output_tokens(estimated_output_tokens)
                     .await;
+                if let Some(ref sync) = success_sync {
+                    state
+                        .record_provider_activity(&sync.provider.id, estimated_output_tokens)
+                        .await;
+                }
                 if status.is_success() {
                     if let Some(success_sync) = success_sync {
                         state
@@ -62,6 +70,7 @@ impl ResponseHandler {
                                 &success_sync.app_type,
                                 &success_sync.provider,
                                 &success_sync.current_provider_id_at_start,
+                                success_sync.is_model_routed,
                             )
                             .await;
                     }
@@ -281,12 +290,16 @@ impl StreamingOutcomeRecorder {
                     state
                         .record_estimated_output_tokens(estimated_output_tokens)
                         .await;
-                    if let Some(success_sync) = success_sync {
+                    if let Some(ref sync) = success_sync {
+                        state
+                            .record_provider_activity(&sync.provider.id, estimated_output_tokens)
+                            .await;
                         state
                             .sync_successful_provider_selection(
-                                &success_sync.app_type,
-                                &success_sync.provider,
-                                &success_sync.current_provider_id_at_start,
+                                &sync.app_type,
+                                &sync.provider,
+                                &sync.current_provider_id_at_start,
+                                sync.is_model_routed,
                             )
                             .await;
                     }
@@ -306,12 +319,16 @@ impl StreamingOutcomeRecorder {
                     state
                         .record_estimated_output_tokens(estimated_output_tokens)
                         .await;
-                    if let Some(success_sync) = success_sync {
+                    if let Some(ref sync) = success_sync {
+                        state
+                            .record_provider_activity(&sync.provider.id, estimated_output_tokens)
+                            .await;
                         state
                             .sync_successful_provider_selection(
-                                &success_sync.app_type,
-                                &success_sync.provider,
-                                &success_sync.current_provider_id_at_start,
+                                &sync.app_type,
+                                &sync.provider,
+                                &sync.current_provider_id_at_start,
+                                sync.is_model_routed,
                             )
                             .await;
                     }

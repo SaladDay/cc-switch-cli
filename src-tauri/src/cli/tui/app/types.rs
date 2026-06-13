@@ -473,6 +473,9 @@ pub enum ConfirmAction {
     ClaudeModelFillAll {
         source_idx: usize,
     },
+    ModelRouteDelete {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -509,6 +512,26 @@ pub enum TextSubmit {
     },
     WebDavJianguoyunUsername,
     WebDavJianguoyunPassword,
+    ModelRouteAddPattern,
+    ModelRouteAddProvider {
+        pattern: String,
+    },
+    ModelRouteAddPriority {
+        pattern: String,
+        provider_id: String,
+    },
+    ModelRouteEditPattern {
+        id: String,
+    },
+    ModelRouteEditProvider {
+        id: String,
+        pattern: String,
+    },
+    ModelRouteEditPriority {
+        id: String,
+        pattern: String,
+        provider_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -622,6 +645,12 @@ pub enum Overlay {
     UsageQueryTemplatePicker {
         selected: usize,
     },
+    ModelRouteProviderPicker {
+        pattern: String,
+        selected: usize,
+        editing: bool,               // true=edit mode (has existing id), false=add mode
+        existing_id: Option<String>, // for edit mode
+    },
     ManagedAccountPicker {
         auth_provider: String,
         selected: usize,
@@ -733,6 +762,7 @@ impl Overlay {
         matches!(
             self,
             Overlay::BackupPicker { .. }
+                | Overlay::ModelRouteProviderPicker { .. }
                 | Overlay::TextView(_)
                 | Overlay::CommonSnippetPicker { .. }
                 | Overlay::ProviderTestMenu { .. }
@@ -772,6 +802,7 @@ impl Overlay {
             | Overlay::Help(_)
             | Overlay::Confirm(_)
             | Overlay::BackupPicker { .. }
+            | Overlay::ModelRouteProviderPicker { .. }
             | Overlay::TextView(_)
             | Overlay::CommonSnippetPicker { .. }
             | Overlay::ProviderTestMenu { .. }

@@ -259,6 +259,37 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 17. Model Routes 表 (per-model provider routing, v11+)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_routes (
+                id TEXT PRIMARY KEY,
+                app_type TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                last_hit_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // model_routes 索引 (与上游 cc-switch 一致)
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_routes_lookup
+             ON model_routes(app_type, enabled, priority DESC, created_at ASC, id ASC)",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_routes_provider
+             ON model_routes(provider_id, app_type)",
+            [],
+        );
+
         // 尝试添加 live_takeover_active 列到 proxy_config 表
         let _ = conn.execute(
             "ALTER TABLE proxy_config ADD COLUMN live_takeover_active INTEGER NOT NULL DEFAULT 0",
@@ -341,6 +372,12 @@ impl Database {
         let mut version = Self::get_user_version(conn)?;
 
         if version > SCHEMA_VERSION {
+            // 上游 cc-switch 可能已升级到更高版本（如 v12）。若 schema 兼容则跳过迁移。
+            if version == 12 {
+                log::warn!("数据库版本 {version} 高于 SCHEMA_VERSION={SCHEMA_VERSION}，跳过迁移（兼容模式）");
+                conn.execute("RELEASE schema_migration;", []).ok();
+                return Ok(());
+            }
             conn.execute("ROLLBACK TO schema_migration;", []).ok();
             conn.execute("RELEASE schema_migration;", []).ok();
             return Err(Self::future_schema_error(version));
@@ -400,6 +437,11 @@ impl Database {
                         log::info!("迁移数据库从 v9 到 v10（添加 Hermes Agent 支持）");
                         Self::migrate_v9_to_v10(conn)?;
                         Self::set_user_version(conn, 10)?;
+                    }
+                    10 => {
+                        log::info!("迁移数据库从 v10 到 v11（添加模型路由表）");
+                        Self::migrate_v10_to_v11(conn)?;
+                        Self::set_user_version(conn, 11)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -507,6 +549,17 @@ impl Database {
             "in_failover_queue",
             "BOOLEAN NOT NULL DEFAULT 0",
         )?;
+
+        // model_routes 统计字段（cc-switch v12 未含，留作向后兼容 + 命中追踪）
+        if Self::table_exists(conn, "model_routes")? {
+            Self::add_column_if_missing(
+                conn,
+                "model_routes",
+                "hit_count",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            Self::add_column_if_missing(conn, "model_routes", "last_hit_at", "TEXT")?;
+        }
 
         // 添加代理超时配置字段
         if Self::table_exists(conn, "proxy_config")? {
@@ -1209,6 +1262,49 @@ impl Database {
         }
 
         log::info!("v9 -> v10 迁移完成：已添加 Hermes Agent 支持");
+        Ok(())
+    }
+
+    /// v10 -> v11 迁移：添加模型路由表 (per-model provider routing)
+    fn migrate_v10_to_v11(conn: &Connection) -> Result<(), AppError> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_routes (
+                id TEXT PRIMARY KEY,
+                app_type TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                last_hit_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 model_routes 表失败: {e}")))?;
+
+        // 添加索引（与上游 cc-switch 一致）
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_routes_lookup
+             ON model_routes(app_type, enabled, priority DESC, created_at ASC, id ASC)",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_routes_provider
+             ON model_routes(provider_id, app_type)",
+            [],
+        );
+
+        // cc-switch v12 兼容：若表已存在但缺列，补上
+        let _ = conn.execute(
+            "ALTER TABLE model_routes ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE model_routes ADD COLUMN last_hit_at TEXT", []);
+
+        log::info!("v10 -> v11 迁移完成：已添加模型路由表 (per-model provider routing)");
         Ok(())
     }
 

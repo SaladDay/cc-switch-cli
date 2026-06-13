@@ -16,8 +16,8 @@ use crate::{
     database::Database,
     provider::Provider,
     proxy::{
-        provider_router::ProviderRouter, providers::gemini_shadow::GeminiShadowStore,
-        types::ProxyConfig,
+        model_router::ModelRouter, provider_router::ProviderRouter,
+        providers::gemini_shadow::GeminiShadowStore, types::ProxyConfig,
     },
     test_support::TestEnvGuard,
 };
@@ -52,9 +52,11 @@ fn test_state_with_db(db: Arc<Database>) -> ProxyServerState {
         status: Arc::new(RwLock::new(crate::proxy::types::ProxyStatus::default())),
         start_time: Arc::new(RwLock::new(None)),
         current_providers: Arc::new(RwLock::new(HashMap::new())),
-        provider_router: Arc::new(ProviderRouter::new(db)),
+        provider_router: Arc::new(ProviderRouter::new(db.clone())),
+        model_router: Arc::new(ModelRouter::new(db)),
         codex_chat_history: Arc::new(Default::default()),
         gemini_shadow: Arc::new(GeminiShadowStore::default()),
+        provider_token_map: Arc::new(RwLock::new(HashMap::new())),
     }
 }
 
@@ -273,6 +275,7 @@ async fn streaming_success_syncs_failover_state_after_body_drains() {
             app_type: AppType::Claude,
             provider: failover.clone(),
             current_provider_id_at_start: current.id.clone(),
+            is_model_routed: false,
         }),
         None,
     )

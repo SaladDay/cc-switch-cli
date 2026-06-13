@@ -1,6 +1,10 @@
 use crate::cli::tui::data;
+use std::collections::HashMap;
 
 use super::*;
+
+/// Dracula purple — used for input (downstream) graph to contrast with accent-colored output.
+const DRACULA_PURPLE: (u8, u8, u8) = (189, 147, 249);
 
 fn opencode_configured_provider_count(data: &UiData) -> usize {
     data.providers
@@ -291,12 +295,15 @@ pub(super) fn render_main(
         .split(chunks[1]);
 
     if current_app_routed {
+        // 收集路由命中按 provider 聚合（用于多色图例）
+        let route_hits = collect_route_hits_for_dashboard(data);
         render_proxy_activity_dashboard(
             frame,
             hero_chunks[0],
             theme,
             &app.proxy_input_activity_samples,
             &app.proxy_output_activity_samples,
+            &app.proxy_provider_activity_samples,
             &uptime_text,
             &proxy_last_error_text,
             data.proxy.last_error.is_some(),
@@ -305,6 +312,7 @@ pub(super) fn render_main(
             auto_failover_queue_len,
             data.proxy.estimated_input_tokens_total,
             data.proxy.estimated_output_tokens_total,
+            &route_hits,
         );
     } else {
         render_logo_hero(frame, hero_chunks[0], theme);
@@ -328,6 +336,7 @@ fn render_proxy_activity_dashboard(
     theme: &super::theme::Theme,
     input_activity_samples: &[u64],
     output_activity_samples: &[u64],
+    provider_activity_samples: &HashMap<String, Vec<u64>>,
     uptime_text: &str,
     proxy_last_error_text: &str,
     has_proxy_error: bool,
@@ -336,6 +345,7 @@ fn render_proxy_activity_dashboard(
     auto_failover_queue_len: usize,
     input_tokens_total: u64,
     output_tokens_total: u64,
+    route_hits: &[ProviderHitInfo],
 ) -> Rect {
     let has_token_traffic = input_tokens_total > 0 || output_tokens_total > 0;
     let title_output_style = if has_token_traffic {
@@ -346,7 +356,9 @@ fn render_proxy_activity_dashboard(
         Style::default().fg(theme.surface)
     };
     let title_input_style = if has_token_traffic {
-        Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme::terminal_palette_color(DRACULA_PURPLE))
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.surface)
     };
@@ -422,6 +434,36 @@ fn render_proxy_activity_dashboard(
         );
     }
 
+    // 多色 Provider 命中图例（model_routes 命中按 provider 分配不同颜色）
+    if !route_hits.is_empty() {
+        let total_hits: i64 = route_hits.iter().map(|h| h.hits).sum();
+        if total_hits > 0 {
+            let legend_label = crate::t!("Route hits", "路由命中");
+            meta_spans.push(Span::raw("  "));
+            meta_spans.push(Span::styled(format!("{legend_label}: "), label_style));
+            meta_plain.push_str("  ");
+            meta_plain.push_str(&legend_label);
+            meta_plain.push_str(": ");
+            for (i, hit) in route_hits.iter().take(5).enumerate() {
+                if i > 0 {
+                    meta_spans.push(Span::raw(", "));
+                    meta_plain.push_str(", ");
+                }
+                let pct = if total_hits > 0 {
+                    (hit.hits as f64 / total_hits as f64) * 100.0
+                } else {
+                    0.0
+                };
+                let text = format!("{} {}% ({}h)", hit.display_name, pct as i32, hit.hits);
+                meta_spans.push(Span::styled(
+                    text.clone(),
+                    Style::default().fg(hit.color).add_modifier(Modifier::BOLD),
+                ));
+                meta_plain.push_str(&text);
+            }
+        }
+    }
+
     let max_text_height = inner.height.saturating_sub(2).clamp(1, 4);
     let text_height = wrapped_display_line_count(&meta_plain, inner.width).min(max_text_height);
     let graph_height = inner.height.saturating_sub(text_height).max(2);
@@ -443,37 +485,83 @@ fn render_proxy_activity_dashboard(
     let lower_height = graph_height.saturating_sub(upper_height).max(1);
     let wave_width = sections[1].width.saturating_sub(1);
     let mut graph_lines = Vec::new();
-    let upper_style = Style::default().fg(theme.accent);
-    let lower_style = if theme.no_color {
+
+    // 从图例数据构建 provider_id → 颜色映射（与 legend 颜色一致）
+    let provider_color_map: HashMap<String, Color> = route_hits
+        .iter()
+        .map(|h| (h.provider_id.clone(), h.color))
+        .collect();
+
+    // 计算每列基于 provider 活动的颜色
+    let column_colors = compute_column_colors(
+        provider_activity_samples,
+        wave_width as usize,
+        &provider_color_map,
+        theme,
+    );
+
+    let upper_rows = proxy_wave_lines(
+        wave_width,
+        upper_height,
+        true,
+        output_activity_samples,
+        &DOTS,
+        false,
+    );
+    let lower_rows = proxy_wave_lines(
+        wave_width,
+        lower_height,
+        true,
+        input_activity_samples,
+        &REV_DOTS,
+        true,
+    );
+
+    let default_upper = Style::default().fg(theme.accent);
+    let default_lower = if theme.no_color {
         Style::default()
     } else {
-        Style::default().fg(theme.cyan)
+        Style::default().fg(theme::terminal_palette_color(DRACULA_PURPLE))
     };
 
-    graph_lines.extend(
-        proxy_wave_lines(
-            wave_width,
-            upper_height,
-            true,
-            output_activity_samples,
-            &DOTS,
-            false,
-        )
-        .into_iter()
-        .map(|row| Line::from(vec![Span::raw(" "), Span::styled(row, upper_style)])),
-    );
-    graph_lines.extend(
-        proxy_wave_lines(
-            wave_width,
-            lower_height,
-            true,
-            input_activity_samples,
-            &REV_DOTS,
-            true,
-        )
-        .into_iter()
-        .map(|row| Line::from(vec![Span::raw(" "), Span::styled(row, lower_style)])),
-    );
+    // 上半部分（output），每列按 provider 颜色
+    for row in &upper_rows {
+        let mut spans = vec![Span::raw(" ")];
+        for (col_idx, ch) in row.chars().enumerate() {
+            let style = match column_colors.get(col_idx).copied().flatten() {
+                Some(provider_color) => {
+                    if theme.no_color {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        // 上半部使用 provider 颜色，稍微调亮
+                        Style::default().fg(provider_color)
+                    }
+                }
+                None => default_upper,
+            };
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+        graph_lines.push(Line::from(spans));
+    }
+
+    // 下半部分（input），使用与上半部相同的 per-provider 颜色
+    for row in &lower_rows {
+        let mut spans = vec![Span::raw(" ")];
+        for (col_idx, ch) in row.chars().enumerate() {
+            let style = match column_colors.get(col_idx).copied().flatten() {
+                Some(provider_color) => {
+                    if theme.no_color {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(provider_color)
+                    }
+                }
+                None => default_lower,
+            };
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+        graph_lines.push(Line::from(spans));
+    }
 
     frame.render_widget(
         Paragraph::new(graph_lines).wrap(Wrap { trim: false }),
@@ -489,6 +577,110 @@ fn wrapped_display_line_count(text: &str, width: u16) -> u16 {
     }
 
     UnicodeWidthStr::width(text).max(1).div_ceil(width as usize) as u16
+}
+
+/// 点阵图多色 palette（与 legend 共用同一组颜色）
+const PER_PROVIDER_PALETTE_RGBS: [(u8, u8, u8); 8] = [
+    (189, 147, 249), // 紫
+    (135, 206, 250), // 天蓝
+    (255, 160, 122), // 浅三文鱼
+    (144, 238, 144), // 浅绿
+    (221, 160, 221), // 李子紫
+    (255, 215, 0),   // 金
+    (127, 255, 212), // 碧绿
+    (176, 196, 222), // 淡钢蓝
+];
+
+/// 根据 per-provider 活动样本，计算波形图每列的颜色（使用与图例一致的 provider 颜色）
+fn compute_column_colors(
+    provider_activity_samples: &HashMap<String, Vec<u64>>,
+    num_columns: usize,
+    provider_color_map: &HashMap<String, Color>,
+    _theme: &super::theme::Theme,
+) -> Vec<Option<Color>> {
+    if provider_activity_samples.is_empty() || num_columns == 0 {
+        return vec![None; num_columns];
+    }
+
+    let mut colors = vec![None; num_columns];
+    for col in 0..num_columns {
+        let mut max_tokens: u64 = 0;
+        let mut dominant_id: Option<&str> = None;
+        for (provider_id, samples) in provider_activity_samples {
+            let tokens = samples.get(col).copied().unwrap_or(0);
+            if tokens > max_tokens {
+                max_tokens = tokens;
+                dominant_id = Some(provider_id.as_str());
+            }
+        }
+        if max_tokens > 0 {
+            colors[col] = dominant_id.and_then(|id| provider_color_map.get(id).copied());
+        }
+    }
+    colors
+}
+
+/// Provider 命中信息（用于仪表盘多色图例和点阵图着色）
+#[derive(Clone)]
+struct ProviderHitInfo {
+    provider_id: String,
+    display_name: String,
+    hits: i64,
+    color: Color,
+}
+
+/// 从 model_routes 数据按 provider 聚合命中数，分配不同颜色
+fn collect_route_hits_for_dashboard(data: &UiData) -> Vec<ProviderHitInfo> {
+    use std::collections::HashMap;
+    let mut agg: HashMap<String, i64> = HashMap::new();
+    for row in &data.model_routes.rows {
+        if !row.enabled {
+            continue;
+        }
+        if row.hit_count == 0 {
+            continue;
+        }
+        // 用 provider_id 作为聚合 key（可能多个 route 指向同一 provider）
+        *agg.entry(row.provider_id.clone()).or_insert(0) += row.hit_count;
+    }
+    if agg.is_empty() {
+        return Vec::new();
+    }
+    let mut v: Vec<(String, i64)> = agg.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    // 使用与点阵图相同的 palette，确保颜色一致
+    let palette: [Color; 8] =
+        PER_PROVIDER_PALETTE_RGBS.map(|rgb| theme::terminal_palette_color(rgb));
+    v.into_iter()
+        .enumerate()
+        .map(|(i, (provider_id, hits))| {
+            let display_name = data
+                .providers
+                .rows
+                .iter()
+                .find(|p| p.id == provider_id)
+                .map(|p| {
+                    // 截断过长的 provider 名
+                    let s = p.provider.name.clone();
+                    if s.chars().count() > 8 {
+                        let truncated: String = s.chars().take(6).collect();
+                        format!("{truncated}…")
+                    } else {
+                        s
+                    }
+                })
+                .unwrap_or_else(|| {
+                    // provider 已被删除时使用 id 前 8 字符
+                    provider_id.chars().take(8).collect()
+                });
+            ProviderHitInfo {
+                provider_id: provider_id.clone(),
+                display_name,
+                hits,
+                color: palette[i % palette.len()],
+            }
+        })
+        .collect()
 }
 
 fn render_logo_hero(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {

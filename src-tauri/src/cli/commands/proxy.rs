@@ -4,6 +4,7 @@ use crate::app_config::AppType;
 use crate::cli::proxy_settings::{validate_proxy_listen_address, validate_proxy_listen_port};
 use crate::cli::ui::{highlight, info, success};
 use crate::error::AppError;
+use crate::model_route::ModelRoute;
 use crate::{AppState, ProxyConfig};
 
 #[cfg(unix)]
@@ -14,9 +15,43 @@ use crate::daemon::ipc::protocol::{Request as DaemonRequest, Response as DaemonR
 use crate::daemon::supervisor::{DAEMON_SOCKET_ENV, SESSION_TOKEN_ENV};
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum ModelRouteCommand {
+    /// List model routing rules
+    List,
+    /// Add a model routing rule
+    Add {
+        /// Wildcard pattern (e.g., *sonnet*, claude-*)
+        pattern: String,
+        /// Provider ID to route matching models to
+        provider_id: String,
+        /// Priority (lower = higher priority)
+        #[arg(long, default_value = "0")]
+        priority: i32,
+    },
+    /// Remove a model routing rule
+    Remove { id: String },
+    /// Toggle a model routing rule on/off
+    Toggle { id: String },
+    /// Update a model routing rule
+    Update {
+        id: String,
+        #[arg(long)]
+        pattern: Option<String>,
+        #[arg(long)]
+        provider_id: Option<String>,
+        #[arg(long)]
+        priority: Option<i32>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum ProxyCommand {
     /// Show current proxy configuration and routes
     Show,
+
+    /// Manage model-based routing rules
+    #[command(subcommand)]
+    ModelRoute(ModelRouteCommand),
 
     /// Enable the persisted proxy switch
     Enable,
@@ -54,6 +89,10 @@ pub enum ProxyCommand {
 pub fn execute(cmd: ProxyCommand, app: Option<AppType>) -> Result<(), AppError> {
     let app_type = app.unwrap_or(AppType::Claude);
     match cmd {
+        ProxyCommand::ModelRoute(subcmd) => {
+            let state = get_state()?;
+            handle_model_route(&state, &app_type, subcmd)
+        }
         ProxyCommand::Show => show_proxy(),
         ProxyCommand::Enable => set_proxy_enabled(app_type, true),
         ProxyCommand::Disable => set_proxy_enabled(app_type, false),
@@ -67,6 +106,116 @@ pub fn execute(cmd: ProxyCommand, app: Option<AppType>) -> Result<(), AppError> 
             takeovers,
         } => serve_proxy(listen_address, listen_port, takeovers),
     }
+}
+
+fn print_model_routes(routes: &[ModelRoute]) {
+    if routes.is_empty() {
+        println!("{}", info("No model routing rules found."));
+        return;
+    }
+    let mut table = comfy_table::Table::new();
+    table.load_preset(comfy_table::presets::UTF8_FULL);
+    table.set_header(vec!["ID", "Pattern", "Provider", "Priority", "Enabled"]);
+    for r in routes {
+        table.add_row(vec![
+            r.id.clone(),
+            r.pattern.clone(),
+            r.provider_id.clone(),
+            r.priority.to_string(),
+            if r.enabled { "yes" } else { "no" }.to_string(),
+        ]);
+    }
+    println!("{table}");
+}
+
+fn handle_model_route(
+    state: &AppState,
+    app: &AppType,
+    cmd: ModelRouteCommand,
+) -> Result<(), AppError> {
+    match cmd {
+        ModelRouteCommand::List => {
+            let routes = state.db.list_model_routes(app.as_str())?;
+            print_model_routes(&routes);
+        }
+        ModelRouteCommand::Add {
+            pattern,
+            provider_id,
+            priority,
+        } => {
+            let route = ModelRoute {
+                id: String::new(),
+                app_type: app.as_str().to_string(),
+                pattern: pattern.clone(),
+                provider_id: provider_id.clone(),
+                priority,
+                enabled: true,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            };
+            let created = state.db.create_model_route(&route)?;
+            println!(
+                "{}",
+                success(&format!(
+                    "Model route created: id={}, pattern=\"{}\" → provider={}, priority={}",
+                    created.id, created.pattern, created.provider_id, created.priority
+                ))
+            );
+        }
+        ModelRouteCommand::Remove { id } => {
+            state.db.delete_model_route(&id)?;
+            println!("{}", success(&format!("Model route {id} removed.")));
+        }
+        ModelRouteCommand::Toggle { id } => {
+            let toggled = state.db.toggle_model_route(&id)?;
+            let status = if toggled.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            println!(
+                "{}",
+                success(&format!(
+                    "Model route {id} toggled: pattern=\"{}\" now {status}.",
+                    toggled.pattern
+                ))
+            );
+        }
+        ModelRouteCommand::Update {
+            id,
+            pattern,
+            provider_id,
+            priority,
+        } => {
+            let existing = state
+                .db
+                .get_model_route(&id)?
+                .ok_or_else(|| AppError::Database("model_route not found".to_string()))?;
+            let updated = ModelRoute {
+                id: existing.id.clone(),
+                app_type: app.as_str().to_string(),
+                pattern: pattern.unwrap_or(existing.pattern),
+                provider_id: provider_id.unwrap_or(existing.provider_id),
+                priority: priority.unwrap_or(existing.priority),
+                enabled: existing.enabled,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            };
+            let result = state.db.update_model_route(&id, &updated)?;
+            println!(
+                "{}",
+                success(&format!(
+                    "Model route {id} updated: pattern=\"{}\" → provider={}, priority={}.",
+                    result.pattern, result.provider_id, result.priority
+                ))
+            );
+        }
+    }
+    Ok(())
 }
 
 fn get_state() -> Result<AppState, AppError> {
@@ -647,8 +796,15 @@ mod tests {
         Database, MultiAppConfig, ProxyService,
     };
 
-    use super::{apply_overrides, build_proxy_overview_lines, load_proxy_app_ports};
+    use super::{
+        apply_overrides, build_proxy_overview_lines, handle_model_route, load_proxy_app_ports,
+        ModelRouteCommand,
+    };
+    use crate::app_config::AppType;
     use crate::cli::proxy_settings::validate_proxy_listen_port;
+    use crate::database::lock_conn;
+    use crate::error::AppError;
+    use crate::model_route::ModelRoute;
 
     #[test]
     fn cli_proxy_listen_port_validation_rejects_reserved_ports() {
@@ -801,6 +957,464 @@ mod tests {
         assert!(
             !output.contains("automatic failover disabled"),
             "proxy show output should not hard-code automatic failover as disabled"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Model-route command tests
+    // ---------------------------------------------------------------------------
+
+    fn seed_provider(db: &Database, app_type: &str, id: &str) -> Result<(), AppError> {
+        let conn = lock_conn!(db.conn);
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta)
+             VALUES (?1, ?2, ?3, '{}', '{}')",
+            rusqlite::params![id, app_type, id],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    #[test]
+    fn model_route_list_empty_shows_no_routes_message() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        let result = handle_model_route(&state, &app, ModelRouteCommand::List);
+        assert!(result.is_ok(), "list should succeed");
+    }
+
+    #[test]
+    fn model_route_add_and_list_roundtrip() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        seed_provider(&db, "claude", "test-prov").expect("seed provider");
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        // Add a route
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Add {
+                pattern: "*-4-5".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 0,
+            },
+        );
+        assert!(result.is_ok(), "add should succeed");
+
+        // Verify via list
+        let routes = db.list_model_routes("claude").expect("list routes");
+        assert_eq!(routes.len(), 1);
+        let route = &routes[0];
+        assert_eq!(route.pattern, "*-4-5");
+        assert_eq!(route.provider_id, "test-prov");
+        assert!(route.enabled);
+    }
+
+    #[test]
+    fn model_route_add_rejects_nonexistent_provider() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Add {
+                pattern: "*-4-5".to_string(),
+                provider_id: "nonexistent".to_string(),
+                priority: 0,
+            },
+        );
+        assert!(result.is_err(), "add with nonexistent provider should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("provider") && err.contains("not found"),
+            "expected provider not found error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn model_route_add_with_explicit_priority() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        seed_provider(&db, "claude", "test-prov").expect("seed provider");
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Add {
+                pattern: "*-sonnet".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 7,
+            },
+        );
+        assert!(result.is_ok(), "add with priority should succeed");
+
+        let routes = db.list_model_routes("claude").expect("list routes");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].priority, 7);
+    }
+
+    #[test]
+    fn model_route_remove_deletes_by_id() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        seed_provider(&db, "claude", "test-prov").expect("seed provider");
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        // Add then remove
+        let route_id = db
+            .create_model_route(&ModelRoute {
+                id: String::new(),
+                app_type: "claude".to_string(),
+                pattern: "*-sonnet".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 0,
+                enabled: true,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            })
+            .expect("create route")
+            .id;
+
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Remove {
+                id: route_id.clone(),
+            },
+        );
+        assert!(result.is_ok(), "remove should succeed");
+
+        let routes = db.list_model_routes("claude").expect("list routes");
+        assert!(routes.is_empty(), "route should be deleted");
+    }
+
+    #[test]
+    fn model_route_remove_nonexistent_id_errors() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Remove {
+                id: "missing-route".to_string(),
+            },
+        );
+        assert!(result.is_err(), "remove nonexistent should fail");
+    }
+
+    #[test]
+    fn model_route_toggle_flips_enabled() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        seed_provider(&db, "claude", "test-prov").expect("seed provider");
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        // Create an enabled route
+        let route_id = db
+            .create_model_route(&ModelRoute {
+                id: String::new(),
+                app_type: "claude".to_string(),
+                pattern: "*-sonnet".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 0,
+                enabled: true,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            })
+            .expect("create route")
+            .id;
+
+        // Toggle off
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Toggle {
+                id: route_id.clone(),
+            },
+        );
+        assert!(result.is_ok(), "toggle should succeed");
+
+        let route = db
+            .get_model_route(&route_id)
+            .expect("get route")
+            .expect("route exists");
+        assert!(!route.enabled, "should be disabled after toggle");
+
+        // Toggle on
+        handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Toggle {
+                id: route_id.clone(),
+            },
+        )
+        .expect("toggle back");
+        let route = db
+            .get_model_route(&route_id)
+            .expect("get route")
+            .expect("route exists");
+        assert!(route.enabled, "should be enabled after second toggle");
+    }
+
+    #[test]
+    fn model_route_toggle_nonexistent_id_errors() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Toggle {
+                id: "missing-route".to_string(),
+            },
+        );
+        assert!(result.is_err(), "toggle nonexistent should fail");
+    }
+
+    #[test]
+    fn model_route_update_changes_pattern_only() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        seed_provider(&db, "claude", "test-prov").expect("seed provider");
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        let route_id = db
+            .create_model_route(&ModelRoute {
+                id: String::new(),
+                app_type: "claude".to_string(),
+                pattern: "original-*".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 5,
+                enabled: true,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            })
+            .expect("create route")
+            .id;
+
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Update {
+                id: route_id.clone(),
+                pattern: Some("new-pattern-*".to_string()),
+                provider_id: None,
+                priority: None,
+            },
+        );
+        assert!(result.is_ok(), "update pattern should succeed");
+
+        let route = db
+            .get_model_route(&route_id)
+            .expect("get route")
+            .expect("route exists");
+        assert_eq!(route.pattern, "new-pattern-*");
+        assert_eq!(route.provider_id, "test-prov"); // unchanged
+        assert_eq!(route.priority, 5); // unchanged
+    }
+
+    #[test]
+    fn model_route_update_changes_provider_only() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        seed_provider(&db, "claude", "test-prov").expect("seed provider");
+        seed_provider(&db, "claude", "other-prov").expect("seed provider");
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        let route_id = db
+            .create_model_route(&ModelRoute {
+                id: String::new(),
+                app_type: "claude".to_string(),
+                pattern: "*-sonnet".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 5,
+                enabled: true,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            })
+            .expect("create route")
+            .id;
+
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Update {
+                id: route_id.clone(),
+                pattern: None,
+                provider_id: Some("other-prov".to_string()),
+                priority: None,
+            },
+        );
+        assert!(result.is_ok(), "update provider should succeed");
+
+        let route = db
+            .get_model_route(&route_id)
+            .expect("get route")
+            .expect("route exists");
+        assert_eq!(route.provider_id, "other-prov");
+        assert_eq!(route.pattern, "*-sonnet"); // unchanged
+    }
+
+    #[test]
+    fn model_route_update_changes_priority_only() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        seed_provider(&db, "claude", "test-prov").expect("seed provider");
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        let route_id = db
+            .create_model_route(&ModelRoute {
+                id: String::new(),
+                app_type: "claude".to_string(),
+                pattern: "*-sonnet".to_string(),
+                provider_id: "test-prov".to_string(),
+                priority: 5,
+                enabled: true,
+                created_at: None,
+                hit_count: 0,
+                last_hit_at: None,
+                updated_at: None,
+            })
+            .expect("create route")
+            .id;
+
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Update {
+                id: route_id.clone(),
+                pattern: None,
+                provider_id: None,
+                priority: Some(99),
+            },
+        );
+        assert!(result.is_ok(), "update priority should succeed");
+
+        let route = db
+            .get_model_route(&route_id)
+            .expect("get route")
+            .expect("route exists");
+        assert_eq!(route.priority, 99);
+    }
+
+    #[test]
+    fn model_route_update_nonexistent_id_errors() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Claude;
+
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Update {
+                id: "missing-route".to_string(),
+                pattern: Some("new-*".to_string()),
+                provider_id: None,
+                priority: None,
+            },
+        );
+        assert!(result.is_err(), "update nonexistent should fail");
+    }
+
+    #[test]
+    fn model_route_with_codex_app_type() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        seed_provider(&db, "codex", "codex-prov").expect("seed provider");
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let app = AppType::Codex;
+
+        // Add a codex route
+        let result = handle_model_route(
+            &state,
+            &app,
+            ModelRouteCommand::Add {
+                pattern: "gpt-*".to_string(),
+                provider_id: "codex-prov".to_string(),
+                priority: 0,
+            },
+        );
+        assert!(result.is_ok(), "add codex route should succeed");
+
+        // Verify stored under codex
+        let routes = db.list_model_routes("codex").expect("list codex routes");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].app_type, "codex");
+        assert_eq!(routes[0].pattern, "gpt-*");
+
+        // Codex routes should NOT appear in claude listing
+        let claude_routes = db.list_model_routes("claude").expect("list claude routes");
+        assert!(
+            claude_routes.is_empty(),
+            "codex routes should not leak to claude"
         );
     }
 }

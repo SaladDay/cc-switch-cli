@@ -21,6 +21,7 @@ pub(super) fn webdav_config_item_label(item: &WebDavConfigItem) -> &'static str 
 
 pub(super) fn local_proxy_settings_item_label(item: &LocalProxySettingsItem) -> &'static str {
     match item {
+        LocalProxySettingsItem::ProxySwitch => crate::t!("Proxy enabled", "代理开关"),
         LocalProxySettingsItem::ListenAddress => texts::tui_settings_proxy_listen_address_label(),
         LocalProxySettingsItem::ListenPort => texts::tui_settings_proxy_listen_port_label(),
         LocalProxySettingsItem::AutoFailover => crate::t!("Automatic failover", "自动故障转移"),
@@ -2565,6 +2566,10 @@ pub(super) fn render_settings(
                     data.proxy.configured_listen_address, data.proxy.configured_listen_port,
                 ),
             ),
+            super::app::SettingsItem::ModelRoutes => (
+                texts::tui_settings_model_routes_title().to_string(),
+                format!("{} rules", data.model_routes.rows.len()),
+            ),
             super::app::SettingsItem::CheckForUpdates => (
                 texts::tui_settings_check_for_updates().to_string(),
                 format!("v{}", env!("CARGO_PKG_VERSION")),
@@ -3106,6 +3111,14 @@ pub(super) fn render_settings_proxy(
     let rows_data = LocalProxySettingsItem::ALL
         .iter()
         .map(|item| match item {
+            LocalProxySettingsItem::ProxySwitch => (
+                local_proxy_settings_item_label(item).to_string(),
+                if data.proxy.enabled {
+                    texts::enabled().to_string()
+                } else {
+                    texts::disabled().to_string()
+                },
+            ),
             LocalProxySettingsItem::ListenAddress => (
                 local_proxy_settings_item_label(item).to_string(),
                 data.proxy.configured_listen_address.clone(),

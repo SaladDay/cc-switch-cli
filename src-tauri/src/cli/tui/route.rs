@@ -27,6 +27,7 @@ pub enum Route {
     Settings,
     SettingsProxy,
     SettingsManagedAccounts,
+    SettingsModelRoutes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
