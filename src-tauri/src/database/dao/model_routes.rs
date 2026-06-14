@@ -248,7 +248,6 @@ fn row_to_route(row: &rusqlite::Row) -> ModelRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn seed_provider(db: &Database, app_type: &str, id: &str) -> Result<(), AppError> {
         let conn = lock_conn!(db.conn);
