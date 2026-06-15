@@ -96,13 +96,12 @@ impl ProxyServerState {
             status.estimated_output_tokens_total.saturating_add(tokens);
     }
 
-    /// 按 provider 记录预估 token 数，用于仪表盘点阵图多色展示
+    /// 按 provider 记录预估 token 数，用于仪表盘点阵图多色展示。
+    /// 即使 token 估算为 0（非流式响应无 char_count 估算），也至少记录一次
+    /// 命中计数为 1，避免点阵图因 estimated_output_tokens == 0 而完全空。
     pub async fn record_provider_activity(&self, provider_id: &str, tokens: u64) {
-        if tokens == 0 {
-            return;
-        }
         let mut map = self.provider_token_map.write().await;
-        *map.entry(provider_id.to_string()).or_default() += tokens;
+        *map.entry(provider_id.to_string()).or_default() += tokens.max(1);
     }
 
     pub async fn record_active_target(&self, app_type: &AppType, provider: &Provider) {
