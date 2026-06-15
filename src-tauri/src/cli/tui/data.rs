@@ -969,7 +969,11 @@ impl UiData {
     }
 
     pub(crate) fn refresh_proxy_snapshot(&mut self, app_type: &AppType) -> Result<(), AppError> {
-        self.proxy = load_proxy_snapshot(app_type)?;
+        let state = load_state()?;
+        self.proxy = load_proxy_snapshot_from_state(&state, app_type)?;
+        // 同时刷新 model_routes 命中统计，使仪表盘的路由命中图例
+        // 能反映代理运行期间累积的 hit_count（否则停留在 UiData::load 快照）。
+        self.model_routes = load_model_routes_snapshot(&state, app_type, &self.providers)?;
         Ok(())
     }
 

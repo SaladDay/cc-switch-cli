@@ -6,6 +6,9 @@ use super::*;
 /// Dracula purple — used for input (downstream) graph to contrast with accent-colored output.
 const DRACULA_PURPLE: (u8, u8, u8) = (189, 147, 249);
 
+/// 路由命中图例中最低显示命中数；低于此值会从图例中隐藏，避免 0% 干扰主图例
+const LEGEND_MIN_HITS: i64 = 5;
+
 fn opencode_configured_provider_count(data: &UiData) -> usize {
     data.providers
         .rows
@@ -435,7 +438,14 @@ fn render_proxy_activity_dashboard(
     }
 
     // 多色 Provider 命中图例（model_routes 命中按 provider 分配不同颜色）
-    if !route_hits.is_empty() {
+    // 过滤掉过小命中（< 5 hits），避免显示 0% 的 provider 干扰主图例
+    let display_hits: Vec<&ProviderHitInfo> = route_hits
+        .iter()
+        .filter(|h| h.hits >= LEGEND_MIN_HITS)
+        .take(5)
+        .collect();
+    if !display_hits.is_empty() {
+        // 总命中基于所有 route_hits（含 < LEGEND_MIN_HITS 的），让百分比统计更准
         let total_hits: i64 = route_hits.iter().map(|h| h.hits).sum();
         if total_hits > 0 {
             let legend_label = crate::t!("Route hits", "路由命中");
@@ -444,7 +454,7 @@ fn render_proxy_activity_dashboard(
             meta_plain.push_str("  ");
             meta_plain.push_str(&legend_label);
             meta_plain.push_str(": ");
-            for (i, hit) in route_hits.iter().take(5).enumerate() {
+            for (i, hit) in display_hits.iter().enumerate() {
                 if i > 0 {
                     meta_spans.push(Span::raw(", "));
                     meta_plain.push_str(", ");
@@ -487,10 +497,27 @@ fn render_proxy_activity_dashboard(
     let mut graph_lines = Vec::new();
 
     // 从图例数据构建 provider_id → 颜色映射（与 legend 颜色一致）
-    let provider_color_map: HashMap<String, Color> = route_hits
+    let mut provider_color_map: HashMap<String, Color> = route_hits
         .iter()
         .map(|h| (h.provider_id.clone(), h.color))
         .collect();
+
+    // 补全颜色：直接切换的 provider（不在 route_hits 中）但仍在活动 sample 里。
+    // 复用图例同款调色板，按 i % 8 取色，确保点阵有颜色。
+    let palette: [Color; 8] =
+        PER_PROVIDER_PALETTE_RGBS.map(|rgb| theme::terminal_palette_color(rgb));
+    let palette_len = palette.len();
+    if palette_len > 0 {
+        // 先收齐所有缺失颜色的 provider_id，避免借用冲突
+        let missing: Vec<String> = provider_activity_samples
+            .keys()
+            .filter(|id| !provider_color_map.contains_key(*id))
+            .cloned()
+            .collect();
+        for (i, provider_id) in missing.iter().enumerate() {
+            provider_color_map.insert(provider_id.clone(), palette[i % palette_len]);
+        }
+    }
 
     // 计算每列基于 provider 活动的颜色
     let column_colors = compute_column_colors(
