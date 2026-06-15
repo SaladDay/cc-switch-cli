@@ -862,10 +862,11 @@ mod tests {
             )?;
             conn.execute(
                 "INSERT INTO usage_daily_rollups (
-                    date, app_type, provider_id, model, request_count, success_count,
+                    date, app_type, provider_id, model, request_model, pricing_model,
+                    request_count, success_count,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                     total_cost_usd, avg_latency_ms
-                ) VALUES ('2026-03-01', 'claude', 'local-provider', 'claude-3', 7, 7, 700, 350, 0, 0, '0.07', 120)",
+                ) VALUES ('2026-03-01', 'claude', 'local-provider', 'claude-3', '', '', 7, 7, 700, 350, 0, 0, '0.07', 120)",
                 [],
             )?;
             conn.execute(

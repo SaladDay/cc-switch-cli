@@ -109,12 +109,13 @@ impl Database {
         let aggregation_sql = format!(
             "INSERT OR REPLACE INTO usage_daily_rollups
                 (date, app_type, provider_id, model,
+                 request_model, pricing_model,
                  request_count, success_count,
                  input_tokens, output_tokens,
                  cache_read_tokens, cache_creation_tokens,
                  total_cost_usd, avg_latency_ms)
             SELECT
-                d, a, p, m,
+                d, a, p, m, rm, pm,
                 COALESCE(old.request_count, 0) + new_req,
                 COALESCE(old.success_count, 0) + new_succ,
                 COALESCE(old.input_tokens, 0) + new_in,
@@ -131,6 +132,8 @@ impl Database {
                 SELECT
                     date(l.created_at, 'unixepoch', 'localtime') as d,
                     l.app_type as a, l.provider_id as p, l.model as m,
+                    COALESCE(l.request_model, '') as rm,
+                    COALESCE(l.pricing_model, '') as pm,
                     COUNT(*) as new_req,
                     SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END) as new_succ,
                     COALESCE(SUM(l.input_tokens), 0) as new_in,
@@ -141,11 +144,12 @@ impl Database {
                     COALESCE(AVG(l.latency_ms), 0) as new_lat
                 FROM proxy_request_logs l
                 WHERE l.created_at < ?1 AND {effective_filter}
-                GROUP BY d, a, p, m
+                GROUP BY d, a, p, m, rm, pm
             ) agg
             LEFT JOIN usage_daily_rollups old
                 ON old.date = agg.d AND old.app_type = agg.a
-                AND old.provider_id = agg.p AND old.model = agg.m"
+                AND old.provider_id = agg.p AND old.model = agg.m
+                AND old.request_model = agg.rm AND old.pricing_model = agg.pm"
         );
 
         conn.execute(&aggregation_sql, [cutoff])

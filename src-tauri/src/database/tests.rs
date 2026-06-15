@@ -431,6 +431,10 @@ fn schema_create_tables_include_pricing_model_columns() {
     let request_model = get_column_info(&conn, "proxy_request_logs", "request_model");
     assert_eq!(request_model.r#type, "TEXT");
     assert_eq!(request_model.notnull, 0);
+
+    let pricing_model = get_column_info(&conn, "proxy_request_logs", "pricing_model");
+    assert_eq!(pricing_model.r#type, "TEXT");
+    assert_eq!(pricing_model.notnull, 0);
 }
 
 #[test]
@@ -1268,6 +1272,95 @@ fn schema_migration_v9_adds_hermes_columns() {
         Database::has_column(&conn, "skills", "enabled_hermes")
             .expect("check skills enabled_hermes"),
         "skills.enabled_hermes should exist after v9 -> v10 migration"
+    );
+}
+
+#[test]
+fn schema_migration_v10_adds_pricing_model_and_rollup_dimensions() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_model TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            latency_ms INTEGER NOT NULL,
+            status_code INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            data_source TEXT NOT NULL DEFAULT 'proxy'
+        );
+        CREATE TABLE usage_daily_rollups (
+            date TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, app_type, provider_id, model)
+        );
+        INSERT INTO usage_daily_rollups
+            (date, app_type, provider_id, model, request_count, success_count,
+             input_tokens, output_tokens, total_cost_usd, avg_latency_ms)
+        VALUES ('2026-06-15', 'claude', 'p1', 'claude-sonnet-4-6', 5, 4,
+                1000, 500, '0.015', 1200);
+        "#,
+    )
+    .expect("seed v10 schema");
+
+    Database::set_user_version(&conn, 10).expect("set user_version=10");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+    assert!(
+        Database::has_column(&conn, "proxy_request_logs", "pricing_model")
+            .expect("check pricing_model"),
+        "proxy_request_logs.pricing_model should exist after v10 -> v11 migration"
+    );
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "request_model")
+            .expect("check request_model"),
+        "usage_daily_rollups.request_model should exist after v10 -> v11 migration"
+    );
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "pricing_model")
+            .expect("check pricing_model"),
+        "usage_daily_rollups.pricing_model should exist after v10 -> v11 migration"
+    );
+
+    let row_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM usage_daily_rollups", [], |row| {
+            row.get(0)
+        })
+        .expect("count rollup rows");
+    assert_eq!(row_count, 1, "seed data should survive migration rebuild");
+
+    let rollup: (String, String, i64) = conn
+        .query_row(
+            "SELECT request_model, pricing_model, request_count
+             FROM usage_daily_rollups
+             WHERE date = '2026-06-15' AND app_type = 'claude' AND provider_id = 'p1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read migrated rollup row");
+    assert_eq!(
+        rollup,
+        ("".to_string(), "".to_string(), 5),
+        "migrated row should have empty request_model/pricing_model and preserved request_count"
     );
 }
 
