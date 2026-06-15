@@ -279,8 +279,9 @@ async fn handle_claude_request(
     headers: HeaderMap,
     body: Value,
 ) -> Response {
+    let estimated_input_tokens = estimate_tokens_from_value(&body);
     state
-        .record_estimated_input_tokens(estimate_tokens_from_value(&body))
+        .record_estimated_input_tokens(estimated_input_tokens)
         .await;
     let context = match HandlerContext::load(&state, AppType::Claude, &headers, &body, "").await {
         Ok(context) => context,
@@ -366,6 +367,7 @@ async fn handle_claude_request(
             provider: forward_result.provider.clone(),
             current_provider_id_at_start: context.current_provider_id_at_start.clone(),
             is_model_routed: context.route_source.as_deref() == Some("model_route"),
+            estimated_input_tokens,
         });
         let first_byte_timeout = remaining_timeout(first_byte_timeout, request_started_at);
         let idle_timeout = context.streaming_idle_timeout();
@@ -484,6 +486,7 @@ async fn handle_claude_request(
         provider: provider.clone(),
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
         is_model_routed: context.route_source.as_deref() == Some("model_route"),
+        estimated_input_tokens,
     });
     let api_format = super::providers::get_claude_api_format(provider);
     let response_result = if adapter.needs_transform(provider) {
@@ -623,8 +626,9 @@ async fn handle_passthrough_request(
     app_type: AppType,
     endpoint: String,
 ) -> Response {
+    let estimated_input_tokens = estimate_tokens_from_value(&body);
     state
-        .record_estimated_input_tokens(estimate_tokens_from_value(&body))
+        .record_estimated_input_tokens(estimated_input_tokens)
         .await;
     let context = match HandlerContext::load(&state, app_type, &headers, &body, &endpoint).await {
         Ok(context) => context,
@@ -717,6 +721,7 @@ async fn handle_passthrough_request(
             provider: forward_result.provider.clone(),
             current_provider_id_at_start: context.current_provider_id_at_start.clone(),
             is_model_routed: context.route_source.as_deref() == Some("model_route"),
+            estimated_input_tokens,
         });
         let response_result = match response {
             super::forwarder::StreamingResponse::Live(response)
@@ -826,6 +831,7 @@ async fn handle_passthrough_request(
             streaming_first_byte_timeout,
             non_streaming_timeout,
             codex_tool_context.unwrap_or_default(),
+            estimated_input_tokens,
         )
         .await;
     }
@@ -869,6 +875,7 @@ async fn handle_passthrough_request(
         provider: forward_result.provider.clone(),
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
         is_model_routed: context.route_source.as_deref() == Some("model_route"),
+        estimated_input_tokens,
     });
     let status = response.status;
     let request_log = Some(RequestLogContext::from_handler(
@@ -1090,6 +1097,7 @@ async fn finish_codex_live_aware_response(
     streaming_first_byte_timeout: Option<Duration>,
     non_streaming_timeout: Option<Duration>,
     tool_context: super::providers::transform_codex_chat::CodexToolContext,
+    estimated_input_tokens: u64,
 ) -> Response {
     let provider = forward_result.provider;
     let response = forward_result.response;
@@ -1099,6 +1107,7 @@ async fn finish_codex_live_aware_response(
         provider: provider.clone(),
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
         is_model_routed: context.route_source.as_deref() == Some("model_route"),
+        estimated_input_tokens,
     });
 
     if super::providers::should_convert_codex_responses_to_chat(&provider, endpoint) {

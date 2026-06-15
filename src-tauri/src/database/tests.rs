@@ -2291,7 +2291,7 @@ fn model_pricing_upsert_rejects_invalid_values() {
 }
 
 #[test]
-fn schema_migration_v10_adds_model_routes_table() {
+fn schema_migration_v10_to_v12_adds_model_routes_table() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute_batch(
         r#"
@@ -2478,7 +2478,7 @@ fn schema_migration_v10_adds_model_routes_table() {
 
     assert!(
         Database::table_exists(&conn, "model_routes").expect("check model_routes exists"),
-        "model_routes table should exist after v10 -> v11 migration"
+        "model_routes table should exist after v10 -> v12 migration"
     );
     assert!(
         Database::has_column(&conn, "model_routes", "pattern").expect("check pattern column"),

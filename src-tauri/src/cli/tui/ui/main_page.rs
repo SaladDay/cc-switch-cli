@@ -1,13 +1,13 @@
 use crate::cli::tui::data;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::*;
 
 /// Dracula purple — used for input (downstream) graph to contrast with accent-colored output.
 const DRACULA_PURPLE: (u8, u8, u8) = (189, 147, 249);
 
-/// 路由命中图例中最低显示命中数；低于此值会从图例中隐藏，避免 0% 干扰主图例
-const LEGEND_MIN_HITS: i64 = 5;
+/// 图例中最低显示 token 数（近期窗口增量）；低于此值的 provider 会从图例中隐藏，避免 0% 干扰主图例
+const LEGEND_MIN_RECENT_TOKENS: u64 = 1_000;
 
 fn opencode_configured_provider_count(data: &UiData) -> usize {
     data.providers
@@ -298,8 +298,9 @@ pub(super) fn render_main(
         .split(chunks[1]);
 
     if current_app_routed {
-        // 收集路由命中按 provider 聚合（用于多色图例）
-        let route_hits = collect_route_hits_for_dashboard(data);
+        // 收集近期 token 活动按 provider 聚合（用于多色图例，与点阵图同口径）
+        let route_hits =
+            collect_route_hits_for_dashboard(data, &app.proxy_provider_activity_samples);
         render_proxy_activity_dashboard(
             frame,
             hero_chunks[0],
@@ -437,18 +438,18 @@ fn render_proxy_activity_dashboard(
         );
     }
 
-    // 多色 Provider 命中图例（model_routes 命中按 provider 分配不同颜色）
-    // 过滤掉过小命中（< 5 hits），避免显示 0% 的 provider 干扰主图例
+    // 多色 Provider 近期流量图例（与点阵图共用近期 token 口径）
+    // 过滤掉过小流量（< LEGEND_MIN_RECENT_TOKENS tok）的 provider
     let display_hits: Vec<&ProviderHitInfo> = route_hits
         .iter()
-        .filter(|h| h.hits >= LEGEND_MIN_HITS)
+        .filter(|h| h.recent_tokens >= LEGEND_MIN_RECENT_TOKENS)
         .take(5)
         .collect();
     if !display_hits.is_empty() {
-        // 总命中基于所有 route_hits（含 < LEGEND_MIN_HITS 的），让百分比统计更准
-        let total_hits: i64 = route_hits.iter().map(|h| h.hits).sum();
-        if total_hits > 0 {
-            let legend_label = crate::t!("Route hits", "路由命中");
+        // 总量基于所有 route_hits（含 < LEGEND_MIN_RECENT_TOKENS 的），让百分比统计更准
+        let total_tokens: u64 = route_hits.iter().map(|h| h.recent_tokens).sum();
+        if total_tokens > 0 {
+            let legend_label = crate::t!("Recent tokens", "近期流量");
             meta_spans.push(Span::raw("  "));
             meta_spans.push(Span::styled(format!("{legend_label}: "), label_style));
             meta_plain.push_str("  ");
@@ -459,12 +460,9 @@ fn render_proxy_activity_dashboard(
                     meta_spans.push(Span::raw(", "));
                     meta_plain.push_str(", ");
                 }
-                let pct = if total_hits > 0 {
-                    (hit.hits as f64 / total_hits as f64) * 100.0
-                } else {
-                    0.0
-                };
-                let text = format!("{} {}% ({}h)", hit.display_name, pct as i32, hit.hits);
+                let pct = (hit.recent_tokens as f64 / total_tokens as f64) * 100.0;
+                let tok_text = format_estimated_token_compact(hit.recent_tokens);
+                let text = format!("{} {}% ({})", hit.display_name, pct as i32, tok_text);
                 meta_spans.push(Span::styled(
                     text.clone(),
                     Style::default().fg(hit.color).add_modifier(Modifier::BOLD),
@@ -519,12 +517,15 @@ fn render_proxy_activity_dashboard(
         }
     }
 
-    // 计算每列基于 provider 活动的颜色
-    let column_colors = compute_column_colors(
-        provider_activity_samples,
+    let visible_provider_ids: HashSet<String> =
+        route_hits.iter().map(|h| h.provider_id.clone()).collect();
+    let column_color_stacks = compute_column_color_stacks(
+        provider_activity_samples
+            .iter()
+            .filter(|(id, _)| visible_provider_ids.contains(*id)),
         wave_width as usize,
         &provider_color_map,
-        theme,
+        upper_height.max(lower_height) as usize,
     );
 
     let upper_rows = proxy_wave_lines(
@@ -552,10 +553,10 @@ fn render_proxy_activity_dashboard(
     };
 
     // 上半部分（output），每列按 provider 颜色
-    for row in &upper_rows {
+    for (row_idx, row) in upper_rows.iter().enumerate() {
         let mut spans = vec![Span::raw(" ")];
         for (col_idx, ch) in row.chars().enumerate() {
-            let style = match column_colors.get(col_idx).copied().flatten() {
+            let style = match stack_color_at(&column_color_stacks, col_idx, row_idx) {
                 Some(provider_color) => {
                     if theme.no_color {
                         Style::default().add_modifier(Modifier::BOLD)
@@ -572,10 +573,10 @@ fn render_proxy_activity_dashboard(
     }
 
     // 下半部分（input），使用与上半部相同的 per-provider 颜色
-    for row in &lower_rows {
+    for (row_idx, row) in lower_rows.iter().enumerate() {
         let mut spans = vec![Span::raw(" ")];
         for (col_idx, ch) in row.chars().enumerate() {
-            let style = match column_colors.get(col_idx).copied().flatten() {
+            let style = match stack_color_at(&column_color_stacks, col_idx, row_idx) {
                 Some(provider_color) => {
                     if theme.no_color {
                         Style::default().add_modifier(Modifier::BOLD)
@@ -618,33 +619,123 @@ const PER_PROVIDER_PALETTE_RGBS: [(u8, u8, u8); 8] = [
     (176, 196, 222), // 淡钢蓝
 ];
 
-/// 根据 per-provider 活动样本，计算波形图每列的颜色（使用与图例一致的 provider 颜色）
-fn compute_column_colors(
-    provider_activity_samples: &HashMap<String, Vec<u64>>,
+/// 根据 per-provider 活动样本，计算每列的垂直颜色栈。
+/// 同一时间窗口多个 provider 同时有流量时，按 token 占比分配行高，
+/// 避免只显示 dominant provider 而吞掉其他 provider。
+fn compute_column_color_stacks<'a>(
+    provider_activity_samples: impl IntoIterator<Item = (&'a String, &'a Vec<u64>)>,
     num_columns: usize,
     provider_color_map: &HashMap<String, Color>,
-    _theme: &super::theme::Theme,
-) -> Vec<Option<Color>> {
-    if provider_activity_samples.is_empty() || num_columns == 0 {
-        return vec![None; num_columns];
+    stack_height: usize,
+) -> Vec<Vec<Option<Color>>> {
+    if num_columns == 0 || stack_height == 0 {
+        return vec![vec![None; stack_height]; num_columns];
     }
 
-    let mut colors = vec![None; num_columns];
+    let provider_activity_samples = provider_activity_samples.into_iter().collect::<Vec<_>>();
+    if provider_activity_samples.is_empty() {
+        return vec![vec![None; stack_height]; num_columns];
+    }
+
+    let mut color_stacks = vec![vec![None; stack_height]; num_columns];
     for col in 0..num_columns {
-        let mut max_tokens: u64 = 0;
-        let mut dominant_id: Option<&str> = None;
-        for (provider_id, samples) in provider_activity_samples {
+        let mut entries = Vec::new();
+        for (provider_id, samples) in &provider_activity_samples {
             let tokens = samples.get(col).copied().unwrap_or(0);
-            if tokens > max_tokens {
-                max_tokens = tokens;
-                dominant_id = Some(provider_id.as_str());
+            if tokens > 0 {
+                if let Some(color) = provider_color_map.get(*provider_id).copied() {
+                    entries.push((provider_id.as_str(), tokens, color));
+                }
             }
         }
-        if max_tokens > 0 {
-            colors[col] = dominant_id.and_then(|id| provider_color_map.get(id).copied());
+        if entries.is_empty() {
+            continue;
+        }
+
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let total_tokens = entries.iter().map(|(_, tokens, _)| *tokens).sum::<u64>();
+        let mut rows = allocate_provider_rows(&entries, total_tokens, stack_height);
+        rows.reverse();
+
+        let mut idx = 0;
+        for (entry_idx, row_count) in rows {
+            let color = entries[entry_idx].2;
+            for _ in 0..row_count {
+                if idx >= stack_height {
+                    break;
+                }
+                color_stacks[col][idx] = Some(color);
+                idx += 1;
+            }
         }
     }
-    colors
+    color_stacks
+}
+
+fn stack_color_at(
+    color_stacks: &[Vec<Option<Color>>],
+    col_idx: usize,
+    row_idx: usize,
+) -> Option<Color> {
+    color_stacks
+        .get(col_idx)
+        .and_then(|stack| stack.get(row_idx))
+        .copied()
+        .flatten()
+}
+
+fn allocate_provider_rows(
+    entries: &[(&str, u64, Color)],
+    total_tokens: u64,
+    stack_height: usize,
+) -> Vec<(usize, usize)> {
+    if entries.is_empty() || total_tokens == 0 || stack_height == 0 {
+        return Vec::new();
+    }
+
+    let mut allocations = entries
+        .iter()
+        .enumerate()
+        .map(|(idx, (_, tokens, _))| {
+            let exact = (*tokens as f64 / total_tokens as f64) * stack_height as f64;
+            let mut rows = exact.floor() as usize;
+            if rows == 0 {
+                rows = 1;
+            }
+            (idx, rows, exact - exact.floor())
+        })
+        .collect::<Vec<_>>();
+
+    let mut total_rows = allocations.iter().map(|(_, rows, _)| *rows).sum::<usize>();
+    while total_rows > stack_height {
+        if let Some((_, rows, _)) = allocations
+            .iter_mut()
+            .filter(|(_, rows, _)| *rows > 1)
+            .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            *rows -= 1;
+            total_rows -= 1;
+        } else {
+            break;
+        }
+    }
+
+    while total_rows < stack_height {
+        if let Some((_, rows, _)) = allocations
+            .iter_mut()
+            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            *rows += 1;
+            total_rows += 1;
+        } else {
+            break;
+        }
+    }
+
+    allocations
+        .into_iter()
+        .filter_map(|(idx, rows, _)| (rows > 0).then_some((idx, rows)))
+        .collect()
 }
 
 /// Provider 命中信息（用于仪表盘多色图例和点阵图着色）
@@ -652,35 +743,48 @@ fn compute_column_colors(
 struct ProviderHitInfo {
     provider_id: String,
     display_name: String,
-    hits: i64,
+    /// 最近 PROXY_ACTIVITY_WINDOW 窗口的 token 增量总和（近期实际流量）
+    recent_tokens: u64,
     color: Color,
 }
 
-/// 从 model_routes 数据按 provider 聚合命中数，分配不同颜色
-fn collect_route_hits_for_dashboard(data: &UiData) -> Vec<ProviderHitInfo> {
-    use std::collections::HashMap;
-    let mut agg: HashMap<String, i64> = HashMap::new();
+/// 从近期 token 活动样本按 provider 聚合（与点阵图同口径），分配不同颜色。
+/// 聚合源为 `samples`（按 provider 的窗口 token 增量），并补齐 model_routes 中
+/// enabled 但近期无流量的 provider（其 recent_tokens 为 0，会被图例阈值过滤）。
+fn collect_route_hits_for_dashboard(
+    data: &UiData,
+    samples: &HashMap<String, Vec<u64>>,
+) -> Vec<ProviderHitInfo> {
+    let mut agg: HashMap<String, u64> = HashMap::new();
+
+    // 1) 近期 token 增量是主信号：每个窗口 delta 之和
+    for (provider_id, sample_vec) in samples {
+        let sum: u64 = sample_vec.iter().sum();
+        agg.insert(provider_id.clone(), sum);
+    }
+
+    // 2) 并集 model_routes enabled 的 provider（近期无流量的 recent_tokens 记 0，
+    //    下游由 LEGEND_MIN_RECENT_TOKENS 阈值过滤）
     for row in &data.model_routes.rows {
         if !row.enabled {
             continue;
         }
-        if row.hit_count == 0 {
-            continue;
-        }
-        // 用 provider_id 作为聚合 key（可能多个 route 指向同一 provider）
-        *agg.entry(row.provider_id.clone()).or_insert(0) += row.hit_count;
+        agg.entry(row.provider_id.clone()).or_insert(0);
     }
+
     if agg.is_empty() {
         return Vec::new();
     }
-    let mut v: Vec<(String, i64)> = agg.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let mut v: Vec<(String, u64)> = agg.into_iter().collect();
+    // recent_tokens 降序；相同值按 provider_id 字典序，保证测试与显示稳定
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     // 使用与点阵图相同的 palette，确保颜色一致
     let palette: [Color; 8] =
         PER_PROVIDER_PALETTE_RGBS.map(|rgb| theme::terminal_palette_color(rgb));
     v.into_iter()
         .enumerate()
-        .map(|(i, (provider_id, hits))| {
+        .map(|(i, (provider_id, recent_tokens))| {
             let display_name = data
                 .providers
                 .rows
@@ -703,7 +807,7 @@ fn collect_route_hits_for_dashboard(data: &UiData) -> Vec<ProviderHitInfo> {
             ProviderHitInfo {
                 provider_id: provider_id.clone(),
                 display_name,
-                hits,
+                recent_tokens,
                 color: palette[i % palette.len()],
             }
         })
@@ -935,4 +1039,156 @@ pub(super) fn proxy_activity_wave(width: u16, current_app_routed: bool, samples:
         .into_iter()
         .next()
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::tui::data::{ModelRouteRow, ProviderRow};
+    use crate::provider::Provider;
+    use serde_json::Value;
+
+    /// 构造一个最小可用的 Provider（仅 id/name 有意义，其余留空）
+    fn make_provider(id: &str, name: &str) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: name.to_string(),
+            settings_config: Value::Null,
+            website_url: None,
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        }
+    }
+
+    /// 构造一个最小 ProviderRow
+    fn make_provider_row(id: &str, name: &str) -> ProviderRow {
+        ProviderRow {
+            id: id.to_string(),
+            provider: make_provider(id, name),
+            api_url: None,
+            is_current: false,
+            is_in_config: false,
+            is_saved: false,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        }
+    }
+
+    /// 构造仅含给定 providers 的 UiData
+    fn make_ui_data_with_providers(providers: &[(&str, &str)]) -> UiData {
+        let mut data = UiData::default();
+        data.providers.rows = providers
+            .iter()
+            .map(|(id, name)| make_provider_row(id, name))
+            .collect();
+        data
+    }
+
+    #[test]
+    fn collect_aggregates_recent_tokens_from_samples() {
+        let data = make_ui_data_with_providers(&[("p1", "DeepSeek"), ("p2", "Minimax")]);
+        let mut samples = HashMap::new();
+        samples.insert("p1".to_string(), vec![100, 200, 300]); // sum = 600
+        samples.insert("p2".to_string(), vec![50, 50, 50]); // sum = 150
+
+        let result = collect_route_hits_for_dashboard(&data, &samples);
+        assert_eq!(result.len(), 2);
+        // recent_tokens 降序：p1 在前
+        assert_eq!(result[0].provider_id, "p1");
+        assert_eq!(result[0].recent_tokens, 600);
+        assert_eq!(result[1].provider_id, "p2");
+        assert_eq!(result[1].recent_tokens, 150);
+        assert_eq!(result[0].display_name, "DeepSeek");
+        assert_eq!(result[1].display_name, "Minimax");
+    }
+
+    #[test]
+    fn collect_returns_empty_when_no_samples_and_no_enabled_routes() {
+        let data = UiData::default();
+        let samples = HashMap::new();
+        let result = collect_route_hits_for_dashboard(&data, &samples);
+        assert!(
+            result.is_empty(),
+            "expected empty Vec, got {} entries",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn collect_unions_samples_with_model_routes_enabled_providers() {
+        let mut data =
+            make_ui_data_with_providers(&[("p_routed", "Routed"), ("p_direct", "Direct")]);
+        // model_routes 含一个 enabled route 指向 p_routed（无 samples，近期无流量）
+        data.model_routes.rows.push(ModelRouteRow {
+            id: "r1".to_string(),
+            pattern: "*".to_string(),
+            provider_id: "p_routed".to_string(),
+            provider_name: "Routed".to_string(),
+            priority: 0,
+            enabled: true,
+            hit_count: 999, // 历史命中不应影响 recent_tokens 口径
+            last_hit_at: None,
+        });
+        // samples 含 p_direct（直接切换，无 route）
+        let mut samples = HashMap::new();
+        samples.insert("p_direct".to_string(), vec![400, 400]); // sum = 800
+
+        let result = collect_route_hits_for_dashboard(&data, &samples);
+        let ids: Vec<&str> = result.iter().map(|h| h.provider_id.as_str()).collect();
+        assert!(ids.contains(&"p_direct"), "p_direct should be in union");
+        assert!(
+            ids.contains(&"p_routed"),
+            "p_routed should be in union via model_routes"
+        );
+        // recent_tokens 降序：p_direct(800) 在前，p_routed(0) 在后
+        assert_eq!(result[0].provider_id, "p_direct");
+        assert_eq!(result[1].provider_id, "p_routed");
+        assert_eq!(result[1].recent_tokens, 0);
+    }
+
+    #[test]
+    fn color_stacks_keep_multiple_providers_in_same_column() {
+        let mut samples = HashMap::new();
+        samples.insert("p1".to_string(), vec![90]);
+        samples.insert("p2".to_string(), vec![10]);
+
+        let p1 = Color::Rgb(255, 0, 0);
+        let p2 = Color::Rgb(0, 255, 0);
+        let colors = HashMap::from([("p1".to_string(), p1), ("p2".to_string(), p2)]);
+
+        let stacks = compute_column_color_stacks(samples.iter(), 1, &colors, 4);
+
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].len(), 4);
+        assert!(
+            stacks[0].contains(&Some(p1)),
+            "dominant provider should be present"
+        );
+        assert!(
+            stacks[0].contains(&Some(p2)),
+            "smaller provider should still be visible in the same column"
+        );
+    }
+
+    #[test]
+    fn color_stacks_allow_single_provider_to_fill_column() {
+        let mut samples = HashMap::new();
+        samples.insert("p1".to_string(), vec![100]);
+        samples.insert("p2".to_string(), vec![0]);
+
+        let p1 = Color::Rgb(255, 0, 0);
+        let p2 = Color::Rgb(0, 255, 0);
+        let colors = HashMap::from([("p1".to_string(), p1), ("p2".to_string(), p2)]);
+
+        let stacks = compute_column_color_stacks(samples.iter(), 1, &colors, 3);
+
+        assert_eq!(stacks[0], vec![Some(p1), Some(p1), Some(p1)]);
+    }
 }

@@ -264,36 +264,7 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 17. Model Routes 表 (per-model provider routing, v11+)
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS model_routes (
-                id TEXT PRIMARY KEY,
-                app_type TEXT NOT NULL,
-                pattern TEXT NOT NULL,
-                provider_id TEXT NOT NULL,
-                priority INTEGER NOT NULL DEFAULT 0,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                hit_count INTEGER NOT NULL DEFAULT 0,
-                last_hit_at TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-                FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
-            )",
-            [],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-        // model_routes 索引 (与上游 cc-switch 一致)
-        let _ = conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_model_routes_lookup
-             ON model_routes(app_type, enabled, priority DESC, created_at ASC, id ASC)",
-            [],
-        );
-        let _ = conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_model_routes_provider
-             ON model_routes(provider_id, app_type)",
-            [],
-        );
+        Self::create_model_routes_table(conn)?;
 
         // 尝试添加 live_takeover_active 列到 proxy_config 表
         let _ = conn.execute(
@@ -377,15 +348,6 @@ impl Database {
         let mut version = Self::get_user_version(conn)?;
 
         if version > SCHEMA_VERSION {
-            // 上游 cc-switch 可能已升级到更高版本（如 v12）。若 schema 兼容则跳过迁移，
-            // 但仍需运行列补齐修复（如 model_routes.hit_count / last_hit_at），
-            // 以保证旧版本创建的表能继续被新代码正确查询。
-            if version == 12 {
-                log::warn!("数据库版本 {version} 高于 SCHEMA_VERSION={SCHEMA_VERSION}，进入兼容模式并补齐列");
-                Self::create_tables_on_conn(conn)?;
-                conn.execute("RELEASE schema_migration;", []).ok();
-                return Ok(());
-            }
             conn.execute("ROLLBACK TO schema_migration;", []).ok();
             conn.execute("RELEASE schema_migration;", []).ok();
             return Err(Self::future_schema_error(version));
@@ -452,6 +414,11 @@ impl Database {
                         );
                         Self::migrate_v10_to_v11(conn)?;
                         Self::set_user_version(conn, 11)?;
+                    }
+                    11 => {
+                        log::info!("迁移数据库从 v11 到 v12（添加模型路由表和命中统计字段）");
+                        Self::migrate_v11_to_v12(conn)?;
+                        Self::set_user_version(conn, 12)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1337,6 +1304,56 @@ impl Database {
         log::info!(
             "v10 -> v11 迁移完成：usage_daily_rollups 已保留 request_model/pricing_model 维度"
         );
+        Ok(())
+    }
+
+    /// v11 -> v12 迁移：添加模型路由表和命中统计字段。
+    fn migrate_v11_to_v12(conn: &Connection) -> Result<(), AppError> {
+        Self::create_model_routes_table(conn)?;
+        log::info!("v11 -> v12 迁移完成：已添加模型路由表和命中统计字段");
+        Ok(())
+    }
+
+    fn create_model_routes_table(conn: &Connection) -> Result<(), AppError> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_routes (
+                id TEXT PRIMARY KEY,
+                app_type TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                last_hit_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 model_routes 表失败: {e}")))?;
+
+        Self::add_column_if_missing(
+            conn,
+            "model_routes",
+            "hit_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        Self::add_column_if_missing(conn, "model_routes", "last_hit_at", "TEXT")?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_routes_lookup
+             ON model_routes(app_type, enabled, priority DESC, created_at ASC, id ASC)",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 model_routes lookup 索引失败: {e}")))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_routes_provider
+             ON model_routes(provider_id, app_type)",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 model_routes provider 索引失败: {e}")))?;
+
         Ok(())
     }
 

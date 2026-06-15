@@ -31,6 +31,10 @@ pub struct SuccessSyncInfo {
     /// 当为 true 时，跳过 set_current_provider / update_live_backup，
     /// 因为 provider 是模型路由命中选中的，不是用户主动切换的。
     pub is_model_routed: bool,
+    /// 该请求估算的 input token（请求入口算出，随请求带到此处按 provider 归类）。
+    /// 用于让 per-provider 活动统计同时覆盖 input 流量，使点阵图 input/output 波形
+    /// 都能正确按 provider 着色。
+    pub estimated_input_tokens: u64,
 }
 
 impl ResponseHandler {
@@ -60,7 +64,11 @@ impl ResponseHandler {
                     .await;
                 if let Some(ref sync) = success_sync {
                     state
-                        .record_provider_activity(&sync.provider.id, estimated_output_tokens)
+                        .record_provider_activity(
+                            &sync.provider.id,
+                            sync.estimated_input_tokens
+                                .saturating_add(estimated_output_tokens),
+                        )
                         .await;
                 }
                 if status.is_success() {
@@ -292,7 +300,11 @@ impl StreamingOutcomeRecorder {
                         .await;
                     if let Some(ref sync) = success_sync {
                         state
-                            .record_provider_activity(&sync.provider.id, estimated_output_tokens)
+                            .record_provider_activity(
+                                &sync.provider.id,
+                                sync.estimated_input_tokens
+                                    .saturating_add(estimated_output_tokens),
+                            )
                             .await;
                         state
                             .sync_successful_provider_selection(
@@ -321,7 +333,11 @@ impl StreamingOutcomeRecorder {
                         .await;
                     if let Some(ref sync) = success_sync {
                         state
-                            .record_provider_activity(&sync.provider.id, estimated_output_tokens)
+                            .record_provider_activity(
+                                &sync.provider.id,
+                                sync.estimated_input_tokens
+                                    .saturating_add(estimated_output_tokens),
+                            )
                             .await;
                         state
                             .sync_successful_provider_selection(

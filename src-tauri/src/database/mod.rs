@@ -59,7 +59,7 @@ static DATABASE_PERMISSION_CHECK: Once = Once::new();
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 11;
+pub(crate) const SCHEMA_VERSION: i32 = 12;
 
 fn database_open_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -437,14 +437,7 @@ impl Database {
             drop(conn);
 
             if version > SCHEMA_VERSION {
-                // 上游 cc-switch 可能已升级 DB 版本（如 v12）。若核心 schema 兼容则允许继续运行。
-                if version == 12 {
-                    log::warn!(
-                        "数据库版本 {version} 高于当前支持的最高版本 {SCHEMA_VERSION}，将尝试以兼容模式运行"
-                    );
-                } else {
-                    return Err(Self::future_schema_error(version));
-                }
+                return Err(Self::future_schema_error(version));
             }
 
             if version > 0 && version < SCHEMA_VERSION {
@@ -485,15 +478,9 @@ impl Database {
 
         let version = Self::get_user_version(&conn)?;
         if version > SCHEMA_VERSION {
-            if version == 12 {
-                log::warn!(
-                    "数据库版本 {version} 高于当前支持的最高版本 {SCHEMA_VERSION}，将尝试以兼容模式运行（只读）"
-                );
-            } else {
-                return Err(Self::future_schema_error(version));
-            }
+            return Err(Self::future_schema_error(version));
         }
-        if version != SCHEMA_VERSION && version != 12 {
+        if version != SCHEMA_VERSION {
             return Err(AppError::Database(format!(
                 "database schema version {version} requires initialization before snapshot reads; current schema version is {SCHEMA_VERSION}"
             )));

@@ -17,6 +17,11 @@ use crate::provider::Provider;
 
 use super::error::ProxyError;
 
+// Route priority uses lower numbers as higher priority. Manual provider
+// selection outranks normal automatic routes (default 0), while an explicitly
+// higher-priority route (< -1) can still override it.
+const MANUAL_PROVIDER_PRIORITY: i32 = -1;
+
 pub struct ModelRouter {
     db: Arc<Database>,
 }
@@ -36,24 +41,24 @@ impl ModelRouter {
         app_type: &str,
         model: &str,
     ) -> Result<Option<(String, Provider)>, ProxyError> {
-        self.match_route_internal(app_type, model).await
+        self.match_route_internal(app_type, model, None).await
     }
 
     pub async fn match_route_respecting_manual_provider(
         &self,
         app_type: &str,
         model: &str,
-        _manual_provider: Option<&Provider>,
+        manual_provider: Option<&Provider>,
     ) -> Result<Option<(String, Provider)>, ProxyError> {
-        // Model routes always take priority — even when a manual provider is set,
-        // an explicit matching route fires regardless.
-        self.match_route_internal(app_type, model).await
+        self.match_route_internal(app_type, model, manual_provider)
+            .await
     }
 
     async fn match_route_internal(
         &self,
         app_type: &str,
         model: &str,
+        manual_provider: Option<&Provider>,
     ) -> Result<Option<(String, Provider)>, ProxyError> {
         if model.is_empty() {
             return Ok(None);
@@ -66,6 +71,9 @@ impl ModelRouter {
 
         for route in routes {
             if !route.enabled {
+                continue;
+            }
+            if should_skip_route_for_manual_provider(route.priority, manual_provider) {
                 continue;
             }
 
@@ -115,6 +123,13 @@ impl ModelRouter {
 
         Ok(None)
     }
+}
+
+fn should_skip_route_for_manual_provider(
+    route_priority: i32,
+    manual_provider: Option<&Provider>,
+) -> bool {
+    manual_provider.is_some() && route_priority >= MANUAL_PROVIDER_PRIORITY
 }
 
 /// Compile a model route pattern into a case-insensitive regex.
@@ -181,6 +196,23 @@ mod tests {
             last_hit_at: None,
             created_at: None,
             updated_at: None,
+        }
+    }
+
+    fn manual_provider(id: &str) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: id.to_string(),
+            settings_config: serde_json::json!({}),
+            website_url: None,
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
         }
     }
 
@@ -476,5 +508,50 @@ mod tests {
             .expect("match_route");
         // Provider doesn't exist — get_provider_by_id returns None
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn normal_route_priority_yields_to_manual_provider() {
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        seed_provider(&db, "claude", "automatic-provider");
+
+        let route = test_route("claude", "*", "automatic-provider", 0, true);
+        db.create_model_route(&route).expect("create route");
+
+        let router = ModelRouter::new(db);
+        let manual_provider = manual_provider("manually-selected");
+        let result = router
+            .match_route_respecting_manual_provider(
+                "claude",
+                "any-request-model",
+                Some(&manual_provider),
+            )
+            .await
+            .expect("match route");
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_higher_priority_route_can_override_manual_provider() {
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        seed_provider(&db, "claude", "explicit-route-provider");
+
+        let route = test_route("claude", "*", "explicit-route-provider", -2, true);
+        db.create_model_route(&route).expect("create route");
+
+        let router = ModelRouter::new(db);
+        let manual_provider = manual_provider("manually-selected");
+        let result = router
+            .match_route_respecting_manual_provider(
+                "claude",
+                "any-request-model",
+                Some(&manual_provider),
+            )
+            .await
+            .expect("match route")
+            .expect("higher-priority route should match");
+
+        assert_eq!(result.1.id, "explicit-route-provider");
     }
 }

@@ -89,9 +89,9 @@ impl HandlerContext {
             });
 
         // A manual Claude provider switch writes role-model mappings into live config
-        // (for example claude-opus-4-8[1M] -> deepseek-v4-pro[1m]). We treat these
-        // as a fallback that only overrides broad default role routes (*opus*, *sonnet*,
-        // *haiku*). Explicit, specific model routes still fire normally.
+        // (for example client-visible aliases mapped to provider-specific upstream
+        // models). Treat that selected provider as the user's active choice and let
+        // normal-priority automatic routes yield to it.
         let manual_role_provider = if matches!(app_type, AppType::Claude) {
             manual_provider
                 .clone()
@@ -100,15 +100,14 @@ impl HandlerContext {
             None
         };
 
-        // Model route matching first — the router internally skips only
-        // default role patterns (*opus*, etc.) when a manual provider has an
-        // explicit role mapping, but specific routes like "claude-opus-4-8*"
-        // still match normally.
+        // Model route matching first. The router compares generic route priority
+        // against the active manual provider choice; it does not special-case model
+        // families or provider names.
         let (providers, route_source) = match model_router
             .match_route_respecting_manual_provider(
                 app_type.as_str(),
                 &request_model,
-                manual_provider.as_ref(),
+                manual_role_provider.as_ref(),
             )
             .await
         {
@@ -505,7 +504,7 @@ mod tests {
 
     #[tokio::test]
     #[serial(home_settings)]
-    async fn model_route_always_takes_priority_over_manual_provider() {
+    async fn manual_role_mapping_beats_normal_priority_model_route() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("create memory database"));
         let mut current = test_provider("deepseek-current", 1);
@@ -538,7 +537,7 @@ mod tests {
         let route = ModelRoute {
             id: String::new(),
             app_type: "claude".into(),
-            pattern: "*opus*".into(),
+            pattern: "*".into(),
             provider_id: route_target.id.clone(),
             priority: 0,
             enabled: true,
@@ -560,16 +559,19 @@ mod tests {
         .await
         .expect("load handler context");
 
-        // Model routes always take priority — even when a manual provider
-        // with a role mapping is active, *opus* (p0) → route_target wins.
+        // Normal-priority automatic routes are fallbacks. A manual provider with an
+        // explicit mapping must keep the request on the selected provider.
         assert_eq!(context.providers().len(), 1);
-        assert_eq!(context.providers()[0].id, "pp-coder");
-        assert_eq!(context.route_source, Some("model_route".to_string()));
+        assert_eq!(context.providers()[0].id, "deepseek-current");
+        assert_eq!(
+            context.route_source,
+            Some("manual_provider_model".to_string())
+        );
     }
 
     #[tokio::test]
     #[serial(home_settings)]
-    async fn specific_model_route_beats_manual_role_mapping() {
+    async fn higher_priority_model_route_beats_manual_role_mapping() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("create memory database"));
 
@@ -602,14 +604,13 @@ mod tests {
             .await
             .expect("enable auto failover");
 
-        // Specific model route (NOT a default role pattern like "*opus*")
         use crate::model_route::ModelRoute;
         let specific_route = ModelRoute {
             id: String::new(),
             app_type: "claude".into(),
-            pattern: "claude-opus-4-8*".into(),
+            pattern: "*".into(),
             provider_id: specific_target.id.clone(),
-            priority: 10,
+            priority: -2,
             enabled: true,
             hit_count: 0,
             last_hit_at: None,
@@ -630,7 +631,7 @@ mod tests {
         .await
         .expect("load handler context");
 
-        // Specific route wins over manual role mapping
+        // Routes with explicit higher priority can still win over manual selection.
         assert_eq!(context.providers().len(), 1);
         assert_eq!(context.providers()[0].id, "specific-opus-prov");
         assert_eq!(context.route_source, Some("model_route".to_string()));
