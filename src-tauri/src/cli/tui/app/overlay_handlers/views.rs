@@ -394,10 +394,19 @@ impl App {
                     let pattern = std::mem::take(pattern);
                     let is_editing = *editing;
                     let eid = existing_id.clone();
+                    // 编辑时预填原有 priority，避免误改顺序；新增时默认 0
+                    let priority_input = if is_editing {
+                        eid.as_ref()
+                            .and_then(|id| data.model_routes.rows.iter().find(|row| &row.id == id))
+                            .map(|row| row.priority.to_string())
+                            .unwrap_or_else(|| "0".to_string())
+                    } else {
+                        "0".to_string()
+                    };
                     self.overlay = Overlay::TextInput(TextInputState {
                         title: texts::tui_model_route_add_priority_title().to_string(),
                         prompt: texts::tui_model_route_add_priority_prompt().to_string(),
-                        input: TextInput::new("0".to_string()),
+                        input: TextInput::new(priority_input),
                         submit: if is_editing {
                             TextSubmit::ModelRouteEditPriority {
                                 id: eid.unwrap_or_default(),

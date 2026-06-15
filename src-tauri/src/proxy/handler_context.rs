@@ -15,6 +15,23 @@ use super::{
     types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
 };
 
+/// Extract the model identifier from a Gemini API path like
+/// `/v1beta/models/gemini-2.5-pro:generateContent` or
+/// `/v1/models/gemini-2.5-flash:streamGenerateContent`. Returns `None` if
+/// the path does not match the expected `models/<name>[:action]` shape.
+fn extract_gemini_model_from_path(path: &str) -> Option<String> {
+    // Find the "models/" segment and take what follows up to ":" or end.
+    let idx = path.find("/models/")?;
+    let after = &path[idx + "/models/".len()..];
+    let end = after.find([':', '?', '/']).unwrap_or(after.len());
+    let model = &after[..end];
+    if model.is_empty() {
+        None
+    } else {
+        Some(model.to_string())
+    }
+}
+
 pub struct HandlerContext {
     pub start_time: Instant,
     pub state: ProxyServerState,
@@ -38,6 +55,7 @@ impl HandlerContext {
         app_type: AppType,
         headers: &HeaderMap,
         body: &Value,
+        path: &str,
     ) -> Result<Self, ProxyError> {
         let _ = crate::settings::reload_settings();
         let current_provider_id_at_start =
@@ -50,11 +68,14 @@ impl HandlerContext {
 
         let provider_router = state.provider_router.clone();
         let model_router = state.model_router.clone();
+        // Gemini 请求的 model 在 URI 路径中（如 /v1beta/models/gemini-2.5-pro:generateContent），
+        // 标准 Claude/Codex/OpenAI 请求的 model 在 JSON body 中。
         let request_model = body
             .get("model")
             .and_then(|value| value.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+            .map(|s| s.to_string())
+            .or_else(|| extract_gemini_model_from_path(path))
+            .unwrap_or_else(|| "unknown".to_string());
 
         let manual_provider = current_provider_id_at_start
             .is_empty()
@@ -320,6 +341,7 @@ mod tests {
             AppType::Claude,
             &HeaderMap::new(),
             &json!({"model": "claude-3-7-sonnet-20250219"}),
+            "",
         )
         .await
         .expect("load handler context");
@@ -360,6 +382,7 @@ mod tests {
             AppType::Claude,
             &HeaderMap::new(),
             &json!({"model": "claude-3-7-sonnet-20250219"}),
+            "",
         )
         .await
         .expect("load handler context");
@@ -401,6 +424,7 @@ mod tests {
                     AppType::Claude,
                     &HeaderMap::new(),
                     &json!({"model": "claude-3-7-sonnet-20250219"}),
+                    "",
                 )
                 .await
             })
@@ -468,6 +492,7 @@ mod tests {
             AppType::Claude,
             &HeaderMap::new(),
             &json!({"model": "claude-sonnet-4-6"}),
+            "",
         )
         .await
         .expect("load handler context");
@@ -530,6 +555,7 @@ mod tests {
             AppType::Claude,
             &HeaderMap::new(),
             &json!({"model": "claude-opus-4-8[1M]"}),
+            "",
         )
         .await
         .expect("load handler context");
@@ -599,6 +625,7 @@ mod tests {
             AppType::Claude,
             &HeaderMap::new(),
             &json!({"model": "claude-opus-4-8[1M]"}),
+            "",
         )
         .await
         .expect("load handler context");
@@ -641,6 +668,7 @@ mod tests {
             AppType::Claude,
             &HeaderMap::new(),
             &json!({"model": "gemini-2.5-pro"}),
+            "",
         )
         .await
         .expect("load handler context");

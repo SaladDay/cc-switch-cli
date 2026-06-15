@@ -377,9 +377,12 @@ impl Database {
         let mut version = Self::get_user_version(conn)?;
 
         if version > SCHEMA_VERSION {
-            // 上游 cc-switch 可能已升级到更高版本（如 v12）。若 schema 兼容则跳过迁移。
+            // 上游 cc-switch 可能已升级到更高版本（如 v12）。若 schema 兼容则跳过迁移，
+            // 但仍需运行列补齐修复（如 model_routes.hit_count / last_hit_at），
+            // 以保证旧版本创建的表能继续被新代码正确查询。
             if version == 12 {
-                log::warn!("数据库版本 {version} 高于 SCHEMA_VERSION={SCHEMA_VERSION}，跳过迁移（兼容模式）");
+                log::warn!("数据库版本 {version} 高于 SCHEMA_VERSION={SCHEMA_VERSION}，进入兼容模式并补齐列");
+                Self::create_tables_on_conn(conn)?;
                 conn.execute("RELEASE schema_migration;", []).ok();
                 return Ok(());
             }
