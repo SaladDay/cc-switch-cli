@@ -376,16 +376,32 @@ impl App {
         &mut self,
         provider_token_map: &HashMap<String, u64>,
     ) {
-        let Some(prev_map) = &self.proxy_activity_last_provider_tokens else {
-            self.proxy_activity_last_provider_tokens = Some(provider_token_map.clone());
-            return;
-        };
+        // proxy 重启会令主 token 计数回退，触发 observe_proxy_token_activity 清空主样本。
+        // 这里同步清空 provider 样本，保持列对齐，避免颜色栈错位退化为单色。
+        let main_len = self.proxy_input_activity_samples.len();
+        let prev_len = self
+            .proxy_provider_activity_samples
+            .values()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0);
+        if prev_len > main_len {
+            for samples in self.proxy_provider_activity_samples.values_mut() {
+                samples.clear();
+            }
+        }
 
-        // Compute per-provider deltas
+        let first_tick = self.proxy_activity_last_provider_tokens.is_none();
+        let prev_map = self
+            .proxy_activity_last_provider_tokens
+            .clone()
+            .unwrap_or_default();
+
+        // Compute per-provider deltas（首 tick 全为 0，与主样本首列对齐）
         for (provider_id, current_tokens) in provider_token_map {
             let prev = prev_map.get(provider_id).copied().unwrap_or(0);
-            let delta = if *current_tokens < prev {
-                0 // proxy restarted, skip this round
+            let delta = if first_tick || *current_tokens < prev {
+                0
             } else {
                 current_tokens.saturating_sub(prev)
             };
@@ -400,7 +416,7 @@ impl App {
         }
 
         // Pad all provider samples to match input/output sample length
-        let target_len = self.proxy_input_activity_samples.len();
+        let target_len = main_len;
         for samples in self.proxy_provider_activity_samples.values_mut() {
             while samples.len() < target_len {
                 samples.insert(0, 0);

@@ -144,10 +144,13 @@ fn compile_pattern(pattern: &str) -> Result<Regex, regex::Error> {
         return Regex::new(&format!("(?i)^{escaped}$"));
     }
 
-    // Split on *, escape each segment, join with .* and anchor at start only.
+    // Split on *, escape each segment, join with .* and anchor at the start.
     // ^ prevents substring matches (e.g. "claude-*" matching "xclaude-opus").
-    // No $ — trailing * means open-ended, and patterns like "*-sonnet" should
-    // match "claude-sonnet-4-6" (which does not end with "-sonnet").
+    // Patterns that do NOT end with '*' are also anchored at the end ($): a
+    // suffix rule like "*-4-5" then matches only ids ending in "-4-5" and not
+    // "claude-haiku-4-55". Patterns ending in '*' (e.g. "claude-*", "sonnet*")
+    // stay open-ended prefix matches; use "*sonnet*" to match a substring.
+    let ends_with_wild = pattern.ends_with('*');
     let segments: Vec<&str> = pattern.split('*').collect();
     let mut regex_str = String::from("(?i)^");
     for (i, segment) in segments.iter().enumerate() {
@@ -155,6 +158,9 @@ fn compile_pattern(pattern: &str) -> Result<Regex, regex::Error> {
             regex_str.push_str(".*");
         }
         regex_str.push_str(&regex::escape(segment));
+    }
+    if !ends_with_wild {
+        regex_str.push('$');
     }
 
     Regex::new(&regex_str)
@@ -366,14 +372,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_match_route_star_suffix_rejects_partial() {
+        // Regression (Codex P2): "*-4-5" must not match "claude-haiku-4-55".
+        // Non-trailing-* suffix rules are anchored at the end, so a longer id
+        // that merely contains "-4-5" as a substring is not matched.
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        seed_provider(&db, "claude", "prov-45");
+
+        let route = test_route("claude", "*-4-5", "prov-45", 1, true);
+        db.create_model_route(&route).expect("create route");
+
+        let router = ModelRouter::new(db);
+        assert!(router
+            .match_route("claude", "claude-haiku-4-55")
+            .await
+            .expect("match_route")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn test_match_route_priority() {
         let db = Arc::new(Database::memory().expect("create memory database"));
         seed_provider(&db, "claude", "prov-high");
         seed_provider(&db, "claude", "prov-low");
 
         // Higher priority (lower number) should win
-        let route_high = test_route("claude", "*-sonnet", "prov-high", 1, true);
-        let route_low = test_route("claude", "*-sonnet", "prov-low", 10, true);
+        let route_high = test_route("claude", "*sonnet*", "prov-high", 1, true);
+        let route_low = test_route("claude", "*sonnet*", "prov-low", 10, true);
         db.create_model_route(&route_high)
             .expect("create high-priority route");
         db.create_model_route(&route_low)
@@ -393,7 +418,7 @@ mod tests {
         let db = Arc::new(Database::memory().expect("create memory database"));
         seed_provider(&db, "claude", "prov-disabled");
 
-        let route = test_route("claude", "*-sonnet", "prov-disabled", 1, false);
+        let route = test_route("claude", "*sonnet*", "prov-disabled", 1, false);
         db.create_model_route(&route)
             .expect("create disabled route");
 

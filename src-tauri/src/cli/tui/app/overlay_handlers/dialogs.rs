@@ -420,10 +420,23 @@ impl App {
                     });
                     return Action::None;
                 }
+                // 编辑时预选当前 provider，避免回车静默改成首个 provider (Codex P2)
+                let selected = data
+                    .model_routes
+                    .rows
+                    .iter()
+                    .find(|row| row.id == id)
+                    .and_then(|route| {
+                        data.providers
+                            .rows
+                            .iter()
+                            .position(|p| p.id == route.provider_id)
+                    })
+                    .unwrap_or(0);
                 self.overlay = Overlay::ModelRouteProviderPicker {
                     pattern: raw,
 
-                    selected: 0,
+                    selected,
 
                     editing: true,
 
