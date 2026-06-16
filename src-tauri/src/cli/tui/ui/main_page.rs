@@ -519,13 +519,31 @@ fn render_proxy_activity_dashboard(
 
     let visible_provider_ids: HashSet<String> =
         route_hits.iter().map(|h| h.provider_id.clone()).collect();
-    let column_color_stacks = compute_column_color_stacks(
-        provider_activity_samples
-            .iter()
-            .filter(|(id, _)| visible_provider_ids.contains(*id)),
+    let visible_samples: Vec<(&String, &Vec<u64>)> = provider_activity_samples
+        .iter()
+        .filter(|(id, _)| visible_provider_ids.contains(*id))
+        .collect();
+
+    // 点阵每列实际占据的行数（从底部算）。颜色只填点阵字符所在的区间，避免 minor
+    // provider 颜色被分配到点阵空白行而不可见（图例颜色与点阵颜色对不上的根因）。
+    let upper_filled =
+        column_filled_rows(wave_width as usize, upper_height, output_activity_samples);
+    let lower_filled =
+        column_filled_rows(wave_width as usize, lower_height, input_activity_samples);
+
+    let upper_color_stacks = compute_column_color_stacks(
+        visible_samples.iter().copied(),
         wave_width as usize,
         &provider_color_map,
-        upper_height.max(lower_height) as usize,
+        upper_height as usize,
+        &upper_filled,
+    );
+    let lower_color_stacks = compute_column_color_stacks(
+        visible_samples.iter().copied(),
+        wave_width as usize,
+        &provider_color_map,
+        lower_height as usize,
+        &lower_filled,
     );
 
     let upper_rows = proxy_wave_lines(
@@ -556,7 +574,7 @@ fn render_proxy_activity_dashboard(
     for (row_idx, row) in upper_rows.iter().enumerate() {
         let mut spans = vec![Span::raw(" ")];
         for (col_idx, ch) in row.chars().enumerate() {
-            let style = match stack_color_at(&column_color_stacks, col_idx, row_idx) {
+            let style = match stack_color_at(&upper_color_stacks, col_idx, row_idx) {
                 Some(provider_color) => {
                     if theme.no_color {
                         Style::default().add_modifier(Modifier::BOLD)
@@ -576,7 +594,7 @@ fn render_proxy_activity_dashboard(
     for (row_idx, row) in lower_rows.iter().enumerate() {
         let mut spans = vec![Span::raw(" ")];
         for (col_idx, ch) in row.chars().enumerate() {
-            let style = match stack_color_at(&column_color_stacks, col_idx, row_idx) {
+            let style = match stack_color_at(&lower_color_stacks, col_idx, row_idx) {
                 Some(provider_color) => {
                     if theme.no_color {
                         Style::default().add_modifier(Modifier::BOLD)
@@ -620,13 +638,15 @@ const PER_PROVIDER_PALETTE_RGBS: [(u8, u8, u8); 8] = [
 ];
 
 /// 根据 per-provider 活动样本，计算每列的垂直颜色栈。
-/// 同一时间窗口多个 provider 同时有流量时，按 token 占比分配行高，
-/// 避免只显示 dominant provider 而吞掉其他 provider。
+/// 颜色只填充该列点阵实际占据的行（`column_filled_rows`，从底部算），
+/// 并在区间内按 token 占比分配行高：dominant 在底部，minor 紧贴其上。
+/// 这样每个 provider 的颜色都落在有点阵字符的行上，minor provider 也可见。
 fn compute_column_color_stacks<'a>(
     provider_activity_samples: impl IntoIterator<Item = (&'a String, &'a Vec<u64>)>,
     num_columns: usize,
     provider_color_map: &HashMap<String, Color>,
     stack_height: usize,
+    column_filled_rows: &[usize],
 ) -> Vec<Vec<Option<Color>>> {
     if num_columns == 0 || stack_height == 0 {
         return vec![vec![None; stack_height]; num_columns];
@@ -639,6 +659,17 @@ fn compute_column_color_stacks<'a>(
 
     let mut color_stacks = vec![vec![None; stack_height]; num_columns];
     for col in 0..num_columns {
+        // 该列点阵实际占据的行数（从底部算）。颜色只填这个区间，避免 minor
+        // provider 的颜色被分配到点阵空白行（图例与点阵颜色对不上的根因）。
+        let filled = column_filled_rows
+            .get(col)
+            .copied()
+            .unwrap_or(0)
+            .min(stack_height);
+        if filled == 0 {
+            continue;
+        }
+
         let mut entries = Vec::new();
         for (provider_id, samples) in &provider_activity_samples {
             let tokens = samples.get(col).copied().unwrap_or(0);
@@ -654,17 +685,19 @@ fn compute_column_color_stacks<'a>(
 
         entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         let total_tokens = entries.iter().map(|(_, tokens, _)| *tokens).sum::<u64>();
-        let mut rows = allocate_provider_rows(&entries, total_tokens, stack_height);
+        // 在 [0, filled) 内分配行数，dominant 占高 idx（点阵底部），minor 占低 idx（顶部字符行）。
+        let mut rows = allocate_provider_rows(&entries, total_tokens, filled);
         rows.reverse();
 
+        let base = stack_height - filled;
         let mut idx = 0;
         for (entry_idx, row_count) in rows {
             let color = entries[entry_idx].2;
             for _ in 0..row_count {
-                if idx >= stack_height {
+                if idx >= filled {
                     break;
                 }
-                color_stacks[col][idx] = Some(color);
+                color_stacks[col][base + idx] = Some(color);
                 idx += 1;
             }
         }
@@ -682,6 +715,21 @@ fn stack_color_at(
         .and_then(|stack| stack.get(row_idx))
         .copied()
         .flatten()
+}
+
+/// 计算点阵每列实际占据的行数（从底部算），与 `proxy_wave_lines` 的渲染口径一致。
+/// 颜色栈据此只填充点阵有字符的区间，确保 provider 颜色落在可见的字符行上。
+fn column_filled_rows(width: usize, height: u16, samples: &[u64]) -> Vec<usize> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let recent = super::proxy_wave::recent_samples(width, true, samples);
+    let scaled = super::proxy_wave::scale_samples(height, &recent, true);
+    scaled
+        .iter()
+        .map(|v| ((*v as usize) + 7) / 8)
+        .map(|rows| rows.min(height as usize))
+        .collect()
 }
 
 fn allocate_provider_rows(
@@ -1163,7 +1211,8 @@ mod tests {
         let p2 = Color::Rgb(0, 255, 0);
         let colors = HashMap::from([("p1".to_string(), p1), ("p2".to_string(), p2)]);
 
-        let stacks = compute_column_color_stacks(samples.iter(), 1, &colors, 4);
+        // 点阵画满 4 行：dominant(p1) 占底部，minor(p2) 占顶部字符行。
+        let stacks = compute_column_color_stacks(samples.iter(), 1, &colors, 4, &[4]);
 
         assert_eq!(stacks.len(), 1);
         assert_eq!(stacks[0].len(), 4);
@@ -1187,8 +1236,30 @@ mod tests {
         let p2 = Color::Rgb(0, 255, 0);
         let colors = HashMap::from([("p1".to_string(), p1), ("p2".to_string(), p2)]);
 
-        let stacks = compute_column_color_stacks(samples.iter(), 1, &colors, 3);
+        let stacks = compute_column_color_stacks(samples.iter(), 1, &colors, 3, &[3]);
 
         assert_eq!(stacks[0], vec![Some(p1), Some(p1), Some(p1)]);
+    }
+
+    #[test]
+    fn color_stacks_only_fill_rendered_rows() {
+        // Regression: 点阵只画 2 行（filled=2），stack_height=4。颜色必须只填
+        // 点阵字符所在的 [2, 4) 区间，minor(p2) 在顶部字符行(base=2)，dominant(p1)
+        // 在底部，[0, 2) 的空白行保持 None，避免图例颜色与点阵颜色对不上。
+        let mut samples = HashMap::new();
+        samples.insert("p1".to_string(), vec![90]);
+        samples.insert("p2".to_string(), vec![10]);
+
+        let p1 = Color::Rgb(255, 0, 0);
+        let p2 = Color::Rgb(0, 255, 0);
+        let colors = HashMap::from([("p1".to_string(), p1), ("p2".to_string(), p2)]);
+
+        let stacks = compute_column_color_stacks(samples.iter(), 1, &colors, 4, &[2]);
+
+        assert_eq!(
+            stacks[0],
+            vec![None, None, Some(p2), Some(p1)],
+            "colors must occupy only the rendered [base, stack_height) rows"
+        );
     }
 }

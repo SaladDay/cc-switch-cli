@@ -57,7 +57,7 @@ pub(super) fn proxy_wave_lines(
     rows
 }
 
-fn recent_samples(width: usize, current_app_routed: bool, samples: &[u64]) -> Vec<u64> {
+pub(super) fn recent_samples(width: usize, current_app_routed: bool, samples: &[u64]) -> Vec<u64> {
     if !current_app_routed {
         return vec![0; width];
     }
@@ -73,7 +73,7 @@ fn recent_samples(width: usize, current_app_routed: bool, samples: &[u64]) -> Ve
     out
 }
 
-fn scale_samples(height: u16, samples: &[u64], show_idle_baseline: bool) -> Vec<u64> {
+pub(super) fn scale_samples(height: u16, samples: &[u64], show_idle_baseline: bool) -> Vec<u64> {
     let baseline = if show_idle_baseline { 1 } else { 0 };
     let max = samples.iter().copied().max().unwrap_or(0);
     if max == 0 {
