@@ -1,5 +1,4 @@
 pub mod providers;
-pub mod terminal;
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

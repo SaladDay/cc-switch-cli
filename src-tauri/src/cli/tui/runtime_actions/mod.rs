@@ -240,36 +240,20 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::SessionResume { command, cwd } => {
-            let preferred_terminal = crate::settings::get_preferred_terminal();
-            let target = session_terminal_target(preferred_terminal.as_deref());
-            let launch_result = ctx.terminal.with_terminal_restored(|| {
-                crate::session_manager::terminal::launch_terminal(
-                    &target,
-                    &command,
-                    cwd.as_deref(),
-                    None,
-                )
-                .map_err(AppError::Message)
+            let launch_result = ctx.terminal.with_terminal_restored_for_handoff(|| {
+                exec_session_resume(&command, cwd.as_deref())
             });
-            match launch_result {
-                Ok(()) => {
-                    ctx.app.push_toast(
-                        texts::tui_sessions_toast_terminal_launched(),
-                        ToastKind::Success,
-                    );
-                }
-                Err(err) => {
-                    ctx.app.overlay = Overlay::TextView(TextViewState {
-                        title: texts::tui_sessions_resume_command().to_string(),
-                        lines: command.lines().map(|line| line.to_string()).collect(),
-                        scroll: 0,
-                        action: None,
-                    });
-                    ctx.app.push_toast(
-                        texts::tui_sessions_toast_resume_fallback(&err.to_string()),
-                        ToastKind::Warning,
-                    );
-                }
+            if let Err(err) = launch_result {
+                ctx.app.overlay = Overlay::TextView(TextViewState {
+                    title: texts::tui_sessions_resume_command().to_string(),
+                    lines: command.lines().map(|line| line.to_string()).collect(),
+                    scroll: 0,
+                    action: None,
+                });
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_resume_fallback(&err.to_string()),
+                    ToastKind::Warning,
+                );
             }
             Ok(())
         }
@@ -564,15 +548,46 @@ pub(crate) fn handle_action(
     }
 }
 
-fn session_terminal_target(preferred_terminal: Option<&str>) -> String {
-    match preferred_terminal
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some("iterm2") => "iterm".to_string(),
-        Some(target) => target.to_string(),
-        None => "terminal".to_string(),
+#[cfg(unix)]
+fn build_session_resume_command(
+    shell: &std::ffi::OsStr,
+    command: &str,
+    cwd: Option<&str>,
+) -> std::process::Command {
+    let mut process = std::process::Command::new(shell);
+    process.arg("-c").arg(command);
+    if let Some(cwd) = cwd.filter(|value| !value.trim().is_empty()) {
+        process.current_dir(cwd);
     }
+    process
+}
+
+#[cfg(unix)]
+fn exec_session_resume(command: &str, cwd: Option<&str>) -> Result<(), AppError> {
+    use std::os::unix::process::CommandExt;
+
+    if command.trim().is_empty() {
+        return Err(AppError::Message("Resume command is empty".to_string()));
+    }
+
+    let shell = std::env::var_os("SHELL")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into());
+    let exec_err = build_session_resume_command(&shell, command, cwd).exec();
+    Err(AppError::localized(
+        "sessions.resume_exec_failed",
+        format!("恢复会话失败: {exec_err}"),
+        format!("Failed to resume session: {exec_err}"),
+    ))
+}
+
+#[cfg(not(unix))]
+fn exec_session_resume(_command: &str, _cwd: Option<&str>) -> Result<(), AppError> {
+    Err(AppError::localized(
+        "sessions.resume_unsupported_platform",
+        "当前平台暂不支持在当前终端恢复会话。".to_string(),
+        "Resuming a session in the current terminal is not supported on this platform.".to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -664,11 +679,35 @@ mod tests {
     }
 
     #[test]
-    fn session_terminal_target_matches_upstream_setting_names() {
-        assert_eq!(session_terminal_target(None), "terminal");
-        assert_eq!(session_terminal_target(Some("")), "terminal");
-        assert_eq!(session_terminal_target(Some("iterm2")), "iterm");
-        assert_eq!(session_terminal_target(Some("ghostty")), "ghostty");
+    #[cfg(unix)]
+    fn session_resume_command_uses_user_shell_and_session_cwd() {
+        let command = build_session_resume_command(
+            std::ffi::OsStr::new("/bin/zsh"),
+            "claude --resume session-1",
+            Some("/workspace"),
+        );
+
+        assert_eq!(command.get_program(), std::path::Path::new("/bin/zsh"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec!["-c", "claude --resume session-1"]
+        );
+        assert_eq!(
+            command.get_current_dir(),
+            Some(std::path::Path::new("/workspace"))
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn session_resume_command_ignores_blank_cwd() {
+        let command = build_session_resume_command(
+            std::ffi::OsStr::new("/bin/bash"),
+            "codex resume session-1",
+            Some("  "),
+        );
+
+        assert_eq!(command.get_current_dir(), None);
     }
 
     fn write_invalid_legacy_config(home: &Path) {
