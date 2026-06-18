@@ -73,7 +73,12 @@ impl ModelRouter {
             if !route.enabled {
                 continue;
             }
-            if should_skip_route_for_manual_provider(route.priority, manual_provider) {
+            if should_skip_route_for_manual_provider(
+                &route.pattern,
+                route.priority,
+                model,
+                manual_provider,
+            ) {
                 continue;
             }
 
@@ -126,10 +131,35 @@ impl ModelRouter {
 }
 
 fn should_skip_route_for_manual_provider(
+    route_pattern: &str,
     route_priority: i32,
+    request_model: &str,
     manual_provider: Option<&Provider>,
 ) -> bool {
-    manual_provider.is_some() && route_priority >= MANUAL_PROVIDER_PRIORITY
+    manual_provider.is_some()
+        && route_priority >= MANUAL_PROVIDER_PRIORITY
+        && !route_pattern_mentions_request_role(route_pattern, request_model)
+}
+
+fn route_pattern_mentions_request_role(route_pattern: &str, request_model: &str) -> bool {
+    let Some(role) = claude_role_family(request_model) else {
+        return false;
+    };
+
+    route_pattern.to_ascii_lowercase().contains(role)
+}
+
+fn claude_role_family(model: &str) -> Option<&'static str> {
+    let model = model.to_ascii_lowercase();
+    if model.contains("haiku") {
+        Some("haiku")
+    } else if model.contains("opus") {
+        Some("opus")
+    } else if model.contains("sonnet") {
+        Some("sonnet")
+    } else {
+        None
+    }
 }
 
 /// Compile a model route pattern into a case-insensitive regex.
@@ -555,6 +585,29 @@ mod tests {
             .expect("match route");
 
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn role_specific_route_priority_does_not_yield_to_manual_provider() {
+        let db = Arc::new(Database::memory().expect("create memory database"));
+        seed_provider(&db, "claude", "opus-provider");
+
+        let route = test_route("claude", "*opus*", "opus-provider", 0, true);
+        db.create_model_route(&route).expect("create route");
+
+        let router = ModelRouter::new(db);
+        let manual_provider = manual_provider("manually-selected");
+        let result = router
+            .match_route_respecting_manual_provider(
+                "claude",
+                "claude-opus-4-8",
+                Some(&manual_provider),
+            )
+            .await
+            .expect("match route")
+            .expect("role-specific route should match");
+
+        assert_eq!(result.1.id, "opus-provider");
     }
 
     #[tokio::test]

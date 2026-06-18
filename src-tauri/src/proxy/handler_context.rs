@@ -639,6 +639,59 @@ mod tests {
 
     #[tokio::test]
     #[serial(home_settings)]
+    async fn role_specific_opus_route_beats_current_glm_role_mapping() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("create memory database"));
+
+        let mut current = test_provider("glm-current", 1);
+        current.name = "Zhipu GLM".to_string();
+        current.settings_config = json!({
+            "env": {
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.1"
+            }
+        });
+        let route_target = test_provider("pp-coder", 0);
+
+        db.save_provider("claude", &current)
+            .expect("save current provider");
+        db.save_provider("claude", &route_target)
+            .expect("save route target provider");
+        db.set_current_provider("claude", &current.id)
+            .expect("set current provider");
+
+        use crate::model_route::ModelRoute;
+        let route = ModelRoute {
+            id: String::new(),
+            app_type: "claude".into(),
+            pattern: "*opus*".into(),
+            provider_id: route_target.id.clone(),
+            priority: 0,
+            enabled: true,
+            hit_count: 0,
+            last_hit_at: None,
+            created_at: None,
+            updated_at: None,
+        };
+        db.create_model_route(&route).expect("create model route");
+
+        let state = test_state(db);
+        let context = HandlerContext::load(
+            &state,
+            AppType::Claude,
+            &HeaderMap::new(),
+            &json!({"model": "claude-opus-4-8"}),
+            "",
+        )
+        .await
+        .expect("load handler context");
+
+        assert_eq!(context.providers().len(), 1);
+        assert_eq!(context.providers()[0].id, "pp-coder");
+        assert_eq!(context.route_source, Some("model_route".to_string()));
+    }
+
+    #[tokio::test]
+    #[serial(home_settings)]
     async fn no_model_route_falls_back_to_provider_router() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().expect("create memory database"));
