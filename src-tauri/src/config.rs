@@ -213,7 +213,7 @@ fn is_system_dir(path: &Path) -> bool {
     #[cfg(windows)]
     {
         // Should do some more verifications here
-        false
+        return false;
     }
 
     false
@@ -918,6 +918,11 @@ fn is_allowed_platform_config_symlink(path: &Path) -> bool {
         let _ = path;
         false
     }
+}
+
+#[cfg(not(unix))]
+fn is_allowed_platform_config_symlink(_path: &Path) -> bool {
+    false
 }
 
 #[cfg(unix)]

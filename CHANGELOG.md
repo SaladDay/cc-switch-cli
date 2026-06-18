@@ -7,6 +7,32 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.8.3] - 2026-06-17
+
+### Changed
+
+- **Database / WebDAV**: Raise the supported SQLite schema to v11 so CLI installs can open and sync databases created by the newer CC Switch line. Fixes [#281](https://github.com/SaladDay/cc-switch-cli/issues/281).
+- **Database / Backups**: Tighten file permissions for the cc-switch database and backup files, including migration and recovery paths.
+- **Release Notes**: Keep the generated release body focused on assets and update metadata while GitHub renders the contributor list.
+
+### Fixed
+
+- **Database / Migration**: Add the v10 -> v11 migration for `proxy_request_logs.pricing_model` and the expanded `usage_daily_rollups` key with `request_model` and `pricing_model`.
+- **WebDAV / Import**: Accept current-schema v11 sync exports instead of treating them as future databases, while still rejecting schemas newer than this build before restore work starts.
+- **Usage Logs**: Preserve the request model and pricing model dimensions when usage rows are rolled up or restored from sync snapshots.
+
+### Commits (since v5.8.2)
+
+- f620fd3b Secure cc-switch database and backup file permissions (#221)
+- 663174ff chore(release): simplify release notes body
+
+### Thanks
+
+- Thanks `@Lei-fly` for opening [#281](https://github.com/SaladDay/cc-switch-cli/issues/281) and spelling out the v5.8.2 to schema v11 compatibility failure.
+- Thanks `@FeiYehua` for the database permission hardening and the schema v11 compatibility work in [#221](https://github.com/SaladDay/cc-switch-cli/pull/221).
+- Thanks `@SaladDay` for the release workflow cleanup and release coordination.
+- Thanks to every contributor who has worked on CC Switch CLI, reported issues, reviewed changes, tested releases, or helped users diagnose upgrade problems.
+
 ## [5.8.2] - 2026-06-11
 
 ### Added

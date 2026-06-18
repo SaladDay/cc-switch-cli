@@ -35,6 +35,136 @@ fn read_opencode_live(path: &std::path::Path) -> serde_json::Value {
 }
 
 #[test]
+fn opencode_provider_modalities_round_trips_to_live_config() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let state = state_from_config(MultiAppConfig::default());
+    let modalities = json!({ "input": ["text", "image"] });
+    let provider_config = json!({
+        "npm": "@ai-sdk/openai-compatible",
+        "options": {
+            "baseURL": "https://vision.example.com/v1",
+            "apiKey": "sk-vision"
+        },
+        "models": {
+            "vision": { "name": "Vision" }
+        },
+        "modalities": modalities,
+        "customRouting": {
+            "tier": "vision"
+        }
+    });
+
+    ProviderService::add(
+        &state,
+        AppType::OpenCode,
+        Provider::with_id(
+            "vision".to_string(),
+            "Vision".to_string(),
+            provider_config.clone(),
+            None,
+        ),
+    )
+    .expect("add opencode provider with modalities");
+
+    let live = read_opencode_live(&opencode_config_path(home));
+    assert_eq!(live["provider"]["vision"], provider_config);
+    assert_eq!(live["provider"]["vision"]["modalities"], modalities);
+    assert_eq!(
+        live["provider"]["vision"]["customRouting"],
+        json!({ "tier": "vision" })
+    );
+    assert!(live["provider"]["vision"].get("extra").is_none());
+}
+
+#[test]
+fn opencode_provider_without_modalities_omits_modalities_and_extra_keys() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let state = state_from_config(MultiAppConfig::default());
+    let provider = opencode_provider("text-only", "Text Only", "https://text.example.com/v1");
+    let expected_config = provider.settings_config.clone();
+
+    ProviderService::add(&state, AppType::OpenCode, provider)
+        .expect("add opencode provider without modalities");
+
+    let live = read_opencode_live(&opencode_config_path(home));
+    let serialized_provider = live["provider"]["text-only"]
+        .as_object()
+        .expect("serialized provider object");
+
+    assert_eq!(live["provider"]["text-only"], expected_config);
+    assert!(!serialized_provider.contains_key("modalities"));
+    assert!(!serialized_provider.contains_key("extra"));
+}
+
+#[test]
+fn opencode_update_clears_existing_modalities_when_typed_provider_omits_them() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenCode)
+            .expect("opencode manager");
+        manager.providers.insert(
+            "vision".to_string(),
+            opencode_provider("vision", "Vision", "https://old.example.com/v1"),
+        );
+    }
+
+    let opencode_path = opencode_config_path(home);
+    std::fs::create_dir_all(opencode_path.parent().expect("opencode config dir"))
+        .expect("create opencode dir");
+    let modalities = json!({ "input": ["text", "image"] });
+    std::fs::write(
+        &opencode_path,
+        serde_json::to_string_pretty(&json!({
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {
+                "vision": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {
+                        "baseURL": "https://old.example.com/v1",
+                        "apiKey": "sk-vision"
+                    },
+                    "models": {
+                        "vision": { "name": "Vision" }
+                    },
+                    "modalities": modalities
+                }
+            }
+        }))
+        .expect("serialize opencode live config"),
+    )
+    .expect("seed opencode live config");
+
+    let state = state_from_config(config);
+    ProviderService::update(
+        &state,
+        AppType::OpenCode,
+        opencode_provider("vision", "Vision Updated", "https://new.example.com/v1"),
+    )
+    .expect("update opencode provider without modalities");
+
+    let live = read_opencode_live(&opencode_path);
+    assert_eq!(
+        live["provider"]["vision"]["options"]["baseURL"],
+        json!("https://new.example.com/v1")
+    );
+    let provider = live["provider"]["vision"]
+        .as_object()
+        .expect("serialized provider object");
+    assert!(!provider.contains_key("modalities"));
+}
+
+#[test]
 fn opencode_add_syncs_all_providers_to_live_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();

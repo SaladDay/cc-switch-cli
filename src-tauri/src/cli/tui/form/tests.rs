@@ -11,6 +11,10 @@ fn template_index_by_label(app_type: AppType, label: &str) -> usize {
         .expect("template should exist")
 }
 
+fn claudeapi_template_index(app_type: AppType) -> usize {
+    template_index_by_label(app_type, "* ClaudeAPI")
+}
+
 fn packycode_template_index(app_type: AppType) -> usize {
     template_index_by_label(app_type, "* PackyCode")
 }
@@ -84,6 +88,10 @@ fn provider_add_form_template_labels_use_ascii_prefix_for_packycode() {
         labels.contains(&"* PackyCode"),
         "expected PackyCode chip label to use ASCII prefix for alignment stability"
     );
+    assert!(
+        labels.contains(&"* ClaudeAPI"),
+        "expected ClaudeAPI chip label to use ASCII prefix for alignment stability"
+    );
 }
 
 #[test]
@@ -95,6 +103,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "Claude Official",
             "Codex",
+            "* ClaudeAPI",
             "* PackyCode",
             "* Cubence",
             "* RunAPI",
@@ -139,6 +148,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
         !opencode_labels.contains(&"* PackyCode"),
         "OpenCode should expose only explicitly supported sponsor presets"
     );
+    assert!(
+        !opencode_labels.contains(&"* ClaudeAPI"),
+        "OpenCode should not expose Claude-only sponsor presets"
+    );
 
     let hermes_labels = ProviderAddFormState::new(AppType::Hermes).template_labels();
     assert_eq!(hermes_labels, vec!["Custom", "* Cubence", "* RunAPI"]);
@@ -151,6 +164,10 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
     assert!(
         !openclaw_labels.contains(&"* PackyCode"),
         "OpenClaw should expose only explicitly supported sponsor presets"
+    );
+    assert!(
+        !openclaw_labels.contains(&"* ClaudeAPI"),
+        "OpenClaw should not expose Claude-only sponsor presets"
     );
 }
 
@@ -172,6 +189,11 @@ fn cli_provider_templates_match_tui_serializer_output() {
             AppType::Gemini,
             ProviderAddTemplate::GoogleOauth,
             "Google OAuth",
+        ),
+        (
+            AppType::Claude,
+            ProviderAddTemplate::Claudeapi,
+            "* ClaudeAPI",
         ),
         (
             AppType::Claude,
@@ -395,6 +417,20 @@ fn provider_add_form_aicodemirror_preset_keeps_affiliate_register_url_in_metadat
 }
 
 #[test]
+fn provider_add_form_claudeapi_preset_keeps_affiliate_register_url_in_metadata() {
+    let claude_presets = super::provider_templates::provider_sponsor_presets(&AppType::Claude);
+    let claudeapi = claude_presets
+        .iter()
+        .find(|preset| preset.id() == "claudeapi")
+        .expect("expected ClaudeAPI sponsor preset for Claude");
+
+    assert_eq!(
+        claudeapi.register_url(),
+        "https://console.claudeapi.com/register?source=cc-switch-cli"
+    );
+}
+
+#[test]
 fn provider_add_form_google_oauth_template_marks_official_metadata() {
     let mut form = ProviderAddFormState::new(AppType::Gemini);
     let existing_ids = Vec::<String>::new();
@@ -444,6 +480,25 @@ fn provider_add_form_runapi_preset_keeps_affiliate_register_url_in_metadata() {
         .expect("expected RunAPI sponsor preset for Claude");
 
     assert_eq!(runapi.register_url(), "https://runapi.co/register?aff=kTlB");
+}
+
+#[test]
+fn provider_add_form_claudeapi_template_claude_sets_base_url_and_partner_meta() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    let existing_ids = Vec::<String>::new();
+
+    let idx = claudeapi_template_index(AppType::Claude);
+    form.apply_template(idx, &existing_ids);
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["name"], "ClaudeAPI");
+    assert_eq!(provider["websiteUrl"], "https://console.claudeapi.com");
+    assert_eq!(
+        provider["settingsConfig"]["env"]["ANTHROPIC_BASE_URL"],
+        "https://gw.claudeapi.com"
+    );
+    assert_eq!(provider["meta"]["isPartner"], true);
+    assert_eq!(provider["meta"]["partnerPromotionKey"], "claudeapi");
 }
 
 #[test]
