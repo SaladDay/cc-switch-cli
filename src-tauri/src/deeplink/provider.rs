@@ -256,6 +256,13 @@ fn build_claude_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
         );
     }
 
+    // 合并自定义环境变量
+    if let Some(custom) = &request.custom_env {
+        for (key, value) in custom {
+            env.entry(key.clone()).or_insert(value.clone());
+        }
+    }
+
     json!({ "env": env })
 }
 
@@ -482,7 +489,12 @@ fn merge_claude_config(
         })?;
 
     if request.api_key.as_ref().is_none_or(|s| s.is_empty()) {
-        if let Some(token) = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) {
+        // 支持两种 Claude 认证 env key：ANTHROPIC_AUTH_TOKEN 和 ANTHROPIC_API_KEY
+        if let Some(token) = env
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .or_else(|| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|v| v.as_str())
+        {
             request.api_key = Some(token.to_string());
         }
     }
@@ -525,6 +537,25 @@ fn merge_claude_config(
             .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+    }
+
+    // 保留非标准 env key（如 ANTHROPIC_CUSTOM_HEADERS 等自定义变量）
+    let known_keys: &[&str] = &[
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    ];
+    let custom: serde_json::Map<String, serde_json::Value> = env
+        .iter()
+        .filter(|(k, _)| !known_keys.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if !custom.is_empty() {
+        request.custom_env = Some(custom);
     }
 
     Ok(())

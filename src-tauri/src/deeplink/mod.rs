@@ -48,6 +48,10 @@ pub struct DeepLinkImportRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opus_model: Option<String>,
 
+    /// 自定义环境变量（从 inline config 的 env 对象中保留的非标准 key）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_env: Option<serde_json::Map<String, serde_json::Value>>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
