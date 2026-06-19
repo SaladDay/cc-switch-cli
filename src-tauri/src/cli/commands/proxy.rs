@@ -165,10 +165,12 @@ fn handle_model_route(
             );
         }
         ModelRouteCommand::Remove { id } => {
+            require_route_for_app(state, &id, app)?;
             state.db.delete_model_route(&id)?;
             println!("{}", success(&format!("Model route {id} removed.")));
         }
         ModelRouteCommand::Toggle { id } => {
+            require_route_for_app(state, &id, app)?;
             let toggled = state.db.toggle_model_route(&id)?;
             let status = if toggled.enabled {
                 "enabled"
@@ -189,13 +191,10 @@ fn handle_model_route(
             provider_id,
             priority,
         } => {
-            let existing = state
-                .db
-                .get_model_route(&id)?
-                .ok_or_else(|| AppError::Database("model_route not found".to_string()))?;
+            let existing = require_route_for_app(state, &id, app)?;
             let updated = ModelRoute {
                 id: existing.id.clone(),
-                app_type: app.as_str().to_string(),
+                app_type: existing.app_type.clone(),
                 pattern: pattern.unwrap_or(existing.pattern),
                 provider_id: provider_id.unwrap_or(existing.provider_id),
                 priority: priority.unwrap_or(existing.priority),
@@ -216,6 +215,25 @@ fn handle_model_route(
         }
     }
     Ok(())
+}
+
+/// 取出路由并校验它属于当前 app，避免 `--app claude` 误删/误改其他 app 的路由。
+fn require_route_for_app(
+    state: &AppState,
+    id: &str,
+    app: &AppType,
+) -> Result<ModelRoute, AppError> {
+    let existing = state
+        .db
+        .get_model_route(id)?
+        .ok_or_else(|| AppError::Database(format!("model route {id} not found")))?;
+    if existing.app_type != app.as_str() {
+        return Err(AppError::Database(format!(
+            "model route {id} belongs to app '{}', not the current app '{}'",
+            existing.app_type, app
+        )));
+    }
+    Ok(existing)
 }
 
 fn get_state() -> Result<AppState, AppError> {

@@ -97,6 +97,14 @@ pub async fn handle_models(State(state): State<ProxyServerState>) -> impl IntoRe
                     model_ids.push(m.to_string());
                 }
             }
+            // 精确 pattern（无通配符）也作为 model id 暴露，否则路由专属 model
+            // （如 gpt-5、deepseek-v4-pro）不会出现在 /v1/models，客户端 picker 看不到。
+            if !pattern_lower.contains('*') {
+                let exact = route.pattern.trim().to_string();
+                if !exact.is_empty() && !model_ids.contains(&exact) {
+                    model_ids.push(exact);
+                }
+            }
         }
     }
 
