@@ -489,7 +489,12 @@ fn merge_claude_config(
         })?;
 
     if request.api_key.as_ref().is_none_or(|s| s.is_empty()) {
-        if let Some(token) = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) {
+        // 支持两种 Claude 认证 env key：ANTHROPIC_AUTH_TOKEN 和 ANTHROPIC_API_KEY
+        if let Some(token) = env
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .or_else(|| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|v| v.as_str())
+        {
             request.api_key = Some(token.to_string());
         }
     }
@@ -537,6 +542,7 @@ fn merge_claude_config(
     // 保留非标准 env key（如 ANTHROPIC_CUSTOM_HEADERS 等自定义变量）
     let known_keys: &[&str] = &[
         "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",

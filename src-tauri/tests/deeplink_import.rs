@@ -334,3 +334,64 @@ fn deeplink_import_rejects_non_http_endpoints_from_config() {
         "expected scheme validation error, got {err:?}"
     );
 }
+
+#[test]
+fn deeplink_import_claude_provider_reads_api_key_from_anthropic_api_key() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    // Inline config uses ANTHROPIC_API_KEY (not ANTHROPIC_AUTH_TOKEN)
+    let config_json = r#"{"env":{"ANTHROPIC_API_KEY":"sk-api-key-test","ANTHROPIC_BASE_URL":"https://api.example.com/v1"}}"#;
+    let config_b64 = BASE64_URL_SAFE_NO_PAD.encode(config_json.as_bytes());
+
+    let url = format!(
+        "ccswitch://v1/import?resource=provider&app=claude&name=APIKey%20Claude&config={config_b64}&configFormat=json"
+    );
+    let request = parse_deeplink_url(&url).expect("parse deeplink url");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+
+    let state = state_from_config(config);
+
+    let provider_id = import_provider_from_deeplink(&state, request)
+        .expect("import provider from deeplink should succeed with ANTHROPIC_API_KEY");
+
+    let guard = state.config.read().expect("read config");
+    let manager = guard
+        .get_manager(&AppType::Claude)
+        .expect("claude manager should exist");
+    let provider = manager
+        .providers
+        .get(&provider_id)
+        .expect("provider created via deeplink");
+
+    // API key should be read from ANTHROPIC_API_KEY
+    let auth_token = provider
+        .settings_config
+        .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+        .and_then(|v| v.as_str());
+    assert_eq!(
+        auth_token,
+        Some("sk-api-key-test"),
+        "api_key should be populated from ANTHROPIC_API_KEY"
+    );
+
+    // ANTHROPIC_API_KEY should NOT appear in custom_env (it's a known key)
+    let api_key_in_env = provider
+        .settings_config
+        .pointer("/env/ANTHROPIC_API_KEY")
+        .and_then(|v| v.as_str());
+    assert!(
+        api_key_in_env.is_none(),
+        "ANTHROPIC_API_KEY should not leak into env as a separate key"
+    );
+    drop(guard);
+
+    let persisted = state
+        .db
+        .get_provider_by_id(&provider_id, AppType::Claude.as_str())
+        .expect("read provider from db");
+    assert!(persisted.is_some(), "provider should be persisted to db");
+}
