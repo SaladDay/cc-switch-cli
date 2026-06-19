@@ -181,6 +181,28 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
 
 // ── 智谱 GLM ────────────────────────────────────────────────
 
+/// 智谱 TOKENS_LIMIT 条目按 `unit` 字段的显式窗口分类。
+enum ZhipuWindow {
+    FiveHour,
+    Weekly,
+}
+
+/// 按 `unit` 字段判定 TOKENS_LIMIT 条目所属窗口。
+///
+/// 实测形态（bigmodel.cn 与 z.ai 共用同一后端，字段一致）：
+/// - `unit: 3, number: 5` → 5 小时滚动窗口（老/新套餐均有）
+/// - `unit: 6, number: 7` 与 `unit: 6, number: 1` → 每周窗口（两种取值都被
+///   实测过，故只锚定 `unit`、不绑 `number`）
+///
+/// `unit` 缺失或值不认识时返回 None，由调用方走重置时间启发式兜底。
+fn classify_zhipu_window(item: &serde_json::Value) -> Option<ZhipuWindow> {
+    match item.get("unit").and_then(|v| v.as_i64()) {
+        Some(3) => Some(ZhipuWindow::FiveHour),
+        Some(6) => Some(ZhipuWindow::Weekly),
+        _ => None,
+    }
+}
+
 /// 根据用户配置的 base_url 确定智谱配额查询端点。
 /// 中国大陆用户使用 open.bigmodel.cn，国际用户使用 api.z.ai。
 fn zhipu_quota_base(base_url: &str) -> &'static str {
@@ -251,7 +273,14 @@ async fn query_zhipu(base_url: &str, api_key: &str) -> SubscriptionQuota {
         None => return make_error("Missing 'data' field in response".to_string()),
     };
 
-    let mut tiers = Vec::new();
+    // 按 `unit` 字段分类 TOKENS_LIMIT 条目：
+    // - unit: 3 → 5 小时滚动窗口
+    // - unit: 6 → 每周窗口
+    // unit 缺失或不识别时走重置时间启发式兜底。
+    type Entry = (Option<i64>, f64, Option<String>);
+    let mut five_hour: Option<Entry> = None;
+    let mut weekly: Option<Entry> = None;
+    let mut unclassified: Vec<Entry> = Vec::new();
 
     if let Some(limits) = data.get("limits").and_then(|v| v.as_array()) {
         for limit_item in limits {
@@ -259,35 +288,46 @@ async fn query_zhipu(base_url: &str, api_key: &str) -> SubscriptionQuota {
                 .get("type")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            if !limit_type.eq_ignore_ascii_case("TOKENS_LIMIT") {
+                continue;
+            }
             let percentage = limit_item
                 .get("percentage")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
-            let next_reset = limit_item
-                .get("nextResetTime")
-                .and_then(|v| v.as_i64())
-                .and_then(millis_to_iso8601);
-
-            if limit_type != "TOKENS_LIMIT" {
-                continue;
+            let reset_ms = limit_item.get("nextResetTime").and_then(|v| v.as_i64());
+            let reset_iso = reset_ms.and_then(millis_to_iso8601);
+            let entry = (reset_ms, percentage, reset_iso);
+            match classify_zhipu_window(limit_item) {
+                Some(ZhipuWindow::FiveHour) if five_hour.is_none() => five_hour = Some(entry),
+                Some(ZhipuWindow::Weekly) if weekly.is_none() => weekly = Some(entry),
+                _ => unclassified.push(entry),
             }
-
-            tiers.push(QuotaTier {
-                name: "five_hour".to_string(),
-                utilization: percentage,
-                resets_at: next_reset,
-            });
         }
     }
 
-    // 按 nextResetTime 排序：缺失的（刚重置的 5 小时桶）排在前面，
-    // 有值的按重置时间升序排列，确保显示顺序正确。
-    tiers.sort_by(|a, b| match (&a.resets_at, &b.resets_at) {
-        (None, None) => std::cmp::Ordering::Equal,
-        (None, Some(_)) => std::cmp::Ordering::Less,
-        (Some(_), None) => std::cmp::Ordering::Greater,
-        (Some(a_time), Some(b_time)) => a_time.cmp(b_time),
-    });
+    // 兜底启发式：无 nextResetTime 的条目优先归 five_hour（5 小时桶在 0% 等
+    // 状态下可能没有 reset），其余按 reset 升序依次填入仍空缺的槽位。
+    unclassified.sort_by_key(|(reset, _, _)| (reset.is_some(), reset.unwrap_or(i64::MIN)));
+    for entry in unclassified {
+        if five_hour.is_none() {
+            five_hour = Some(entry);
+        } else if weekly.is_none() {
+            weekly = Some(entry);
+        }
+        // 智谱当前最多两条 TOKENS_LIMIT，多余的忽略
+    }
+
+    let mut tiers = Vec::new();
+    for (name, slot) in [("five_hour", five_hour), ("weekly_limit", weekly)] {
+        if let Some((_, percentage, resets_at)) = slot {
+            tiers.push(QuotaTier {
+                name: name.to_string(),
+                utilization: percentage,
+                resets_at,
+            });
+        }
+    }
 
     // 套餐等级存入 credential_message
     let level = data
@@ -478,6 +518,7 @@ pub async fn get_coding_plan_quota(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn zhipu_quota_base_cn() {
@@ -591,5 +632,45 @@ mod tests {
         });
         assert_eq!(tiers[0].name, "five_hour");
         assert_eq!(tiers[1].name, "weekly");
+    }
+
+    #[test]
+    fn classify_zhipu_window_five_hour() {
+        let item = json!({"unit": 3, "number": 5});
+        assert!(matches!(
+            classify_zhipu_window(&item),
+            Some(ZhipuWindow::FiveHour)
+        ));
+    }
+
+    #[test]
+    fn classify_zhipu_window_weekly() {
+        let item = json!({"unit": 6, "number": 7});
+        assert!(matches!(
+            classify_zhipu_window(&item),
+            Some(ZhipuWindow::Weekly)
+        ));
+    }
+
+    #[test]
+    fn classify_zhipu_window_weekly_variant() {
+        // 实测 unit:6, number:1 也是每周窗口
+        let item = json!({"unit": 6, "number": 1});
+        assert!(matches!(
+            classify_zhipu_window(&item),
+            Some(ZhipuWindow::Weekly)
+        ));
+    }
+
+    #[test]
+    fn classify_zhipu_window_unknown_unit() {
+        let item = json!({"unit": 99, "number": 5});
+        assert!(classify_zhipu_window(&item).is_none());
+    }
+
+    #[test]
+    fn classify_zhipu_window_missing_unit() {
+        let item = json!({"number": 5});
+        assert!(classify_zhipu_window(&item).is_none());
     }
 }
