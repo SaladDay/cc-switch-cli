@@ -510,7 +510,7 @@ fn deeplink_command_execute_dispatches_by_resource_type() {
         let cmd = cc_switch_lib::cli::commands::deeplink::DeeplinkCommand {
             url: url.to_string(),
         };
-        cc_switch_lib::cli::commands::deeplink::execute(cmd)
+        cc_switch_lib::cli::commands::deeplink::execute(cmd, None)
             .unwrap_or_else(|e| panic!("[{resource}] execute() should succeed, got: {e}"));
     }
 }
