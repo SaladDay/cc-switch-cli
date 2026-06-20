@@ -37,7 +37,7 @@ pub enum ModelRouteCommand {
         id: String,
         #[arg(long)]
         pattern: Option<String>,
-        #[arg(long)]
+        #[arg(long = "provider")]
         provider_id: Option<String>,
         #[arg(long)]
         priority: Option<i32>,
