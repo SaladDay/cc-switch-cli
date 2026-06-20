@@ -23,7 +23,7 @@ use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::error::AppError;
 
-use app::{Action, App, EditorSubmit, LoadingKind, Overlay, ToastKind};
+use app::{Action, App, EditorSubmit, Overlay, ToastKind};
 use runtime_actions::{apply_preloaded_app_switch, handle_action};
 #[cfg(test)]
 use runtime_actions::{
@@ -1431,18 +1431,6 @@ fn queue_sessions_refresh_if_needed(
     }
 }
 
-fn startup_loading_overlay() -> Overlay {
-    Overlay::Loading {
-        kind: LoadingKind::Generic,
-        title: texts::tui_loading().to_string(),
-        message: crate::t!(
-            "Loading cc-switch data. The interface will be ready shortly.",
-            "正在加载 cc-switch 数据，界面很快就绪。"
-        )
-        .to_string(),
-    }
-}
-
 fn initialize_loaded_app(
     app: &mut App,
     data: &mut data::UiData,
@@ -1540,7 +1528,6 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let (mut app, mut data) =
         initialize_app_shell_with(app_override, apply_visible_apps_startup_policy)?;
     let mut startup_overlay = (!matches!(app.overlay, Overlay::None)).then(|| app.overlay.clone());
-    app.overlay = startup_loading_overlay();
 
     let tick_rate = TUI_TICK_RATE;
     let mut last_tick = Instant::now();
@@ -1765,6 +1752,11 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 ) {
                     Ok(true) => {
                         initial_data_loading = false;
+                        let current_app_type = app.app_type.clone();
+                        let _ = data_cache.queue_current_app_data_refresh(
+                            Some(&app_data.req_tx),
+                            &current_app_type,
+                        );
                         if drain_initial_loading_queued_events()? {
                             initial_loading_quit_requested = true;
                         }
@@ -1817,6 +1809,11 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                     ) {
                         Ok(true) => {
                             initial_data_loading = false;
+                            let current_app_type = app.app_type.clone();
+                            let _ = data_cache.queue_current_app_data_refresh(
+                                Some(&app_data.req_tx),
+                                &current_app_type,
+                            );
                             if drain_initial_loading_queued_events()? {
                                 initial_loading_quit_requested = true;
                             }

@@ -876,7 +876,11 @@ fn initial_app_data_result_restores_startup_overlay_and_caches_loaded_data() {
         },
     );
     cache.incomplete_by_app.insert(AppType::Claude);
-    app.overlay = startup_loading_overlay();
+    app.overlay = Overlay::Confirm(ConfirmOverlay {
+        title: "Visible apps".to_string(),
+        message: "Review detected apps".to_string(),
+        action: ConfirmAction::VisibleAppsAutoDetection,
+    });
     let mut startup_overlay = Some(Overlay::Confirm(ConfirmOverlay {
         title: "Visible apps".to_string(),
         message: "Review detected apps".to_string(),
