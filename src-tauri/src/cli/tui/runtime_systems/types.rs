@@ -179,6 +179,17 @@ pub(crate) enum UsagePricingMsg {
     },
 }
 
+pub(crate) enum SessionUsageSyncReq {
+    Run { request_id: u64 },
+}
+
+pub(crate) enum SessionUsageSyncMsg {
+    Finished {
+        request_id: u64,
+        result: Result<(), String>,
+    },
+}
+
 pub(crate) enum SkillsReq {
     Discover { query: String },
     Install { spec: String, app: AppType },
@@ -332,6 +343,12 @@ pub(crate) struct AppDataSystem {
 pub(crate) struct UsagePricingSystem {
     pub(crate) req_tx: mpsc::Sender<UsagePricingReq>,
     pub(crate) result_rx: mpsc::Receiver<UsagePricingMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct SessionUsageSyncSystem {
+    pub(crate) req_tx: mpsc::Sender<SessionUsageSyncReq>,
+    pub(crate) result_rx: mpsc::Receiver<SessionUsageSyncMsg>,
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 

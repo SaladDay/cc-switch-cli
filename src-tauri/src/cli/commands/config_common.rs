@@ -1,12 +1,14 @@
 use clap::Subcommand;
+use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
 
+use super::live_conflict::PromptConflictResolver;
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::cli::ui::{highlight, info, success};
 use crate::error::AppError;
-use crate::services::ProviderService;
+use crate::services::{provider::live_merge, ProviderService};
 use crate::store::AppState;
 
 #[derive(Subcommand, Debug, Clone)]
@@ -114,6 +116,14 @@ fn get_state() -> Result<AppState, AppError> {
     AppState::try_new()
 }
 
+fn with_prompt_conflict_resolution<T>(
+    f: impl FnOnce(live_merge::ConflictResolution<'_>) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let mut resolver = PromptConflictResolver;
+    let resolver = RefCell::new(&mut resolver as &mut dyn live_merge::ConflictResolver);
+    f(live_merge::ConflictResolution::Resolver(&resolver))
+}
+
 fn no_current_provider_message(action: CommonConfigSnippetAction) -> &'static str {
     match action {
         CommonConfigSnippetAction::Set => texts::common_config_snippet_no_current_provider(),
@@ -185,7 +195,7 @@ fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<Strin
         | AppType::OpenCode
         | AppType::Hermes
         | AppType::OpenClaw => {
-            let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+            let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
                 AppError::InvalidInput(texts::tui_toast_invalid_json(&e.to_string()))
             })?;
             if !value.is_object() {
@@ -237,7 +247,14 @@ fn set(
     let snippet = canonical_common_snippet(app_type.clone(), &raw)?.unwrap_or_default();
 
     let state = get_state()?;
-    ProviderService::set_common_config_snippet(&state, app_type.clone(), Some(snippet))?;
+    with_prompt_conflict_resolution(|resolution| {
+        ProviderService::set_common_config_snippet_with_resolution(
+            &state,
+            app_type.clone(),
+            Some(snippet),
+            resolution,
+        )
+    })?;
 
     println!(
         "{}",
@@ -296,11 +313,14 @@ fn extract(
 
     if save {
         let snippet = canonical_common_snippet(app_type.clone(), &extracted)?.unwrap_or_default();
-        ProviderService::set_common_config_snippet(
-            &state,
-            app_type.clone(),
-            Some(snippet.clone()),
-        )?;
+        with_prompt_conflict_resolution(|resolution| {
+            ProviderService::set_common_config_snippet_with_resolution(
+                &state,
+                app_type.clone(),
+                Some(snippet.clone()),
+                resolution,
+            )
+        })?;
         println!("{}", success(texts::common_config_snippet_extracted()));
         if !snippet.trim().is_empty() {
             println!();
@@ -317,7 +337,14 @@ fn extract(
 
 fn clear(app_type: AppType, _apply: bool) -> Result<(), AppError> {
     let state = get_state()?;
-    ProviderService::clear_common_config_snippet(&state, app_type.clone())?;
+    with_prompt_conflict_resolution(|resolution| {
+        ProviderService::set_common_config_snippet_with_resolution(
+            &state,
+            app_type.clone(),
+            None,
+            resolution,
+        )
+    })?;
 
     println!(
         "{}",
@@ -389,11 +416,12 @@ mod tests {
             &get_claude_settings_path(),
             &json!({
                 "env": {
-                    "ANTHROPIC_BASE_URL": "https://stale.example"
+                    "ANTHROPIC_BASE_URL": "https://provider.example",
+                    "LOCAL_ONLY": "preserve-me"
                 }
             }),
         )
-        .expect("seed stale live settings");
+        .expect("seed live settings");
 
         (temp_home, env)
     }
@@ -678,9 +706,6 @@ mod tests {
 
     #[test]
     fn follow_up_message_is_omitted_for_additive_apps() {
-        assert!(matches!(
-            follow_up_message(AppType::OpenCode, CommonConfigSnippetAction::Set, ""),
-            None
-        ));
+        assert!(follow_up_message(AppType::OpenCode, CommonConfigSnippetAction::Set, "").is_none());
     }
 }

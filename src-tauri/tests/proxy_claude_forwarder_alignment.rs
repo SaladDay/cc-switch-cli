@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use std::{
     collections::VecDeque,
     env,
@@ -92,7 +94,6 @@ impl ProxyEnvGuard {
         let saved = proxy_keys
             .into_iter()
             .chain(bypass_keys)
-            .into_iter()
             .map(|key| {
                 let old = env::var(key).ok();
                 if bypass_keys.contains(&key) {
@@ -386,7 +387,7 @@ async fn start_proxy_service(
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
-    let mut app_proxy = db
+    let app_proxy = db
         .get_proxy_config_for_app("claude")
         .await
         .expect("read claude app proxy config");
@@ -441,7 +442,7 @@ async fn start_proxy_service_with_rectifier_config(
     )
     .expect("store rectifier config");
 
-    let mut app_proxy = db
+    let app_proxy = db
         .get_proxy_config_for_app("claude")
         .await
         .expect("read claude app proxy config");

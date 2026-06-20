@@ -224,7 +224,7 @@ fn format_price_per_million(value: &str) -> String {
         return "-".to_string();
     }
     match trimmed.parse::<f64>() {
-        Ok(value) if value == 0.0 => "$0".to_string(),
+        Ok(0.0) => "$0".to_string(),
         Ok(value) if value >= 100.0 => format!("${value:.0}"),
         Ok(value) if value >= 10.0 => format!("${value:.1}"),
         Ok(value) if value >= 1.0 => format!("${value:.2}"),

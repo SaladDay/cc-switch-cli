@@ -51,7 +51,10 @@ pub use config::{
     prompt_fix_permissions, read_json_file, validate_config_dir,
 };
 pub use database::{Database, FailoverQueueItem};
-pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkImportRequest};
+pub use deeplink::{
+    import_mcp_from_deeplink, import_prompt_from_deeplink, import_provider_from_deeplink,
+    import_skill_from_deeplink, parse_deeplink_url, DeepLinkImportRequest, McpImportResult,
+};
 pub use error::AppError;
 pub use import_export::export_config_to_file;
 pub use mcp::{

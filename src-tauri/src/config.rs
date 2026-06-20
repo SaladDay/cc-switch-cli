@@ -213,7 +213,7 @@ fn is_system_dir(path: &Path) -> bool {
     #[cfg(windows)]
     {
         // Should do some more verifications here
-        false
+        return false;
     }
 
     false
@@ -920,6 +920,11 @@ fn is_allowed_platform_config_symlink(path: &Path) -> bool {
     }
 }
 
+#[cfg(not(unix))]
+fn is_allowed_platform_config_symlink(_path: &Path) -> bool {
+    false
+}
+
 #[cfg(unix)]
 fn is_managed_sensitive_config_path(path: &Path) -> Result<bool, AppError> {
     let config_dir = normalized_absolute_path(&get_app_config_dir())?;
@@ -1349,6 +1354,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o600)
             .open(&db_path)
             .expect("create db file");
@@ -1397,6 +1403,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o644)
             .open(&db_path)
             .expect("create db file");
@@ -1427,6 +1434,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o644)
             .open(&db_path)
             .expect("create db file");
@@ -1484,6 +1492,7 @@ mod tests {
             std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .mode(0o644)
                 .open(path)
                 .expect("create sensitive file");
@@ -1519,6 +1528,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o644)
             .open(&plugin_json)
             .expect("create skill metadata");
@@ -1571,6 +1581,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o644)
             .open(&json_path)
             .expect("create json file");
@@ -1651,6 +1662,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o644)
             .open(&db_path)
             .expect("create db file");

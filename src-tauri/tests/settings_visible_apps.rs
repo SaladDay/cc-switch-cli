@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use serde_json::json;
 use serial_test::serial;
 use std::ffi::OsString;
@@ -512,14 +514,16 @@ fn set_visible_apps_rejects_zero_selection() {
 fn update_settings_rejects_all_false_visible_apps() {
     let _home = HomeGuard::new();
 
-    let mut settings = AppSettings::default();
-    settings.visible_apps = VisibleApps {
-        claude: false,
-        codex: false,
-        gemini: false,
-        opencode: false,
-        openclaw: false,
-        hermes: false,
+    let settings = AppSettings {
+        visible_apps: VisibleApps {
+            claude: false,
+            codex: false,
+            gemini: false,
+            opencode: false,
+            openclaw: false,
+            hermes: false,
+        },
+        ..Default::default()
     };
 
     let err =

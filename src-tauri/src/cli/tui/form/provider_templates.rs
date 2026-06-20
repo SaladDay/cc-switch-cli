@@ -62,7 +62,22 @@ impl SponsorProviderPreset {
     }
 }
 
-static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 5] = [
+static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 6] = [
+    SponsorProviderPreset {
+        id: "claudeapi",
+        provider_name: "ClaudeAPI",
+        chip_label: "* ClaudeAPI",
+        website_url: "https://console.claudeapi.com",
+        register_url: "https://console.claudeapi.com/register?source=cc-switch-cli",
+        promo_code: "",
+        partner_promotion_key: "claudeapi",
+        claude_base_url: "https://gw.claudeapi.com",
+        codex_base_url: "",
+        gemini_base_url: "",
+        opencode_base_url: "",
+        openclaw_base_url: "",
+        hermes_base_url: "",
+    },
     SponsorProviderPreset {
         id: "packycode",
         provider_name: "PackyCode",
@@ -140,41 +155,42 @@ static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 5] = [
     },
 ];
 
-static SPONSOR_PROVIDER_PRESETS_CLAUDE: [SponsorProviderPreset; 5] = [
+static SPONSOR_PROVIDER_PRESETS_CLAUDE: [SponsorProviderPreset; 6] = [
     SPONSOR_PROVIDER_PRESETS[0],
     SPONSOR_PROVIDER_PRESETS[1],
     SPONSOR_PROVIDER_PRESETS[2],
     SPONSOR_PROVIDER_PRESETS[3],
     SPONSOR_PROVIDER_PRESETS[4],
+    SPONSOR_PROVIDER_PRESETS[5],
 ];
 
 static SPONSOR_PROVIDER_PRESETS_CODEX: [SponsorProviderPreset; 5] = [
-    SPONSOR_PROVIDER_PRESETS[0],
     SPONSOR_PROVIDER_PRESETS[1],
+    SPONSOR_PROVIDER_PRESETS[2],
+    SPONSOR_PROVIDER_PRESETS[3],
+    SPONSOR_PROVIDER_PRESETS[4],
+    SPONSOR_PROVIDER_PRESETS[5],
+];
+
+static SPONSOR_PROVIDER_PRESETS_GEMINI: [SponsorProviderPreset; 3] = [
+    SPONSOR_PROVIDER_PRESETS[1],
+    SPONSOR_PROVIDER_PRESETS[2],
+    SPONSOR_PROVIDER_PRESETS[4],
+];
+
+static SPONSOR_PROVIDER_PRESETS_OPENCODE: [SponsorProviderPreset; 3] = [
     SPONSOR_PROVIDER_PRESETS[2],
     SPONSOR_PROVIDER_PRESETS[3],
     SPONSOR_PROVIDER_PRESETS[4],
 ];
 
-static SPONSOR_PROVIDER_PRESETS_GEMINI: [SponsorProviderPreset; 3] = [
-    SPONSOR_PROVIDER_PRESETS[0],
-    SPONSOR_PROVIDER_PRESETS[1],
-    SPONSOR_PROVIDER_PRESETS[3],
-];
-
-static SPONSOR_PROVIDER_PRESETS_OPENCODE: [SponsorProviderPreset; 3] = [
-    SPONSOR_PROVIDER_PRESETS[1],
-    SPONSOR_PROVIDER_PRESETS[2],
-    SPONSOR_PROVIDER_PRESETS[3],
-];
-
 static SPONSOR_PROVIDER_PRESETS_HERMES: [SponsorProviderPreset; 2] =
-    [SPONSOR_PROVIDER_PRESETS[1], SPONSOR_PROVIDER_PRESETS[2]];
+    [SPONSOR_PROVIDER_PRESETS[2], SPONSOR_PROVIDER_PRESETS[3]];
 
 static SPONSOR_PROVIDER_PRESETS_OPENCLAW: [SponsorProviderPreset; 3] = [
-    SPONSOR_PROVIDER_PRESETS[1],
     SPONSOR_PROVIDER_PRESETS[2],
     SPONSOR_PROVIDER_PRESETS[3],
+    SPONSOR_PROVIDER_PRESETS[4],
 ];
 
 static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 3] = [

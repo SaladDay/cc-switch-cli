@@ -8,8 +8,10 @@ use crate::proxy::providers::codex_oauth_auth::{
 };
 use crate::services::subscription::{query_codex_quota, CredentialStatus, SubscriptionQuota};
 
-fn manager_store() -> &'static RwLock<Option<(PathBuf, Arc<CodexOAuthManager>)>> {
-    static STORE: OnceLock<RwLock<Option<(PathBuf, Arc<CodexOAuthManager>)>>> = OnceLock::new();
+type CodexOAuthManagerStore = RwLock<Option<(PathBuf, Arc<CodexOAuthManager>)>>;
+
+fn manager_store() -> &'static CodexOAuthManagerStore {
+    static STORE: OnceLock<CodexOAuthManagerStore> = OnceLock::new();
     STORE.get_or_init(|| RwLock::new(None))
 }
 

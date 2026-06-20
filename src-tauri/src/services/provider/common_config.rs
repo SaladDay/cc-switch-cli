@@ -549,13 +549,63 @@ pub(super) fn strip_common_config_from_live_settings(
     live_settings: Value,
     snippet: Option<&str>,
 ) -> Value {
-    if !provider_uses_common_config(app_type, provider, snippet) {
-        return live_settings;
-    }
+    strip_common_config_from_live_settings_with_fallback(
+        app_type,
+        provider,
+        live_settings,
+        snippet,
+        None,
+    )
+}
 
+#[expect(
+    dead_code,
+    reason = "kept for live-setting fallback stripping when provider snapshots are needed"
+)]
+pub(super) fn strip_common_config_from_live_settings_or_provider_snapshot(
+    app_type: &AppType,
+    provider: &Provider,
+    live_settings: Value,
+    snippet: Option<&str>,
+) -> Value {
+    strip_common_config_from_live_settings_with_fallback(
+        app_type,
+        provider,
+        live_settings,
+        snippet,
+        Some(&provider.settings_config),
+    )
+}
+
+pub(super) fn strip_common_config_snippet_from_live_settings_or_provider_snapshot(
+    app_type: &AppType,
+    provider: &Provider,
+    live_settings: Value,
+    snippet: Option<&str>,
+) -> Value {
+    strip_common_config_snippet_from_live_settings_with_fallback(
+        app_type,
+        provider,
+        live_settings,
+        snippet,
+        Some(&provider.settings_config),
+    )
+}
+
+fn strip_common_config_snippet_from_live_settings_with_fallback(
+    app_type: &AppType,
+    provider: &Provider,
+    live_settings: Value,
+    snippet: Option<&str>,
+    fallback_settings: Option<&Value>,
+) -> Value {
     let Some(snippet_text) = snippet else {
         return live_settings;
     };
+
+    if snippet_text.trim().is_empty() {
+        return live_settings;
+    }
 
     match remove_common_config_from_settings(app_type, &live_settings, snippet_text) {
         Ok(settings) => settings,
@@ -565,9 +615,29 @@ pub(super) fn strip_common_config_from_live_settings(
                 app_type.as_str(),
                 provider.id
             );
-            live_settings
+            fallback_settings.cloned().unwrap_or(live_settings)
         }
     }
+}
+
+fn strip_common_config_from_live_settings_with_fallback(
+    app_type: &AppType,
+    provider: &Provider,
+    live_settings: Value,
+    snippet: Option<&str>,
+    fallback_settings: Option<&Value>,
+) -> Value {
+    if !provider_uses_common_config(app_type, provider, snippet) {
+        return live_settings;
+    }
+
+    strip_common_config_snippet_from_live_settings_with_fallback(
+        app_type,
+        provider,
+        live_settings,
+        snippet,
+        fallback_settings,
+    )
 }
 
 pub(super) fn normalize_provider_common_config_for_storage(

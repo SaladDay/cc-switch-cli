@@ -22,11 +22,13 @@ pub(crate) use types::{
     ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq, SkillsReq,
     StreamCheckReq, UpdateReq, UsagePricingMsg, UsagePricingReq, WebDavReq, WebDavReqKind,
 };
+pub(crate) use types::{SessionUsageSyncMsg, SessionUsageSyncReq};
 #[cfg(test)]
 pub(crate) use workers::drain_latest_webdav_req;
 pub(crate) use workers::{
     start_app_data_system, start_local_env_system, start_managed_auth_system,
     start_model_fetch_system, start_proxy_system, start_quota_system, start_session_system,
-    start_skills_system, start_speedtest_system, start_stream_check_system, start_update_system,
-    start_usage_pricing_system, start_webdav_system,
+    start_session_usage_sync_system, start_skills_system, start_speedtest_system,
+    start_stream_check_system, start_update_system, start_usage_pricing_system,
+    start_webdav_system,
 };

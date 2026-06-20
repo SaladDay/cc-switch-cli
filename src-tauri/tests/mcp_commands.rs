@@ -691,8 +691,10 @@ fn set_apps_replaces_matrix_and_syncs_opencode_live_config() {
 
     let state = state_from_config(config);
 
-    let mut apps = McpApps::default();
-    apps.opencode = true;
+    let apps = McpApps {
+        opencode: true,
+        ..Default::default()
+    };
     assert!(
         McpService::set_apps(&state, "matrix-server", apps).expect("set apps succeeds"),
         "existing server should be updated"

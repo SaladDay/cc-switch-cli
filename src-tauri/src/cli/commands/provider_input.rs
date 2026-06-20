@@ -24,6 +24,7 @@ pub enum ProviderAddTemplate {
     CodexOauth,
     OpenaiOfficial,
     GoogleOauth,
+    Claudeapi,
     Packycode,
     Runapi,
     Aicodemirror,
@@ -40,6 +41,7 @@ impl ProviderAddTemplate {
             Self::CodexOauth => "codex-oauth",
             Self::OpenaiOfficial => "openai-official",
             Self::GoogleOauth => "google-oauth",
+            Self::Claudeapi => "claudeapi",
             Self::Packycode => "packycode",
             Self::Runapi => "runapi",
             Self::Aicodemirror => "aicodemirror",
@@ -56,7 +58,8 @@ impl ProviderAddTemplate {
     pub fn requires_settings_prompt(self) -> bool {
         matches!(
             self,
-            Self::Packycode
+            Self::Claudeapi
+                | Self::Packycode
                 | Self::Runapi
                 | Self::Aicodemirror
                 | Self::Cubence
@@ -175,7 +178,20 @@ struct SponsorProviderPreset {
     hermes_base_url: &'static str,
 }
 
-const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 5] = [
+const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 6] = [
+    SponsorProviderPreset {
+        id: ProviderAddTemplate::Claudeapi,
+        provider_name: "ClaudeAPI",
+        chip_label: "* ClaudeAPI",
+        website_url: "https://console.claudeapi.com",
+        partner_promotion_key: "claudeapi",
+        claude_base_url: "https://gw.claudeapi.com",
+        codex_base_url: "",
+        gemini_base_url: "",
+        opencode_base_url: "",
+        openclaw_base_url: "",
+        hermes_base_url: "",
+    },
     SponsorProviderPreset {
         id: ProviderAddTemplate::Packycode,
         provider_name: "PackyCode",
@@ -243,7 +259,7 @@ const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 5] = [
     },
 ];
 
-const PROVIDER_TEMPLATE_CHOICES_CLAUDE: [ProviderAddTemplateChoice; 8] = [
+const PROVIDER_TEMPLATE_CHOICES_CLAUDE: [ProviderAddTemplateChoice; 9] = [
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Custom,
         label: "Custom",
@@ -257,24 +273,28 @@ const PROVIDER_TEMPLATE_CHOICES_CLAUDE: [ProviderAddTemplateChoice; 8] = [
         label: "Codex",
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Packycode,
+        template: ProviderAddTemplate::Claudeapi,
         label: SPONSOR_PROVIDER_PRESETS[0].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Cubence,
+        template: ProviderAddTemplate::Packycode,
         label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Runapi,
+        template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Aicodemirror,
+        template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Dds,
+        template: ProviderAddTemplate::Aicodemirror,
         label: SPONSOR_PROVIDER_PRESETS[4].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Dds,
+        label: SPONSOR_PROVIDER_PRESETS[5].chip_label,
     },
 ];
 
@@ -289,23 +309,23 @@ const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 8] = [
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Packycode,
-        label: SPONSOR_PROVIDER_PRESETS[0].chip_label,
-    },
-    ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Runapi,
+        template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Aicodemirror,
+        template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Dds,
+        template: ProviderAddTemplate::Aicodemirror,
         label: SPONSOR_PROVIDER_PRESETS[4].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Dds,
+        label: SPONSOR_PROVIDER_PRESETS[5].chip_label,
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Deepseek,
@@ -324,15 +344,15 @@ const PROVIDER_TEMPLATE_CHOICES_GEMINI: [ProviderAddTemplateChoice; 5] = [
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Packycode,
-        label: SPONSOR_PROVIDER_PRESETS[0].chip_label,
-    },
-    ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
     },
     ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+    ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Aicodemirror,
-        label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+        label: SPONSOR_PROVIDER_PRESETS[4].chip_label,
     },
 ];
 
@@ -343,15 +363,15 @@ const PROVIDER_TEMPLATE_CHOICES_OPENCODE: [ProviderAddTemplateChoice; 4] = [
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Cubence,
-        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
-    },
-    ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Aicodemirror,
+        template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Aicodemirror,
+        label: SPONSOR_PROVIDER_PRESETS[4].chip_label,
     },
 ];
 
@@ -362,11 +382,11 @@ const PROVIDER_TEMPLATE_CHOICES_HERMES: [ProviderAddTemplateChoice; 3] = [
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Cubence,
-        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Runapi,
-        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+        label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
     },
 ];
 
@@ -377,15 +397,15 @@ const PROVIDER_TEMPLATE_CHOICES_OPENCLAW: [ProviderAddTemplateChoice; 4] = [
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Cubence,
-        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
-    },
-    ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Aicodemirror,
+        template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Aicodemirror,
+        label: SPONSOR_PROVIDER_PRESETS[4].chip_label,
     },
 ];
 
@@ -494,7 +514,8 @@ fn template_default_name(template: ProviderAddTemplate) -> Result<&'static str, 
         ProviderAddTemplate::OpenaiOfficial => "OpenAI Official",
         ProviderAddTemplate::GoogleOauth => "Google OAuth",
         ProviderAddTemplate::Deepseek => "DeepSeek",
-        ProviderAddTemplate::Packycode
+        ProviderAddTemplate::Claudeapi
+        | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
@@ -512,7 +533,8 @@ fn template_default_website_url(template: ProviderAddTemplate) -> Option<&'stati
         ProviderAddTemplate::OpenaiOfficial => Some("https://chatgpt.com/codex"),
         ProviderAddTemplate::GoogleOauth => Some("https://ai.google.dev"),
         ProviderAddTemplate::Deepseek => Some("https://platform.deepseek.com"),
-        ProviderAddTemplate::Packycode
+        ProviderAddTemplate::Claudeapi
+        | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
@@ -530,6 +552,7 @@ fn template_default_category(template: ProviderAddTemplate) -> Option<&'static s
         ProviderAddTemplate::Runapi => Some("aggregator"),
         ProviderAddTemplate::Custom
         | ProviderAddTemplate::CodexOauth
+        | ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
@@ -573,7 +596,8 @@ fn template_default_meta(
             partner_promotion_key: Some("google-official".to_string()),
             ..Default::default()
         }),
-        ProviderAddTemplate::Packycode
+        ProviderAddTemplate::Claudeapi
+        | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
@@ -601,6 +625,7 @@ fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> 
         | ProviderAddTemplate::CodexOauth
         | ProviderAddTemplate::OpenaiOfficial
         | ProviderAddTemplate::GoogleOauth
+        | ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
@@ -616,6 +641,7 @@ fn template_default_icon_color(template: ProviderAddTemplate) -> Option<&'static
         | ProviderAddTemplate::CodexOauth
         | ProviderAddTemplate::OpenaiOfficial
         | ProviderAddTemplate::GoogleOauth
+        | ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
@@ -648,7 +674,8 @@ fn build_provider_template_settings_config(
         ProviderAddTemplate::OpenaiOfficial => build_codex_official_settings_config(None),
         ProviderAddTemplate::Deepseek => Ok(build_codex_deepseek_settings_config()),
         ProviderAddTemplate::GoogleOauth => Ok(json!({ "env": {} })),
-        ProviderAddTemplate::Packycode
+        ProviderAddTemplate::Claudeapi
+        | ProviderAddTemplate::Packycode
         | ProviderAddTemplate::Runapi
         | ProviderAddTemplate::Aicodemirror
         | ProviderAddTemplate::Cubence
@@ -1183,6 +1210,7 @@ requires_openai_auth = true
                 "Custom",
                 "Claude Official",
                 "Codex",
+                "* ClaudeAPI",
                 "* PackyCode",
                 "* Cubence",
                 "* RunAPI",
@@ -1237,6 +1265,10 @@ requires_openai_auth = true
         );
         assert!(
             validate_provider_add_template(&AppType::OpenCode, ProviderAddTemplate::Packycode)
+                .is_err()
+        );
+        assert!(
+            validate_provider_add_template(&AppType::Codex, ProviderAddTemplate::Claudeapi)
                 .is_err()
         );
         assert!(
@@ -1323,6 +1355,35 @@ requires_openai_auth = true
         assert!(
             binding.account_id.is_none(),
             "default-account binding should omit accountId"
+        );
+    }
+
+    #[test]
+    fn cli_claudeapi_template_uses_claude_only_sponsor_base_url() {
+        let provider =
+            build_provider_template_seed(&AppType::Claude, ProviderAddTemplate::Claudeapi, &[])
+                .expect("build ClaudeAPI Claude seed");
+
+        assert_eq!(provider.id, "claudeapi");
+        assert_eq!(provider.name, "ClaudeAPI");
+        assert_eq!(
+            provider.website_url.as_deref(),
+            Some("https://console.claudeapi.com")
+        );
+        assert_eq!(
+            provider.settings_config["env"]["ANTHROPIC_BASE_URL"],
+            "https://gw.claudeapi.com"
+        );
+        assert_eq!(
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.partner_promotion_key.as_deref()),
+            Some("claudeapi")
+        );
+        assert_eq!(
+            provider.meta.as_ref().and_then(|meta| meta.is_partner),
+            Some(true)
         );
     }
 
@@ -2536,6 +2597,10 @@ fn prompt_opencode_config(current: Option<&Value>) -> Result<Value, AppError> {
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "OpenCode settings builder maps flat form fields into nested JSON"
+)]
 fn build_opencode_settings_config(
     current: Option<&Value>,
     npm: &str,
@@ -2648,9 +2713,7 @@ fn opencode_primary_model_id(model_id: &str, model_name: &str) -> Option<String>
     None
 }
 
-fn opencode_selected_model_from_models<'a>(
-    models: &'a Map<String, Value>,
-) -> Option<(&'a String, &'a Value)> {
+fn opencode_selected_model_from_models(models: &Map<String, Value>) -> Option<(&String, &Value)> {
     models.iter().max_by(|(id_a, model_a), (id_b, model_b)| {
         opencode_model_rank(model_a)
             .cmp(&opencode_model_rank(model_b))
@@ -2897,10 +2960,7 @@ fn build_hermes_settings_config(
 
 fn normalize_hermes_api_mode(api_mode: &str) -> String {
     let api_mode = api_mode.trim();
-    if crate::hermes_config::HERMES_API_MODES
-        .iter()
-        .any(|candidate| *candidate == api_mode)
-    {
+    if crate::hermes_config::HERMES_API_MODES.contains(&api_mode) {
         api_mode.to_string()
     } else {
         crate::hermes_config::HERMES_DEFAULT_API_MODE.to_string()
@@ -3284,8 +3344,6 @@ pub fn generate_provider_id(name: &str, existing_ids: &[String]) -> String {
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
                 c
-            } else if c.is_whitespace() {
-                '-'
             } else {
                 '-'
             }

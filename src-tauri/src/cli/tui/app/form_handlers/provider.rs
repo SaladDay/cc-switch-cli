@@ -136,10 +136,7 @@ impl App {
     }
 
     fn handle_provider_fields_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
-        let (fields, selected, editing) = match self.prepare_provider_field_selection() {
-            Some(state) => state,
-            None => return None,
-        };
+        let (fields, selected, editing) = self.prepare_provider_field_selection()?;
 
         if editing {
             self.handle_provider_field_editing(selected, key, data)
@@ -164,9 +161,7 @@ impl App {
                 Some(Action::None)
             }
             _ => {
-                if TextEditCommand::from_key(key).is_none() {
-                    return None;
-                }
+                TextEditCommand::from_key(key)?;
                 let policy = TextInputPolicy {
                     max_chars: (selected == ProviderAddField::Notes)
                         .then_some(PROVIDER_NOTES_MAX_CHARS),
@@ -674,10 +669,7 @@ impl App {
             };
         }
 
-        let (fields, selected, editing) = match self.prepare_usage_query_field_selection() {
-            Some(state) => state,
-            None => return None,
-        };
+        let (fields, selected, editing) = self.prepare_usage_query_field_selection()?;
 
         if editing {
             self.handle_usage_query_field_editing(selected, key)
@@ -724,9 +716,7 @@ impl App {
                 Some(Action::None)
             }
             _ => {
-                if TextEditCommand::from_key(key).is_none() {
-                    return None;
-                }
+                TextEditCommand::from_key(key)?;
                 let changed = provider
                     .usage_query_input_mut(selected)
                     .and_then(|input| input.apply_key(key))

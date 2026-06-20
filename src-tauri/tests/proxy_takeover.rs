@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use std::{net::TcpListener, sync::Arc};
 
 use cc_switch_lib::{

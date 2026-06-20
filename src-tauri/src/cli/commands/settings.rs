@@ -33,6 +33,10 @@ pub enum SettingsCommand {
     /// Show, enable, or disable Claude plugin integration
     #[command(name = "claude-plugin", subcommand)]
     ClaudePlugin(ClaudePluginCommand),
+
+    /// Manage unified Codex session history
+    #[command(name = "codex-history", subcommand)]
+    CodexHistory(CodexHistoryCommand),
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +127,33 @@ pub enum ClaudePluginCommand {
     Disable,
 }
 
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodexHistoryCommand {
+    /// Show unified Codex session history setting
+    Show {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enable unified Codex session history
+    Enable {
+        /// Also migrate existing official Codex sessions into the shared history bucket
+        #[arg(long)]
+        migrate_existing: bool,
+    },
+    /// Disable unified Codex session history
+    Disable {
+        /// Restore previously migrated official sessions from backups
+        #[arg(long)]
+        restore: bool,
+    },
+    /// Migrate existing official Codex sessions into the shared bucket
+    #[command(name = "migrate-existing")]
+    MigrateExisting,
+    /// Restore migrated official Codex sessions from backups
+    Restore,
+}
+
 pub fn execute(cmd: SettingsCommand) -> Result<(), AppError> {
     match cmd {
         SettingsCommand::Show { json } => show_settings(json),
@@ -130,6 +161,7 @@ pub fn execute(cmd: SettingsCommand) -> Result<(), AppError> {
         SettingsCommand::VisibleApps(cmd) => visible_apps_cmd(cmd),
         SettingsCommand::ClaudeOnboarding(cmd) => claude_onboarding_cmd(cmd),
         SettingsCommand::ClaudePlugin(cmd) => claude_plugin_cmd(cmd),
+        SettingsCommand::CodexHistory(cmd) => codex_history_cmd(cmd),
     }
 }
 
@@ -142,6 +174,9 @@ fn show_settings(json_output: bool) -> Result<(), AppError> {
             "visibleAppsMode": settings.visible_apps_settings.mode,
             "skipClaudeOnboarding": settings.skip_claude_onboarding,
             "enableClaudePluginIntegration": settings.enable_claude_plugin_integration,
+            "unifyCodexSessionHistory": settings.unify_codex_session_history,
+            "unifyCodexMigrateExisting": settings.unify_codex_migrate_existing.unwrap_or(false),
+            "hasCodexHistoryUnifyBackup": crate::codex_history_migration::has_codex_official_history_unify_backup(),
             "openclawConfigDir": settings.openclaw_config_dir,
         });
         println!(
@@ -161,6 +196,10 @@ fn show_settings(json_output: bool) -> Result<(), AppError> {
     println!(
         "Claude plugin integration: {}",
         yes_no(settings.enable_claude_plugin_integration)
+    );
+    println!(
+        "Unified Codex session history: {}",
+        yes_no(settings.unify_codex_session_history)
     );
     println!(
         "OpenClaw config dir: {}",
@@ -338,6 +377,187 @@ fn set_claude_plugin_integration(enabled: bool) -> Result<(), AppError> {
         ))
     );
     Ok(())
+}
+
+fn codex_history_cmd(cmd: CodexHistoryCommand) -> Result<(), AppError> {
+    match cmd {
+        CodexHistoryCommand::Show { json } => show_codex_history(json),
+        CodexHistoryCommand::Enable { migrate_existing } => {
+            set_codex_history_enabled(true, migrate_existing, false)
+        }
+        CodexHistoryCommand::Disable { restore } => {
+            set_codex_history_enabled(false, false, restore)
+        }
+        CodexHistoryCommand::MigrateExisting => migrate_codex_history_existing(),
+        CodexHistoryCommand::Restore => restore_codex_history(),
+    }
+}
+
+fn show_codex_history(json_output: bool) -> Result<(), AppError> {
+    let settings = crate::settings::get_settings();
+    let has_backup = crate::codex_history_migration::has_codex_official_history_unify_backup();
+    let migration = settings
+        .local_migrations
+        .as_ref()
+        .and_then(|migrations| migrations.codex_official_history_unify_v1.as_ref());
+
+    if json_output {
+        let payload = json!({
+            "enabled": settings.unify_codex_session_history,
+            "migrateExistingRequested": settings.unify_codex_migrate_existing.unwrap_or(false),
+            "hasBackup": has_backup,
+            "migration": migration,
+        });
+        println!(
+            "{}",
+            to_json(&payload).map_err(|err| AppError::Message(err.to_string()))?
+        );
+        return Ok(());
+    }
+
+    println!("{}", highlight("Codex History"));
+    println!(
+        "Unified session history: {}",
+        yes_no(settings.unify_codex_session_history)
+    );
+    println!(
+        "Migrate existing requested: {}",
+        yes_no(settings.unify_codex_migrate_existing.unwrap_or(false))
+    );
+    println!("Restore backup available: {}", yes_no(has_backup));
+    if let Some(migration) = migration {
+        println!(
+            "Last migration: jsonl_files={}, state_rows={}",
+            migration.migrated_jsonl_files, migration.migrated_state_rows
+        );
+    }
+    Ok(())
+}
+
+fn set_codex_history_enabled(
+    enabled: bool,
+    migrate_existing: bool,
+    restore: bool,
+) -> Result<(), AppError> {
+    let existing = crate::settings::get_settings();
+    let changed = existing.unify_codex_session_history != enabled;
+    if !changed {
+        println!(
+            "{}",
+            info(&format!(
+                "Unified Codex session history already {}",
+                if enabled { "enabled" } else { "disabled" }
+            ))
+        );
+        return Ok(());
+    }
+
+    let mut next = existing.clone();
+    next.unify_codex_session_history = enabled;
+    next.unify_codex_migrate_existing = if enabled && migrate_existing {
+        Some(true)
+    } else {
+        None
+    };
+
+    crate::settings::update_settings(next)?;
+    let state = match crate::store::AppState::try_new() {
+        Ok(state) => state,
+        Err(err) => {
+            rollback_codex_history_settings(&existing);
+            return Err(AppError::Message(format!(
+                "Unified Codex session history setting was rolled back because app state initialization failed: {err}"
+            )));
+        }
+    };
+    if let Err(err) = crate::services::provider::reapply_current_codex_official_live(&state) {
+        rollback_codex_history_settings(&existing);
+        return Err(AppError::Message(format!(
+            "Unified Codex session history setting was rolled back because live config rewrite failed: {err}"
+        )));
+    }
+
+    if enabled {
+        if migrate_existing {
+            let outcome =
+                crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket()?;
+            print_codex_history_migration_outcome(&outcome);
+        }
+        println!("{}", success("Unified Codex session history enabled"));
+    } else {
+        crate::settings::clear_codex_official_history_unify_migration()?;
+        crate::settings::clear_codex_unify_migrate_existing()?;
+        if restore {
+            restore_codex_history()?;
+        }
+        println!("{}", success("Unified Codex session history disabled"));
+    }
+
+    Ok(())
+}
+
+fn rollback_codex_history_settings(existing: &crate::settings::AppSettings) {
+    if let Err(err) = crate::settings::update_settings(existing.clone()) {
+        log::error!("Failed to roll back unified Codex session history setting: {err}");
+    }
+}
+
+fn migrate_codex_history_existing() -> Result<(), AppError> {
+    let mut settings = crate::settings::get_settings();
+    if !settings.unify_codex_session_history {
+        return Err(AppError::InvalidInput(
+            "Enable unified Codex session history before migrating existing sessions".to_string(),
+        ));
+    }
+    settings.unify_codex_migrate_existing = Some(true);
+    crate::settings::update_settings(settings)?;
+
+    let state = crate::store::AppState::try_new()?;
+    crate::services::provider::reapply_current_codex_official_live(&state)?;
+    let outcome =
+        crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket()?;
+    print_codex_history_migration_outcome(&outcome);
+    Ok(())
+}
+
+fn restore_codex_history() -> Result<(), AppError> {
+    let outcome = crate::codex_history_migration::restore_codex_official_history_from_backups()?;
+    if let Some(reason) = outcome.skipped_reason {
+        println!(
+            "{}",
+            info(&format!("Codex official history restore skipped: {reason}"))
+        );
+    } else {
+        println!(
+            "{}",
+            success(&format!(
+                "Codex official history restored: jsonl_files={}, state_rows={}",
+                outcome.restored_jsonl_files, outcome.restored_state_rows
+            ))
+        );
+    }
+    Ok(())
+}
+
+fn print_codex_history_migration_outcome(
+    outcome: &crate::codex_history_migration::CodexHistoryProviderBucketMigrationOutcome,
+) {
+    if let Some(reason) = outcome.skipped_reason.as_deref() {
+        println!(
+            "{}",
+            info(&format!(
+                "Codex official history migration skipped: {reason}"
+            ))
+        );
+    } else {
+        println!(
+            "{}",
+            success(&format!(
+                "Codex official history migrated: jsonl_files={}, state_rows={}",
+                outcome.migrated_jsonl_files, outcome.migrated_state_rows
+            ))
+        );
+    }
 }
 
 fn print_visible_apps_summary() {

@@ -38,6 +38,7 @@ pub struct SessionSyncResult {
 }
 
 /// 数据来源分布
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataSourceSummary {
@@ -107,33 +108,55 @@ fn merge_sync_step(
 }
 
 pub(crate) fn run_session_usage_sync_cycle_best_effort(db: &Database, context: &str) {
+    match run_session_usage_sync_cycle(db, context) {
+        Ok(_) => {}
+        Err(error) => log::warn!("Session usage sync failed ({context}): {error}"),
+    }
+}
+
+pub(crate) fn run_session_usage_sync_cycle(
+    db: &Database,
+    context: &str,
+) -> Result<SessionSyncResult, AppError> {
+    let mut result = SessionSyncResult {
+        imported: 0,
+        skipped: 0,
+        files_scanned: 0,
+        errors: vec![],
+    };
+
     match db.backfill_missing_usage_costs() {
         Ok(updated) if updated > 0 => {
             log::info!("Usage cost backfill completed ({context}): updated={updated}");
         }
         Ok(_) => log::debug!("No missing usage costs to backfill ({context})"),
-        Err(error) => log::warn!("Usage cost backfill failed ({context}): {error}"),
+        Err(error) => {
+            let message = format!("Usage cost backfill failed: {error}");
+            log::warn!("{message} ({context})");
+            result.errors.push(message);
+        }
     }
 
-    sync_all_session_usage_best_effort(db, context);
+    let sync_result = sync_all_session_usage(db)?;
+    result.merge(sync_result);
+    log_session_usage_sync_result(&result, context);
+    Ok(result)
 }
 
-pub(crate) fn sync_all_session_usage_best_effort(db: &Database, context: &str) {
-    match sync_all_session_usage(db) {
-        Ok(result) if result.imported > 0 || !result.errors.is_empty() => {
-            log::info!(
-                "Session usage sync completed ({context}): imported={}, skipped={}, files={}, errors={}",
-                result.imported,
-                result.skipped,
-                result.files_scanned,
-                result.errors.len()
-            );
-            for error in result.errors.iter().take(3) {
-                log::warn!("Session usage sync error ({context}): {error}");
-            }
+fn log_session_usage_sync_result(result: &SessionSyncResult, context: &str) {
+    if result.imported > 0 || !result.errors.is_empty() {
+        log::info!(
+            "Session usage sync completed ({context}): imported={}, skipped={}, files={}, errors={}",
+            result.imported,
+            result.skipped,
+            result.files_scanned,
+            result.errors.len()
+        );
+        for error in result.errors.iter().take(3) {
+            log::warn!("Session usage sync error ({context}): {error}");
         }
-        Ok(_) => log::debug!("No new session usage logs to sync ({context})"),
-        Err(error) => log::warn!("Session usage sync failed ({context}): {error}"),
+    } else {
+        log::debug!("No new session usage logs to sync ({context})");
     }
 }
 
@@ -616,6 +639,7 @@ fn find_model_pricing_for_session(
 }
 
 /// 查询数据来源分布统计
+#[allow(dead_code)]
 pub fn get_data_source_breakdown(db: &Database) -> Result<Vec<DataSourceSummary>, AppError> {
     let conn = lock_conn!(db.conn);
 

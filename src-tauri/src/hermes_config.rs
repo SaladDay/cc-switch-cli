@@ -33,6 +33,7 @@
 
 use crate::config::{atomic_write, create_managed_config_dir_all, get_app_config_dir, home_dir};
 use crate::error::AppError;
+use crate::services::provider::live_merge;
 use crate::settings::{effective_backup_retain_count, get_hermes_override_dir};
 use chrono::Local;
 use indexmap::IndexMap;
@@ -665,8 +666,27 @@ pub fn get_provider(name: &str) -> Result<Option<Value>, AppError> {
 ///   on disk but not submitted by the UI are preserved.
 /// - Holds the write lock end-to-end to avoid TOCTOU races.
 pub fn set_provider(name: &str, provider_config: Value) -> Result<HermesWriteOutcome, AppError> {
-    let _guard = hermes_write_lock().lock()?;
+    set_provider_with_resolution(
+        name,
+        provider_config,
+        live_merge::ConflictPolicy::PreferIncoming.into(),
+    )
+}
 
+pub fn set_provider_with_resolution(
+    name: &str,
+    provider_config: Value,
+    resolution: live_merge::ConflictResolution<'_>,
+) -> Result<HermesWriteOutcome, AppError> {
+    let providers_value = prepare_provider_with_resolution(name, provider_config, resolution)?;
+    write_prepared_providers(&providers_value)
+}
+
+pub fn prepare_provider_with_resolution(
+    name: &str,
+    provider_config: Value,
+    resolution: live_merge::ConflictResolution<'_>,
+) -> Result<serde_yaml::Value, AppError> {
     let config = read_hermes_config()?;
     ensure_provider_writable(&config, name, "edit")?;
 
@@ -686,19 +706,13 @@ pub fn set_provider(name: &str, provider_config: Value) -> Result<HermesWriteOut
         .and_then(|obj| obj.keys().next())
         .cloned();
 
-    let mut yaml_val: serde_yaml::Value = json_to_yaml(&normalized)?;
-    if let serde_yaml::Value::Mapping(ref mut m) = yaml_val {
-        m.insert(
-            serde_yaml::Value::String("name".to_string()),
-            serde_yaml::Value::String(name.to_string()),
-        );
+    let mut submitted = normalized;
+    if let Some(obj) = submitted.as_object_mut() {
+        obj.insert("name".to_string(), Value::String(name.to_string()));
         if let Some(model_id) = first_model_id {
-            m.insert(
-                serde_yaml::Value::String("model".to_string()),
-                serde_yaml::Value::String(model_id),
-            );
+            obj.insert("model".to_string(), Value::String(model_id));
         } else {
-            m.remove(serde_yaml::Value::String("model".to_string()));
+            obj.remove("model");
         }
     }
 
@@ -706,20 +720,26 @@ pub fn set_provider(name: &str, provider_config: Value) -> Result<HermesWriteOut
         .iter_mut()
         .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
     {
-        if let (Some(existing_map), serde_yaml::Value::Mapping(new_map)) =
-            (existing.as_mapping(), &mut yaml_val)
-        {
-            for (k, v) in existing_map {
-                new_map.entry(k.clone()).or_insert_with(|| v.clone());
-            }
-        }
-        *existing = yaml_val;
+        let existing_json = yaml_to_json(existing)?;
+        let merged = live_merge::merge_json_live(
+            &crate::app_config::AppType::Hermes,
+            format!("config.yaml custom_providers.{name}"),
+            existing_json,
+            &submitted,
+            resolution,
+        )?;
+        *existing = json_to_yaml(&merged)?;
     } else {
-        providers.push(yaml_val);
+        providers.push(json_to_yaml(&submitted)?);
     }
 
-    let providers_value = serde_yaml::Value::Sequence(providers);
-    write_yaml_section_to_config_locked("custom_providers", &providers_value)
+    Ok(serde_yaml::Value::Sequence(providers))
+}
+
+pub fn write_prepared_providers(
+    providers_value: &serde_yaml::Value,
+) -> Result<HermesWriteOutcome, AppError> {
+    write_yaml_section_to_config("custom_providers", providers_value)
 }
 
 /// Remove a provider from the `custom_providers:` list.
@@ -804,10 +824,8 @@ pub fn get_current_provider_id() -> Result<Option<String>, AppError> {
         .map(str::trim)
         .unwrap_or_default();
 
-    if !provider_ref.is_empty() {
-        if get_providers()?.contains_key(provider_ref) {
-            return Ok(Some(provider_ref.to_string()));
-        }
+    if !provider_ref.is_empty() && get_providers()?.contains_key(provider_ref) {
+        return Ok(Some(provider_ref.to_string()));
     }
 
     if provider_ref == "custom" {

@@ -20,10 +20,10 @@ use super::types::{
     AppDataReq, AppDataSystem, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg,
     ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg,
     ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, SessionMsg, SessionReq, SessionSystem,
-    SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg,
-    StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem, UsagePricingMsg,
-    UsagePricingReq, UsagePricingSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq,
-    WebDavReqKind, WebDavSystem,
+    SessionUsageSyncMsg, SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg, SkillsReq,
+    SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem,
+    UpdateMsg, UpdateReq, UpdateSystem, UsagePricingMsg, UsagePricingReq, UsagePricingSystem,
+    WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 pub(crate) fn start_proxy_system() -> Result<ProxySystem, AppError> {
@@ -664,7 +664,6 @@ fn handle_session_req(req: SessionReq, tx: &mpsc::Sender<SessionMsg>) -> Result<
                 crate::session_manager::scan_sessions_for_provider(&provider_id)
             })
             .map_err(|_| "session scan panicked".to_string());
-            let result = result;
             tx.send(SessionMsg::ScanFinished { request_id, result })
                 .map_err(|_| ())
         }
@@ -810,6 +809,25 @@ pub(crate) fn start_usage_pricing_system() -> Result<UsagePricingSystem, AppErro
     })
 }
 
+pub(crate) fn start_session_usage_sync_system() -> Result<SessionUsageSyncSystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<SessionUsageSyncMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<SessionUsageSyncReq>();
+
+    let handle = std::thread::Builder::new()
+        .name("cc-switch-session-usage".to_string())
+        .spawn(move || session_usage_sync_worker_loop(req_rx, result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn session usage sync worker thread".to_string(),
+            source: e,
+        })?;
+
+    Ok(SessionUsageSyncSystem {
+        req_tx,
+        result_rx,
+        _handle: handle,
+    })
+}
+
 pub(crate) fn start_app_data_system() -> Result<AppDataSystem, AppError> {
     let (result_tx, result_rx) = mpsc::channel::<AppDataMsg>();
     let (req_tx, req_rx) = mpsc::channel::<AppDataReq>();
@@ -827,6 +845,39 @@ pub(crate) fn start_app_data_system() -> Result<AppDataSystem, AppError> {
         result_rx,
         _handle: handle,
     })
+}
+
+fn session_usage_sync_worker_loop(
+    rx: mpsc::Receiver<SessionUsageSyncReq>,
+    tx: mpsc::Sender<SessionUsageSyncMsg>,
+) {
+    while let Ok(mut req) = rx.recv() {
+        for next in rx.try_iter() {
+            req = next;
+        }
+
+        let SessionUsageSyncReq::Run { request_id } = req;
+        let result = match crate::Database::init() {
+            Ok(db) => {
+                crate::services::session_usage::run_session_usage_sync_cycle(&db, "tui-background")
+                    .and_then(|result| {
+                        if result.errors.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(AppError::Message(format!(
+                                "{} session usage sync error(s); first: {}",
+                                result.errors.len(),
+                                result.errors[0]
+                            )))
+                        }
+                    })
+                    .map_err(|error| error.to_string())
+            }
+            Err(error) => Err(error.to_string()),
+        };
+
+        let _ = tx.send(SessionUsageSyncMsg::Finished { request_id, result });
+    }
 }
 
 fn app_data_worker_loop(rx: mpsc::Receiver<AppDataReq>, tx: mpsc::Sender<AppDataMsg>) {

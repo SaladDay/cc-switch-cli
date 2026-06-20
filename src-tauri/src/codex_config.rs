@@ -551,19 +551,48 @@ fn set_codex_model_catalog_json_field(
     Ok(doc.to_string())
 }
 
-pub fn prepare_codex_config_text_with_model_catalog(
+#[derive(Clone, Debug)]
+pub struct PreparedCodexConfigText {
+    pub config_text: String,
+    pub model_catalog: Option<Value>,
+}
+
+pub fn prepare_codex_config_text_with_model_catalog_payload(
     settings: &Value,
     config_text: &str,
-) -> Result<String, AppError> {
+) -> Result<PreparedCodexConfigText, AppError> {
     let catalog_path = get_codex_model_catalog_path();
 
     if let Some(catalog) = codex_model_catalog_from_settings(settings, config_text)? {
         let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
-        write_json_file(&catalog_path, &catalog)?;
-        Ok(config_text)
+        Ok(PreparedCodexConfigText {
+            config_text,
+            model_catalog: Some(catalog),
+        })
     } else {
-        set_codex_model_catalog_json_field(config_text, None)
+        Ok(PreparedCodexConfigText {
+            config_text: set_codex_model_catalog_json_field(config_text, None)?,
+            model_catalog: None,
+        })
     }
+}
+
+pub fn write_prepared_codex_model_catalog(
+    prepared: &PreparedCodexConfigText,
+) -> Result<(), AppError> {
+    if let Some(catalog) = &prepared.model_catalog {
+        write_json_file(&get_codex_model_catalog_path(), catalog)?;
+    }
+    Ok(())
+}
+
+pub fn prepare_codex_config_text_with_model_catalog(
+    settings: &Value,
+    config_text: &str,
+) -> Result<String, AppError> {
+    let prepared = prepare_codex_config_text_with_model_catalog_payload(settings, config_text)?;
+    write_prepared_codex_model_catalog(&prepared)?;
+    Ok(prepared.config_text)
 }
 
 pub fn read_codex_model_catalog_simplified_from_live() -> Result<Option<Value>, AppError> {
@@ -842,6 +871,162 @@ pub fn read_codex_live_settings() -> Result<Value, AppError> {
     Ok(json!({ "auth": auth, "config": cfg_text }))
 }
 
+/// `[model_providers.custom]` entry that makes an official (ChatGPT OAuth)
+/// provider behave like Codex's built-in `openai` entry while running under
+/// the shared custom id.
+fn codex_unified_official_provider_table() -> toml_edit::Table {
+    let mut table = toml_edit::Table::new();
+    table["name"] = toml_edit::value("OpenAI");
+    table["requires_openai_auth"] = toml_edit::value(true);
+    table["supports_websockets"] = toml_edit::value(true);
+    table["wire_api"] = toml_edit::value("responses");
+    table
+}
+
+fn table_matches_codex_unified_official_provider(table: &toml_edit::Table) -> bool {
+    table.len() == 4
+        && table.get("name").and_then(|item| item.as_str()) == Some("OpenAI")
+        && table
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            == Some(true)
+        && table
+            .get("supports_websockets")
+            .and_then(|item| item.as_bool())
+            == Some(true)
+        && table.get("wire_api").and_then(|item| item.as_str()) == Some("responses")
+}
+
+/// 统一 Codex 会话历史：把官方供应商的 live 配置改写为以共享的
+/// `custom` model_provider 标识运行（认证仍走 `auth.json` 的 ChatGPT 登录）。
+pub fn inject_codex_unified_session_bucket(config_text: &str) -> Result<String, AppError> {
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+
+    if doc.get("model_provider").is_some() {
+        return Ok(config_text.to_string());
+    }
+
+    let existing_custom_conflicts = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|providers| providers.get(CC_SWITCH_CODEX_MODEL_PROVIDER_ID))
+        .and_then(|item| item.as_table())
+        .is_some_and(|table| !table_matches_codex_unified_official_provider(table));
+    if existing_custom_conflicts {
+        log::warn!(
+            "官方 Codex 配置已存在自定义 [model_providers.custom]，跳过统一会话路由注入以避免激活未知路由"
+        );
+        return Ok(config_text.to_string());
+    }
+
+    doc["model_provider"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_PROVIDER_ID);
+
+    if doc.get("model_providers").is_none() {
+        let mut parent = toml_edit::Table::new();
+        parent.set_implicit(true);
+        doc["model_providers"] = toml_edit::Item::Table(parent);
+    }
+    if let Some(providers) = doc["model_providers"].as_table_mut() {
+        if !providers.contains_key(CC_SWITCH_CODEX_MODEL_PROVIDER_ID) {
+            providers.insert(
+                CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+                toml_edit::Item::Table(codex_unified_official_provider_table()),
+            );
+        }
+    }
+
+    Ok(doc.to_string())
+}
+
+/// `inject_codex_unified_session_bucket` 的反向操作：仅当形态与注入产物完全一致时剥离。
+pub fn strip_codex_unified_session_bucket(config_text: &str) -> Result<String, AppError> {
+    if !config_text.contains("model_provider") {
+        return Ok(config_text.to_string());
+    }
+
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+
+    if doc.get("model_provider").and_then(|item| item.as_str())
+        != Some(CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+    {
+        return Ok(config_text.to_string());
+    }
+
+    let matches_injected = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|providers| providers.get(CC_SWITCH_CODEX_MODEL_PROVIDER_ID))
+        .and_then(|item| item.as_table())
+        .is_some_and(table_matches_codex_unified_official_provider);
+    if !matches_injected {
+        return Ok(config_text.to_string());
+    }
+
+    doc.as_table_mut().remove("model_provider");
+    let providers_empty = doc["model_providers"]
+        .as_table_mut()
+        .map(|providers| {
+            providers.remove(CC_SWITCH_CODEX_MODEL_PROVIDER_ID);
+            providers.is_empty()
+        })
+        .unwrap_or(false);
+    if providers_empty {
+        doc.as_table_mut().remove("model_providers");
+    }
+
+    Ok(doc.to_string())
+}
+
+/// 统一会话开关开启时，把官方供应商 `{ auth, config }` 设置对象中的
+/// config 文本注入共享 custom 路由；开关关闭或非官方供应商时不做改动。
+pub fn apply_codex_unified_session_bucket_to_settings(
+    category: Option<&str>,
+    settings: &mut Value,
+) -> Result<(), AppError> {
+    if category != Some("official") || !crate::settings::unify_codex_session_history() {
+        return Ok(());
+    }
+
+    let config_text = settings
+        .get("config")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    let injected = inject_codex_unified_session_bucket(&config_text)?;
+    if injected != config_text {
+        if let Some(obj) = settings.as_object_mut() {
+            obj.insert("config".to_string(), Value::String(injected));
+        }
+    }
+    Ok(())
+}
+
+/// Backfill helper: strip the unified-session injection from a live
+/// `{ auth, config }` settings object before it is stored back to the DB.
+pub fn strip_codex_unified_session_bucket_from_settings(
+    settings: &mut Value,
+) -> Result<(), AppError> {
+    let Some(config_text) = settings
+        .get("config")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+    else {
+        return Ok(());
+    };
+
+    let stripped = strip_codex_unified_session_bucket(&config_text)?;
+    if stripped != config_text {
+        if let Some(obj) = settings.as_object_mut() {
+            obj.insert("config".to_string(), Value::String(stripped));
+        }
+    }
+    Ok(())
+}
+
 /// Route a Codex live write between full auth+config or config-only.
 ///
 /// Official providers with usable login material own `auth.json`. Third-party
@@ -865,15 +1050,22 @@ pub fn write_codex_live_for_provider(
     auth: &Value,
     config_text: Option<&str>,
 ) -> Result<(), AppError> {
-    let should_write_auth =
-        category == Some("official") || !crate::settings::preserve_codex_official_auth_on_switch();
+    let unified_official_config =
+        if category == Some("official") && crate::settings::unify_codex_session_history() {
+            Some(inject_codex_unified_session_bucket(
+                config_text.unwrap_or(""),
+            )?)
+        } else {
+            None
+        };
+    let config_text = unified_official_config.as_deref().or(config_text);
+
+    let should_write_auth = (category == Some("official") && codex_auth_has_login_material(auth))
+        || (category != Some("official")
+            && !crate::settings::preserve_codex_official_auth_on_switch());
 
     if should_write_auth {
-        if category == Some("official") && !codex_auth_has_login_material(auth) {
-            write_codex_live_atomic_optional_auth(None, config_text)
-        } else {
-            write_codex_live_atomic(auth, config_text)
-        }
+        write_codex_live_atomic(auth, config_text)
     } else {
         let live_config = prepare_codex_provider_live_config(auth, config_text.unwrap_or(""))?;
         write_codex_live_config_atomic(Some(&live_config))
@@ -1172,6 +1364,9 @@ mod tests {
     impl SettingsGuard {
         fn with_codex_config_dir(dir: Option<&str>) -> Self {
             let original = crate::settings::get_settings();
+            if let Some(home) = crate::config::home_dir() {
+                fs::create_dir_all(home).unwrap();
+            }
             let mut settings = original.clone();
             settings.codex_config_dir = dir.map(str::to_string);
             crate::settings::update_settings(settings).unwrap();
@@ -1342,6 +1537,110 @@ model = "gpt-5.4"
 
         let _ = fs::remove_dir_all(codex_home);
         set_test_home_override(None);
+    }
+
+    #[test]
+    fn unified_session_bucket_injects_for_empty_official_config() {
+        let injected = inject_codex_unified_session_bucket("").expect("inject");
+        let doc: toml::Table = toml::from_str(&injected).expect("parse injected config");
+
+        assert_eq!(
+            doc.get("model_provider").and_then(|value| value.as_str()),
+            Some(CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+        );
+        let custom = doc["model_providers"][CC_SWITCH_CODEX_MODEL_PROVIDER_ID]
+            .as_table()
+            .expect("custom provider table");
+        assert_eq!(
+            custom.get("name").and_then(|value| value.as_str()),
+            Some("OpenAI")
+        );
+        assert_eq!(
+            custom
+                .get("requires_openai_auth")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            custom
+                .get("supports_websockets")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            custom.get("wire_api").and_then(|value| value.as_str()),
+            Some("responses")
+        );
+    }
+
+    #[test]
+    fn unified_session_bucket_preserves_other_keys_and_explicit_routing() {
+        let with_catalog = "model_catalog_json = \"cc-switch-model-catalog.json\"\n";
+        let injected = inject_codex_unified_session_bucket(with_catalog).expect("inject");
+        assert!(injected.contains("model_catalog_json"));
+        assert!(injected.contains("model_provider = \"custom\""));
+
+        let explicit = "model_provider = \"openai_https\"\n";
+        let unchanged = inject_codex_unified_session_bucket(explicit).expect("inject");
+        assert_eq!(unchanged, explicit);
+    }
+
+    #[test]
+    fn unified_session_bucket_skips_conflicting_custom_table() {
+        let stale = r#"[model_providers.custom]
+name = "Relay"
+base_url = "https://relay.example/v1"
+"#;
+        let unchanged = inject_codex_unified_session_bucket(stale).expect("inject");
+        assert_eq!(unchanged, stale);
+
+        let injected_once = inject_codex_unified_session_bucket("").expect("inject");
+        let reinjected = inject_codex_unified_session_bucket(&injected_once).expect("re-inject");
+        assert_eq!(reinjected, injected_once);
+    }
+
+    #[test]
+    fn unified_session_bucket_strip_round_trips_injection() {
+        let injected = inject_codex_unified_session_bucket("").expect("inject");
+        let stripped = strip_codex_unified_session_bucket(&injected).expect("strip");
+        assert_eq!(stripped.trim(), "");
+
+        let with_catalog = "model_catalog_json = \"cc-switch-model-catalog.json\"\n";
+        let injected = inject_codex_unified_session_bucket(with_catalog).expect("inject");
+        let stripped = strip_codex_unified_session_bucket(&injected).expect("strip");
+        assert_eq!(stripped, with_catalog);
+    }
+
+    #[test]
+    fn unified_session_bucket_strip_keeps_third_party_custom_entry() {
+        let third_party = r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let untouched = strip_codex_unified_session_bucket(third_party).expect("strip");
+        assert_eq!(untouched, third_party);
+    }
+
+    #[test]
+    fn unified_session_bucket_strip_from_settings_only_touches_config() {
+        let injected = inject_codex_unified_session_bucket("").expect("inject");
+        let mut settings = json!({
+            "auth": { "tokens": { "access_token": "secret" } },
+            "config": injected,
+        });
+        strip_codex_unified_session_bucket_from_settings(&mut settings).expect("strip settings");
+        assert_eq!(
+            settings
+                .get("config")
+                .and_then(|value| value.as_str())
+                .map(str::trim),
+            Some("")
+        );
+        assert!(settings.pointer("/auth/tokens/access_token").is_some());
     }
 
     #[test]

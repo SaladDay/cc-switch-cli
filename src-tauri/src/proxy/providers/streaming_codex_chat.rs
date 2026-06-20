@@ -533,6 +533,32 @@ impl ChatToResponsesState {
         events.extend(self.finalize_text());
         events.extend(self.finalize_tools());
 
+        // When finish_reason is absent, the stream was truncated without a proper
+        // completion signal.  Distinguish between streams that produced substantive
+        // output (report as incomplete) and those that produced nothing (report as
+        // failed with stream_truncated).
+        if self.finish_reason.is_none() {
+            let output = self.completed_output_items();
+            if output.is_empty() {
+                events.push(self.failed_event(
+                    "Stream truncated before any output was produced".to_string(),
+                    Some("stream_truncated".to_string()),
+                ));
+            } else {
+                let mut response = self.base_response("incomplete", output);
+                response["incomplete_details"] = json!({ "reason": "stream_truncated" });
+                events.push(sse_event(
+                    "response.completed",
+                    json!({
+                        "type": "response.completed",
+                        "response": response
+                    }),
+                ));
+            }
+            self.completed = true;
+            return events;
+        }
+
         let status = response_status_from_finish_reason(self.finish_reason.as_deref());
         let mut response = self.base_response(status, self.completed_output_items());
         if status == "incomplete" {

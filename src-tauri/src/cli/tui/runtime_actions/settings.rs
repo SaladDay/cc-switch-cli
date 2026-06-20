@@ -72,7 +72,7 @@ pub(super) fn set_proxy_listen_port(
     if app_running {
         *ctx.data = UiData::load(&ctx.app.app_type)?;
         ctx.app.push_toast(
-            texts::tui_toast_proxy_settings_stop_before_edit(),
+            texts::tui_toast_proxy_settings_stop_app_route_before_edit_port(),
             super::super::app::ToastKind::Info,
         );
         return Ok(());
@@ -527,7 +527,7 @@ fn update_proxy_config(
     if status.running {
         *ctx.data = UiData::load(&ctx.app.app_type)?;
         ctx.app.push_toast(
-            texts::tui_toast_proxy_settings_stop_before_edit(),
+            texts::tui_toast_proxy_settings_stop_proxy_before_edit_address(),
             super::super::app::ToastKind::Info,
         );
         return Ok(());
@@ -550,8 +550,6 @@ mod tests {
     use super::*;
 
     use serde_json::json;
-    use std::ffi::OsString;
-    use std::path::Path;
     use tempfile::TempDir;
 
     use crate::app_config::AppType;
@@ -561,52 +559,12 @@ mod tests {
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::provider::Provider;
     use crate::services::ProviderService;
-    use crate::test_support::{
-        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
-    };
-
-    struct EnvGuard {
-        _lock: TestHomeSettingsLock,
-        old_home: Option<OsString>,
-        old_userprofile: Option<OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_home(home: &Path) -> Self {
-            let lock = lock_test_home_and_settings();
-            let old_home = std::env::var_os("HOME");
-            let old_userprofile = std::env::var_os("USERPROFILE");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            set_test_home_override(Some(home));
-            crate::settings::reload_test_settings();
-            Self {
-                _lock: lock,
-                old_home,
-                old_userprofile,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            set_test_home_override(self.old_home.as_deref().map(Path::new));
-            crate::settings::reload_test_settings();
-        }
-    }
+    use crate::test_support::TestEnvGuard;
 
     #[test]
     fn set_openclaw_config_dir_persists_override_and_syncs_live_config() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
 
         let target_dir = temp_home.path().join("wsl-openclaw");
         std::fs::create_dir_all(&target_dir).expect("create target openclaw dir");
@@ -616,8 +574,8 @@ mod tests {
             &state,
             AppType::OpenClaw,
             Provider::with_id(
-                "demo".to_string(),
-                "Demo".to_string(),
+                "settings-dir-demo".to_string(),
+                "Settings Dir Demo".to_string(),
                 json!({
                     "apiKey": "sk-demo",
                     "baseUrl": "https://demo.example/v1",
@@ -670,11 +628,11 @@ mod tests {
         let value: serde_json::Value =
             json5::from_str(&source).expect("parse synced openclaw config as json5");
         assert_eq!(
-            value["models"]["providers"]["demo"]["baseUrl"],
+            value["models"]["providers"]["settings-dir-demo"]["baseUrl"],
             json!("https://demo.example/v1")
         );
         assert_eq!(
-            value["models"]["providers"]["demo"]["models"][0]["id"],
+            value["models"]["providers"]["settings-dir-demo"]["models"][0]["id"],
             json!("demo-model")
         );
     }
@@ -682,7 +640,7 @@ mod tests {
     #[test]
     fn set_openclaw_config_dir_none_clears_override_and_falls_back_to_default_path() {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let _env = TestEnvGuard::isolated(temp_home.path());
 
         let override_dir = temp_home.path().join("custom-openclaw");
         std::fs::create_dir_all(&override_dir).expect("create override dir");

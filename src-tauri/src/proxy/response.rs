@@ -302,6 +302,10 @@ where
     build_buffered_json_response_inner(status, headers, body, transform)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "stream response setup needs timeout, format, and shadow context"
+)]
 pub fn build_anthropic_stream_response(
     response: reqwest::Response,
     first_byte_timeout: Option<Duration>,

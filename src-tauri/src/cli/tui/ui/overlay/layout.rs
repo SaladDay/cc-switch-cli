@@ -26,8 +26,7 @@ pub(crate) fn compact_lines_overlay_rect(
     let max_width = content_area
         .width
         .saturating_sub(4)
-        .max(1)
-        .min(TOAST_MAX_WIDTH);
+        .clamp(1, TOAST_MAX_WIDTH);
     let min_width = 36.min(max_width);
     let content_width = lines
         .iter()

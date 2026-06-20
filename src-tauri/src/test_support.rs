@@ -39,6 +39,7 @@ pub(crate) struct TestEnvGuard {
     old_cc_switch_config_dir: Option<OsString>,
     old_claude_config_dir: Option<OsString>,
     old_codex_home: Option<OsString>,
+    old_xdg_runtime_dir: Option<OsString>,
 }
 
 impl TestEnvGuard {
@@ -49,12 +50,14 @@ impl TestEnvGuard {
         let old_cc_switch_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
         let old_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
         let old_codex_home = std::env::var_os("CODEX_HOME");
+        let old_xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
 
         std::env::set_var("HOME", home);
         std::env::set_var("USERPROFILE", home);
         std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
         std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
         std::env::set_var("CODEX_HOME", home.join(".codex"));
+        std::env::set_var("XDG_RUNTIME_DIR", home.join(".runtime"));
         set_test_home_override(Some(home));
         crate::settings::reload_test_settings();
 
@@ -66,6 +69,7 @@ impl TestEnvGuard {
             old_cc_switch_config_dir,
             old_claude_config_dir,
             old_codex_home,
+            old_xdg_runtime_dir,
         }
     }
 
@@ -82,6 +86,7 @@ impl Drop for TestEnvGuard {
         restore_env("CC_SWITCH_CONFIG_DIR", &self.old_cc_switch_config_dir);
         restore_env("CLAUDE_CONFIG_DIR", &self.old_claude_config_dir);
         restore_env("CODEX_HOME", &self.old_codex_home);
+        restore_env("XDG_RUNTIME_DIR", &self.old_xdg_runtime_dir);
         set_test_home_override(self.old_home.as_deref().map(Path::new));
         crate::settings::reload_test_settings();
     }

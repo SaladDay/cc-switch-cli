@@ -29,11 +29,19 @@ fn pending_snapshot_app_data(request_id: u64) -> PendingAppDataLoad {
 }
 
 fn pending_full_app_data(request_id: u64) -> PendingAppDataLoad {
+    pending_full_app_data_with_epoch(request_id, 0, 0)
+}
+
+fn pending_full_app_data_with_epoch(
+    request_id: u64,
+    generation: u64,
+    app_state_epoch: u64,
+) -> PendingAppDataLoad {
     PendingAppDataLoad {
         kind: AppDataLoadKind::Full,
         request_id,
-        generation: 0,
-        app_state_epoch: 0,
+        generation,
+        app_state_epoch,
     }
 }
 
@@ -216,6 +224,7 @@ fn stale_app_data_result_does_not_overwrite_current_app() {
         &mut cache,
         None,
         None,
+        None,
         AppDataMsg::Loaded {
             kind: AppDataLoadKind::Snapshot,
             request_id: 1,
@@ -295,6 +304,7 @@ fn app_data_result_preserves_usage_pricing_that_finished_first() {
         &mut app,
         &mut data,
         &mut cache,
+        None,
         None,
         None,
         AppDataMsg::Loaded {
@@ -379,6 +389,7 @@ fn current_app_data_changed_queues_full_load_without_caching_stale_data() {
         &mut app,
         &mut data,
         &mut cache,
+        None,
         None,
         None,
         AppDataMsg::Loaded {
@@ -483,6 +494,7 @@ fn current_app_data_changed_full_load_requeues_custom_usage_and_invalidates_old_
         &mut app,
         &mut data,
         &mut cache,
+        None,
         None,
         Some(&usage_tx),
         AppDataMsg::Loaded {
@@ -598,6 +610,7 @@ fn app_data_result_after_cache_invalidation_is_ignored() {
         &mut cache,
         None,
         None,
+        None,
         AppDataMsg::Loaded {
             kind: AppDataLoadKind::Snapshot,
             request_id: 4,
@@ -611,6 +624,56 @@ fn app_data_result_after_cache_invalidation_is_ignored() {
     assert_eq!(data.providers.current_id, "current-after-reload");
     assert!(cache.pending_by_app.is_empty());
     assert_eq!(cache.data_generation, 1);
+}
+
+#[test]
+fn stale_app_data_result_after_background_sync_requeues_current_app_refresh() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "current-after-sync".to_string();
+    let mut cache = UiDataByAppCache::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Claude, pending_full_app_data(2));
+    cache.incomplete_by_app.insert(AppType::Claude);
+    cache.clear_usage_pricing_after_external_usage_sync();
+    let (tx, rx) = mpsc::channel();
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "stale-full-load".to_string();
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&tx),
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Full,
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(data.providers.current_id, "current-after-sync");
+    assert!(cache.incomplete_by_app.contains(&AppType::Claude));
+    assert!(matches!(
+        rx.recv()
+            .expect("fresh app data request should be queued after stale result"),
+        AppDataReq::FullLoad {
+            request_id: 1,
+            generation: 1,
+            app_state_epoch: 1,
+            app_type: AppType::Claude,
+        }
+    ));
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Claude).copied(),
+        Some(pending_full_app_data_with_epoch(1, 1, 1))
+    );
 }
 
 #[test]
@@ -1178,6 +1241,113 @@ fn usage_pricing_load_updates_non_blocking_loading_state() {
 }
 
 #[test]
+fn background_session_usage_sync_queues_once() {
+    let (tx, rx) = mpsc::channel();
+    let mut tracker = RequestTracker::default();
+
+    queue_background_session_usage_sync(Some(&tx), &mut tracker);
+    queue_background_session_usage_sync(Some(&tx), &mut tracker);
+
+    assert_eq!(tracker.active, Some(1));
+    assert!(matches!(
+        rx.recv()
+            .expect("session usage sync request should be queued"),
+        SessionUsageSyncReq::Run { request_id: 1 }
+    ));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn background_session_usage_sync_refreshes_usage_with_new_epoch() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.usage.summary_7d.total_cost_usd = 3.0;
+    app.usage
+        .start_loading(AppType::Codex, data::UsageRangePreset::SevenDays);
+    let mut cache = UiDataByAppCache::default();
+    let mut cached_codex = UiData::default();
+    cached_codex.usage.summary_7d.total_cost_usd = 9.0;
+    cached_codex.pricing.rows.push(data::ModelPricingRow {
+        model_id: "stale-model".to_string(),
+        ..data::ModelPricingRow::default()
+    });
+    cache.by_app.insert(AppType::Codex, cached_codex);
+    let mut tracker = RequestTracker::default();
+    let request_id = tracker.start();
+    let (tx, rx) = mpsc::channel();
+
+    handle_session_usage_sync_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut tracker,
+        Some(&tx),
+        SessionUsageSyncMsg::Finished {
+            request_id,
+            result: Ok(()),
+        },
+    );
+
+    assert_eq!(tracker.active, None);
+    assert_eq!(cache.app_state_epoch, 1);
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 3.0);
+    assert!(!app
+        .usage
+        .is_loading_for(&AppType::Codex, data::UsageRangePreset::SevenDays));
+    let cached_codex = cache
+        .by_app
+        .get(&AppType::Codex)
+        .expect("non-current app snapshot should remain cached");
+    assert_eq!(cached_codex.usage.summary_7d.total_cost_usd, 0.0);
+    assert!(cached_codex.pricing.rows.is_empty());
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::SevenDays));
+    assert!(matches!(
+        rx.recv()
+            .expect("usage/pricing refresh should be queued after sync"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            generation: 1,
+            app_state_epoch: 1,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+        }
+    ));
+}
+
+#[test]
+fn background_session_usage_sync_error_does_not_refresh_usage() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.usage.summary_7d.total_cost_usd = 3.0;
+    let mut cache = UiDataByAppCache::default();
+    let mut tracker = RequestTracker::default();
+    let request_id = tracker.start();
+    let (tx, rx) = mpsc::channel();
+
+    handle_session_usage_sync_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut tracker,
+        Some(&tx),
+        SessionUsageSyncMsg::Finished {
+            request_id,
+            result: Err("sync failed".to_string()),
+        },
+    );
+
+    assert_eq!(tracker.active, None);
+    assert_eq!(cache.app_state_epoch, 0);
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 3.0);
+    assert!(!app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::SevenDays));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn usage_custom_range_action_queues_range_specific_load() {
     let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
     let mut app = App::new(Some(AppType::Claude));
@@ -1278,8 +1448,10 @@ fn usage_custom_range_app_switch_does_not_show_stale_custom_cache() {
     app.usage.range = data::UsageRangePreset::Custom(active_range);
     data.usage.begin_custom_range(active_range);
 
-    let mut stale_usage = data::UsageSnapshot::default();
-    stale_usage.custom_range = Some(stale_range);
+    let mut stale_usage = data::UsageSnapshot {
+        custom_range: Some(stale_range),
+        ..Default::default()
+    };
     stale_usage.summary_custom.total_requests = 99;
     stale_usage.summary_custom.total_cost_usd = 12.34;
     cache.usage_pricing_by_key.insert(
@@ -1855,8 +2027,10 @@ fn update_check_finished_is_processed_when_request_id_matches() {
         title: texts::tui_update_checking_title().to_string(),
         message: texts::tui_loading().to_string(),
     };
-    let mut update_check = RequestTracker::default();
-    update_check.active = Some(7);
+    let mut update_check = RequestTracker {
+        active: Some(7),
+        ..Default::default()
+    };
 
     let info = crate::cli::commands::update::UpdateCheckInfo {
         current_version: "4.7.0".to_string(),
@@ -1894,8 +2068,10 @@ fn update_check_finished_for_homebrew_update_shows_brew_toast() {
         title: texts::tui_update_checking_title().to_string(),
         message: texts::tui_loading().to_string(),
     };
-    let mut update_check = RequestTracker::default();
-    update_check.active = Some(7);
+    let mut update_check = RequestTracker {
+        active: Some(7),
+        ..Default::default()
+    };
 
     let info = crate::cli::commands::update::UpdateCheckInfo {
         current_version: "4.7.0".to_string(),
@@ -1926,8 +2102,10 @@ fn update_check_finished_for_homebrew_update_shows_brew_toast() {
 fn update_check_finished_is_ignored_when_request_id_mismatch() {
     let mut app = App::new(None);
     app.overlay = Overlay::None;
-    let mut update_check = RequestTracker::default();
-    update_check.active = Some(2);
+    let mut update_check = RequestTracker {
+        active: Some(2),
+        ..Default::default()
+    };
 
     let stale = crate::cli::commands::update::UpdateCheckInfo {
         current_version: "4.7.0".to_string(),

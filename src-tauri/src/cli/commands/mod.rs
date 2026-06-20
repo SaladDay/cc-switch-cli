@@ -7,10 +7,12 @@ pub(crate) mod config_openclaw;
 pub mod config_webdav;
 #[cfg(unix)]
 pub mod daemon;
+pub mod deeplink;
 pub mod env;
 pub mod failover;
 pub mod hermes;
 pub mod internal;
+pub(crate) mod live_conflict;
 pub mod mcp;
 pub mod prompts;
 pub mod provider;

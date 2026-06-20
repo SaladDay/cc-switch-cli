@@ -81,6 +81,9 @@ fn run(cli: Cli) -> Result<(), AppError> {
         #[cfg(unix)]
         Some(Commands::Daemon(cmd)) => cc_switch_lib::cli::commands::daemon::execute(cmd),
         Some(Commands::Env(cmd)) => cc_switch_lib::cli::commands::env::execute(cmd, cli.app),
+        Some(Commands::Deeplink(cmd)) => {
+            cc_switch_lib::cli::commands::deeplink::execute(cmd, cli.app)
+        }
         Some(Commands::Update(cmd)) => cc_switch_lib::cli::commands::update::execute(cmd),
         Some(Commands::Completions(cmd)) => cc_switch_lib::cli::commands::completions::execute(cmd),
         Some(Commands::Internal(cmd)) => cc_switch_lib::cli::commands::internal::execute(cmd),
@@ -113,10 +116,10 @@ fn initialize_startup_state_if_needed(command: &Option<Commands>) -> Result<(), 
 }
 
 fn database_access_required(command: &Option<Commands>) -> bool {
-    match command {
-        Some(Commands::Completions(_)) | Some(Commands::Update(_)) => false,
-        _ => true,
-    }
+    !matches!(
+        command,
+        Some(Commands::Completions(_)) | Some(Commands::Update(_))
+    )
 }
 
 #[cfg(test)]

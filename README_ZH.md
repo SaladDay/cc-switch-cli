@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.8.2-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.8.4-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -33,6 +33,16 @@
 ## ❤️赞助商
 
 <table>
+  <tr>
+    <td width="180">
+      <a href="https://console.claudeapi.com/register?source=cc-switch-cli">
+        <img src="assets/partners/logos/claudeapi.png" alt="ClaudeAPI" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>ClaudeAPI</b> 赞助本项目！<b>ClaudeAPI</b> 是一家专注 Claude 的 API 接入服务商，走官方与 AWS 渠道，主打高稳定、低延迟，完整支持 Claude Code、Codex 与 Agent 工作流。支持企业对接、发票服务，并可在 <b>CC-Switch CLI</b> 中一键配置调用。CC-Switch CLI 用户专属福利：通过<a href="https://console.claudeapi.com/register?source=cc-switch-cli">此链接</a>注册，即可领取免费测试额度。
+    </td>
+  </tr>
   <tr>
     <td width="180">
       <a href="https://www.packyapi.com/register?aff=cc-switch-cli">

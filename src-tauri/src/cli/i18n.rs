@@ -1,3 +1,8 @@
+#![expect(
+    clippy::if_same_then_else,
+    reason = "generated i18n accessors may share text across locales"
+)]
+
 use crate::settings::{get_settings, update_settings};
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -3061,12 +3066,10 @@ pub mod texts {
             } else {
                 "选择模型".to_string()
             }
+        } else if fetching {
+            "Select Model (Fetching...)".to_string()
         } else {
-            if fetching {
-                "Select Model (Fetching...)".to_string()
-            } else {
-                "Select Model".to_string()
-            }
+            "Select Model".to_string()
         }
     }
 
@@ -4404,11 +4407,19 @@ pub mod texts {
         }
     }
 
-    pub fn tui_settings_proxy_stop_before_edit_hint() -> &'static str {
+    pub fn tui_settings_proxy_stop_before_edit_hint(current_app_is_active: bool) -> &'static str {
         if is_chinese() {
-            "请先停止本地代理，再修改监听地址或端口"
+            if current_app_is_active {
+                "修改监听地址：需先停止本地代理。修改监听端口：需先停止当前应用的代理路由。改完后重新启动路由生效。"
+            } else {
+                "修改监听地址：需先停止本地代理。监听端口可以修改。改完后重新启动路由生效。"
+            }
         } else {
-            "Stop the local proxy before editing listen address or port"
+            if current_app_is_active {
+                "Listen address: stop the proxy to edit. Listen port: stop this app's route to edit. Restart routing after changes."
+            } else {
+                "Listen address: stop the proxy to edit. Listen port can be edited. Restart routing after changes."
+            }
         }
     }
 
@@ -4444,11 +4455,19 @@ pub mod texts {
         }
     }
 
-    pub fn tui_toast_proxy_settings_stop_before_edit() -> &'static str {
+    pub fn tui_toast_proxy_settings_stop_proxy_before_edit_address() -> &'static str {
         if is_chinese() {
-            "本地代理正在运行。请先停止代理，再修改监听地址或端口。"
+            "本地代理正在运行。请先停止代理，再修改监听地址。"
         } else {
-            "The local proxy is running. Stop it before editing listen address or port."
+            "The local proxy is running. Stop it before editing listen address."
+        }
+    }
+
+    pub fn tui_toast_proxy_settings_stop_app_route_before_edit_port() -> &'static str {
+        if is_chinese() {
+            "当前应用正在使用代理。请先停止当前应用的代理路由，再修改监听端口。"
+        } else {
+            "This app is using the proxy. Stop this app's proxy route before editing listen port."
         }
     }
 
@@ -7070,12 +7089,10 @@ pub mod texts {
             } else {
                 "仓库已禁用。".to_string()
             }
+        } else if enabled {
+            "Repository enabled.".to_string()
         } else {
-            if enabled {
-                "Repository enabled.".to_string()
-            } else {
-                "Repository disabled.".to_string()
-            }
+            "Repository disabled.".to_string()
         }
     }
 
@@ -7086,12 +7103,10 @@ pub mod texts {
             } else {
                 "已恢复 Claude Code 初次安装确认。".to_string()
             }
+        } else if enabled {
+            "Claude Code onboarding confirmation will be skipped.".to_string()
         } else {
-            if enabled {
-                "Claude Code onboarding confirmation will be skipped.".to_string()
-            } else {
-                "Claude Code onboarding confirmation restored.".to_string()
-            }
+            "Claude Code onboarding confirmation restored.".to_string()
         }
     }
 
@@ -7102,12 +7117,10 @@ pub mod texts {
             } else {
                 "已关闭 Claude Code for VSCode 插件联动。".to_string()
             }
+        } else if enabled {
+            "Claude Code for VSCode integration enabled.".to_string()
         } else {
-            if enabled {
-                "Claude Code for VSCode integration enabled.".to_string()
-            } else {
-                "Claude Code for VSCode integration disabled.".to_string()
-            }
+            "Claude Code for VSCode integration disabled.".to_string()
         }
     }
 
@@ -10330,16 +10343,14 @@ pub mod texts {
                     "确认恢复 Claude Code 初次安装确认？\n将从 {path} 删除 hasCompletedOnboarding"
                 )
             }
+        } else if enable {
+            format!(
+                "Enable skipping Claude Code onboarding confirmation?\nWrites hasCompletedOnboarding=true to {path}"
+            )
         } else {
-            if enable {
-                format!(
-                    "Enable skipping Claude Code onboarding confirmation?\nWrites hasCompletedOnboarding=true to {path}"
-                )
-            } else {
-                format!(
-                    "Disable skipping Claude Code onboarding confirmation?\nRemoves hasCompletedOnboarding from {path}"
-                )
-            }
+            format!(
+                "Disable skipping Claude Code onboarding confirmation?\nRemoves hasCompletedOnboarding from {path}"
+            )
         }
     }
 
@@ -10350,12 +10361,10 @@ pub mod texts {
             } else {
                 "✓ 已恢复 Claude Code 初次安装确认".to_string()
             }
+        } else if enable {
+            "✓ Skip Claude Code onboarding confirmation enabled".to_string()
         } else {
-            if enable {
-                "✓ Skip Claude Code onboarding confirmation enabled".to_string()
-            } else {
-                "✓ Claude Code onboarding confirmation restored".to_string()
-            }
+            "✓ Claude Code onboarding confirmation restored".to_string()
         }
     }
 
@@ -10384,16 +10393,14 @@ pub mod texts {
             } else {
                 "确认关闭 Claude Code for VSCode 插件联动？".to_string()
             }
+        } else if enable {
+            format!(
+                "Enable Claude Code for VSCode integration?\nWrites primaryApiKey=\"any\" to {path}"
+            )
         } else {
-            if enable {
-                format!(
-                    "Enable Claude Code for VSCode integration?\nWrites primaryApiKey=\"any\" to {path}"
-                )
-            } else {
-                format!(
-                    "Disable Claude Code for VSCode integration?\nRemoves primaryApiKey from {path}"
-                )
-            }
+            format!(
+                "Disable Claude Code for VSCode integration?\nRemoves primaryApiKey from {path}"
+            )
         }
     }
 
@@ -10404,12 +10411,10 @@ pub mod texts {
             } else {
                 "✓ 已关闭 Claude Code for VSCode 插件联动".to_string()
             }
+        } else if enable {
+            "✓ Claude Code for VSCode integration enabled".to_string()
         } else {
-            if enable {
-                "✓ Claude Code for VSCode integration enabled".to_string()
-            } else {
-                "✓ Claude Code for VSCode integration disabled".to_string()
-            }
+            "✓ Claude Code for VSCode integration disabled".to_string()
         }
     }
 
@@ -10641,12 +10646,10 @@ pub mod texts {
             } else {
                 format!("编辑 {app} 的通用配置片段（JSON 对象，留空则清除）：")
             }
+        } else if is_codex {
+            format!("Edit common config snippet for {app} (TOML; empty to clear):")
         } else {
-            if is_codex {
-                format!("Edit common config snippet for {app} (TOML; empty to clear):")
-            } else {
-                format!("Edit common config snippet for {app} (JSON object; empty to clear):")
-            }
+            format!("Edit common config snippet for {app} (JSON object; empty to clear):")
         }
     }
 

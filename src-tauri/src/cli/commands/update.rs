@@ -643,7 +643,7 @@ fn asset_name_from_url(url: &str) -> Result<String, AppError> {
         .map_err(|e| AppError::Message(format!("Invalid asset URL '{url}': {e}")))?;
     let asset_name = parsed
         .path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::Message(format!("Asset URL has no file name: {url}")))?;
 

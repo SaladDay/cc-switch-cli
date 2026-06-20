@@ -166,8 +166,10 @@ fn update_settings_persists_openclaw_override_dir() {
     let home = ensure_test_home();
     let _config_dir = ConfigDirEnvGuard::set(None);
 
-    let mut settings = AppSettings::default();
-    settings.openclaw_config_dir = Some("~/custom-openclaw".to_string());
+    let settings = AppSettings {
+        openclaw_config_dir: Some("~/custom-openclaw".to_string()),
+        ..Default::default()
+    };
     update_settings(settings).expect("save settings with openclaw override");
 
     let path = home.join(".cc-switch").join("settings.json");
@@ -188,8 +190,10 @@ fn update_settings_persists_hermes_override_dir() {
     let home = ensure_test_home();
     let _config_dir = ConfigDirEnvGuard::set(None);
 
-    let mut settings = AppSettings::default();
-    settings.hermes_config_dir = Some("~/custom-hermes".to_string());
+    let settings = AppSettings {
+        hermes_config_dir: Some("~/custom-hermes".to_string()),
+        ..Default::default()
+    };
     update_settings(settings).expect("save settings with hermes override");
 
     let path = home.join(".cc-switch").join("settings.json");
@@ -211,8 +215,10 @@ fn update_settings_uses_cc_switch_config_dir_override_for_settings_path() {
     let override_dir = home.join("custom-config-root");
     let _config_dir = ConfigDirEnvGuard::set(Some(override_dir.to_string_lossy().as_ref()));
 
-    let mut settings = AppSettings::default();
-    settings.openclaw_config_dir = Some("~/custom-openclaw".to_string());
+    let settings = AppSettings {
+        openclaw_config_dir: Some("~/custom-openclaw".to_string()),
+        ..Default::default()
+    };
     update_settings(settings).expect("save settings with config dir override");
 
     let override_settings = override_dir.join("settings.json");

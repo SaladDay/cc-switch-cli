@@ -10,6 +10,10 @@ impl App {
             return Some(action);
         }
 
+        if let Some(action) = self.handle_provider_switch_live_conflicts_overlay_key(key) {
+            return Some(action);
+        }
+
         if let Some(action) = self.handle_text_input_overlay_key(key, data) {
             return Some(action);
         }
@@ -213,6 +217,44 @@ impl App {
                     }
                     _ => Action::None,
                 }
+            }
+            _ => Action::None,
+        };
+
+        Some(action)
+    }
+
+    fn handle_provider_switch_live_conflicts_overlay_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Option<Action> {
+        let Overlay::ProviderSwitchLiveConflicts { provider_id, .. } = &self.overlay else {
+            return None;
+        };
+        let id = provider_id.clone();
+
+        let action = match key.code {
+            KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Char('1') => {
+                self.close_overlay();
+                Action::ProviderSwitchResolveLiveConflicts {
+                    id,
+                    policy: crate::services::provider::live_merge::ConflictPolicy::PreferLocal,
+                }
+            }
+            KeyCode::Char('c')
+            | KeyCode::Char('C')
+            | KeyCode::Char('u')
+            | KeyCode::Char('U')
+            | KeyCode::Char('2') => {
+                self.close_overlay();
+                Action::ProviderSwitchResolveLiveConflicts {
+                    id,
+                    policy: crate::services::provider::live_merge::ConflictPolicy::PreferIncoming,
+                }
+            }
+            KeyCode::Esc => {
+                self.close_overlay();
+                Action::None
             }
             _ => Action::None,
         };
@@ -581,7 +623,7 @@ impl App {
     ) -> Action {
         if data.proxy.running {
             self.push_toast(
-                texts::tui_toast_proxy_settings_stop_before_edit(),
+                texts::tui_toast_proxy_settings_stop_proxy_before_edit_address(),
                 ToastKind::Info,
             );
             return Action::None;
@@ -607,9 +649,9 @@ impl App {
     }
 
     fn handle_settings_proxy_listen_port_submit(&mut self, data: &UiData, raw: String) -> Action {
-        if data.proxy.running {
+        if data.proxy.has_active_worker_for(&self.app_type) {
             self.push_toast(
-                texts::tui_toast_proxy_settings_stop_before_edit(),
+                texts::tui_toast_proxy_settings_stop_app_route_before_edit_port(),
                 ToastKind::Info,
             );
             return Action::None;

@@ -1,17 +1,23 @@
 //! Deep link import functionality for CC Switch (CLI edition).
 //!
 //! Implements the `ccswitch://v1/import?...` protocol for importing resources.
-//! Currently supports importing provider configurations for Claude/Codex/Gemini/OpenCode/OpenClaw.
+//! Supports importing providers, MCP servers, prompts, and skill repositories.
 
+mod mcp;
 mod parser;
+mod prompt;
 mod provider;
+mod skill;
 mod utils;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use mcp::{import_mcp_from_deeplink, McpImportResult};
 pub use parser::parse_deeplink_url;
+pub use prompt::import_prompt_from_deeplink;
 pub use provider::import_provider_from_deeplink;
+pub use skill::import_skill_from_deeplink;
 
 /// Deep link import request model.
 ///

@@ -191,9 +191,13 @@ fn poll_until_authorized(
                     "Device code expired. Please try again.".to_string(),
                 ));
             }
-            None => runtime.block_on(tokio::time::sleep(interval)),
+            None => runtime.block_on(sleep_for_next_poll(interval)),
         }
     }
+}
+
+async fn sleep_for_next_poll(interval: Duration) {
+    tokio::time::sleep(interval).await;
 }
 
 fn poll_interval_seconds(server_interval: u64) -> u64 {
@@ -306,6 +310,12 @@ mod tests {
         assert_eq!(poll_interval_seconds(5), 5);
         assert_eq!(poll_interval_seconds(8), 8);
         assert_eq!(poll_interval_seconds(10), 10);
+    }
+
+    #[test]
+    fn poll_sleep_runs_inside_cli_runtime() {
+        let runtime = create_runtime().expect("create runtime");
+        runtime.block_on(sleep_for_next_poll(Duration::from_millis(1)));
     }
 
     #[test]

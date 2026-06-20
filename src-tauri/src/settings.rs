@@ -346,6 +346,10 @@ pub struct LocalMigrations {
         Option<CodexThirdPartyHistoryProviderBucketMigration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_provider_template_v1: Option<CodexProviderTemplateMigration>,
+    /// 统一会话开关的官方历史迁移标记。开关关闭时会被清除，
+    /// 这样重新开启能把关闭期间落入 openai 桶的官方会话补迁进来。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_official_history_unify_v1: Option<CodexOfficialHistoryUnifyMigration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +373,21 @@ pub struct CodexProviderTemplateMigration {
     pub completed_at: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub migrated_provider_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexOfficialHistoryUnifyMigration {
+    pub completed_at: String,
+    pub target_provider_id: String,
+    #[serde(default)]
+    pub migrated_jsonl_files: usize,
+    #[serde(default)]
+    pub migrated_state_rows: usize,
+    /// 迁移时的规范化 Codex 目录。标记只对同一目录生效：
+    /// 切换 codex_config_dir 后旧标记不会挡住新目录的迁移。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_config_dir: Option<String>,
 }
 
 /// 应用设置结构，允许覆盖默认配置目录
@@ -428,6 +447,15 @@ pub struct AppSettings {
     /// Opt-in: defaults to false so third-party switches cleanly overwrite auth.json.
     #[serde(default)]
     pub preserve_codex_official_auth_on_switch: bool,
+    /// Run official Codex providers under the shared "custom" model_provider id
+    /// so official sessions share one resume-history bucket with third-party providers.
+    #[serde(default)]
+    pub unify_codex_session_history: bool,
+    /// User opted in to migrate existing official sessions ("openai" bucket)
+    /// into the shared bucket. Persisted so a failed migration retries at startup;
+    /// cleared when the toggle turns off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unify_codex_migrate_existing: Option<bool>,
     /// Skills 同步方式（auto|symlink|copy）
     #[serde(default)]
     pub skill_sync_method: crate::services::skill::SyncMethod,
@@ -484,6 +512,8 @@ impl Default for AppSettings {
             language: None,
             launch_on_startup: false,
             preserve_codex_official_auth_on_switch: false,
+            unify_codex_session_history: false,
+            unify_codex_migrate_existing: None,
             skill_sync_method: crate::services::skill::SyncMethod::default(),
             security: None,
             webdav_sync: None,
@@ -668,6 +698,13 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
             incoming_migrations.codex_provider_template_v1 =
                 existing_migrations.codex_provider_template_v1;
         }
+        if incoming_migrations
+            .codex_official_history_unify_v1
+            .is_none()
+        {
+            incoming_migrations.codex_official_history_unify_v1 =
+                existing_migrations.codex_official_history_unify_v1;
+        }
     }
     new_settings.normalize_common();
     new_settings.validate()?;
@@ -737,6 +774,53 @@ pub fn mark_codex_provider_template_migrated(
     })
 }
 
+/// 统一会话迁移标记是否覆盖指定目录。标记里没记目录视为不匹配；
+/// 重跑迁移是幂等的，宁可重迁也不漏迁。
+pub fn is_codex_official_history_unify_migrated_for_dir(codex_dir: &str) -> bool {
+    get_settings()
+        .local_migrations
+        .as_ref()
+        .and_then(|migrations| migrations.codex_official_history_unify_v1.as_ref())
+        .is_some_and(|migration| migration.codex_config_dir.as_deref() == Some(codex_dir))
+}
+
+/// 条件写入迁移完成标记：仅当此刻开关仍开启且迁移意愿仍在时才写。
+pub fn mark_codex_official_history_unify_migrated_if_enabled(
+    migration: CodexOfficialHistoryUnifyMigration,
+) -> Result<bool, AppError> {
+    let mut written = false;
+    mutate_settings(|settings| {
+        if settings.unify_codex_session_history
+            && settings.unify_codex_migrate_existing.unwrap_or(false)
+        {
+            settings
+                .local_migrations
+                .get_or_insert_with(Default::default)
+                .codex_official_history_unify_v1 = Some(migration);
+            written = true;
+        }
+    })?;
+    Ok(written)
+}
+
+pub fn clear_codex_official_history_unify_migration() -> Result<(), AppError> {
+    mutate_settings(|settings| {
+        if let Some(migrations) = settings.local_migrations.as_mut() {
+            migrations.codex_official_history_unify_v1 = None;
+        }
+    })
+}
+
+pub fn unify_codex_migrate_existing_requested() -> bool {
+    get_settings().unify_codex_migrate_existing.unwrap_or(false)
+}
+
+pub fn clear_codex_unify_migrate_existing() -> Result<(), AppError> {
+    mutate_settings(|settings| {
+        settings.unify_codex_migrate_existing = None;
+    })
+}
+
 pub fn get_preferred_terminal() -> Option<String> {
     settings_store()
         .read()
@@ -789,6 +873,16 @@ pub fn preserve_codex_official_auth_on_switch() -> bool {
             error.into_inner()
         })
         .preserve_codex_official_auth_on_switch
+}
+
+pub fn unify_codex_session_history() -> bool {
+    settings_store()
+        .read()
+        .unwrap_or_else(|error| {
+            log::warn!("设置锁已毒化，使用恢复值: {error}");
+            error.into_inner()
+        })
+        .unify_codex_session_history
 }
 
 pub fn get_gemini_override_dir() -> Option<PathBuf> {
@@ -1013,4 +1107,16 @@ pub fn set_skip_claude_onboarding(enabled: bool) -> Result<(), AppError> {
     let mut settings = get_settings();
     settings.skip_claude_onboarding = enabled;
     update_settings(settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppSettings;
+
+    #[test]
+    fn codex_unified_session_history_defaults_off() {
+        let settings = AppSettings::default();
+        assert!(!settings.unify_codex_session_history);
+        assert_eq!(settings.unify_codex_migrate_existing, None);
+    }
 }

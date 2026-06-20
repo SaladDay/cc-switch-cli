@@ -54,6 +54,10 @@ pub fn parse_response_usage(app_type: &AppType, body: &[u8]) -> Option<ParsedUsa
     parse_response_value(app_type, &value)
 }
 
+#[expect(
+    dead_code,
+    reason = "kept for Claude-specific response usage parsing callers"
+)]
 pub fn parse_claude_response_usage(body: &[u8]) -> Option<ParsedUsage> {
     let value: Value = serde_json::from_slice(body).ok()?;
     parse_response_value(&AppType::Claude, &value)
@@ -157,6 +161,7 @@ impl StreamLogCollector {
         }
     }
 
+    #[expect(dead_code, reason = "kept for Claude-only stream collector callers")]
     pub fn parsed_usage(&self) -> Option<ParsedUsage> {
         parse_claude_stream_usage(&self.events)
     }

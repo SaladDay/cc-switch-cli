@@ -817,9 +817,9 @@ pub(crate) fn visible_sessions_for_state<'a>(
         .collect()
 }
 
-pub(crate) fn visible_session_messages<'a>(
-    sessions: &'a SessionsState,
-) -> Vec<(usize, &'a crate::session_manager::SessionMessage)> {
+pub(crate) fn visible_session_messages(
+    sessions: &SessionsState,
+) -> Vec<(usize, &crate::session_manager::SessionMessage)> {
     let query = sessions.message_query_lower();
     sessions
         .messages

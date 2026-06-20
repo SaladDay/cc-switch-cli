@@ -307,7 +307,7 @@ mod tests {
     #[cfg(unix)]
     use std::process::Stdio;
     #[cfg(unix)]
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     #[cfg(unix)]
@@ -320,6 +320,19 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&path, permissions).expect("chmod stub executable");
         path
+    }
+
+    #[cfg(unix)]
+    fn wait_until_exists(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]
@@ -360,10 +373,14 @@ mod tests {
     #[test]
     fn interrupting_handoff_still_cleans_up_temp_settings() {
         let temp_dir = TempDir::new().expect("create temp dir");
+        let ready_path = temp_dir.path().join("claude-ready");
         let executable = write_test_executable(
             &temp_dir,
             "claude-stub.sh",
-            "trap 'exit 130' INT TERM HUP\nwhile :; do sleep 1; done",
+            &format!(
+                "trap 'exit 130' INT TERM HUP\nprintf '%s\\n' ready > {:?}\nwhile :; do sleep 1; done",
+                ready_path
+            ),
         );
         let settings_path = temp_dir.path().join("cc-switch-claude-settings.json");
         std::fs::write(&settings_path, "{}").expect("seed temp settings");
@@ -384,7 +401,7 @@ mod tests {
         }
 
         let mut child = command.spawn().expect("spawn handoff");
-        std::thread::sleep(Duration::from_millis(150));
+        wait_until_exists(&ready_path);
         let kill_result = unsafe { libc::kill(-(child.id() as i32), libc::SIGINT) };
         assert_eq!(kill_result, 0, "send SIGINT to handoff process group");
 

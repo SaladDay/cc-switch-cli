@@ -310,7 +310,7 @@ fn populate_hermes_form(form: &mut ProviderAddFormState, provider: &Provider) {
         .or_else(|| settings.get("apiMode"))
         .and_then(|value| value.as_str())
     {
-        if super::HERMES_API_MODES.iter().any(|mode| *mode == api_mode) {
+        if super::HERMES_API_MODES.contains(&api_mode) {
             form.hermes_api_mode = api_mode.to_string();
         }
     }

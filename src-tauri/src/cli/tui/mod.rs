@@ -47,11 +47,12 @@ use runtime_systems::{
     handle_quota_msg, handle_session_msg, handle_skills_msg, handle_speedtest_msg,
     handle_stream_check_msg, handle_update_msg, handle_webdav_msg, start_app_data_system,
     start_local_env_system, start_managed_auth_system, start_model_fetch_system,
-    start_proxy_system, start_quota_system, start_session_system, start_skills_system,
-    start_speedtest_system, start_stream_check_system, start_update_system,
+    start_proxy_system, start_quota_system, start_session_system, start_session_usage_sync_system,
+    start_skills_system, start_speedtest_system, start_stream_check_system, start_update_system,
     start_usage_pricing_system, start_webdav_system, AppDataLoadKind, AppDataMsg, AppDataReq,
     LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq,
-    SkillsReq, StreamCheckReq, UpdateReq, UsagePricingMsg, UsagePricingReq, WebDavReq,
+    SessionUsageSyncMsg, SessionUsageSyncReq, SkillsReq, StreamCheckReq, UpdateReq,
+    UsagePricingMsg, UsagePricingReq, WebDavReq,
 };
 use terminal::{PanicRestoreHookGuard, TuiTerminal};
 
@@ -345,6 +346,13 @@ enum AppDataLoadQueued {
     SendFailed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppDataLoadFinish {
+    Accepted,
+    Stale,
+    Ignored,
+}
+
 impl UiDataByAppCache {
     fn remember_current(&mut self, app_type: &AppType, data: &data::UiData) {
         if self.pending_by_app.contains_key(app_type) || self.incomplete_by_app.contains(app_type) {
@@ -402,6 +410,18 @@ impl UiDataByAppCache {
     fn clear_after_app_state_recreated(&mut self) {
         self.app_state_epoch = self.app_state_epoch.wrapping_add(1);
         self.clear();
+    }
+
+    fn clear_usage_pricing_after_external_usage_sync(&mut self) {
+        self.data_generation = self.data_generation.wrapping_add(1);
+        self.app_state_epoch = self.app_state_epoch.wrapping_add(1);
+        self.pending_by_app.clear();
+        self.usage_pricing_by_key.clear();
+        self.pending_usage_pricing_by_key.clear();
+        for cached in self.by_app.values_mut() {
+            cached.usage = data::UsageSnapshot::default();
+            cached.pricing = data::ModelPricingSnapshot::default();
+        }
     }
 
     fn remove_app_snapshot(&mut self, app_type: &AppType) {
@@ -545,7 +565,20 @@ impl UiDataByAppCache {
         request_id: u64,
         generation: u64,
         app_state_epoch: u64,
-    ) -> bool {
+    ) -> AppDataLoadFinish {
+        if generation != self.data_generation || app_state_epoch != self.app_state_epoch {
+            let completed = PendingAppDataLoad {
+                kind,
+                request_id,
+                generation,
+                app_state_epoch,
+            };
+            if self.pending_by_app.get(app_type).copied() == Some(completed) {
+                self.pending_by_app.remove(app_type);
+            }
+            return AppDataLoadFinish::Stale;
+        }
+
         if self.pending_by_app.get(app_type).copied()
             != Some(PendingAppDataLoad {
                 kind,
@@ -554,10 +587,10 @@ impl UiDataByAppCache {
                 app_state_epoch,
             })
         {
-            return false;
+            return AppDataLoadFinish::Ignored;
         }
         self.pending_by_app.remove(app_type);
-        true
+        AppDataLoadFinish::Accepted
     }
 
     fn mark_app_data_loaded(&mut self, app_type: &AppType) {
@@ -752,11 +785,74 @@ fn handle_usage_pricing_msg(
     }
 }
 
+fn queue_background_session_usage_sync(
+    sync_req_tx: Option<&mpsc::Sender<SessionUsageSyncReq>>,
+    sync_tracker: &mut RequestTracker,
+) {
+    let Some(tx) = sync_req_tx else {
+        return;
+    };
+    if sync_tracker.active.is_some() {
+        return;
+    }
+
+    let request_id = sync_tracker.start();
+    if let Err(err) = tx.send(SessionUsageSyncReq::Run { request_id }) {
+        sync_tracker.cancel();
+        log::debug!("queue background session usage sync failed: {err}");
+    }
+}
+
+fn handle_session_usage_sync_msg(
+    app: &mut App,
+    data: &mut data::UiData,
+    data_cache: &mut UiDataByAppCache,
+    sync_tracker: &mut RequestTracker,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+    msg: SessionUsageSyncMsg,
+) {
+    let SessionUsageSyncMsg::Finished { request_id, result } = msg;
+    if !sync_tracker.finish_if_active(request_id) {
+        return;
+    }
+
+    if let Err(err) = result {
+        log::debug!("background session usage sync failed: {err}");
+        return;
+    }
+
+    if usage_pricing_req_tx.is_none() {
+        log::debug!("background session usage sync finished; usage/pricing worker unavailable");
+        return;
+    }
+
+    app.usage.clear_loading();
+    data_cache.clear_usage_pricing_after_external_usage_sync();
+
+    let current_app_type = app.app_type.clone();
+    data_cache.queue_usage_pricing_load(
+        app,
+        usage_pricing_req_tx,
+        &current_app_type,
+        data::UsageRangePreset::SevenDays,
+    );
+    if matches!(app.usage.range, data::UsageRangePreset::Custom(_)) {
+        data_cache.queue_usage_pricing_load(
+            app,
+            usage_pricing_req_tx,
+            &current_app_type,
+            app.usage.range,
+        );
+    }
+    data_cache.remember_current(&app.app_type, data);
+}
+
 fn handle_app_data_msg(
     app: &mut App,
     data: &mut data::UiData,
     data_cache: &mut UiDataByAppCache,
     quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
+    app_data_req_tx: Option<&mpsc::Sender<AppDataReq>>,
     usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
     msg: AppDataMsg,
 ) {
@@ -769,14 +865,22 @@ fn handle_app_data_msg(
             app_type,
             result,
         } => {
-            if !data_cache.finish_app_data_load(
+            match data_cache.finish_app_data_load(
                 kind,
                 &app_type,
                 request_id,
                 generation,
                 app_state_epoch,
             ) {
-                return;
+                AppDataLoadFinish::Accepted => {}
+                AppDataLoadFinish::Stale => {
+                    if app.app_type == app_type {
+                        let _ =
+                            data_cache.queue_current_app_data_refresh(app_data_req_tx, &app_type);
+                    }
+                    return;
+                }
+                AppDataLoadFinish::Ignored => return,
             }
 
             match result {
@@ -862,14 +966,15 @@ fn handle_initial_app_data_msg(
             if !matches!(kind, AppDataLoadKind::Initial) {
                 return Ok(false);
             }
-            if !data_cache.finish_app_data_load(
+            match data_cache.finish_app_data_load(
                 kind,
                 &app_type,
                 request_id,
                 generation,
                 app_state_epoch,
             ) {
-                return Ok(false);
+                AppDataLoadFinish::Accepted => {}
+                AppDataLoadFinish::Stale | AppDataLoadFinish::Ignored => return Ok(false),
             }
 
             let mut loaded = result.map_err(AppError::Message)?;
@@ -973,6 +1078,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ConfigWebDavMigrateV1ToV2 => CacheInvalidation::AppStateRecreated,
 
         Action::ProviderSwitch { .. }
+        | Action::ProviderSwitchResolveLiveConflicts { .. }
         | Action::ProviderRemoveFromConfig { .. }
         | Action::ProviderSetDefaultModel { .. }
         | Action::ProviderImportLiveConfig
@@ -1075,6 +1181,35 @@ fn drop_cached_worker_state(
     Ok(())
 }
 
+fn apply_current_app_data_changed(
+    app: &mut App,
+    data: &mut data::UiData,
+    data_cache: &mut UiDataByAppCache,
+    quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
+    app_data_req_tx: Option<&mpsc::Sender<AppDataReq>>,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+) -> Result<(), AppError> {
+    let app_type = app.app_type.clone();
+    data_cache.remove_app_snapshot(&app_type);
+    data_cache.remove_usage_pricing_for_app(&app_type);
+
+    match data_cache.queue_current_app_data_refresh(app_data_req_tx, &app_type) {
+        AppDataLoadQueued::Queued | AppDataLoadQueued::AlreadyPending => Ok(()),
+        AppDataLoadQueued::Unavailable | AppDataLoadQueued::SendFailed => {
+            *data = data::UiData::load(&app_type)?;
+            data_cache.mark_app_data_loaded(&app_type);
+            apply_loaded_data_cache_invalidation(
+                app,
+                data,
+                data_cache,
+                quota_req_tx,
+                usage_pricing_req_tx,
+                CacheInvalidation::DataReloaded,
+            )
+        }
+    }
+}
+
 fn apply_cache_invalidation(
     app: &mut App,
     data: &mut data::UiData,
@@ -1149,35 +1284,10 @@ fn apply_loaded_data_cache_invalidation(
     Ok(())
 }
 
-fn apply_current_app_data_changed(
-    app: &mut App,
-    data: &mut data::UiData,
-    data_cache: &mut UiDataByAppCache,
-    quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
-    app_data_req_tx: Option<&mpsc::Sender<AppDataReq>>,
-    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
-) -> Result<(), AppError> {
-    let current_app_type = app.app_type.clone();
-    data_cache.remove_app_snapshot(&current_app_type);
-    data_cache.remove_usage_pricing_for_app(&current_app_type);
-
-    match data_cache.queue_current_app_data_refresh(app_data_req_tx, &current_app_type) {
-        AppDataLoadQueued::Queued | AppDataLoadQueued::AlreadyPending => Ok(()),
-        AppDataLoadQueued::Unavailable | AppDataLoadQueued::SendFailed => {
-            data_cache.remove_app_snapshot(&current_app_type);
-            *data = data::UiData::load(&current_app_type)?;
-            apply_loaded_data_cache_invalidation(
-                app,
-                data,
-                data_cache,
-                quota_req_tx,
-                usage_pricing_req_tx,
-                CacheInvalidation::DataReloaded,
-            )
-        }
-    }
-}
-
+#[expect(
+    clippy::too_many_arguments,
+    reason = "top-level TUI dispatcher coordinates worker channels, cache, and trackers"
+)]
 fn handle_tui_action(
     terminal: &mut TuiTerminal,
     app: &mut App,
@@ -1443,6 +1553,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let mut proxy_loading = RequestTracker::default();
     let mut webdav_loading = RequestTracker::default();
     let mut update_check = RequestTracker::default();
+    let mut session_usage_sync = RequestTracker::default();
 
     let speedtest = match start_speedtest_system() {
         Ok(system) => Some(system),
@@ -1544,6 +1655,14 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         }
     };
 
+    let session_usage = match start_session_usage_sync_system() {
+        Ok(system) => Some(system),
+        Err(err) => {
+            log::debug!("Session usage sync worker unavailable: {err}");
+            None
+        }
+    };
+
     let webdav = match start_webdav_system() {
         Ok(system) => Some(system),
         Err(err) => {
@@ -1610,6 +1729,10 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         );
         queue_local_env_refresh_if_available(&mut app, local_env.as_ref().map(|s| &s.req_tx));
         queue_managed_auth_refresh_if_available(&mut app, managed_auth.as_ref().map(|s| &s.req_tx));
+        queue_background_session_usage_sync(
+            session_usage.as_ref().map(|s| &s.req_tx),
+            &mut session_usage_sync,
+        );
     }
 
     loop {
@@ -1656,6 +1779,10 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         queue_managed_auth_refresh_if_available(
                             &mut app,
                             managed_auth.as_ref().map(|s| &s.req_tx),
+                        );
+                        queue_background_session_usage_sync(
+                            session_usage.as_ref().map(|s| &s.req_tx),
+                            &mut session_usage_sync,
                         );
                     }
                     Ok(false) => {}
@@ -1704,6 +1831,10 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                             queue_managed_auth_refresh_if_available(
                                 &mut app,
                                 managed_auth.as_ref().map(|s| &s.req_tx),
+                            );
+                            queue_background_session_usage_sync(
+                                session_usage.as_ref().map(|s| &s.req_tx),
+                                &mut session_usage_sync,
                             );
                         }
                         Ok(false) => {}
@@ -1800,6 +1931,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                     &mut data,
                     &mut data_cache,
                     quota.as_ref().map(|s| &s.req_tx),
+                    Some(&app_data.req_tx),
                     usage_pricing.as_ref().map(|s| &s.req_tx),
                     msg,
                 );
@@ -1809,6 +1941,19 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         if let Some(usage_pricing) = usage_pricing.as_ref() {
             while let Ok(msg) = usage_pricing.result_rx.try_recv() {
                 handle_usage_pricing_msg(&mut app, &mut data, &mut data_cache, msg);
+            }
+        }
+
+        if let Some(session_usage) = session_usage.as_ref() {
+            while let Ok(msg) = session_usage.result_rx.try_recv() {
+                handle_session_usage_sync_msg(
+                    &mut app,
+                    &mut data,
+                    &mut data_cache,
+                    &mut session_usage_sync,
+                    usage_pricing.as_ref().map(|s| &s.req_tx),
+                    msg,
+                );
             }
         }
 

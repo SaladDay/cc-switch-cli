@@ -340,88 +340,86 @@ pub(super) fn render_footer(
             texts::tui_footer_filter_mode(),
             Style::default().fg(theme.dim),
         )]
-    } else {
-        if theme.no_color {
-            let proxy_segment = if proxy_action_available {
-                format!("P {}  ", proxy_footer_label)
-            } else {
-                String::new()
-            };
-            vec![Span::styled(
-                format!(
-                    "{}  {}{}",
-                    texts::tui_footer_nav_keys(),
-                    proxy_segment,
-                    texts::tui_footer_action_keys_global(),
-                ),
-                Style::default(),
-            )]
+    } else if theme.no_color {
+        let proxy_segment = if proxy_action_available {
+            format!("P {}  ", proxy_footer_label)
         } else {
-            let nav_bg = super::theme::terminal_palette_color((101, 113, 160)); // #6571A0
-            let act_bg = super::theme::terminal_palette_color((248, 248, 248)); // #F8F8F8
-            let nav_fg = super::theme::terminal_palette_color((255, 255, 255));
-            let act_fg = super::theme::terminal_palette_color((108, 108, 108));
-            let nav_key_style = Style::default()
-                .fg(nav_fg)
-                .bg(nav_bg)
-                .add_modifier(Modifier::BOLD);
-            let nav_desc_style = Style::default().fg(nav_fg).bg(nav_bg);
-            let act_key_style = Style::default()
-                .fg(act_fg)
-                .bg(act_bg)
-                .add_modifier(Modifier::BOLD);
-            let act_desc_style = Style::default().fg(act_fg).bg(act_bg);
-            let nav_sep = Span::styled("  ", nav_desc_style);
-            let act_sep = Span::styled("  ", act_desc_style);
+            String::new()
+        };
+        vec![Span::styled(
+            format!(
+                "{}  {}{}",
+                texts::tui_footer_nav_keys(),
+                proxy_segment,
+                texts::tui_footer_action_keys_global(),
+            ),
+            Style::default(),
+        )]
+    } else {
+        let nav_bg = super::theme::terminal_palette_color((101, 113, 160)); // #6571A0
+        let act_bg = super::theme::terminal_palette_color((248, 248, 248)); // #F8F8F8
+        let nav_fg = super::theme::terminal_palette_color((255, 255, 255));
+        let act_fg = super::theme::terminal_palette_color((108, 108, 108));
+        let nav_key_style = Style::default()
+            .fg(nav_fg)
+            .bg(nav_bg)
+            .add_modifier(Modifier::BOLD);
+        let nav_desc_style = Style::default().fg(nav_fg).bg(nav_bg);
+        let act_key_style = Style::default()
+            .fg(act_fg)
+            .bg(act_bg)
+            .add_modifier(Modifier::BOLD);
+        let act_desc_style = Style::default().fg(act_fg).bg(act_bg);
+        let nav_sep = Span::styled("  ", nav_desc_style);
+        let act_sep = Span::styled("  ", act_desc_style);
 
-            let nav_items: &[(&str, &str)] = if i18n::is_chinese() {
-                &[("←→", "菜单/内容"), ("↑↓", "移动")]
-            } else {
-                &[("←→", "menu/content"), ("↑↓", "move")]
-            };
+        let nav_items: &[(&str, &str)] = if i18n::is_chinese() {
+            &[("←→", "菜单/内容"), ("↑↓", "移动")]
+        } else {
+            &[("←→", "menu/content"), ("↑↓", "move")]
+        };
 
-            let act_items_base: &[(&str, &str)] = if i18n::is_chinese() {
-                &[
-                    ("[ ]", "切换应用"),
-                    ("/", "过滤"),
-                    ("Esc", "返回"),
-                    ("?", "帮助"),
-                ]
-            } else {
-                &[
-                    ("[ ]", "switch app"),
-                    ("/", "filter"),
-                    ("Esc", "back"),
-                    ("?", "help"),
-                ]
-            };
+        let act_items_base: &[(&str, &str)] = if i18n::is_chinese() {
+            &[
+                ("[ ]", "切换应用"),
+                ("/", "过滤"),
+                ("Esc", "返回"),
+                ("?", "帮助"),
+            ]
+        } else {
+            &[
+                ("[ ]", "switch app"),
+                ("/", "filter"),
+                ("Esc", "back"),
+                ("?", "help"),
+            ]
+        };
 
-            let mut act_items = act_items_base.to_vec();
-            if proxy_action_available {
-                act_items.insert(0, ("P", proxy_footer_label));
-            }
-
-            let mut v = Vec::new();
-            for (i, (key, desc)) in nav_items.iter().enumerate() {
-                if i > 0 {
-                    v.push(nav_sep.clone());
-                }
-                v.push(Span::styled(format!(" {} ", key), nav_key_style));
-                v.push(Span::styled(format!(" {}", desc), nav_desc_style));
-            }
-            v.push(Span::styled(" ", nav_desc_style));
-            // gap between blocks
-            v.push(Span::raw(" "));
-            for (i, (key, desc)) in act_items.iter().enumerate() {
-                if i > 0 {
-                    v.push(act_sep.clone());
-                }
-                v.push(Span::styled(format!(" {} ", key), act_key_style));
-                v.push(Span::styled(format!(" {}", desc), act_desc_style));
-            }
-            v.push(Span::styled(" ", act_desc_style));
-            v
+        let mut act_items = act_items_base.to_vec();
+        if proxy_action_available {
+            act_items.insert(0, ("P", proxy_footer_label));
         }
+
+        let mut v = Vec::new();
+        for (i, (key, desc)) in nav_items.iter().enumerate() {
+            if i > 0 {
+                v.push(nav_sep.clone());
+            }
+            v.push(Span::styled(format!(" {} ", key), nav_key_style));
+            v.push(Span::styled(format!(" {}", desc), nav_desc_style));
+        }
+        v.push(Span::styled(" ", nav_desc_style));
+        // gap between blocks
+        v.push(Span::raw(" "));
+        for (i, (key, desc)) in act_items.iter().enumerate() {
+            if i > 0 {
+                v.push(act_sep.clone());
+            }
+            v.push(Span::styled(format!(" {} ", key), act_key_style));
+            v.push(Span::styled(format!(" {}", desc), act_desc_style));
+        }
+        v.push(Span::styled(" ", act_desc_style));
+        v
     };
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -486,8 +484,7 @@ pub(super) fn toast_rect(content_area: Rect, message: &str) -> Rect {
     let max_width = content_area
         .width
         .saturating_sub(4)
-        .max(1)
-        .min(TOAST_MAX_WIDTH);
+        .clamp(1, TOAST_MAX_WIDTH);
     let min_width = TOAST_MIN_WIDTH.min(max_width);
     let content_width = message
         .lines()

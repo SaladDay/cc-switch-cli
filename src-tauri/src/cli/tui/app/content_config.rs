@@ -544,7 +544,7 @@ impl App {
                         })
                     } else {
                         let options = form.available_fallback_options(&model_options);
-                        (!options.is_empty()).then(|| (row, 0, options))
+                        (!options.is_empty()).then_some((row, 0, options))
                     }
                 }
                 OpenClawAgentsSection::Runtime => None,
@@ -872,52 +872,50 @@ impl App {
                 self.settings_proxy_idx = (self.settings_proxy_idx + 1).min(items_len - 1);
                 Action::None
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                match LocalProxySettingsItem::ALL.get(self.settings_proxy_idx) {
-                    Some(LocalProxySettingsItem::ProxySwitch) => {
-                        return Action::SetProxyEnabled {
-                            enabled: !data.proxy.enabled,
-                        }
+            KeyCode::Enter => match LocalProxySettingsItem::ALL.get(self.settings_proxy_idx) {
+                Some(LocalProxySettingsItem::ProxySwitch) => {
+                    return Action::SetProxyEnabled {
+                        enabled: !data.proxy.enabled,
                     }
-                    Some(LocalProxySettingsItem::AutoFailover) => {
-                        self.request_auto_failover_toggle(data)
-                    }
-                    Some(LocalProxySettingsItem::ListenAddress) => {
-                        if data.proxy.running {
-                            self.push_toast(
-                                texts::tui_toast_proxy_settings_stop_before_edit(),
-                                ToastKind::Info,
-                            );
-                            return Action::None;
-                        }
-                        self.overlay = Overlay::TextInput(TextInputState {
-                            title: texts::tui_settings_proxy_title().to_string(),
-                            prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
-                            input: TextInput::new(data.proxy.configured_listen_address.clone()),
-                            submit: TextSubmit::SettingsProxyListenAddress,
-                            secret: false,
-                        });
-                        Action::None
-                    }
-                    Some(LocalProxySettingsItem::ListenPort) => {
-                        if data.proxy.running {
-                            self.push_toast(
-                                texts::tui_toast_proxy_settings_stop_before_edit(),
-                                ToastKind::Info,
-                            );
-                            return Action::None;
-                        }
-                        self.overlay = Overlay::TextInput(TextInputState {
-                            title: texts::tui_settings_proxy_title().to_string(),
-                            prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
-                            input: TextInput::new(data.proxy.configured_listen_port.to_string()),
-                            submit: TextSubmit::SettingsProxyListenPort,
-                            secret: false,
-                        });
-                        Action::None
-                    }
-                    None => Action::None,
                 }
+                Some(LocalProxySettingsItem::AutoFailover) => {
+                    self.request_auto_failover_toggle(data)
+                }
+                Some(LocalProxySettingsItem::ListenAddress) => {
+                    if data.proxy.running {
+                        self.push_toast(
+                            texts::tui_toast_proxy_settings_stop_proxy_before_edit_address(),
+                            ToastKind::Info,
+                        );
+                        return Action::None;
+                    }
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_settings_proxy_title().to_string(),
+                        prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
+                        input: TextInput::new(data.proxy.configured_listen_address.clone()),
+                        submit: TextSubmit::SettingsProxyListenAddress,
+                        secret: false,
+                    });
+                    Action::None
+                }
+                Some(LocalProxySettingsItem::ListenPort) => {
+                    if data.proxy.has_active_worker_for(&self.app_type) {
+                        self.push_toast(
+                            texts::tui_toast_proxy_settings_stop_app_route_before_edit_port(),
+                            ToastKind::Info,
+                        );
+                        return Action::None;
+                    }
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_settings_proxy_title().to_string(),
+                        prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
+                        input: TextInput::new(data.proxy.configured_listen_port.to_string()),
+                        submit: TextSubmit::SettingsProxyListenPort,
+                        secret: false,
+                    });
+                    Action::None
+                }
+                None => Action::None,
             }
             _ => Action::None,
         }
@@ -1175,6 +1173,10 @@ impl App {
                 ),
             ]);
         } else {
+            let current_app_has_active_worker = data.proxy.has_active_worker_for(&self.app_type);
+            let port_edit_hint =
+                texts::tui_settings_proxy_stop_before_edit_hint(current_app_has_active_worker)
+                    .to_string();
             lines.extend([
                 format!(
                     "{}: {}:{}",
@@ -1182,11 +1184,7 @@ impl App {
                     data.proxy.configured_listen_address,
                     data.proxy.configured_listen_port
                 ),
-                crate::t!(
-                    "Stop the local proxy before editing listen address or port. Restart routing after those settings change.",
-                    "修改监听地址或端口前需要先停止本地代理；改完后重新启动路由才会生效。"
-                )
-                .to_string(),
+                port_edit_hint,
             ]);
         }
 

@@ -212,7 +212,7 @@ pub(super) fn render_claude_api_format_picker_overlay(
         });
 
     let choices = crate::cli::tui::form::ClaudeApiFormat::choices_for_app(&app_type);
-    let items = choices.into_iter().copied().map(|api_format| {
+    let items = choices.iter().copied().map(|api_format| {
         let marker = if api_format == current {
             texts::tui_marker_active()
         } else {
@@ -741,6 +741,10 @@ fn render_hermes_model_picker_input(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "model picker renderer receives transient search state"
+)]
 pub(super) fn render_model_fetch_picker_overlay(
     frame: &mut Frame<'_>,
     content_area: Rect,
@@ -1432,6 +1436,10 @@ pub(super) fn render_skills_sync_method_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "app picker renderer receives list state and display labels"
+)]
 fn render_apps_picker_overlay<A>(
     frame: &mut Frame<'_>,
     content_area: Rect,

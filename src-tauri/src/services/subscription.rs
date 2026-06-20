@@ -688,6 +688,10 @@ fn gemini_oauth_client_from_options(
     })
 }
 
+#[expect(
+    dead_code,
+    reason = "kept for Gemini OAuth clients loaded from JSON credentials"
+)]
 fn gemini_oauth_client_from_json(value: &serde_json::Value) -> Option<GeminiOAuthClient> {
     let client_id = value
         .get("client_id")

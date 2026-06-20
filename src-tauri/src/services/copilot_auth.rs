@@ -7,8 +7,10 @@ use crate::proxy::providers::copilot_auth::{
     GitHubAccount, GitHubDeviceCodeResponse,
 };
 
-fn manager_store() -> &'static RwLock<Option<(PathBuf, Arc<CopilotAuthManager>)>> {
-    static STORE: OnceLock<RwLock<Option<(PathBuf, Arc<CopilotAuthManager>)>>> = OnceLock::new();
+type CopilotAuthManagerStore = RwLock<Option<(PathBuf, Arc<CopilotAuthManager>)>>;
+
+fn manager_store() -> &'static CopilotAuthManagerStore {
+    static STORE: OnceLock<CopilotAuthManagerStore> = OnceLock::new();
     STORE.get_or_init(|| RwLock::new(None))
 }
 
@@ -180,6 +182,10 @@ impl CopilotAuthService {
     }
 
     #[cfg(test)]
+    #[expect(
+        dead_code,
+        reason = "kept for tests that need seeded Copilot auth state"
+    )]
     pub(crate) async fn seed_account_for_tests(
         account_id: &str,
         github_token: &str,

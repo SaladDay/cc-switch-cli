@@ -11,6 +11,7 @@ use crate::openclaw_config::{
     OpenClawEnvConfig, OpenClawToolsConfig,
 };
 use crate::provider::Provider;
+use crate::services::provider::live_merge;
 use crate::services::{McpService, PromptService, ProviderService};
 use crate::settings::{set_webdav_sync_settings, WebDavSyncSettings};
 
@@ -796,7 +797,12 @@ fn submit_provider_add(
         )
         .map(|_| true)
     } else {
-        ProviderService::add(&state, ctx.app.app_type.clone(), provider)
+        ProviderService::add_with_resolution(
+            &state,
+            ctx.app.app_type.clone(),
+            provider,
+            live_merge::ConflictPolicy::PreferIncoming.into(),
+        )
     };
 
     match result {
@@ -842,7 +848,12 @@ fn submit_provider_edit(
     }
 
     let state = load_state()?;
-    let result = ProviderService::update(&state, ctx.app.app_type.clone(), provider);
+    let result = ProviderService::update_with_resolution(
+        &state,
+        ctx.app.app_type.clone(),
+        provider,
+        live_merge::ConflictPolicy::PreferIncoming.into(),
+    );
 
     if let Err(err) = result {
         ctx.app.push_toast(err.to_string(), ToastKind::Error);
@@ -1183,8 +1194,10 @@ mod tests {
     impl SettingsGuard {
         fn with_openclaw_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.openclaw_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                openclaw_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set openclaw override dir");
             Self { previous }
         }
