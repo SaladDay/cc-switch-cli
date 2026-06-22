@@ -75,7 +75,7 @@ impl HandlerContext {
             .and_then(|value| value.as_str())
             .map(|s| s.to_string())
             .or_else(|| extract_gemini_model_from_path(path))
-            .unwrap_or_else(|| "unknown".to_string());
+            .unwrap_or_default();
 
         let manual_provider = current_provider_id_at_start
             .is_empty()

@@ -148,7 +148,7 @@ impl ProxyServerState {
 
         if takeover_enabled {
             ProxyService::new(self.db.clone())
-                .update_live_backup_from_provider(app_type.as_str(), provider)
+                .refresh_failover_live_snapshot_for_provider(app_type.as_str(), provider)
                 .await
                 .ok();
         }
