@@ -443,6 +443,7 @@ impl Database {
                 version = Self::get_user_version(conn)?;
             }
             Self::repair_proxy_request_logs_columns(conn)?;
+            Self::repair_usage_daily_rollups_columns(conn)?;
             Self::create_request_logs_indexes_if_supported(conn)?;
             Self::normalize_auto_failover_requires_takeover(conn)?;
             Ok(())
@@ -2319,6 +2320,7 @@ impl Database {
             ("app_type", "TEXT NOT NULL DEFAULT 'claude'"),
             ("model", "TEXT NOT NULL DEFAULT ''"),
             ("request_model", "TEXT"),
+            ("pricing_model", "TEXT"),
             ("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
             ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
             ("cache_read_tokens", "INTEGER NOT NULL DEFAULT 0"),
@@ -2343,6 +2345,63 @@ impl Database {
             Self::add_column_if_missing(conn, "proxy_request_logs", column, definition)?;
         }
 
+        Ok(())
+    }
+
+    /// 幂等修复 `usage_daily_rollups`：若缺少 v11 的 `request_model`/`pricing_model`
+    /// 列（主键仍是旧的 4 列形式），则重建为 v11 schema 并迁移历史聚合数据。
+    ///
+    /// 覆盖一条历史路径：某些 DB 的 `user_version` 已是 v11/v12，但 rollups 表却停留在
+    /// 更早的 v6 schema（建库时 `create_tables` 使用旧 DDL 后直接 set_user_version），
+    /// 导致 v10→v11 迁移循环从未运行，`run_usage_maintenance` 持续报
+    /// `no such column: request_model`。重建 SQL 与 `migrate_v10_to_v11` 保持一致。
+    fn repair_usage_daily_rollups_columns(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "usage_daily_rollups")? {
+            return Ok(());
+        }
+
+        let has_request_model = Self::has_column(conn, "usage_daily_rollups", "request_model")?;
+        let has_pricing_model = Self::has_column(conn, "usage_daily_rollups", "pricing_model")?;
+        if has_request_model && has_pricing_model {
+            return Ok(());
+        }
+
+        log::info!(
+            "修复 usage_daily_rollups：缺少 request_model/pricing_model 列，重建为 v11 schema"
+        );
+
+        conn.execute_batch(
+            "ALTER TABLE usage_daily_rollups RENAME TO usage_daily_rollups_repair_backup;
+             CREATE TABLE usage_daily_rollups (
+                 date TEXT NOT NULL,
+                 app_type TEXT NOT NULL,
+                 provider_id TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 request_model TEXT NOT NULL DEFAULT '',
+                 pricing_model TEXT NOT NULL DEFAULT '',
+                 request_count INTEGER NOT NULL DEFAULT 0,
+                 success_count INTEGER NOT NULL DEFAULT 0,
+                 input_tokens INTEGER NOT NULL DEFAULT 0,
+                 output_tokens INTEGER NOT NULL DEFAULT 0,
+                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                 total_cost_usd TEXT NOT NULL DEFAULT '0',
+                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
+             );
+             INSERT INTO usage_daily_rollups
+                 (date, app_type, provider_id, model, request_model, pricing_model,
+                  request_count, success_count, input_tokens, output_tokens,
+                  cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms)
+             SELECT date, app_type, provider_id, model, '', '',
+                  request_count, success_count, input_tokens, output_tokens,
+                  cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms
+             FROM usage_daily_rollups_repair_backup;
+             DROP TABLE usage_daily_rollups_repair_backup;",
+        )
+        .map_err(|e| AppError::Database(format!("重建 usage_daily_rollups 失败: {e}")))?;
+
+        log::info!("usage_daily_rollups 重建完成，已迁移历史聚合数据");
         Ok(())
     }
 

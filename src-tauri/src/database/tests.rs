@@ -2554,6 +2554,64 @@ fn schema_migration_v10_to_v12_adds_model_routes_table() {
 }
 
 #[test]
+fn repair_usage_daily_rollups_rebuilds_legacy_table_when_already_at_current_schema() {
+    // 模拟历史路径：user_version 已是 SCHEMA_VERSION，但 usage_daily_rollups 停留在
+    // 更早的 v6 schema（缺 request_model/pricing_model，旧 4 列主键），迁移循环从未运行，
+    // 仅靠 apply_schema_migrations 的 repair 阶段重建。
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    conn.execute_batch(
+        "DROP TABLE usage_daily_rollups;
+         CREATE TABLE usage_daily_rollups (
+             date TEXT NOT NULL,
+             app_type TEXT NOT NULL,
+             provider_id TEXT NOT NULL,
+             model TEXT NOT NULL,
+             request_count INTEGER NOT NULL DEFAULT 0,
+             success_count INTEGER NOT NULL DEFAULT 0,
+             input_tokens INTEGER NOT NULL DEFAULT 0,
+             output_tokens INTEGER NOT NULL DEFAULT 0,
+             cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+             cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+             total_cost_usd TEXT NOT NULL DEFAULT '0',
+             avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+             PRIMARY KEY (date, app_type, provider_id, model)
+         );
+         INSERT INTO usage_daily_rollups
+             (date, app_type, provider_id, model, request_count, input_tokens, output_tokens)
+         VALUES ('2026-06-22', 'claude', 'prov-1', 'glm-5.2', 5, 100, 200);",
+    )
+    .expect("seed legacy rollups table");
+
+    // version 已是当前 schema，迁移循环不进入，仅 repair 阶段应重建 rollups
+    Database::apply_schema_migrations_on_conn(&conn).expect("repair via migration entrypoint");
+
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "request_model")
+            .expect("check request_model"),
+        "request_model column should exist after repair"
+    );
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "pricing_model")
+            .expect("check pricing_model"),
+        "pricing_model column should exist after repair"
+    );
+
+    // 历史聚合数据应保留
+    let (request_count, input_tokens): (i64, i64) = conn
+        .query_row(
+            "SELECT request_count, input_tokens FROM usage_daily_rollups
+             WHERE provider_id = 'prov-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("query migrated row");
+    assert_eq!(request_count, 5);
+    assert_eq!(input_tokens, 100);
+}
+
+#[test]
 fn model_route_dao_crud_roundtrip() {
     let db = Database::memory().expect("create memory db");
 
