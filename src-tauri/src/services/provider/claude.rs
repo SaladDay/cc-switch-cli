@@ -241,6 +241,7 @@ impl ProviderService {
     ) -> Result<(), AppError> {
         let prepared = Self::prepare_claude_live_write(
             provider,
+            None,
             common_config_snippet,
             previous_common_config_snippet,
             apply_common_config,
@@ -257,6 +258,7 @@ impl ProviderService {
     ) -> Result<(), AppError> {
         let prepared = Self::prepare_claude_live_write(
             provider,
+            None,
             common_config_snippet,
             None,
             apply_common_config,
@@ -268,6 +270,7 @@ impl ProviderService {
 
     pub(super) fn prepare_claude_live_write(
         provider: &Provider,
+        previous_provider: Option<&Provider>,
         common_config_snippet: Option<&str>,
         previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
@@ -307,13 +310,23 @@ impl ProviderService {
         } else {
             json!({})
         };
-        let settings = live_merge::merge_json_live(
-            &AppType::Claude,
-            "settings.json",
-            local,
-            &content_to_write,
-            resolution,
-        )?;
+        let settings = match previous_provider {
+            Some(previous_provider) => live_merge::merge_json_with_base_live(
+                &AppType::Claude,
+                "settings.json",
+                local,
+                &previous_provider.settings_config,
+                &content_to_write,
+                resolution,
+            )?,
+            None => live_merge::merge_json_live(
+                &AppType::Claude,
+                "settings.json",
+                local,
+                &content_to_write,
+                resolution,
+            )?,
+        };
 
         Ok(PreparedLiveWrite::Claude { settings })
     }

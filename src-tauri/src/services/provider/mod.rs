@@ -2803,6 +2803,14 @@ impl ProviderService {
         }
 
         let backup = Self::capture_live_snapshot(app_type)?;
+        let previous_provider = effective_current_provider
+            .filter(|current_id| *current_id != provider_id)
+            .and_then(|current_id| {
+                config
+                    .get_manager(app_type)
+                    .and_then(|manager| manager.providers.get(current_id))
+                    .cloned()
+            });
         let provider = match app_type {
             AppType::Codex => {
                 Self::prepare_switch_codex(config, provider_id, effective_current_provider)?
@@ -2821,7 +2829,7 @@ impl ProviderService {
         Ok(PostCommitAction {
             app_type: app_type.clone(),
             provider,
-            previous_provider: None,
+            previous_provider,
             backup,
             sync_mcp: true,
             refresh_snapshot: true,
@@ -2982,6 +2990,7 @@ impl ProviderService {
             ),
             AppType::Claude => Self::prepare_claude_live_write(
                 provider,
+                previous_provider,
                 common_config_snippet,
                 previous_common_config_snippet,
                 apply_common_config,
