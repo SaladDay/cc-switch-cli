@@ -148,6 +148,20 @@ pub static DEFAULT_PROVIDER_ICONS: Lazy<HashMap<&'static str, ProviderIcon>> = L
             color: "#FFD21E",
         },
     );
+    m.insert(
+        "atlascloud",
+        ProviderIcon {
+            name: "atlascloud",
+            color: "#6B4FBB",
+        },
+    );
+    m.insert(
+        "atlas",
+        ProviderIcon {
+            name: "atlascloud",
+            color: "#6B4FBB",
+        },
+    );
 
     // 云平台
     m.insert(
