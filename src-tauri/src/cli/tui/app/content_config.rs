@@ -916,7 +916,7 @@ impl App {
                     Action::None
                 }
                 None => Action::None,
-            }
+            },
             _ => Action::None,
         }
     }
