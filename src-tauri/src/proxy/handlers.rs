@@ -48,61 +48,66 @@ pub async fn get_status(State(state): State<ProxyServerState>) -> impl IntoRespo
 /// clients can consume the response.
 pub async fn handle_models(State(state): State<ProxyServerState>) -> impl IntoResponse {
     let db = state.db;
-    let app_type = "claude";
-
     let mut model_ids: Vec<String> = Vec::new();
 
-    // 1. Collect model names from all providers' env config
-    if let Ok(providers) = db.get_all_providers(app_type) {
-        for provider in providers.values() {
-            let env = provider.settings_config.get("env");
-            if let Some(env) = env {
-                let keys = [
-                    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-                    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-                    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-                    "ANTHROPIC_MODEL",
-                ];
-                for key in &keys {
-                    if let Some(val) = env
-                        .get(*key)
-                        .and_then(|v| v.as_str())
-                        .filter(|v| !v.is_empty())
-                    {
-                        let cleaned = strip_one_m_suffix_for_upstream(val).to_string();
-                        if !model_ids.contains(&cleaned) {
-                            model_ids.push(cleaned);
+    // /v1/models 是模型发现端点，客户端（Claude Code、Codex 等）不会携带 app 标识，
+    // 所以遍历所有 app，合并各自的供应商 env 模型和启用的 model route，
+    // 让每个客户端都能看到为自己 app 配置的模型。
+    for app in AppType::all() {
+        let app_type = app.as_str();
+
+        // 1. Collect model names from this app's providers' env config
+        if let Ok(providers) = db.get_all_providers(app_type) {
+            for provider in providers.values() {
+                let env = provider.settings_config.get("env");
+                if let Some(env) = env {
+                    let keys = [
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                        "ANTHROPIC_MODEL",
+                    ];
+                    for key in &keys {
+                        if let Some(val) = env
+                            .get(*key)
+                            .and_then(|v| v.as_str())
+                            .filter(|v| !v.is_empty())
+                        {
+                            let cleaned = strip_one_m_suffix_for_upstream(val).to_string();
+                            if !model_ids.contains(&cleaned) {
+                                model_ids.push(cleaned);
+                            }
                         }
                     }
                 }
             }
         }
-    }
 
-    // 2. Add standard Claude role models from route patterns
-    if let Ok(routes) = db.list_model_routes(app_type) {
-        for route in &routes {
-            if !route.enabled {
-                continue;
-            }
-            let pattern_lower = route.pattern.trim().to_ascii_lowercase();
-            let standard_models = match pattern_lower.as_str() {
-                "*haiku*" | "haiku" => vec!["claude-haiku-4-5-20251001"],
-                "*sonnet*" | "sonnet" => vec!["claude-sonnet-4-6"],
-                "*opus*" | "opus" => vec!["claude-opus-4-8"],
-                _ => Vec::new(),
-            };
-            for m in standard_models {
-                if !model_ids.contains(&m.to_string()) {
-                    model_ids.push(m.to_string());
+        // 2. Add standard Claude role models from route patterns
+        if let Ok(routes) = db.list_model_routes(app_type) {
+            for route in &routes {
+                if !route.enabled {
+                    continue;
                 }
-            }
-            // 精确 pattern（无通配符）也作为 model id 暴露，否则路由专属 model
-            // （如 gpt-5、deepseek-v4-pro）不会出现在 /v1/models，客户端 picker 看不到。
-            if !pattern_lower.contains('*') {
-                let exact = route.pattern.trim().to_string();
-                if !exact.is_empty() && !model_ids.contains(&exact) {
-                    model_ids.push(exact);
+                let pattern_lower = route.pattern.trim().to_ascii_lowercase();
+                let standard_models = match pattern_lower.as_str() {
+                    "*haiku*" | "haiku" => vec!["claude-haiku-4-5-20251001"],
+                    "*sonnet*" | "sonnet" => vec!["claude-sonnet-4-6"],
+                    "*opus*" | "opus" => vec!["claude-opus-4-8"],
+                    _ => Vec::new(),
+                };
+                for m in standard_models {
+                    if !model_ids.contains(&m.to_string()) {
+                        model_ids.push(m.to_string());
+                    }
+                }
+                // 精确 pattern（无通配符）也作为 model id 暴露，否则路由专属 model
+                // （如 gpt-5、deepseek-v4-pro）不会出现在 /v1/models，客户端 picker 看不到。
+                if !pattern_lower.contains('*') {
+                    let exact = route.pattern.trim().to_string();
+                    if !exact.is_empty() && !model_ids.contains(&exact) {
+                        model_ids.push(exact);
+                    }
                 }
             }
         }
