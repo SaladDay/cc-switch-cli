@@ -365,6 +365,9 @@ mod tests {
             crate::settings::get_current_provider(&AppType::Claude).as_deref(),
             Some("claude-failover")
         );
+        // The original takeover live backup must be preserved verbatim: auto-failover
+        // writes a separate failover snapshot instead of mutating proxy_live_backup, so
+        // restore_live_config_for_app still restores the user's original provider config.
         let backup = db
             .get_live_backup("claude")
             .await
@@ -374,6 +377,21 @@ mod tests {
             serde_json::from_str(&backup.original_config).expect("parse live backup snapshot");
         assert_eq!(
             backup_snapshot
+                .get("base_url")
+                .and_then(serde_json::Value::as_str),
+            Some("https://current.example")
+        );
+
+        // The failover provider's config is captured in a dedicated failover snapshot.
+        let failover_snapshot = db
+            .get_failover_live_snapshot("claude", &failover.id)
+            .await
+            .expect("read failover snapshot after sync")
+            .expect("failover snapshot should be written");
+        let failover_config: serde_json::Value =
+            serde_json::from_str(&failover_snapshot.config_json).expect("parse failover snapshot");
+        assert_eq!(
+            failover_config
                 .get("base_url")
                 .and_then(serde_json::Value::as_str),
             Some("https://failover.example")
