@@ -1270,8 +1270,8 @@ async fn switch_updates_running_proxy_takeover_target_without_restart() {
             .and_then(Value::as_object)
             .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
             .and_then(Value::as_str),
-        Some("https://api.one.example"),
-        "hot-switch should preserve the original live backup used for restore"
+        Some("https://api.two.example"),
+        "hot-switch should refresh the restore backup to the selected provider"
     );
 
     let snapshot = state

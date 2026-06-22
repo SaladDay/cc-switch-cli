@@ -149,6 +149,8 @@ struct AutoFailoverActivation {
     app_type: AppType,
     previous_db_current_provider: Option<String>,
     previous_local_current_provider: Option<String>,
+    previous_live_backup: Option<String>,
+    rollback_live_backup: String,
 }
 
 fn proxy_runtime_registry() -> &'static StdMutex<HashMap<String, Weak<ProxyRuntimeState>>> {
@@ -1834,14 +1836,29 @@ impl ProxyService {
             .get_current_provider(app_key)
             .map_err(|error| format!("load current provider for {app_key} failed: {error}"))?;
         let previous_local_current_provider = crate::settings::get_current_provider(&app_type);
+        let previous_live_backup = self
+            .db
+            .get_live_backup(app_key)
+            .await
+            .map_err(|error| format!("load live backup for {app_key} failed: {error}"))?
+            .map(|backup| backup.original_config);
         self.regenerate_failover_live_snapshots_for_app(&app_type, Some(&first_provider_id))
             .await?;
+        let rollback_live_backup = self
+            .db
+            .get_live_backup(app_key)
+            .await
+            .map_err(|error| format!("load rollback backup for {app_key} failed: {error}"))?
+            .map(|backup| backup.original_config)
+            .ok_or_else(|| format!("missing rollback backup for {app_key}"))?;
         self.switch_proxy_target(app_key, &first_provider_id)
             .await?;
         Ok(AutoFailoverActivation {
             app_type,
             previous_db_current_provider,
             previous_local_current_provider,
+            previous_live_backup,
+            rollback_live_backup,
         })
     }
 
@@ -1894,12 +1911,33 @@ impl ProxyService {
             {
                 let _guard =
                     crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+                self.db
+                    .save_live_backup(app_key, &activation.rollback_live_backup)
+                    .await
+                    .map_err(|rollback_error| {
+                        format!(
+                            "enable proxy and auto failover failed: {start_error}; rollback failed: restore live backup for {app_key} failed: {rollback_error}"
+                        )
+                    })?;
                 if let Err(rollback_error) = self
                     .disable_takeover_for_app_unlocked(&activation.app_type, false)
                     .await
                 {
                     return Err(format!(
                         "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
+                    ));
+                }
+                let restore_backup_result = match activation.previous_live_backup.as_deref() {
+                    Some(previous_live_backup) => {
+                        self.db
+                            .save_live_backup(app_key, previous_live_backup)
+                            .await
+                    }
+                    None => self.db.delete_live_backup(app_key).await,
+                };
+                if let Err(rollback_error) = restore_backup_result {
+                    return Err(format!(
+                        "enable proxy and auto failover failed: {start_error}; rollback failed: restore prior live backup for {app_key} failed: {rollback_error}"
                     ));
                 }
                 if let Err(rollback_error) =
@@ -2273,6 +2311,8 @@ impl ProxyService {
             .map_err(|e| format!("更新本地当前供应商失败: {e}"))?;
 
         if should_sync_live {
+            self.update_live_backup_from_provider(app_type_enum.as_str(), &provider)
+                .await?;
             self.write_failover_live_snapshot_for_provider(&app_type_enum, &provider)
                 .await?;
         }
@@ -4570,7 +4610,25 @@ mod tests {
             .expect("backup exists");
         let stored_backup: Value =
             serde_json::from_str(&backup.original_config).expect("parse original live backup");
-        assert_eq!(stored_backup, original_live);
+        assert_eq!(
+            stored_backup
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some("https://b.example"),
+            "enabling auto-failover should refresh the restore backup to the queue head"
+        );
+        assert_eq!(
+            stored_backup
+                .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+                .and_then(Value::as_str),
+            Some("b")
+        );
+        assert_eq!(
+            stored_backup
+                .pointer("/env/LOCAL_ONLY")
+                .and_then(Value::as_str),
+            Some("kept")
+        );
 
         for (provider_id, token, base_url) in [
             ("provider-a", "a", "https://a.example"),
@@ -7059,7 +7117,7 @@ wire_api = "responses"
 
     #[tokio::test]
     #[serial]
-    async fn hot_switch_codex_provider_uses_failover_snapshot_without_mutating_live_backup() {
+    async fn hot_switch_codex_provider_refreshes_restore_backup_to_selected_provider() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestHomeEnvGuard::set(temp_home.path());
 
@@ -7113,7 +7171,21 @@ requires_openai_auth = true
             .expect("set current provider");
         crate::settings::set_current_provider(&AppType::Codex, Some("a"))
             .expect("set local current provider");
-        let original_backup = provider_a.settings_config.clone();
+        let original_backup = json!({
+            "auth": {
+                "OPENAI_API_KEY": "rightcode-key"
+            },
+            "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+local_only = "kept"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        });
         db.save_live_backup(
             "codex",
             &serde_json::to_string(&original_backup).expect("serialize provider a"),
@@ -7149,7 +7221,30 @@ requires_openai_auth = true
             .expect("backup exists");
         let stored_backup: Value =
             serde_json::from_str(&backup.original_config).expect("parse backup json");
-        assert_eq!(stored_backup, original_backup);
+        assert_eq!(
+            stored_backup
+                .get("auth")
+                .and_then(|auth| auth.get("OPENAI_API_KEY"))
+                .and_then(Value::as_str),
+            Some("aihubmix-key"),
+            "hot switch should refresh the restore backup auth to the selected provider"
+        );
+        let backup_config = stored_backup
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("backup config string");
+        let parsed_backup: toml::Value =
+            toml::from_str(backup_config).expect("parse backup config");
+        assert_eq!(
+            parsed_backup.get("model_provider").and_then(|v| v.as_str()),
+            Some("aihubmix"),
+            "hot switch should refresh the restore backup config to the selected provider"
+        );
+        assert_eq!(
+            parsed_backup.get("local_only").and_then(|v| v.as_str()),
+            Some("kept"),
+            "hot switch should preserve local-only live backup fields while refreshing provider-owned fields"
+        );
 
         let snapshot = db
             .get_failover_live_snapshot("codex", "b")
@@ -7240,16 +7335,21 @@ requires_openai_auth = true
             parsed_restored
                 .get("model_provider")
                 .and_then(|v| v.as_str()),
-            Some("rightcode"),
-            "restore should use the original local backup"
+            Some("aihubmix"),
+            "restore should use the hot-switched provider backup"
+        );
+        assert_eq!(
+            parsed_restored.get("local_only").and_then(|v| v.as_str()),
+            Some("kept"),
+            "restore should preserve local-only live backup fields"
         );
         assert_eq!(
             restored
                 .get("auth")
                 .and_then(|auth| auth.get("OPENAI_API_KEY"))
                 .and_then(Value::as_str),
-            Some("rightcode-key"),
-            "restore should use the original local backup auth"
+            Some("aihubmix-key"),
+            "restore should use the hot-switched provider backup auth"
         );
     }
 
@@ -7321,6 +7421,126 @@ requires_openai_auth = true
         assert!(
             stored.get("config").is_none(),
             "Gemini live backup should not snapshot settings.json/config; upstream keeps only env"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn hot_switch_gemini_provider_refreshes_restore_backup_to_selected_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        let provider_a = Provider::with_id(
+            "a".to_string(),
+            "A".to_string(),
+            json!({
+                "env": {
+                    "GEMINI_API_KEY": "a-key"
+                }
+            }),
+            None,
+        );
+        let provider_b = Provider::with_id(
+            "b".to_string(),
+            "B".to_string(),
+            json!({
+                "env": {
+                    "GEMINI_API_KEY": "b-key"
+                },
+                "config": {
+                    "theme": "selected"
+                }
+            }),
+            None,
+        );
+        db.save_provider("gemini", &provider_a)
+            .expect("save provider a");
+        db.save_provider("gemini", &provider_b)
+            .expect("save provider b");
+        db.set_current_provider("gemini", "a")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Gemini, Some("a"))
+            .expect("set local current provider");
+        db.save_live_backup(
+            "gemini",
+            r#"{"env":{"GEMINI_API_KEY":"a-key","LOCAL_ONLY":"kept"}}"#,
+        )
+        .await
+        .expect("seed live backup");
+        service
+            .write_gemini_live(&json!({
+                "env": {
+                    "GOOGLE_GEMINI_BASE_URL": "http://127.0.0.1:15721",
+                    "GEMINI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+                }
+            }))
+            .expect("seed taken-over Gemini live config");
+
+        service
+            .hot_switch_provider("gemini", "b")
+            .await
+            .expect("hot switch Gemini provider");
+
+        let backup = db
+            .get_live_backup("gemini")
+            .await
+            .expect("get live backup")
+            .expect("backup exists");
+        let stored_backup: Value =
+            serde_json::from_str(&backup.original_config).expect("parse backup json");
+        assert_eq!(
+            stored_backup
+                .pointer("/env/GEMINI_API_KEY")
+                .and_then(Value::as_str),
+            Some("b-key"),
+            "hot switch should refresh Gemini restore backup to the selected provider"
+        );
+        assert_eq!(
+            stored_backup
+                .pointer("/env/LOCAL_ONLY")
+                .and_then(Value::as_str),
+            Some("kept"),
+            "hot switch should preserve local-only Gemini backup values"
+        );
+        assert!(
+            stored_backup.get("config").is_none(),
+            "Gemini restore backup should keep only env data"
+        );
+
+        let live = service.read_gemini_live().expect("read Gemini live config");
+        assert_eq!(
+            live.pointer("/env/GEMINI_API_KEY").and_then(Value::as_str),
+            Some(PROXY_TOKEN_PLACEHOLDER),
+            "active Gemini live config should remain proxy-managed during takeover"
+        );
+        assert_eq!(
+            live.pointer("/env/GOOGLE_GEMINI_BASE_URL")
+                .and_then(Value::as_str),
+            Some("http://127.0.0.1:15721"),
+            "active Gemini live config should keep the proxy base URL"
+        );
+
+        service
+            .restore_live_config_for_app(&AppType::Gemini)
+            .await
+            .expect("restore Gemini live config");
+        let restored = service
+            .read_gemini_live()
+            .expect("read restored Gemini live config");
+        assert_eq!(
+            restored
+                .pointer("/env/GEMINI_API_KEY")
+                .and_then(Value::as_str),
+            Some("b-key"),
+            "restore should use the hot-switched Gemini provider backup"
+        );
+        assert_eq!(
+            restored.pointer("/env/LOCAL_ONLY").and_then(Value::as_str),
+            Some("kept"),
+            "restore should preserve local-only Gemini backup values"
         );
     }
 
@@ -7432,7 +7652,7 @@ requires_openai_auth = true
 
     #[tokio::test]
     #[serial]
-    async fn switch_proxy_target_uses_failover_snapshot_without_mutating_live_backup() {
+    async fn switch_proxy_target_refreshes_restore_backup_to_selected_provider() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestHomeEnvGuard::set(temp_home.path());
 
@@ -7501,7 +7721,20 @@ requires_openai_auth = true
             .expect("backup exists");
         let stored_backup: Value =
             serde_json::from_str(&backup.original_config).expect("parse live backup");
-        assert_eq!(stored_backup, original_live);
+        assert_eq!(
+            stored_backup
+                .pointer("/env/ANTHROPIC_API_KEY")
+                .and_then(Value::as_str),
+            Some("b-key"),
+            "switching proxy target should refresh the restore backup to the selected provider"
+        );
+        assert_eq!(
+            stored_backup
+                .pointer("/env/LOCAL_ONLY")
+                .and_then(Value::as_str),
+            Some("kept"),
+            "switching proxy target should preserve local-only backup values"
+        );
 
         let snapshot = db
             .get_failover_live_snapshot("claude", "b")
