@@ -1065,6 +1065,59 @@ fn preview_switch_live_conflicts_reports_real_local_provider_changes() {
 
 #[test]
 #[serial]
+fn preview_switch_live_conflicts_reports_removed_local_provider_field() {
+    let (_temp_home, _env, state) = setup_claude_switch_preview_state(json!({
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://claude.one"
+        }
+    }));
+
+    let conflicts = ProviderService::preview_switch_live_conflicts(&state, AppType::Claude, "p2")
+        .expect("preview switch conflicts");
+
+    assert!(
+        conflicts.iter().any(|conflict| {
+            conflict.path == "env.ANTHROPIC_AUTH_TOKEN"
+                && conflict.local == "<removed>"
+                && conflict.incoming == "token2"
+        }),
+        "expected removed token conflict, got {conflicts:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn switch_fails_when_live_removed_current_provider_field_changed_by_target() {
+    let (_temp_home, _env, state) = setup_claude_switch_preview_state(json!({
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://claude.one"
+        }
+    }));
+
+    let err = ProviderService::switch(&state, AppType::Claude, "p2")
+        .expect_err("switch should report removed live field conflict");
+    let message = err.to_string();
+    assert!(
+        message.contains("env.ANTHROPIC_AUTH_TOKEN")
+            && message.contains("local: <removed>")
+            && message.contains("cc-switch: token2"),
+        "unexpected error: {message}"
+    );
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    assert!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none(),
+        "failed switch should preserve the locally removed token"
+    );
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.one")
+    );
+}
+
+#[test]
+#[serial]
 fn preview_switch_live_conflicts_ignores_missing_claude_settings_file() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
