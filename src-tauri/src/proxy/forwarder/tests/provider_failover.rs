@@ -59,6 +59,7 @@ async fn single_provider_bypasses_open_breaker() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -112,6 +113,7 @@ async fn single_provider_respects_open_breaker_without_explicit_bypass_option() 
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -181,6 +183,7 @@ async fn single_streaming_provider_respects_open_breaker_without_explicit_bypass
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -224,6 +227,7 @@ async fn claude_buffered_failover_uses_second_provider_and_per_provider_endpoint
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -297,6 +301,7 @@ async fn failover_enabled_single_queued_negative_provider_does_not_use_non_queue
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -366,6 +371,7 @@ async fn failover_enabled_multiple_queued_providers_transfer_by_queue_priority()
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -431,6 +437,7 @@ async fn failover_enabled_all_queued_providers_unavailable_fails_after_attemptin
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -488,6 +495,7 @@ async fn plain_buffered_400_fails_over_to_next_provider() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -565,6 +573,7 @@ async fn claude_buffered_rectifier_owned_400_stops_before_next_provider() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -642,6 +651,7 @@ async fn plain_streaming_422_json_error_fails_over_to_next_provider() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -703,6 +713,7 @@ async fn single_candidate_with_failover_enabled_respects_open_breaker() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -766,6 +777,7 @@ async fn skipped_candidates_preserve_last_attempted_upstream_response() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -830,6 +842,7 @@ async fn later_half_open_provider_permit_is_not_preclaimed_when_earlier_success_
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -888,6 +901,7 @@ async fn claude_buffered_rectifier_retries_same_provider_on_invalid_signature() 
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -956,6 +970,7 @@ async fn claude_openai_chat_budget_rectifier_retries_same_provider_with_transfor
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -1027,6 +1042,7 @@ async fn claude_streaming_rectifier_retries_same_provider_on_invalid_signature_e
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -1120,6 +1136,7 @@ async fn claude_streaming_rectifier_owned_400_stops_before_next_provider() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -1195,6 +1212,7 @@ async fn claude_streaming_openai_chat_budget_rectifier_retries_same_provider() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )

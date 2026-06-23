@@ -61,6 +61,7 @@ async fn bedrock_claude_prepare_request_injects_optimizer_and_cache_breakpoints(
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -120,6 +121,7 @@ async fn non_bedrock_claude_prepare_request_skips_optimizer_and_cache_injection(
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -168,6 +170,7 @@ async fn non_copilot_claude_prepare_request_strips_one_m_suffix_after_mapping() 
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -209,6 +212,7 @@ async fn deepseek_native_claude_prepare_request_normalizes_tool_thinking_history
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -389,6 +393,7 @@ async fn claude_gemini_native_prepare_request_rewrites_url_body_and_auth() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -445,6 +450,7 @@ async fn claude_gemini_native_prepare_request_preserves_opaque_full_url() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -503,6 +509,7 @@ async fn streaming_passthrough_prepare_request_forces_identity_accept_encoding()
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -575,6 +582,7 @@ async fn codex_oauth_prepare_request_injects_client_session_headers() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -627,6 +635,7 @@ async fn codex_oauth_prepare_request_skips_generated_session_headers() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -687,6 +696,7 @@ async fn codex_oauth_prepare_request_errors_without_available_account() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -730,6 +740,7 @@ async fn github_copilot_prepare_request_uses_responses_for_openai_vendor_model()
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -793,6 +804,7 @@ async fn github_copilot_prepare_request_uses_chat_for_anthropic_vendor_model() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -849,6 +861,7 @@ async fn github_copilot_prepare_request_detects_copilot_base_url_without_provide
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -903,6 +916,7 @@ async fn github_copilot_prepare_request_preserves_full_url_relay() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -979,6 +993,7 @@ async fn github_copilot_prepare_request_sets_agent_initiator_for_tool_results() 
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1032,6 +1047,7 @@ async fn github_copilot_prepare_request_sets_subagent_headers_and_interaction_id
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1085,6 +1101,7 @@ async fn github_copilot_prepare_request_uses_x_session_id_for_interaction_id_fal
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1132,6 +1149,7 @@ async fn github_copilot_prepare_request_downgrades_warmup_model() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1191,6 +1209,7 @@ async fn github_copilot_prepare_request_strips_thinking_before_transform() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1255,6 +1274,7 @@ async fn github_copilot_prepare_request_overrides_client_fingerprint_headers() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1324,6 +1344,7 @@ async fn github_copilot_prepare_request_disabled_optimizer_keeps_default_headers
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1373,6 +1394,7 @@ async fn codex_oauth_prepare_request_rejects_proxy_managed_placeholder_header() 
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1406,6 +1428,7 @@ async fn non_managed_upstream_allows_proxy_managed_placeholder_guard() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1443,6 +1466,7 @@ async fn codex_chat_prepare_request_rewrites_responses_to_chat_completions() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1491,6 +1515,7 @@ async fn codex_chat_prepare_request_preserves_responses_query() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1525,6 +1550,7 @@ async fn codex_chat_prepare_request_preserves_responses_compact_query() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1559,6 +1585,7 @@ async fn codex_chat_prepare_request_uses_provider_chat_base_without_forcing_v1()
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1596,6 +1623,7 @@ async fn codex_chat_prepare_request_preserves_full_chat_endpoint_base_url() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1633,6 +1661,7 @@ async fn codex_chat_prepare_request_preserves_query_with_full_chat_endpoint_base
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await
@@ -1665,6 +1694,7 @@ async fn build_request(
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
         )
         .await

@@ -278,3 +278,26 @@ async fn update_proxy_config_for_app_preserves_failover_with_non_empty_queue(
     assert_eq!(db.get_proxy_flags_sync("claude"), (true, true));
     Ok(())
 }
+
+#[tokio::test]
+async fn retry_interval_seconds_round_trips_per_app() -> Result<(), AppError> {
+    let db = Database::memory()?;
+
+    // Fresh DB seeds retry_interval_seconds = 0 (backward-compatible immediate retry).
+    let initial = db.get_proxy_config_for_app("codex").await?;
+    assert_eq!(initial.retry_interval_seconds, 0);
+
+    // Set + persist + re-read.
+    let mut config = db.get_proxy_config_for_app("codex").await?;
+    config.retry_interval_seconds = 7;
+    db.update_proxy_config_for_app(config).await?;
+
+    let reloaded = db.get_proxy_config_for_app("codex").await?;
+    assert_eq!(reloaded.retry_interval_seconds, 7);
+
+    // Other apps are independent (per-app storage).
+    let claude = db.get_proxy_config_for_app("claude").await?;
+    assert_eq!(claude.retry_interval_seconds, 0);
+
+    Ok(())
+}

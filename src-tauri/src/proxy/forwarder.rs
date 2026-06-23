@@ -39,6 +39,9 @@ pub struct ForwardOptions {
     pub max_retries: u32,
     pub request_timeout: Option<Duration>,
     pub bypass_circuit_breaker: bool,
+    /// 连接阶段/首字前 transport 重试之间的固定等待时间。
+    /// `None` 或 `Some(Duration::ZERO)` 表示立即重试（保持旧行为）。
+    pub retry_interval_seconds: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -762,6 +765,7 @@ impl RequestForwarder {
                             && is_retryable_transport_error(&error)
                         {
                             attempt += 1;
+                            maybe_sleep_retry_interval(options.retry_interval_seconds).await;
                             continue;
                         }
 
@@ -775,6 +779,7 @@ impl RequestForwarder {
                     Err(_) => {
                         if allow_transport_retry && attempt < options.max_retries {
                             attempt += 1;
+                            maybe_sleep_retry_interval(options.retry_interval_seconds).await;
                             continue;
                         }
 
@@ -929,6 +934,7 @@ impl RequestForwarder {
                             && is_retryable_transport_error(&error)
                         {
                             attempt += 1;
+                            maybe_sleep_retry_interval(options.retry_interval_seconds).await;
                             continue;
                         }
 
@@ -942,6 +948,7 @@ impl RequestForwarder {
                     Err(_) => {
                         if allow_transport_retry && attempt < options.max_retries {
                             attempt += 1;
+                            maybe_sleep_retry_interval(options.retry_interval_seconds).await;
                             continue;
                         }
 
@@ -1109,6 +1116,18 @@ fn clone_request(
 
 fn uses_internal_transport_retry(app_type: &AppType) -> bool {
     !matches!(app_type, AppType::Claude)
+}
+
+/// 在两次 transport 重试之间按配置的固定间隔等待。
+///
+/// `None` 或 `Some(Duration::ZERO)` 时不 sleep（保持旧的立即重试行为，也不引入
+/// 额外的 async 让步）。
+async fn maybe_sleep_retry_interval(interval: Option<Duration>) {
+    if let Some(interval) = interval {
+        if !interval.is_zero() {
+            tokio::time::sleep(interval).await;
+        }
+    }
 }
 
 fn is_retryable_transport_error(error: &reqwest::Error) -> bool {

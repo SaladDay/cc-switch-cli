@@ -7,6 +7,12 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Proxy / Retry**: Add a configurable per-app fixed transport-retry interval. The local proxy previously retried upstream connection/timeout errors immediately (hardcoded 0s interval). The new `retry_interval_seconds` field (stored in `proxy_config`, default `0` = immediate, backward-compatible) makes that wait configurable per app via `cc-switch proxy config --retry-interval-seconds <N>` (range 0–300, Claude/Codex/Gemini only), and is shown in `cc-switch proxy show` under a new per-app "Retry interval" section. Only the pre-first-byte transport-retry layer is affected; auth is untouched and mid-stream disconnect retries remain out of scope. Backed by schema migration v11 → v12.
+
 ## [5.8.4] - 2026-06-19
 
 ### Added

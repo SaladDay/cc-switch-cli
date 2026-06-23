@@ -35,6 +35,7 @@ fn default_app_proxy_config(app_type: impl Into<String>) -> AppProxyConfig {
         enabled: false,
         auto_failover_enabled: false,
         max_retries: 3,
+        retry_interval_seconds: 0,
         streaming_first_byte_timeout: 60,
         streaming_idle_timeout: 120,
         non_streaming_timeout: 600,
@@ -334,7 +335,7 @@ impl Database {
                 "SELECT app_type, enabled, auto_failover_enabled,
                         max_retries, streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                         circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
-                        circuit_error_rate_threshold, circuit_min_requests
+                        circuit_error_rate_threshold, circuit_min_requests, retry_interval_seconds
                  FROM proxy_config WHERE app_type = ?1",
                 [app_type],
                 |row| {
@@ -351,6 +352,7 @@ impl Database {
                         circuit_timeout_seconds: row.get::<_, i32>(9)? as u32,
                         circuit_error_rate_threshold: row.get(10)?,
                         circuit_min_requests: row.get::<_, i32>(11)? as u32,
+                        retry_interval_seconds: row.get::<_, i32>(12)? as u32,
                     })
                 },
             )
@@ -380,7 +382,7 @@ impl Database {
                 "SELECT app_type, enabled, auto_failover_enabled,
                         max_retries, streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                         circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
-                        circuit_error_rate_threshold, circuit_min_requests
+                        circuit_error_rate_threshold, circuit_min_requests, retry_interval_seconds
                  FROM proxy_config WHERE app_type = ?1",
                 [app_type],
                 |row| {
@@ -397,6 +399,7 @@ impl Database {
                         circuit_timeout_seconds: row.get::<_, i32>(9)? as u32,
                         circuit_error_rate_threshold: row.get(10)?,
                         circuit_min_requests: row.get::<_, i32>(11)? as u32,
+                        retry_interval_seconds: row.get::<_, i32>(12)? as u32,
                     })
                 },
             )
@@ -437,6 +440,7 @@ impl Database {
                 circuit_timeout_seconds = ?10,
                 circuit_error_rate_threshold = ?11,
                 circuit_min_requests = ?12,
+                retry_interval_seconds = ?13,
                 updated_at = datetime('now')
              WHERE app_type = ?1",
             rusqlite::params![
@@ -452,6 +456,7 @@ impl Database {
                 config.circuit_timeout_seconds as i32,
                 config.circuit_error_rate_threshold,
                 config.circuit_min_requests as i32,
+                config.retry_interval_seconds as i32,
             ],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
