@@ -451,6 +451,14 @@ cc-switch proxy serve --takeover claude           # Foreground debug mode; refus
 
 Normal CLI/TUI proxy enable/disable actions are routed through the daemon. The daemon auto-starts when the first app proxy route is activated, runs one worker per active supported app (Claude, Codex, Gemini), and exits automatically when no proxy routes remain active.
 
+> **Platform support:** The daemon-managed proxy relies on a Unix-domain-socket supervisor and is available **only on macOS and Linux**. On Windows, `proxy enable` / `proxy disable` and the `daemon` subcommand are unavailable and fail with `managed sessions are only supported on unix`. To run the local proxy on Windows, use the foreground mode instead, which starts the relay without the supervisor:
+>
+> ```bash
+> cc-switch proxy serve --takeover claude
+> ```
+>
+> `proxy show` and `proxy config` work on all platforms. See [#294](https://github.com/SaladDay/cc-switch-cli/issues/294).
+
 ### 🧪 Environment & Local Tools
 
 Inspect environment conflicts and whether required local CLIs are installed.
