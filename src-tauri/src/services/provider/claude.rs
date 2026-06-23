@@ -311,14 +311,18 @@ impl ProviderService {
             json!({})
         };
         let settings = match live_merge_base {
-            Some(base) => live_merge::merge_json_with_base_live(
-                &AppType::Claude,
-                "settings.json",
-                local,
-                base,
-                &content_to_write,
-                resolution,
-            )?,
+            Some(base) => {
+                let mut local = local;
+                Self::backfill_missing_claude_incoming_keys(&mut local, base, &content_to_write);
+                live_merge::merge_json_with_base_live(
+                    &AppType::Claude,
+                    "settings.json",
+                    local,
+                    base,
+                    &content_to_write,
+                    resolution,
+                )?
+            }
             None => live_merge::merge_json_live(
                 &AppType::Claude,
                 "settings.json",
@@ -329,6 +333,33 @@ impl ProviderService {
         };
 
         Ok(PreparedLiveWrite::Claude { settings })
+    }
+
+    fn backfill_missing_claude_incoming_keys(local: &mut Value, base: &Value, incoming: &Value) {
+        let (Value::Object(local_map), Value::Object(base_map), Value::Object(incoming_map)) =
+            (local, base, incoming)
+        else {
+            return;
+        };
+
+        for (key, incoming_value) in incoming_map {
+            match local_map.get_mut(key) {
+                Some(local_value) => {
+                    if let Some(base_value) = base_map.get(key) {
+                        Self::backfill_missing_claude_incoming_keys(
+                            local_value,
+                            base_value,
+                            incoming_value,
+                        );
+                    }
+                }
+                None => {
+                    if base_map.contains_key(key) {
+                        local_map.insert(key.clone(), incoming_value.clone());
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn apply_claude_live_write(prepared: &PreparedLiveWrite) -> Result<(), AppError> {

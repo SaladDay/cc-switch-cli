@@ -63,6 +63,7 @@ pub fn get_providers() -> Result<Map<String, Value>, AppError> {
         .unwrap_or_default())
 }
 
+#[allow(dead_code)]
 pub fn set_provider(id: &str, provider: Value) -> Result<(), AppError> {
     set_provider_value(id, provider, true)
 }

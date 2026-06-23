@@ -812,6 +812,7 @@ impl ProviderService {
                     .prepare_live_backup_from_provider_with_resolution(
                         action.app_type.as_str(),
                         &action.provider,
+                        action.previous_provider.as_ref(),
                         resolution,
                     ),
             )
@@ -2979,6 +2980,10 @@ impl ProviderService {
         Self::apply_prepared_live_snapshot(&prepared)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "dispatch wrapper threads app-specific live sync context"
+    )]
     fn prepare_live_snapshot_with_resolution(
         app_type: &AppType,
         provider: &Provider,

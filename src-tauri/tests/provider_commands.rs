@@ -1801,6 +1801,7 @@ async fn switch_provider_under_takeover_refreshes_claude_restore_backup_to_selec
     let provider_a_live = json!({
         "env": {
             "ANTHROPIC_API_KEY": "stale-key",
+            "ANTHROPIC_BASE_URL": "https://a.example",
             "LOCAL_ONLY": "preserve-me"
         },
         "workspace": {
@@ -1826,7 +1827,10 @@ async fn switch_provider_under_takeover_refreshes_claude_restore_backup_to_selec
                 "old-provider".to_string(),
                 "Legacy Claude".to_string(),
                 json!({
-                    "env": { "ANTHROPIC_API_KEY": "stale-key" },
+                    "env": {
+                        "ANTHROPIC_API_KEY": "stale-key",
+                        "ANTHROPIC_BASE_URL": "https://a.example"
+                    },
                     "workspace": { "path": "/tmp/old-workspace" }
                 }),
                 None,
@@ -1932,6 +1936,13 @@ async fn switch_provider_under_takeover_refreshes_claude_restore_backup_to_selec
         Some("preserve-me"),
         "takeover-time switch should keep local-only live config values in the restore backup"
     );
+    assert!(
+        backup_after_switch
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .is_none(),
+        "takeover-time switch should remove provider-owned keys that are absent from the selected provider"
+    );
     assert_eq!(
         backup_after_switch
             .get("env")
@@ -1981,6 +1992,13 @@ async fn switch_provider_under_takeover_refreshes_claude_restore_backup_to_selec
             .and_then(|value| value.as_str()),
         Some("preserve-me"),
         "restore after a takeover-time switch should keep local-only live config values"
+    );
+    assert!(
+        restored_live
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .is_none(),
+        "restore after a takeover-time switch should not restore stale provider-owned keys"
     );
     assert_ne!(
         restored_live

@@ -1600,6 +1600,7 @@ impl ProxyService {
         Self::merge_live_backup_snapshot(
             app_type,
             Some(original_live),
+            None,
             provider_snapshot,
             live_merge::ConflictPolicy::PreferIncoming.into(),
         )
@@ -2101,6 +2102,7 @@ impl ProxyService {
         let backup_snapshot = Self::merge_live_backup_snapshot(
             &app_type_enum,
             existing_backup_value.as_ref(),
+            None,
             backup_snapshot,
             live_merge::ConflictPolicy::PreferIncoming.into(),
         )?;
@@ -2112,6 +2114,7 @@ impl ProxyService {
         &self,
         app_type: &str,
         provider: &Provider,
+        previous_provider: Option<&Provider>,
         resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<Value, String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
@@ -2121,10 +2124,22 @@ impl ProxyService {
             provider,
             &mut backup_snapshot,
         )?;
+        let previous_backup_snapshot = previous_provider
+            .map(|provider| {
+                let mut snapshot = self.build_live_snapshot_from_provider(&app_type, provider)?;
+                Self::apply_codex_unified_session_bucket_to_backup(
+                    &app_type,
+                    provider,
+                    &mut snapshot,
+                )?;
+                Ok::<Value, String>(snapshot)
+            })
+            .transpose()?;
         let existing_backup_value = self.load_live_backup_value(&app_type).await?;
         Self::merge_live_backup_snapshot(
             &app_type,
             existing_backup_value.as_ref(),
+            previous_backup_snapshot.as_ref(),
             backup_snapshot,
             resolution,
         )
@@ -2172,12 +2187,22 @@ impl ProxyService {
     fn merge_live_backup_snapshot(
         app_type: &AppType,
         existing_backup: Option<&Value>,
+        previous_backup_snapshot: Option<&Value>,
         backup_snapshot: Value,
         resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<Value, String> {
         match app_type {
-            AppType::Claude => match existing_backup {
-                Some(existing) => live_merge::merge_json_live(
+            AppType::Claude => match (existing_backup, previous_backup_snapshot) {
+                (Some(existing), Some(base)) => live_merge::merge_json_with_base_live(
+                    app_type,
+                    "proxy live backup",
+                    existing.clone(),
+                    base,
+                    &backup_snapshot,
+                    resolution,
+                )
+                .map_err(|error| error.to_string()),
+                (Some(existing), None) => live_merge::merge_json_live(
                     app_type,
                     "proxy live backup",
                     existing.clone(),
@@ -2185,19 +2210,35 @@ impl ProxyService {
                     resolution,
                 )
                 .map_err(|error| error.to_string()),
-                None => Ok(backup_snapshot),
+                (None, _) => Ok(backup_snapshot),
             },
-            AppType::Codex => {
-                Self::merge_codex_live_backup(existing_backup, backup_snapshot, resolution)
-            }
+            AppType::Codex => Self::merge_codex_live_backup(
+                existing_backup,
+                previous_backup_snapshot,
+                backup_snapshot,
+                resolution,
+            ),
             AppType::Gemini => {
                 let incoming_env = backup_snapshot
                     .get("env")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
                 let incoming_snapshot = json!({ "env": incoming_env });
-                match existing_backup {
-                    Some(existing) => live_merge::merge_json_live(
+                let base_snapshot = previous_backup_snapshot.map(|base| {
+                    let base_env = base.get("env").cloned().unwrap_or_else(|| json!({}));
+                    json!({ "env": base_env })
+                });
+                match (existing_backup, base_snapshot.as_ref()) {
+                    (Some(existing), Some(base)) => live_merge::merge_json_with_base_live(
+                        app_type,
+                        "proxy live backup",
+                        existing.clone(),
+                        base,
+                        &incoming_snapshot,
+                        resolution,
+                    )
+                    .map_err(|error| error.to_string()),
+                    (Some(existing), None) => live_merge::merge_json_live(
                         app_type,
                         "proxy live backup",
                         existing.clone(),
@@ -2205,7 +2246,7 @@ impl ProxyService {
                         resolution,
                     )
                     .map_err(|error| error.to_string()),
-                    None => Ok(incoming_snapshot),
+                    (None, _) => Ok(incoming_snapshot),
                 }
             }
             AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(backup_snapshot),
@@ -2214,6 +2255,7 @@ impl ProxyService {
 
     fn merge_codex_live_backup(
         existing_backup: Option<&Value>,
+        previous_backup_snapshot: Option<&Value>,
         mut incoming_backup: Value,
         resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<Value, String> {
@@ -2226,34 +2268,64 @@ impl ProxyService {
             .get("auth")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let base_auth = previous_backup_snapshot
+            .and_then(|base| base.get("auth"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
         let incoming_auth = incoming_backup
             .get("auth")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let merged_auth = live_merge::merge_json_live(
-            &AppType::Codex,
-            "proxy live backup auth",
-            existing_auth,
-            &incoming_auth,
-            resolution,
-        )
+        let merged_auth = if previous_backup_snapshot.is_some() {
+            live_merge::merge_json_with_base_live(
+                &AppType::Codex,
+                "proxy live backup auth",
+                existing_auth,
+                &base_auth,
+                &incoming_auth,
+                resolution,
+            )
+        } else {
+            live_merge::merge_json_live(
+                &AppType::Codex,
+                "proxy live backup auth",
+                existing_auth,
+                &incoming_auth,
+                resolution,
+            )
+        }
         .map_err(|error| error.to_string())?;
 
         let existing_config = existing_backup
             .get("config")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let base_config = previous_backup_snapshot
+            .and_then(|base| base.get("config"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let incoming_config = incoming_backup
             .get("config")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let merged_config = live_merge::merge_toml_live(
-            &AppType::Codex,
-            "proxy live backup config",
-            existing_config,
-            incoming_config,
-            resolution,
-        )
+        let merged_config = if previous_backup_snapshot.is_some() {
+            live_merge::merge_toml_with_base_live(
+                &AppType::Codex,
+                "proxy live backup config",
+                existing_config,
+                base_config,
+                incoming_config,
+                resolution,
+            )
+        } else {
+            live_merge::merge_toml_live(
+                &AppType::Codex,
+                "proxy live backup config",
+                existing_config,
+                incoming_config,
+                resolution,
+            )
+        }
         .map_err(|error| error.to_string())?;
 
         if let Some(root) = merged.as_object_mut() {
@@ -2289,11 +2361,25 @@ impl ProxyService {
             .map_err(|e| format!("读取供应商失败: {e}"))?
             .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
 
-        let logical_target_changed =
+        let current_provider_id =
             crate::settings::get_effective_current_provider(&self.db, &app_type_enum)
-                .map_err(|e| format!("读取当前供应商失败: {e}"))?
-                .as_deref()
-                != Some(provider_id);
+                .map_err(|e| format!("读取当前供应商失败: {e}"))?;
+        let logical_target_changed = current_provider_id.as_deref() != Some(provider_id);
+        let previous_provider = current_provider_id
+            .as_deref()
+            .filter(|current_id| *current_id != provider_id)
+            .and_then(|current_id| {
+                self.db
+                    .get_provider_by_id(current_id, app_type)
+                    .map_err(|error| {
+                        log::warn!(
+                            "load previous provider {current_id} for {app_type} failed while hot-switching: {error}"
+                        );
+                        error
+                    })
+                    .ok()
+                    .flatten()
+            });
 
         let has_backup = self
             .db
@@ -2311,7 +2397,15 @@ impl ProxyService {
             .map_err(|e| format!("更新本地当前供应商失败: {e}"))?;
 
         if should_sync_live {
-            self.update_live_backup_from_provider(app_type_enum.as_str(), &provider)
+            let backup_snapshot = self
+                .prepare_live_backup_from_provider_with_resolution(
+                    app_type_enum.as_str(),
+                    &provider,
+                    previous_provider.as_ref(),
+                    live_merge::ConflictPolicy::PreferIncoming.into(),
+                )
+                .await?;
+            self.save_live_backup_snapshot(app_type_enum.as_str(), &backup_snapshot)
                 .await?;
             self.write_failover_live_snapshot_for_provider(&app_type_enum, &provider)
                 .await?;
@@ -7245,6 +7339,22 @@ requires_openai_auth = true
             Some("kept"),
             "hot switch should preserve local-only live backup fields while refreshing provider-owned fields"
         );
+        let backup_model_providers = parsed_backup
+            .get("model_providers")
+            .and_then(|v| v.as_table())
+            .expect("backup model_providers");
+        assert!(
+            backup_model_providers.get("rightcode").is_none(),
+            "hot switch should remove stale provider-owned config sections from the restore backup"
+        );
+        assert_eq!(
+            backup_model_providers
+                .get("aihubmix")
+                .and_then(|v| v.get("base_url"))
+                .and_then(|v| v.as_str()),
+            Some("https://aihubmix.example/v1"),
+            "hot switch should keep the selected provider config section in the restore backup"
+        );
 
         let snapshot = db
             .get_failover_live_snapshot("codex", "b")
@@ -7342,6 +7452,22 @@ requires_openai_auth = true
             parsed_restored.get("local_only").and_then(|v| v.as_str()),
             Some("kept"),
             "restore should preserve local-only live backup fields"
+        );
+        let restored_model_providers = parsed_restored
+            .get("model_providers")
+            .and_then(|v| v.as_table())
+            .expect("restored model_providers");
+        assert!(
+            restored_model_providers.get("rightcode").is_none(),
+            "restore should not bring back stale provider-owned config sections"
+        );
+        assert_eq!(
+            restored_model_providers
+                .get("aihubmix")
+                .and_then(|v| v.get("base_url"))
+                .and_then(|v| v.as_str()),
+            Some("https://aihubmix.example/v1"),
+            "restore should keep the selected provider config section"
         );
         assert_eq!(
             restored

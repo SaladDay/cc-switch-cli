@@ -4270,12 +4270,10 @@ pub mod texts {
             } else {
                 "修改监听地址：需先停止本地代理。监听端口可以修改。改完后重新启动路由生效。"
             }
+        } else if current_app_is_active {
+            "Listen address: stop the proxy to edit. Listen port: stop this app's route to edit. Restart routing after changes."
         } else {
-            if current_app_is_active {
-                "Listen address: stop the proxy to edit. Listen port: stop this app's route to edit. Restart routing after changes."
-            } else {
-                "Listen address: stop the proxy to edit. Listen port can be edited. Restart routing after changes."
-            }
+            "Listen address: stop the proxy to edit. Listen port can be edited. Restart routing after changes."
         }
     }
 
