@@ -1396,6 +1396,9 @@ mod tests {
         let err = model_fetch_target(&provider, &AppType::OpenCode)
             .expect_err("empty base url should be rejected");
 
-        assert!(err.to_string().contains("No API URL configured"));
+        assert!(
+            err.to_string().contains("options.baseURL"),
+            "unexpected error: {err}"
+        );
     }
 }
