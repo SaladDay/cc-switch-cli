@@ -2767,10 +2767,6 @@ impl ProviderService {
         Self::apply_prepared_live_snapshot(&prepared)
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "dispatch wrapper threads app-specific live sync context"
-    )]
     fn prepare_live_snapshot(
         app_type: &AppType,
         provider: &Provider,
