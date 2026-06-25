@@ -370,9 +370,6 @@ pub(crate) fn handle_action(
         }
         Action::EditorSubmit { submit, content } => editor::submit(&mut ctx, submit, content),
         Action::ProviderSwitch { id } => providers::switch(&mut ctx, id),
-        Action::ProviderSwitchResolveLiveConflicts { id, policy } => {
-            providers::switch_with_conflict_policy(&mut ctx, id, policy)
-        }
         Action::ProviderRemoveFromConfig { id } => providers::remove_from_config(&mut ctx, id),
         Action::ProviderSetDefaultModel {
             provider_id,

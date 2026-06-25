@@ -702,10 +702,8 @@ fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         return Err(AppError::Message(format!("Provider '{}' not found", id)));
     };
 
-    // 执行切换
-    with_prompt_conflict_resolution(|resolution| {
-        ProviderService::switch_with_resolution(&state, app_type.clone(), id, resolution)
-    })?;
+    // 执行切换（upstream parity：干净写入，无冲突提示）
+    ProviderService::switch(&state, app_type.clone(), id)?;
     if let Err(err) =
         crate::claude_plugin::sync_claude_plugin_on_provider_switch(&app_type, &provider)
     {

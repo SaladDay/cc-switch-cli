@@ -241,7 +241,6 @@ impl ProviderService {
     ) -> Result<(), AppError> {
         let prepared = Self::prepare_claude_live_write(
             provider,
-            None,
             common_config_snippet,
             previous_common_config_snippet,
             apply_common_config,
@@ -258,7 +257,6 @@ impl ProviderService {
     ) -> Result<(), AppError> {
         let prepared = Self::prepare_claude_live_write(
             provider,
-            None,
             common_config_snippet,
             None,
             apply_common_config,
@@ -270,7 +268,6 @@ impl ProviderService {
 
     pub(super) fn prepare_claude_live_write(
         provider: &Provider,
-        _live_merge_base: Option<&Value>,
         common_config_snippet: Option<&str>,
         _previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,

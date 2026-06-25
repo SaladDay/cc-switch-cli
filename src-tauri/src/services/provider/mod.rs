@@ -142,7 +142,6 @@ struct PostCommitAction {
     app_type: AppType,
     provider: Provider,
     previous_provider: Option<Provider>,
-    claude_live_merge_base: Option<Value>,
     backup: LiveSnapshot,
     sync_mcp: bool,
     refresh_snapshot: bool,
@@ -829,7 +828,6 @@ impl ProviderService {
                 &action.app_type,
                 &action.provider,
                 action.previous_provider.as_ref(),
-                action.claude_live_merge_base.as_ref(),
                 action.common_config_snippet.as_deref(),
                 action.previous_common_config_snippet.as_deref(),
                 apply_common_config,
@@ -1302,7 +1300,6 @@ impl ProviderService {
             app_type: app_type.clone(),
             provider,
             previous_provider: None,
-            claude_live_merge_base: None,
             backup: Self::capture_live_snapshot(app_type)?,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
             refresh_snapshot: false,
@@ -1969,7 +1966,6 @@ impl ProviderService {
                     app_type: app_type_clone.clone(),
                     provider: provider_to_store.clone(),
                     previous_provider: None,
-                    claude_live_merge_base: None,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
@@ -2132,7 +2128,6 @@ impl ProviderService {
                     app_type: app_type_clone.clone(),
                     provider: merged,
                     previous_provider,
-                    claude_live_merge_base: None,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
@@ -2701,74 +2696,6 @@ impl ProviderService {
         Ok(())
     }
 
-    pub(crate) fn preview_switch_live_conflicts(
-        state: &AppState,
-        app_type: AppType,
-        provider_id: &str,
-    ) -> Result<Vec<live_merge::ConfigConflict>, AppError> {
-        if !app_type.is_additive_mode() {
-            let providers = state.db.get_all_providers(app_type.as_str())?;
-            providers.get(provider_id).ok_or_else(|| {
-                AppError::localized(
-                    "provider.not_found",
-                    format!("供应商不存在: {provider_id}"),
-                    format!("Provider not found: {provider_id}"),
-                )
-            })?;
-
-            let is_app_taken_over =
-                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                    .ok()
-                    .flatten()
-                    .is_some();
-            let running_takeover_active = state
-                .proxy_service
-                .is_app_takeover_active_blocking(&app_type)
-                .map_err(AppError::Message)?;
-            let live_taken_over = state
-                .proxy_service
-                .detect_takeover_in_live_config_for_app(&app_type);
-            if is_app_taken_over || live_taken_over || running_takeover_active {
-                return Ok(Vec::new());
-            }
-        }
-
-        let effective_current_provider = if app_type.is_additive_mode() {
-            None
-        } else {
-            crate::settings::get_effective_current_provider(&state.db, &app_type)?
-        };
-        let previous_common_config_snippet = if app_type.is_additive_mode() {
-            None
-        } else {
-            state.db.get_config_snippet(app_type.as_str())?
-        };
-        let mut candidate = {
-            let guard = state.config.read().map_err(AppError::from)?;
-            guard.clone()
-        };
-        let action = Self::prepare_switch_post_commit_action(
-            &mut candidate,
-            &app_type,
-            provider_id,
-            effective_current_provider.as_deref(),
-            previous_common_config_snippet,
-        )?;
-
-        let mut collector = live_merge::ConflictCollector::default();
-        {
-            let resolver = &mut collector as &mut dyn live_merge::ConflictResolver;
-            let resolver = std::cell::RefCell::new(resolver);
-            Self::prepare_post_commit_action(
-                state,
-                action,
-                live_merge::ConflictResolution::Resolver(&resolver),
-            )?;
-        }
-
-        Ok(collector.into_conflicts())
-    }
-
     fn prepare_switch_post_commit_action(
         config: &mut MultiAppConfig,
         app_type: &AppType,
@@ -2798,7 +2725,6 @@ impl ProviderService {
                 app_type: app_type.clone(),
                 provider,
                 previous_provider: None,
-                claude_live_merge_base: None,
                 backup: Self::capture_live_snapshot(app_type)?,
                 sync_mcp: matches!(app_type, AppType::OpenCode),
                 refresh_snapshot: false,
@@ -2818,14 +2744,6 @@ impl ProviderService {
                     .and_then(|manager| manager.providers.get(current_id))
                     .cloned()
             });
-        let claude_live_merge_base =
-            if matches!(app_type, AppType::Claude) && get_claude_settings_path().exists() {
-                previous_provider
-                    .as_ref()
-                    .map(|provider| provider.settings_config.clone())
-            } else {
-                None
-            };
         let provider = match app_type {
             AppType::Codex => {
                 Self::prepare_switch_codex(config, provider_id, effective_current_provider)?
@@ -2845,7 +2763,6 @@ impl ProviderService {
             app_type: app_type.clone(),
             provider,
             previous_provider,
-            claude_live_merge_base,
             backup,
             sync_mcp: true,
             refresh_snapshot: true,
@@ -2971,7 +2888,6 @@ impl ProviderService {
             app_type,
             provider,
             None,
-            None,
             common_config_snippet,
             previous_common_config_snippet,
             apply_common_config,
@@ -2988,7 +2904,6 @@ impl ProviderService {
         app_type: &AppType,
         provider: &Provider,
         previous_provider: Option<&Provider>,
-        claude_live_merge_base: Option<&Value>,
         common_config_snippet: Option<&str>,
         previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
@@ -3012,7 +2927,6 @@ impl ProviderService {
             ),
             AppType::Claude => Self::prepare_claude_live_write(
                 provider,
-                claude_live_merge_base,
                 common_config_snippet,
                 previous_common_config_snippet,
                 apply_common_config,

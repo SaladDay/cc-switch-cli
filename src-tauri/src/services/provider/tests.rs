@@ -1033,7 +1033,9 @@ fn setup_claude_switch_preview_state(live_settings: Value) -> (TempDir, EnvGuard
 
 #[test]
 #[serial]
-fn preview_switch_live_conflicts_ignores_expected_current_provider_changes() {
+fn switch_claude_writes_target_when_live_matches_current_provider() {
+    // When the live file matches the current provider exactly, switching is a
+    // clean write of the target provider's values (no conflict is surfaced).
     let (_temp_home, _env, state) = setup_claude_switch_preview_state(json!({
         "env": {
             "ANTHROPIC_AUTH_TOKEN": "token1",
@@ -1041,13 +1043,18 @@ fn preview_switch_live_conflicts_ignores_expected_current_provider_changes() {
         }
     }));
 
-    let conflicts = ProviderService::preview_switch_live_conflicts(&state, AppType::Claude, "p2")
-        .expect("preview switch conflicts");
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch should succeed");
 
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
     assert_eq!(
-        conflicts,
-        Vec::new(),
-        "switching from the current provider's live values to the target provider should not be treated as a local live conflict"
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token2"),
+    );
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str),
+        Some("https://claude.two"),
     );
 }
 
@@ -1107,7 +1114,9 @@ fn switch_overwrites_claude_settings_when_live_missing_target_field() {
 
 #[test]
 #[serial]
-fn preview_switch_live_conflicts_ignores_missing_claude_settings_file() {
+fn switch_claude_writes_target_when_live_settings_file_missing() {
+    // With no live settings.json present, switching is a clean write that
+    // creates the file with the target provider's values.
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::config::get_claude_config_dir()).expect("create ~/.claude");
@@ -1155,13 +1164,13 @@ fn preview_switch_live_conflicts_ignores_missing_claude_settings_file() {
         .set_current_provider(AppType::Claude.as_str(), "p1")
         .expect("set db current provider");
 
-    let conflicts = ProviderService::preview_switch_live_conflicts(&state, AppType::Claude, "p2")
-        .expect("preview switch conflicts");
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch should succeed");
 
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
     assert_eq!(
-        conflicts,
-        Vec::new(),
-        "missing live settings should be treated as an empty destination, not as removed current-provider fields"
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("token2"),
     );
 }
 

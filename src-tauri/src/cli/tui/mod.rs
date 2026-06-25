@@ -1079,7 +1079,6 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ConfigWebDavMigrateV1ToV2 => CacheInvalidation::AppStateRecreated,
 
         Action::ProviderSwitch { .. }
-        | Action::ProviderSwitchResolveLiveConflicts { .. }
         | Action::ProviderRemoveFromConfig { .. }
         | Action::ProviderSetDefaultModel { .. }
         | Action::ProviderImportLiveConfig
