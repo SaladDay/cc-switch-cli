@@ -857,10 +857,14 @@ trust_level = "trusted"
         "state.save should persist the de-duplicated provider snapshot"
     );
 
+    // Upstream parity (clean overwrite): switching to p2 OVERWRITES config.toml
+    // with p2's effective config. p2 is not opted into the common config, so the
+    // runtime project trust (auto-extracted from p1's live config) is not forced
+    // into p2's live file. It is preserved in the common snippet instead.
     let p2_live = std::fs::read_to_string(get_codex_config_path()).expect("read p2 live config");
     assert!(
-        p2_live.contains("/tmp/codex-project-a"),
-        "target provider live config should preserve local runtime project trust during merge"
+        !p2_live.contains("/tmp/codex-project-a"),
+        "clean overwrite should not inject p1's runtime project trust into p2's live config"
     );
 
     ProviderService::switch_with_resolution(
@@ -870,10 +874,13 @@ trust_level = "trusted"
         prefer_incoming_conflicts(),
     )
     .expect("switch back to p1");
+    // Switching back to p1 reapplies its common-config opt-in (set during the
+    // backfill that auto-extracted the runtime projects), so the project trust
+    // returns to the live config via the common snippet.
     let p1_live = std::fs::read_to_string(get_codex_config_path()).expect("read p1 live config");
     assert!(
         p1_live.contains("[projects.\"/tmp/codex-project-a\"]"),
-        "runtime project trust should survive switching away and back"
+        "runtime project trust should survive switching away and back via the common snippet"
     );
 }
 
