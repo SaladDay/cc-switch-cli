@@ -244,14 +244,30 @@ impl ProviderService {
         // settings (provider config + common-config snippet) and OVERWRITE
         // settings.json. Non-provider fields survive via the common-config
         // snippet, not via a merge with the existing live file.
-        let settings = Self::build_effective_live_snapshot(
+        let mut settings = Self::build_effective_live_snapshot(
             &AppType::Claude,
             provider,
             common_config_snippet,
             apply_common_config,
         )?;
+        // Upstream parity (sanitize_claude_settings_for_live): CC-Switch's
+        // internal-only fields must never be written into Claude Code's
+        // settings.json. The stored provider snapshot keeps them (meta /
+        // settings_config), so this only strips them from the live file.
+        Self::sanitize_claude_settings_for_live(&mut settings);
 
         Ok(PreparedLiveWrite::Claude { settings })
+    }
+
+    /// Mirror of upstream `sanitize_claude_settings_for_live`: remove CC-Switch
+    /// internal-only fields that must not leak into Claude Code's settings.json.
+    fn sanitize_claude_settings_for_live(settings: &mut Value) {
+        if let Some(obj) = settings.as_object_mut() {
+            obj.remove("api_format");
+            obj.remove("apiFormat");
+            obj.remove("openrouter_compat_mode");
+            obj.remove("openrouterCompatMode");
+        }
     }
 
     pub(super) fn apply_claude_live_write(prepared: &PreparedLiveWrite) -> Result<(), AppError> {

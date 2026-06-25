@@ -192,12 +192,11 @@ impl ProviderService {
     pub(super) fn prepare_gemini_live_write(
         provider: &Provider,
         common_config_snippet: Option<&str>,
-        previous_common_config_snippet: Option<&str>,
+        _previous_common_config_snippet: Option<&str>,
         force_sync: bool,
     ) -> Result<PreparedLiveWrite, AppError> {
         use crate::gemini_config::{
-            env_to_json, get_gemini_settings_path, json_to_env, read_gemini_env,
-            validate_gemini_settings_strict,
+            get_gemini_settings_path, json_to_env, validate_gemini_settings_strict,
         };
 
         let auth_type = Self::detect_gemini_auth_type(provider);
@@ -212,42 +211,18 @@ impl ProviderService {
             common_config_snippet.is_some(),
         )?;
 
-        let incoming_env = match auth_type {
-            GeminiAuthType::GoogleOfficial => std::collections::HashMap::new(),
+        // Upstream parity (write_gemini_live): the .env file is a full OVERWRITE
+        // with the provider's effective env (`json_to_env(provider.settings_config)`
+        // upstream), for BOTH auth types. Google Official carries OAuth and skips
+        // the API-key validation, but still writes the provider's env verbatim
+        // (e.g. GEMINI_MODEL / custom vars) — it does not preserve the prior
+        // file's unrelated keys.
+        let env = match auth_type {
+            GeminiAuthType::GoogleOfficial => json_to_env(&content_to_write)?,
             GeminiAuthType::ApiKey => {
                 validate_gemini_settings_strict(&content_to_write)?;
                 json_to_env(&content_to_write)?
             }
-        };
-        let mut local_env = {
-            let local_env = read_gemini_env()?;
-            let local_settings = env_to_json(&local_env);
-            let stripped_settings =
-                common_config::strip_common_config_snippet_from_live_settings_or_provider_snapshot(
-                    &AppType::Gemini,
-                    provider,
-                    local_settings,
-                    previous_common_config_snippet,
-                );
-            json_to_env(&stripped_settings)?
-        };
-        if matches!(auth_type, GeminiAuthType::GoogleOfficial) {
-            for key in [
-                "GEMINI_API_KEY",
-                "GOOGLE_GEMINI_BASE_URL",
-                "GEMINI_BASE_URL",
-                "GEMINI_MODEL",
-            ] {
-                local_env.remove(key);
-            }
-        }
-        // Upstream parity (write_gemini_live): the .env file is a full overwrite
-        // with the provider's effective env for API-key providers. Google
-        // Official providers carry no API-key env, so we keep the local env with
-        // the stale API-key keys stripped above (preserving unrelated user keys).
-        let env = match auth_type {
-            GeminiAuthType::GoogleOfficial => local_env,
-            GeminiAuthType::ApiKey => incoming_env,
         };
 
         let mut incoming_config = match content_to_write.get("config") {

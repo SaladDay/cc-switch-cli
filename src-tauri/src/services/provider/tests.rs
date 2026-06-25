@@ -1032,6 +1032,72 @@ fn switch_overwrites_claude_settings_discarding_unstored_live_edit() {
 
 #[test]
 #[serial]
+fn switch_claude_sanitizes_internal_only_fields_from_live_settings() {
+    // Upstream parity (sanitize_claude_settings_for_live): CC-Switch internal-only
+    // fields (api_format / apiFormat / openrouter_compat_mode / openrouterCompatMode)
+    // must never be written into Claude Code's settings.json, even though the
+    // stored provider snapshot carries them.
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::config::get_claude_config_dir()).expect("create ~/.claude");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({ "env": { "ANTHROPIC_AUTH_TOKEN": "t1" } }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_AUTH_TOKEN": "t2" },
+                    "api_format": "openai_chat",
+                    "apiFormat": "openai_chat",
+                    "openrouter_compat_mode": true,
+                    "openrouterCompatMode": true
+                }),
+                None,
+            ),
+        );
+    }
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch should succeed");
+
+    let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+    for key in [
+        "api_format",
+        "apiFormat",
+        "openrouter_compat_mode",
+        "openrouterCompatMode",
+    ] {
+        assert!(
+            live.get(key).is_none(),
+            "internal-only field `{key}` must be sanitized out of live settings.json, got:\n{live}"
+        );
+    }
+    assert_eq!(
+        live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+            .and_then(Value::as_str),
+        Some("t2"),
+        "the provider's real env must still be written"
+    );
+}
+
+#[test]
+#[serial]
 fn switch_overwrites_claude_settings_when_live_missing_target_field() {
     // The live file is missing the token that the target provider defines; a
     // clean write should still publish the target provider's value.
@@ -5491,10 +5557,13 @@ fn switching_google_official_gemini_clears_stale_api_key_env() {
             "Google official Gemini should clear stale {key} from .env"
         );
     }
-    assert_eq!(
-        live_env.get("USER_DEFINED_ENV").map(String::as_str),
-        Some("keep-me"),
-        "unrelated local Gemini env keys should be preserved"
+    // Upstream parity: write_gemini_env_atomic is a FULL overwrite of .env with
+    // the provider's env_map (no merge with the prior file). A Google-official
+    // provider with an empty env therefore writes an empty .env, clearing even
+    // unrelated keys — matching upstream write_gemini_live.
+    assert!(
+        !live_env.contains_key("USER_DEFINED_ENV"),
+        "Gemini .env is a full overwrite with the provider env (upstream parity); prior unrelated keys are not preserved"
     );
 
     let settings: Value = read_json_file(&crate::gemini_config::get_gemini_settings_path())
