@@ -1,9 +1,9 @@
-//! 流式健康检查服务
+//! 供应商连通性检查服务（reachability）
 //!
-//! 使用流式 API 进行快速健康检查，只需接收首个 chunk 即判定成功。
+//! 仅探测供应商 `base_url` 是否可达，不发送真实大模型请求。
+//! 收到任意 HTTP 响应即判定可达，只有 DNS、连接、TLS、超时等网络级错误判定失败。
 
 mod provider_extract;
-mod request_builders;
 mod service;
 #[cfg(test)]
 mod tests;

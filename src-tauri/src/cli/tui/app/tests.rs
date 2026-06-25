@@ -9400,6 +9400,16 @@ mod tests {
     }
 
     #[test]
+    fn settings_menu_exposes_codex_unified_session_history_item() {
+        assert!(
+            SettingsItem::ALL
+                .iter()
+                .any(|item| matches!(item, SettingsItem::CodexUnifiedSessionHistory)),
+            "Settings should expose unified Codex session history"
+        );
+    }
+
+    #[test]
     fn settings_managed_accounts_item_opens_page_and_refreshes_when_status_missing() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Settings;
@@ -9612,6 +9622,31 @@ mod tests {
         assert!(matches!(
             action,
             Action::SetOpenClawConfigDir { path: None }
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn settings_codex_unified_session_history_item_opens_confirm_overlay() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::CodexUnifiedSessionHistory))
+            .expect("CodexUnifiedSessionHistory missing from SettingsItem::ALL");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::SettingsSetCodexUnifiedSessionHistory { enabled: true },
+                ..
+            })
         ));
     }
 

@@ -258,6 +258,10 @@ fn merge_json_value(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recursive merge carries immutable context plus per-node state"
+)]
 fn merge_json_value_with_base(
     app_type: &AppType,
     target: &str,
@@ -449,6 +453,35 @@ pub fn merge_toml_live(
     Ok(local_doc.to_string())
 }
 
+pub fn merge_toml_with_base_live(
+    app_type: &AppType,
+    target: impl Into<String>,
+    local_text: &str,
+    base_text: &str,
+    incoming_text: &str,
+    resolution: ConflictResolution<'_>,
+) -> Result<String, AppError> {
+    let target = target.into();
+    let mut local_doc = parse_toml_live(local_text, &target)?;
+    let base_doc = parse_toml_live(base_text, &target)?;
+    let incoming_doc = parse_toml_live(incoming_text, &target)?;
+    let mut conflicts = Vec::new();
+    merge_toml_table_like_with_base(
+        app_type,
+        &target,
+        String::new(),
+        local_doc.as_table_mut(),
+        Some(base_doc.as_table()),
+        incoming_doc.as_table(),
+        resolution,
+        &mut conflicts,
+    )?;
+    if resolution.collects_failures() && !conflicts.is_empty() {
+        return Err(conflict_error(&conflicts));
+    }
+    Ok(local_doc.to_string())
+}
+
 fn parse_toml_live(text: &str, target: &str) -> Result<DocumentMut, AppError> {
     text.trim()
         .parse::<DocumentMut>()
@@ -500,6 +533,69 @@ fn merge_toml_item(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recursive TOML item merge carries immutable context plus per-node state"
+)]
+fn merge_toml_item_with_base(
+    app_type: &AppType,
+    target: &str,
+    path: String,
+    local: &mut Item,
+    base: Option<&Item>,
+    incoming: &Item,
+    resolution: ConflictResolution<'_>,
+    conflicts: &mut Vec<ConfigConflict>,
+) -> Result<(), AppError> {
+    if base.is_some_and(|base| toml_items_equal(base, incoming)) {
+        return Ok(());
+    }
+
+    if let Some(incoming_table) = incoming.as_table_like() {
+        if let Some(local_table) = local.as_table_like_mut() {
+            let base_table = base.and_then(Item::as_table_like);
+            return merge_toml_table_like_with_base(
+                app_type,
+                target,
+                path,
+                local_table,
+                base_table,
+                incoming_table,
+                resolution,
+                conflicts,
+            );
+        }
+    }
+
+    if toml_items_equal(local, incoming) {
+        return Ok(());
+    }
+
+    let local_matches_base = base.is_some_and(|base| toml_items_equal(local, base));
+    let incoming_changed_from_base = base.is_none_or(|base| !toml_items_equal(incoming, base));
+    if local_matches_base || !incoming_changed_from_base {
+        *local = incoming.clone();
+        return Ok(());
+    }
+
+    let conflict = ConfigConflict {
+        app_type: app_type.clone(),
+        target: target.to_string(),
+        path: display_path(&path),
+        local: toml_display(local),
+        incoming: toml_display(incoming),
+    };
+    if resolution.collects_failures() {
+        conflicts.push(conflict);
+    } else if matches!(
+        resolution.resolve(&[conflict])?,
+        Some(ConflictChoice::UseIncoming)
+    ) {
+        *local = incoming.clone();
+    }
+    Ok(())
+}
+
 fn merge_toml_table_like(
     app_type: &AppType,
     target: &str,
@@ -529,13 +625,121 @@ fn merge_toml_table_like(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recursive TOML table merge carries immutable context plus per-node state"
+)]
+fn merge_toml_table_like_with_base(
+    app_type: &AppType,
+    target: &str,
+    path: String,
+    local: &mut dyn TableLike,
+    base: Option<&dyn TableLike>,
+    incoming: &dyn TableLike,
+    resolution: ConflictResolution<'_>,
+    conflicts: &mut Vec<ConfigConflict>,
+) -> Result<(), AppError> {
+    for (key, incoming_item) in incoming.iter() {
+        let next_path = toml_child_path(&path, key);
+        let base_item = base.and_then(|table| table.get(key));
+        match local.get_mut(key) {
+            Some(local_item) => merge_toml_item_with_base(
+                app_type,
+                target,
+                next_path,
+                local_item,
+                base_item,
+                incoming_item,
+                resolution,
+                conflicts,
+            )?,
+            None => {
+                if let Some(base_item) = base_item {
+                    if toml_items_equal(incoming_item, base_item) {
+                        continue;
+                    }
+
+                    let conflict = ConfigConflict {
+                        app_type: app_type.clone(),
+                        target: target.to_string(),
+                        path: display_path(&next_path),
+                        local: "<removed>".to_string(),
+                        incoming: toml_display(incoming_item),
+                    };
+                    if resolution.collects_failures() {
+                        conflicts.push(conflict);
+                    } else if matches!(
+                        resolution.resolve(&[conflict])?,
+                        Some(ConflictChoice::UseIncoming)
+                    ) {
+                        local.insert(key, incoming_item.clone());
+                    }
+                } else {
+                    local.insert(key, incoming_item.clone());
+                }
+            }
+        }
+    }
+
+    if let Some(base) = base {
+        let removed_keys = base
+            .iter()
+            .filter(|(key, _)| !incoming.contains_key(key) && local.contains_key(key))
+            .map(|(key, base_item)| (key.to_string(), base_item.clone()))
+            .collect::<Vec<_>>();
+        for (key, base_item) in removed_keys {
+            let Some(local_item) = local.get(&key) else {
+                continue;
+            };
+            let next_path = toml_child_path(&path, &key);
+            if toml_items_equal(local_item, &base_item) {
+                local.remove(&key);
+                continue;
+            }
+
+            let conflict = ConfigConflict {
+                app_type: app_type.clone(),
+                target: target.to_string(),
+                path: display_path(&next_path),
+                local: toml_display(local_item),
+                incoming: "<removed>".to_string(),
+            };
+            if resolution.collects_failures() {
+                conflicts.push(conflict);
+            } else if matches!(
+                resolution.resolve(&[conflict])?,
+                Some(ConflictChoice::UseIncoming)
+            ) {
+                local.remove(&key);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn toml_items_equal(left: &Item, right: &Item) -> bool {
-    match (left.as_value(), right.as_value()) {
-        (Some(left_value), Some(right_value)) => {
+    match (
+        left.as_value(),
+        right.as_value(),
+        left.as_table_like(),
+        right.as_table_like(),
+    ) {
+        (Some(left_value), Some(right_value), _, _) => {
             left_value.to_string().trim() == right_value.to_string().trim()
         }
+        (_, _, Some(left_table), Some(right_table)) => toml_tables_equal(left_table, right_table),
         _ => left.to_string().trim() == right.to_string().trim(),
     }
+}
+
+fn toml_tables_equal(left: &dyn TableLike, right: &dyn TableLike) -> bool {
+    left.iter().count() == right.iter().count()
+        && left.iter().all(|(key, left_item)| {
+            right
+                .get(key)
+                .is_some_and(|right_item| toml_items_equal(left_item, right_item))
+        })
 }
 
 fn json_child_path(parent: &str, key: &str) -> String {
@@ -918,6 +1122,63 @@ api_key_env_var = "KEY"
         .unwrap_err();
 
         assert!(err.to_string().contains("model"));
+    }
+
+    #[test]
+    fn toml_merge_with_base_removes_deleted_incoming_sections_when_local_matches_base() {
+        let base = r#"
+model_provider = "rightcode"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+"#;
+        let local = r#"
+model_provider = "rightcode"
+local_only = "kept"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+"#;
+        let incoming = r#"
+model_provider = "aihubmix"
+
+[model_providers.aihubmix]
+name = "AiHubMix"
+base_url = "https://aihubmix.example/v1"
+wire_api = "responses"
+"#;
+
+        let merged = merge_toml_with_base_live(
+            &AppType::Codex,
+            "config.toml",
+            local,
+            base,
+            incoming,
+            ConflictPolicy::PreferIncoming.into(),
+        )
+        .unwrap();
+        let parsed: toml::Value = toml::from_str(&merged).expect("parse merged TOML");
+        let providers = parsed
+            .get("model_providers")
+            .and_then(|value| value.as_table())
+            .expect("model providers table");
+
+        assert!(providers.get("rightcode").is_none());
+        assert_eq!(
+            providers
+                .get("aihubmix")
+                .and_then(|provider| provider.get("base_url"))
+                .and_then(|value| value.as_str()),
+            Some("https://aihubmix.example/v1")
+        );
+        assert_eq!(
+            parsed.get("local_only").and_then(|value| value.as_str()),
+            Some("kept")
+        );
     }
 
     #[test]

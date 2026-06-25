@@ -518,6 +518,9 @@ pub(crate) fn handle_action(
             );
             Ok(())
         }
+        Action::SetCodexUnifiedSessionHistory { enabled } => {
+            settings::set_codex_unified_session_history(&mut ctx, enabled)
+        }
         Action::SetProxyEnabled { enabled } => settings::set_proxy_enabled(&mut ctx, enabled),
         Action::SetProxyListenAddress { address } => {
             settings::set_proxy_listen_address(&mut ctx, address)

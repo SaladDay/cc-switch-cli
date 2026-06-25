@@ -1788,8 +1788,7 @@ fn switch_provider_codex_rejects_missing_auth() {
 
 #[tokio::test]
 #[serial]
-async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_preserves_restore_backup(
-) {
+async fn switch_provider_under_takeover_refreshes_claude_restore_backup_to_selected_provider() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -1799,19 +1798,20 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
         std::fs::create_dir_all(parent).expect("create claude settings dir");
     }
 
-    let legacy_live = json!({
+    let provider_a_live = json!({
         "env": {
-            "ANTHROPIC_API_KEY": "fresh-key",
+            "ANTHROPIC_API_KEY": "stale-key",
+            "ANTHROPIC_BASE_URL": "https://a.example",
             "LOCAL_ONLY": "preserve-me"
         },
         "workspace": {
-            "path": "/tmp/new-workspace",
+            "path": "/tmp/old-workspace",
             "localOnly": true
         }
     });
     std::fs::write(
         &settings_path,
-        serde_json::to_string_pretty(&legacy_live).expect("serialize legacy live"),
+        serde_json::to_string_pretty(&provider_a_live).expect("serialize provider A live"),
     )
     .expect("seed claude live config");
 
@@ -1827,7 +1827,11 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
                 "old-provider".to_string(),
                 "Legacy Claude".to_string(),
                 json!({
-                    "env": { "ANTHROPIC_API_KEY": "stale-key" }
+                    "env": {
+                        "ANTHROPIC_API_KEY": "stale-key",
+                        "ANTHROPIC_BASE_URL": "https://a.example"
+                    },
+                    "workspace": { "path": "/tmp/old-workspace" }
                 }),
                 None,
             ),
@@ -1848,6 +1852,18 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
         manager
             .providers
             .insert("new-provider".to_string(), new_provider);
+        manager.providers.insert(
+            "future-provider".to_string(),
+            Provider::with_id(
+                "future-provider".to_string(),
+                "Future Claude".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "future-key" },
+                    "workspace": { "path": "/tmp/future-workspace" }
+                }),
+                None,
+            ),
+        );
     }
     config.common_config_snippets.claude = Some(
         serde_json::json!({
@@ -1907,18 +1923,33 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
     assert_eq!(
         backup_after_switch
             .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("fresh-key"),
+        "takeover-time switch should refresh the restore backup to the selected provider"
+    );
+    assert_eq!(
+        backup_after_switch
+            .get("env")
             .and_then(|env| env.get("LOCAL_ONLY"))
             .and_then(|value| value.as_str()),
         Some("preserve-me"),
-        "takeover-time switch should preserve the original live backup used for restore"
+        "takeover-time switch should keep local-only live config values in the restore backup"
+    );
+    assert!(
+        backup_after_switch
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .is_none(),
+        "takeover-time switch should remove provider-owned keys that are absent from the selected provider"
     );
     assert_eq!(
         backup_after_switch
             .get("env")
             .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             .and_then(|value| value.as_str()),
-        None,
-        "provider common config belongs in generated failover snapshots, not the restore backup"
+        Some("1"),
+        "selected-provider restore backup should use normal Claude common snippet semantics"
     );
 
     let failover_snapshot = state
@@ -1952,7 +1983,7 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
             .and_then(|env| env.get("ANTHROPIC_API_KEY"))
             .and_then(|value| value.as_str()),
         Some("fresh-key"),
-        "restore after a takeover-time switch should recover the original local live config"
+        "restore after a takeover-time switch should recover the selected provider"
     );
     assert_eq!(
         restored_live
@@ -1962,12 +1993,44 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
         Some("preserve-me"),
         "restore after a takeover-time switch should keep local-only live config values"
     );
-    assert_eq!(
+    assert!(
         restored_live
             .get("env")
-            .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .is_none(),
+        "restore after a takeover-time switch should not restore stale provider-owned keys"
+    );
+    assert_ne!(
+        restored_live
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
             .and_then(|value| value.as_str()),
-        None,
-        "restore after takeover should not write provider common config into the preserved local backup"
+        Some("stale-key"),
+        "disable takeover must not restore the provider that was current when takeover started"
+    );
+
+    ProviderService::switch(&state, AppType::Claude, "future-provider")
+        .expect("switching away after takeover restore should succeed");
+
+    let saved_new_provider = saved_provider(AppType::Claude, "new-provider");
+    assert_eq!(
+        saved_new_provider
+            .settings_config
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("fresh-key"),
+        "switching after takeover restore should not backfill stale provider A into provider B"
+    );
+
+    let live_after_future_switch: serde_json::Value =
+        read_json_file(&settings_path).expect("read claude live settings after future switch");
+    assert_eq!(
+        live_after_future_switch
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("future-key"),
+        "switching after takeover restore should write provider C instead of stale provider A"
     );
 }

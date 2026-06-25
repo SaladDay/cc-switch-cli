@@ -2522,6 +2522,7 @@ pub(super) fn render_settings(
     let openclaw_config_dir = crate::settings::get_settings().openclaw_config_dir;
     let skip_claude_onboarding = crate::settings::get_skip_claude_onboarding();
     let claude_plugin_integration = crate::settings::get_enable_claude_plugin_integration();
+    let codex_unified_session_history = crate::settings::unify_codex_session_history();
 
     let rows_data = super::app::SettingsItem::ALL
         .iter()
@@ -2566,6 +2567,14 @@ pub(super) fn render_settings(
             super::app::SettingsItem::ClaudePluginIntegration => (
                 texts::enable_claude_plugin_integration_label().to_string(),
                 if claude_plugin_integration {
+                    texts::enabled().to_string()
+                } else {
+                    texts::disabled().to_string()
+                },
+            ),
+            super::app::SettingsItem::CodexUnifiedSessionHistory => (
+                texts::codex_unified_session_history_label().to_string(),
+                if codex_unified_session_history {
                     texts::enabled().to_string()
                 } else {
                     texts::disabled().to_string()

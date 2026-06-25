@@ -474,6 +474,15 @@ fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
     Ok(find_codex_model_template(&catalog))
 }
 
+fn load_codex_model_template_static() -> Option<Value> {
+    serde_json::from_str(include_str!("resources/gpt5_5_template.json"))
+        .map_err(|error| {
+            log::debug!("Failed to parse static Codex model template: {error}");
+            error
+        })
+        .ok()
+}
+
 fn load_codex_model_catalog_template() -> Result<Value, AppError> {
     if let Some(template) = load_codex_model_template_from_cache()? {
         return Ok(template);
@@ -481,9 +490,12 @@ fn load_codex_model_catalog_template() -> Result<Value, AppError> {
     if let Some(template) = load_codex_model_template_from_bundled()? {
         return Ok(template);
     }
+    if let Some(template) = load_codex_model_template_static() {
+        return Ok(template);
+    }
 
     Err(AppError::Message(format!(
-        "Codex model catalog template `{CODEX_MODEL_CATALOG_TEMPLATE_SLUG}` not found. Please start Codex once so models_cache.json is available, or ensure the `codex` CLI is on PATH."
+        "Codex model catalog template `{CODEX_MODEL_CATALOG_TEMPLATE_SLUG}` not found."
     )))
 }
 
@@ -1944,6 +1956,18 @@ name = "any"
 
     #[test]
     fn provider_live_write_projects_model_catalog_to_codex_files() {
+        assert_provider_live_write_projects_model_catalog_to_codex_files(true, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn provider_live_write_uses_static_model_template_without_codex_cache() {
+        assert_provider_live_write_projects_model_catalog_to_codex_files(false, "deepseek-v4-pro");
+    }
+
+    fn assert_provider_live_write_projects_model_catalog_to_codex_files(
+        seed_model_cache: bool,
+        model_id: &str,
+    ) {
         let _guard = lock_test_home_and_settings();
         let temp_home = TempDir::new().expect("create temp home");
         let codex_dir = temp_home.path().join(".codex");
@@ -1952,11 +1976,13 @@ name = "any"
         let _settings = SettingsGuard::with_codex_config_dir(Some(codex_dir.to_str().unwrap()));
         let _env = CodexHomeEnvGuard::new(None);
 
-        write_json_file(
-            &codex_dir.join("models_cache.json"),
-            &json!({ "models": [test_codex_model_template()] }),
-        )
-        .expect("seed model cache");
+        if seed_model_cache {
+            write_json_file(
+                &codex_dir.join("models_cache.json"),
+                &json!({ "models": [test_codex_model_template()] }),
+            )
+            .expect("seed model cache");
+        }
 
         let settings = json!({
             "auth": { "OPENAI_API_KEY": "sk-test" },
@@ -1970,8 +1996,8 @@ wire_api = "responses"
             "modelCatalog": {
                 "models": [
                     {
-                        "model": "deepseek-v4-flash",
-                        "displayName": "DeepSeek V4 Flash",
+                        "model": model_id,
+                        "displayName": "DeepSeek V4",
                         "contextWindow": "64000"
                     }
                 ]
@@ -2000,13 +2026,10 @@ wire_api = "responses"
             .and_then(Value::as_array)
             .and_then(|models| models.first())
             .expect("generated model");
-        assert_eq!(
-            model.get("slug").and_then(Value::as_str),
-            Some("deepseek-v4-flash")
-        );
+        assert_eq!(model.get("slug").and_then(Value::as_str), Some(model_id));
         assert_eq!(
             model.get("display_name").and_then(Value::as_str),
-            Some("DeepSeek V4 Flash")
+            Some("DeepSeek V4")
         );
         assert_eq!(
             model.get("context_window").and_then(Value::as_u64),
@@ -2019,7 +2042,7 @@ wire_api = "responses"
             live_settings
                 .pointer("/modelCatalog/models/0/model")
                 .and_then(Value::as_str),
-            Some("deepseek-v4-flash")
+            Some(model_id)
         );
 
         set_test_home_override(None);

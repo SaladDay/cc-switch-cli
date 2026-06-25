@@ -142,6 +142,7 @@ struct PostCommitAction {
     app_type: AppType,
     provider: Provider,
     previous_provider: Option<Provider>,
+    claude_live_merge_base: Option<Value>,
     backup: LiveSnapshot,
     sync_mcp: bool,
     refresh_snapshot: bool,
@@ -811,6 +812,7 @@ impl ProviderService {
                     .prepare_live_backup_from_provider_with_resolution(
                         action.app_type.as_str(),
                         &action.provider,
+                        action.previous_provider.as_ref(),
                         resolution,
                     ),
             )
@@ -827,6 +829,7 @@ impl ProviderService {
                 &action.app_type,
                 &action.provider,
                 action.previous_provider.as_ref(),
+                action.claude_live_merge_base.as_ref(),
                 action.common_config_snippet.as_deref(),
                 action.previous_common_config_snippet.as_deref(),
                 apply_common_config,
@@ -1299,6 +1302,7 @@ impl ProviderService {
             app_type: app_type.clone(),
             provider,
             previous_provider: None,
+            claude_live_merge_base: None,
             backup: Self::capture_live_snapshot(app_type)?,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
             refresh_snapshot: false,
@@ -1965,6 +1969,7 @@ impl ProviderService {
                     app_type: app_type_clone.clone(),
                     provider: provider_to_store.clone(),
                     previous_provider: None,
+                    claude_live_merge_base: None,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
@@ -2127,6 +2132,7 @@ impl ProviderService {
                     app_type: app_type_clone.clone(),
                     provider: merged,
                     previous_provider,
+                    claude_live_merge_base: None,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
@@ -2792,6 +2798,7 @@ impl ProviderService {
                 app_type: app_type.clone(),
                 provider,
                 previous_provider: None,
+                claude_live_merge_base: None,
                 backup: Self::capture_live_snapshot(app_type)?,
                 sync_mcp: matches!(app_type, AppType::OpenCode),
                 refresh_snapshot: false,
@@ -2803,6 +2810,22 @@ impl ProviderService {
         }
 
         let backup = Self::capture_live_snapshot(app_type)?;
+        let previous_provider = effective_current_provider
+            .filter(|current_id| *current_id != provider_id)
+            .and_then(|current_id| {
+                config
+                    .get_manager(app_type)
+                    .and_then(|manager| manager.providers.get(current_id))
+                    .cloned()
+            });
+        let claude_live_merge_base =
+            if matches!(app_type, AppType::Claude) && get_claude_settings_path().exists() {
+                previous_provider
+                    .as_ref()
+                    .map(|provider| provider.settings_config.clone())
+            } else {
+                None
+            };
         let provider = match app_type {
             AppType::Codex => {
                 Self::prepare_switch_codex(config, provider_id, effective_current_provider)?
@@ -2821,7 +2844,8 @@ impl ProviderService {
         Ok(PostCommitAction {
             app_type: app_type.clone(),
             provider,
-            previous_provider: None,
+            previous_provider,
+            claude_live_merge_base,
             backup,
             sync_mcp: true,
             refresh_snapshot: true,
@@ -2947,6 +2971,7 @@ impl ProviderService {
             app_type,
             provider,
             None,
+            None,
             common_config_snippet,
             previous_common_config_snippet,
             apply_common_config,
@@ -2955,10 +2980,15 @@ impl ProviderService {
         Self::apply_prepared_live_snapshot(&prepared)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "dispatch wrapper threads app-specific live sync context"
+    )]
     fn prepare_live_snapshot_with_resolution(
         app_type: &AppType,
         provider: &Provider,
         previous_provider: Option<&Provider>,
+        claude_live_merge_base: Option<&Value>,
         common_config_snippet: Option<&str>,
         previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
@@ -2982,6 +3012,7 @@ impl ProviderService {
             ),
             AppType::Claude => Self::prepare_claude_live_write(
                 provider,
+                claude_live_merge_base,
                 common_config_snippet,
                 previous_common_config_snippet,
                 apply_common_config,

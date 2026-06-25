@@ -799,6 +799,19 @@ impl App {
                     });
                     Action::None
                 }
+                Some(SettingsItem::CodexUnifiedSessionHistory) => {
+                    let current = crate::settings::unify_codex_session_history();
+                    let next = !current;
+
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_confirm_title().to_string(),
+                        message: texts::codex_unified_session_history_confirm(next),
+                        action: ConfirmAction::SettingsSetCodexUnifiedSessionHistory {
+                            enabled: next,
+                        },
+                    });
+                    Action::None
+                }
                 Some(SettingsItem::Proxy) => self.push_route_and_switch(Route::SettingsProxy),
                 Some(SettingsItem::ModelRoutes) => {
                     self.push_route_and_switch(Route::SettingsModelRoutes)

@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
-    routing::post,
-    Json, Router,
+    routing::get,
+    Router,
 };
 use cc_switch_lib::{AppType, Provider, ProviderMeta, StreamCheckConfig, StreamCheckService};
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::sync::Mutex;
 
 async fn bind_test_listener() -> tokio::net::TcpListener {
@@ -31,39 +31,34 @@ async fn bind_test_listener() -> tokio::net::TcpListener {
 
 #[derive(Clone, Default)]
 struct UpstreamState {
-    request_body: Arc<Mutex<Option<Value>>>,
+    request_method: Arc<Mutex<Option<Method>>>,
     authorization: Arc<Mutex<Option<String>>>,
     api_key: Arc<Mutex<Option<String>>>,
 }
 
-async fn handle_stream_check_responses(
+async fn handle_reachability_probe(
     State(state): State<UpstreamState>,
+    method: Method,
     headers: HeaderMap,
-    Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    *state.request_body.lock().await = Some(body);
+    *state.request_method.lock().await = Some(method);
     *state.authorization.lock().await = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(str::to_string);
     *state.api_key.lock().await = headers
         .get("x-api-key")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(str::to_string);
 
-    let sse = concat!(
-        "event: response.created\n",
-        "data: {\"response\":{\"id\":\"resp-stream-check\",\"model\":\"gpt-4.1-mini\"}}\n\n"
-    );
-
-    (StatusCode::OK, [("content-type", "text/event-stream")], sse)
+    StatusCode::UNAUTHORIZED
 }
 
 #[tokio::test]
-async fn stream_check_claude_openai_responses_uses_responses_endpoint() {
+async fn stream_check_claude_openai_responses_uses_base_url_reachability() {
     let upstream_state = UpstreamState::default();
     let upstream_router = Router::new()
-        .route("/v1/responses", post(handle_stream_check_responses))
+        .route("/", get(handle_reachability_probe))
         .with_state(upstream_state.clone());
 
     let upstream_listener = bind_test_listener().await;
@@ -97,80 +92,24 @@ async fn stream_check_claude_openai_responses_uses_responses_endpoint() {
         in_failover_queue: false,
     };
 
-    let config = StreamCheckConfig::default();
-    let result = StreamCheckService::check_with_retry(&AppType::Claude, &provider, &config)
-        .await
-        .expect("stream check should succeed");
-
-    assert!(result.success);
-    assert_eq!(result.http_status, Some(200));
-
-    let upstream_body = upstream_state
-        .request_body
-        .lock()
-        .await
-        .clone()
-        .expect("upstream should receive request body");
-    assert_eq!(
-        upstream_body.get("model").and_then(|v| v.as_str()),
-        Some(config.claude_model.as_str())
-    );
-    assert_eq!(
-        upstream_body
-            .pointer("/input/0/role")
-            .and_then(|v| v.as_str()),
-        Some("user")
-    );
-    assert_eq!(
-        upstream_body
-            .pointer("/input/0/content/0/type")
-            .and_then(|v| v.as_str()),
-        Some("input_text")
-    );
-    assert_eq!(
-        upstream_body
-            .pointer("/input/0/content/0/text")
-            .and_then(|v| v.as_str()),
-        Some(config.test_prompt.as_str())
-    );
-    assert_eq!(
-        upstream_body
-            .get("max_output_tokens")
-            .and_then(|v| v.as_u64()),
-        Some(16)
-    );
-    assert_eq!(
-        upstream_state.authorization.lock().await.as_deref(),
-        Some("Bearer sk-test-claude")
-    );
-    assert_eq!(upstream_state.api_key.lock().await.as_deref(), None);
-
-    upstream_handle.abort();
-}
-
-#[tokio::test]
-async fn stream_check_openclaw_returns_unsupported_before_auth_extraction() {
-    let provider = Provider::with_id(
-        "openclaw-check".to_string(),
-        "OpenClaw Check".to_string(),
-        json!({
-            "models": [
-                { "id": "gpt-4.1-mini" }
-            ]
-        }),
-        None,
-    );
-
-    let err = StreamCheckService::check_with_retry(
-        &AppType::OpenClaw,
+    let result = StreamCheckService::check_with_retry(
+        &AppType::Claude,
         &provider,
         &StreamCheckConfig::default(),
     )
     .await
-    .expect_err("OpenClaw stream check should be rejected as unsupported");
+    .expect("stream check should complete");
 
-    assert!(
-        err.to_string().contains("openclaw 暂不支持流式检查"),
-        "unexpected error: {err}"
+    assert!(result.success);
+    assert_eq!(result.message, "Reachable");
+    assert_eq!(result.http_status, Some(401));
+    assert!(result.model_used.is_empty());
+    assert_eq!(
+        upstream_state.request_method.lock().await.as_ref(),
+        Some(&Method::GET)
     );
+    assert_eq!(upstream_state.authorization.lock().await.as_deref(), None);
+    assert_eq!(upstream_state.api_key.lock().await.as_deref(), None);
+
+    upstream_handle.abort();
 }

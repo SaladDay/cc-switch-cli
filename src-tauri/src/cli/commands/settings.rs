@@ -439,9 +439,12 @@ fn set_codex_history_enabled(
     migrate_existing: bool,
     restore: bool,
 ) -> Result<(), AppError> {
-    let existing = crate::settings::get_settings();
-    let changed = existing.unify_codex_session_history != enabled;
-    if !changed {
+    let outcome = crate::services::codex_history::set_unified_session_history_enabled(
+        enabled,
+        migrate_existing,
+        restore,
+    )?;
+    if !outcome.changed {
         println!(
             "{}",
             info(&format!(
@@ -452,54 +455,19 @@ fn set_codex_history_enabled(
         return Ok(());
     }
 
-    let mut next = existing.clone();
-    next.unify_codex_session_history = enabled;
-    next.unify_codex_migrate_existing = if enabled && migrate_existing {
-        Some(true)
-    } else {
-        None
-    };
-
-    crate::settings::update_settings(next)?;
-    let state = match crate::store::AppState::try_new() {
-        Ok(state) => state,
-        Err(err) => {
-            rollback_codex_history_settings(&existing);
-            return Err(AppError::Message(format!(
-                "Unified Codex session history setting was rolled back because app state initialization failed: {err}"
-            )));
-        }
-    };
-    if let Err(err) = crate::services::provider::reapply_current_codex_official_live(&state) {
-        rollback_codex_history_settings(&existing);
-        return Err(AppError::Message(format!(
-            "Unified Codex session history setting was rolled back because live config rewrite failed: {err}"
-        )));
-    }
-
     if enabled {
-        if migrate_existing {
-            let outcome =
-                crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket()?;
-            print_codex_history_migration_outcome(&outcome);
+        if let Some(migration) = outcome.migration {
+            print_codex_history_migration_outcome(&migration);
         }
         println!("{}", success("Unified Codex session history enabled"));
     } else {
-        crate::settings::clear_codex_official_history_unify_migration()?;
-        crate::settings::clear_codex_unify_migrate_existing()?;
-        if restore {
-            restore_codex_history()?;
+        if let Some(restore) = outcome.restore {
+            print_codex_history_restore_outcome(&restore);
         }
         println!("{}", success("Unified Codex session history disabled"));
     }
 
     Ok(())
-}
-
-fn rollback_codex_history_settings(existing: &crate::settings::AppSettings) {
-    if let Err(err) = crate::settings::update_settings(existing.clone()) {
-        log::error!("Failed to roll back unified Codex session history setting: {err}");
-    }
 }
 
 fn migrate_codex_history_existing() -> Result<(), AppError> {
@@ -522,7 +490,14 @@ fn migrate_codex_history_existing() -> Result<(), AppError> {
 
 fn restore_codex_history() -> Result<(), AppError> {
     let outcome = crate::codex_history_migration::restore_codex_official_history_from_backups()?;
-    if let Some(reason) = outcome.skipped_reason {
+    print_codex_history_restore_outcome(&outcome);
+    Ok(())
+}
+
+fn print_codex_history_restore_outcome(
+    outcome: &crate::codex_history_migration::CodexOfficialHistoryRestoreOutcome,
+) {
+    if let Some(reason) = &outcome.skipped_reason {
         println!(
             "{}",
             info(&format!("Codex official history restore skipped: {reason}"))
@@ -536,7 +511,6 @@ fn restore_codex_history() -> Result<(), AppError> {
             ))
         );
     }
-    Ok(())
 }
 
 fn print_codex_history_migration_outcome(

@@ -80,6 +80,9 @@ impl App {
                     ConfirmAction::SettingsSetClaudePluginIntegration { enabled } => {
                         Action::SetClaudePluginIntegration { enabled: *enabled }
                     }
+                    ConfirmAction::SettingsSetCodexUnifiedSessionHistory { enabled } => {
+                        Action::SetCodexUnifiedSessionHistory { enabled: *enabled }
+                    }
                     ConfirmAction::VisibleAppsAutoDetection => {
                         Action::ConfirmVisibleAppsAutoDetection { use_auto: true }
                     }

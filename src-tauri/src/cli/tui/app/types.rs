@@ -446,6 +446,9 @@ pub enum ConfirmAction {
     SettingsSetClaudePluginIntegration {
         enabled: bool,
     },
+    SettingsSetCodexUnifiedSessionHistory {
+        enabled: bool,
+    },
     VisibleAppsAutoDetection,
     VisibleAppsSwitchToManual {
         apps: crate::settings::VisibleApps,

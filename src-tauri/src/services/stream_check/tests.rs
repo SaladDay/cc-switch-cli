@@ -1,4 +1,14 @@
+use std::sync::Arc;
+
+use axum::{
+    extract::State,
+    http::{Method, StatusCode, Uri},
+    response::IntoResponse,
+    routing::get,
+    Router,
+};
 use serde_json::json;
+use tokio::sync::Mutex;
 
 use crate::{
     app_config::AppType,
@@ -6,34 +16,57 @@ use crate::{
 };
 
 use super::service::StreamCheckService;
-use super::types::{AuthStrategy, HealthStatus, StreamCheckConfig};
+use super::types::{HealthStatus, StreamCheckConfig};
 
-fn claude_gemini_native_provider(key: &str) -> Provider {
-    let mut provider = Provider::with_id(
+fn make_provider(settings_config: serde_json::Value) -> Provider {
+    Provider::with_id(
         "p1".to_string(),
         "Provider One".to_string(),
-        json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://generativelanguage.googleapis.com",
-                "GEMINI_API_KEY": key
-            }
-        }),
+        settings_config,
         None,
+    )
+}
+
+async fn bind_test_listener() -> tokio::net::TcpListener {
+    let mut last_error = None;
+    for _ in 0..20 {
+        match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => return listener,
+            Err(error) => {
+                last_error = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
+    }
+
+    panic!(
+        "bind upstream listener: {:?}",
+        last_error.expect("listener bind should produce an error")
     );
-    provider.meta = Some(ProviderMeta {
-        api_format: Some("gemini_native".to_string()),
-        ..Default::default()
-    });
-    provider
+}
+
+#[derive(Clone, Default)]
+struct ReachabilityState {
+    request_method: Arc<Mutex<Option<Method>>>,
+    request_uri: Arc<Mutex<Option<Uri>>>,
+}
+
+async fn handle_reachability_probe(
+    State(state): State<ReachabilityState>,
+    method: Method,
+    uri: Uri,
+) -> impl IntoResponse {
+    *state.request_method.lock().await = Some(method);
+    *state.request_uri.lock().await = Some(uri);
+    StatusCode::NOT_FOUND
 }
 
 #[test]
-fn stream_check_default_config_matches_upstream_mvp() {
+fn stream_check_default_config_matches_upstream_reachability() {
     let config = StreamCheckConfig::default();
-    assert_eq!(config.timeout_secs, 45);
-    assert_eq!(config.max_retries, 2);
+    assert_eq!(config.timeout_secs, 8);
+    assert_eq!(config.max_retries, 1);
     assert_eq!(config.degraded_threshold_ms, 6000);
-    assert_eq!(config.test_prompt, "Who are you?");
 }
 
 #[test]
@@ -58,38 +91,40 @@ fn stream_check_should_retry_transient_errors() {
     assert!(StreamCheckService::should_retry("request timed out"));
     assert!(StreamCheckService::should_retry("connection abort"));
     assert!(!StreamCheckService::should_retry("API Key invalid"));
+    assert!(!StreamCheckService::should_retry(
+        "Connection failed: dns error"
+    ));
 }
 
 #[test]
-fn stream_check_parse_model_with_effort_supports_at_and_hash() {
-    let (model, effort) = StreamCheckService::parse_model_with_effort("gpt-5.1-codex@low");
-    assert_eq!(model, "gpt-5.1-codex");
-    assert_eq!(effort, Some("low".to_string()));
-
-    let (model, effort) = StreamCheckService::parse_model_with_effort("o1-preview#high");
-    assert_eq!(model, "o1-preview");
-    assert_eq!(effort, Some("high".to_string()));
-
-    let (model, effort) = StreamCheckService::parse_model_with_effort("gpt-4o-mini");
-    assert_eq!(model, "gpt-4o-mini");
-    assert_eq!(effort, None);
+fn stream_check_build_result_treats_any_http_status_as_reachable() {
+    for status in [200u16, 204, 401, 403, 404, 429, 500, 503] {
+        let result = StreamCheckService::build_result(Ok(status), 100, 6000);
+        assert!(result.success, "status {status} should be reachable");
+        assert_eq!(result.status, HealthStatus::Operational);
+        assert_eq!(result.message, "Reachable");
+        assert_eq!(result.http_status, Some(status));
+        assert!(result.model_used.is_empty());
+    }
 }
 
 #[test]
-fn stream_check_provider_test_config_overrides_global_defaults() {
+fn stream_check_build_result_marks_slow_reachable_response_degraded() {
+    let result = StreamCheckService::build_result(Ok(200), 6001, 6000);
+    assert!(result.success);
+    assert_eq!(result.status, HealthStatus::Degraded);
+}
+
+#[test]
+fn stream_check_provider_test_config_overrides_reachability_timing() {
     let config = StreamCheckConfig::default();
-    let mut provider = crate::provider::Provider::with_id(
-        "p1".to_string(),
-        "Provider One".to_string(),
-        json!({"env": {"ANTHROPIC_BASE_URL": "https://example.com"}}),
-        None,
-    );
+    let mut provider = make_provider(json!({"env": {"ANTHROPIC_BASE_URL": "https://example.com"}}));
     provider.meta = Some(crate::provider::ProviderMeta {
         test_config: Some(crate::provider::ProviderTestConfig {
             enabled: true,
-            test_model: Some("claude-override".to_string()),
+            test_model: Some("ignored-by-reachability".to_string()),
             timeout_secs: Some(12),
-            test_prompt: Some("ping".to_string()),
+            test_prompt: Some("ignored".to_string()),
             degraded_threshold_ms: Some(3456),
             max_retries: Some(4),
         }),
@@ -100,196 +135,134 @@ fn stream_check_provider_test_config_overrides_global_defaults() {
     assert_eq!(merged.timeout_secs, 12);
     assert_eq!(merged.max_retries, 4);
     assert_eq!(merged.degraded_threshold_ms, 3456);
-    assert_eq!(merged.claude_model, "claude-override");
-    assert_eq!(merged.codex_model, "claude-override");
-    assert_eq!(merged.gemini_model, "claude-override");
-    assert_eq!(merged.test_prompt, "ping");
 }
 
-#[test]
-fn stream_check_claude_gemini_native_keeps_upstream_anthropic_model_env() {
-    let config = StreamCheckConfig::default();
+#[tokio::test]
+async fn stream_check_codex_openai_chat_uses_base_url_reachability_probe() {
+    let upstream_state = ReachabilityState::default();
+    let upstream_router = Router::new()
+        .route("/", get(handle_reachability_probe))
+        .with_state(upstream_state.clone());
+    let upstream_listener = bind_test_listener().await;
+    let upstream_addr = upstream_listener
+        .local_addr()
+        .expect("read upstream address");
+    let upstream_handle = tokio::spawn(async move {
+        let _ = axum::serve(upstream_listener, upstream_router).await;
+    });
+
     let mut provider = Provider::with_id(
-        "p1".to_string(),
-        "Provider One".to_string(),
+        "codex-openai-chat-check".to_string(),
+        "Codex OpenAI Chat Check".to_string(),
         json!({
-            "env": {
-                "ANTHROPIC_MODEL": "claude-old",
-                "GEMINI_MODEL": "models/gemini-2.5-pro"
-            }
+            "base_url": format!("http://{}", upstream_addr),
+            "apiKey": "sk-test-codex",
+            "api_format": "openai_chat"
         }),
         None,
     );
     provider.meta = Some(ProviderMeta {
-        api_format: Some("gemini_native".to_string()),
-        ..Default::default()
+        api_format: Some("openai_chat".to_string()),
+        ..ProviderMeta::default()
     });
 
+    let result = StreamCheckService::check_with_retry(
+        &AppType::Codex,
+        &provider,
+        &StreamCheckConfig::default(),
+    )
+    .await
+    .expect("Codex chat provider should use reachability probe");
+
+    assert!(result.success);
+    assert_eq!(result.message, "Reachable");
+    assert_eq!(result.http_status, Some(404));
+    assert!(result.model_used.is_empty());
     assert_eq!(
-        StreamCheckService::resolve_test_model(&AppType::Claude, &provider, &config),
-        "claude-old"
+        upstream_state.request_method.lock().await.as_ref(),
+        Some(&Method::GET)
     );
+    assert_eq!(
+        upstream_state
+            .request_uri
+            .lock()
+            .await
+            .as_ref()
+            .map(Uri::path),
+        Some("/")
+    );
+
+    upstream_handle.abort();
 }
 
 #[test]
-fn stream_check_claude_gemini_native_extracts_google_api_key_auth() {
-    let mut provider = Provider::with_id(
-        "p1".to_string(),
-        "Provider One".to_string(),
+fn stream_check_resolves_opencode_base_url_explicit_wins() {
+    let provider = make_provider(json!({
+        "npm": "@ai-sdk/openai",
+        "options": { "baseURL": "https://proxy.local/v1", "apiKey": "k" },
+        "models": {},
+    }));
+    let resolved =
+        StreamCheckService::resolve_opencode_base_url(&provider, Some("@ai-sdk/openai")).unwrap();
+    assert_eq!(resolved, "https://proxy.local/v1");
+}
+
+#[test]
+fn stream_check_resolves_opencode_base_url_falls_back_for_known_npm() {
+    let provider = make_provider(json!({
+        "npm": "@ai-sdk/anthropic",
+        "options": { "apiKey": "k" },
+        "models": {},
+    }));
+    let resolved =
+        StreamCheckService::resolve_opencode_base_url(&provider, Some("@ai-sdk/anthropic"))
+            .unwrap();
+    assert_eq!(resolved, "https://api.anthropic.com");
+}
+
+#[test]
+fn stream_check_resolves_opencode_base_url_errors_for_openai_compatible_without_url() {
+    let provider = make_provider(json!({
+        "npm": "@ai-sdk/openai-compatible",
+        "options": { "apiKey": "k" },
+        "models": {},
+    }));
+    let result =
+        StreamCheckService::resolve_opencode_base_url(&provider, Some("@ai-sdk/openai-compatible"));
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn stream_check_openclaw_reachability_does_not_require_auth() {
+    let upstream_router = Router::new().route("/", get(|| async { StatusCode::NO_CONTENT }));
+    let upstream_listener = bind_test_listener().await;
+    let upstream_addr = upstream_listener
+        .local_addr()
+        .expect("read upstream address");
+    let upstream_handle = tokio::spawn(async move {
+        let _ = axum::serve(upstream_listener, upstream_router).await;
+    });
+
+    let provider = Provider::with_id(
+        "openclaw-check".to_string(),
+        "OpenClaw Check".to_string(),
         json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://generativelanguage.googleapis.com",
-                "GEMINI_API_KEY": "gemini-key"
-            }
+            "baseUrl": format!("http://{}", upstream_addr),
+            "models": [{ "id": "gpt-4.1-mini" }]
         }),
         None,
     );
-    provider.meta = Some(ProviderMeta {
-        api_format: Some("gemini_native".to_string()),
-        ..Default::default()
-    });
 
-    let auth = StreamCheckService::extract_auth(
+    let result = StreamCheckService::check_with_retry(
+        &AppType::OpenClaw,
         &provider,
-        &AppType::Claude,
-        "https://generativelanguage.googleapis.com",
+        &StreamCheckConfig::default(),
     )
-    .expect("extract Claude Gemini auth");
+    .await
+    .expect("OpenClaw reachability should not require auth");
 
-    assert_eq!(auth.strategy, AuthStrategy::Google);
-    assert_eq!(auth.api_key, "gemini-key");
-    assert_eq!(auth.access_token, None);
-}
+    assert!(result.success);
+    assert_eq!(result.http_status, Some(204));
 
-#[test]
-fn stream_check_claude_gemini_native_extracts_google_oauth_json_token() {
-    let provider = claude_gemini_native_provider(
-        r#"{"access_token":"access-123","refresh_token":"refresh-123"}"#,
-    );
-
-    let auth = StreamCheckService::extract_auth(
-        &provider,
-        &AppType::Claude,
-        "https://generativelanguage.googleapis.com",
-    )
-    .expect("extract Claude Gemini OAuth auth");
-
-    assert_eq!(auth.strategy, AuthStrategy::GoogleOAuth);
-    assert_eq!(auth.access_token.as_deref(), Some("access-123"));
-}
-
-#[test]
-fn stream_check_claude_gemini_native_trims_google_oauth_json() {
-    let provider = claude_gemini_native_provider(
-        "\n  {\"access_token\":\"access-123\",\"refresh_token\":\"refresh-123\"}\n",
-    );
-
-    let auth = StreamCheckService::extract_auth(
-        &provider,
-        &AppType::Claude,
-        "https://generativelanguage.googleapis.com",
-    )
-    .expect("extract Claude Gemini whitespace-padded OAuth JSON auth");
-
-    assert_eq!(auth.strategy, AuthStrategy::GoogleOAuth);
-    assert_eq!(
-        auth.api_key,
-        r#"{"access_token":"access-123","refresh_token":"refresh-123"}"#
-    );
-    assert_eq!(auth.access_token.as_deref(), Some("access-123"));
-}
-
-#[test]
-fn stream_check_claude_gemini_native_trims_raw_google_oauth_token() {
-    let provider = claude_gemini_native_provider("\nya29.raw-token-value\n");
-
-    let auth = StreamCheckService::extract_auth(
-        &provider,
-        &AppType::Claude,
-        "https://generativelanguage.googleapis.com",
-    )
-    .expect("extract Claude Gemini raw OAuth auth");
-
-    assert_eq!(auth.strategy, AuthStrategy::GoogleOAuth);
-    assert_eq!(auth.api_key, "ya29.raw-token-value");
-    assert_eq!(auth.access_token.as_deref(), Some("ya29.raw-token-value"));
-}
-
-#[test]
-fn stream_check_claude_gemini_native_refresh_only_json_does_not_expose_empty_bearer() {
-    let provider = claude_gemini_native_provider(
-        r#"{"refresh_token":"rt-abc","client_id":"cid","client_secret":"cs"}"#,
-    );
-
-    let auth = StreamCheckService::extract_auth(
-        &provider,
-        &AppType::Claude,
-        "https://generativelanguage.googleapis.com",
-    )
-    .expect("extract Claude Gemini refresh-only OAuth auth");
-
-    assert_eq!(auth.strategy, AuthStrategy::GoogleOAuth);
-    assert_eq!(auth.access_token, None);
-}
-
-#[test]
-fn stream_check_claude_gemini_native_empty_access_token_json_does_not_expose_empty_bearer() {
-    let provider = claude_gemini_native_provider(
-        r#"{"access_token":"","refresh_token":"rt-abc","client_id":"cid","client_secret":"cs"}"#,
-    );
-
-    let auth = StreamCheckService::extract_auth(
-        &provider,
-        &AppType::Claude,
-        "https://generativelanguage.googleapis.com",
-    )
-    .expect("extract Claude Gemini expired OAuth auth");
-
-    assert_eq!(auth.strategy, AuthStrategy::GoogleOAuth);
-    assert_eq!(auth.access_token, None);
-}
-
-#[test]
-fn stream_check_resolves_claude_gemini_native_url() {
-    let url = StreamCheckService::resolve_claude_stream_url(
-        "https://generativelanguage.googleapis.com",
-        AuthStrategy::Google,
-        "gemini_native",
-        false,
-        "models/gemini-2.5-pro",
-    );
-
-    assert_eq!(
-        url,
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
-    );
-}
-
-#[test]
-fn stream_check_resolves_claude_gemini_native_full_openai_compat_url() {
-    let url = StreamCheckService::resolve_claude_stream_url(
-        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-        AuthStrategy::Google,
-        "gemini_native",
-        true,
-        "gemini-2.5-flash",
-    );
-
-    assert_eq!(
-        url,
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
-    );
-}
-
-#[test]
-fn stream_check_preserves_claude_gemini_native_opaque_full_url() {
-    let url = StreamCheckService::resolve_claude_stream_url(
-        "https://relay.example/custom/generate-content",
-        AuthStrategy::Google,
-        "gemini_native",
-        true,
-        "gemini-2.5-flash",
-    );
-
-    assert_eq!(url, "https://relay.example/custom/generate-content?alt=sse");
+    upstream_handle.abort();
 }

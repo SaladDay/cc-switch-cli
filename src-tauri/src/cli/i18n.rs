@@ -4414,12 +4414,10 @@ pub mod texts {
             } else {
                 "修改监听地址：需先停止本地代理。监听端口可以修改。改完后重新启动路由生效。"
             }
+        } else if current_app_is_active {
+            "Listen address: stop the proxy to edit. Listen port: stop this app's route to edit. Restart routing after changes."
         } else {
-            if current_app_is_active {
-                "Listen address: stop the proxy to edit. Listen port: stop this app's route to edit. Restart routing after changes."
-            } else {
-                "Listen address: stop the proxy to edit. Listen port can be edited. Restart routing after changes."
-            }
+            "Listen address: stop the proxy to edit. Listen port can be edited. Restart routing after changes."
         }
     }
 
@@ -7129,6 +7127,34 @@ pub mod texts {
             format!("同步 Claude Code for VSCode 插件失败: {err}")
         } else {
             format!("Failed to sync Claude Code for VSCode integration: {err}")
+        }
+    }
+
+    pub fn tui_toast_codex_unified_session_history_toggled(enabled: bool) -> String {
+        if is_chinese() {
+            if enabled {
+                "已启用统一 Codex 会话历史。".to_string()
+            } else {
+                "已关闭统一 Codex 会话历史。".to_string()
+            }
+        } else if enabled {
+            "Unified Codex session history enabled.".to_string()
+        } else {
+            "Unified Codex session history disabled.".to_string()
+        }
+    }
+
+    pub fn tui_toast_codex_unified_session_history_already(enabled: bool) -> String {
+        if is_chinese() {
+            if enabled {
+                "统一 Codex 会话历史已经开启。".to_string()
+            } else {
+                "统一 Codex 会话历史已经关闭。".to_string()
+            }
+        } else if enabled {
+            "Unified Codex session history is already enabled.".to_string()
+        } else {
+            "Unified Codex session history is already disabled.".to_string()
         }
     }
 
@@ -10423,6 +10449,28 @@ pub mod texts {
             format!("⚠ Claude Code for VSCode 插件联动失败: {err}")
         } else {
             format!("⚠ Claude Code for VSCode integration failed: {err}")
+        }
+    }
+
+    pub fn codex_unified_session_history_label() -> &'static str {
+        if is_chinese() {
+            "统一 Codex 会话历史"
+        } else {
+            "Unified Codex session history"
+        }
+    }
+
+    pub fn codex_unified_session_history_confirm(enable: bool) -> String {
+        if is_chinese() {
+            if enable {
+                "确认开启统一 Codex 会话历史？\n官方订阅将使用共享 custom 供应商标识运行；已有官方会话不会自动迁移，可用 CLI 命令 settings codex-history migrate-existing 单独迁移。".to_string()
+            } else {
+                "确认关闭统一 Codex 会话历史？\n不会自动恢复已迁移的会话；如需恢复，请使用 CLI 命令 settings codex-history restore。".to_string()
+            }
+        } else if enable {
+            "Enable unified Codex session history?\nOfficial subscriptions will use the shared custom provider id. Existing official sessions are not migrated automatically; use settings codex-history migrate-existing from the CLI if needed.".to_string()
+        } else {
+            "Disable unified Codex session history?\nMigrated sessions are not restored automatically; use settings codex-history restore from the CLI if needed.".to_string()
         }
     }
 

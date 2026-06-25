@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod balance;
+pub mod codex_history;
 pub mod codex_oauth;
 pub mod codex_oauth_models;
 pub mod coding_plan;

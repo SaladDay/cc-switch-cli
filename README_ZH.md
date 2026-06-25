@@ -455,6 +455,14 @@ cc-switch proxy serve --takeover claude           # 前台调试模式；存在 
 
 普通 CLI/TUI 的代理启用/禁用操作都会通过 daemon 执行。首次启用任一应用代理路由时 daemon 会自动启动；每个活跃的受支持应用（Claude、Codex、Gemini）各有一个 worker；当没有任何活跃代理路由时 daemon 会自动退出。
 
+> **平台支持：** 由 daemon 托管的代理依赖 Unix 域 socket 的 supervisor，**仅在 macOS 和 Linux 上可用**。在 Windows 上，`proxy enable` / `proxy disable` 以及 `daemon` 子命令不可用，会报错 `managed sessions are only supported on unix`。Windows 上如需本地代理，请改用前台模式直接启动中转（不依赖 supervisor）：
+>
+> ```bash
+> cc-switch proxy serve --takeover claude
+> ```
+>
+> `proxy show` 与 `proxy config` 在所有平台均可用。参见 [#294](https://github.com/SaladDay/cc-switch-cli/issues/294)。
+
 ### 🧪 环境与本地工具
 
 检查环境变量冲突，以及 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLI 是否已经装好。

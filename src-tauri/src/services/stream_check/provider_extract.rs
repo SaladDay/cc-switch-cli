@@ -1,337 +1,116 @@
-use regex::Regex;
 use reqwest::{Client, Proxy};
 
 use crate::{
     app_config::AppType,
     error::AppError,
     provider::{Provider, ProviderProxyConfig},
+    proxy::providers::get_adapter,
 };
 
 use super::service::StreamCheckService;
-use super::types::{AuthInfo, AuthStrategy, StreamCheckConfig};
 
 impl StreamCheckService {
-    pub(crate) fn resolve_test_model(
-        app_type: &AppType,
-        provider: &Provider,
-        config: &StreamCheckConfig,
-    ) -> String {
-        match app_type {
-            AppType::Claude => Self::extract_env_model(provider, "ANTHROPIC_MODEL")
-                .unwrap_or_else(|| config.claude_model.clone()),
-            AppType::Codex => {
-                Self::extract_codex_model(provider).unwrap_or_else(|| config.codex_model.clone())
-            }
-            AppType::Gemini => Self::extract_env_model(provider, "GEMINI_MODEL")
-                .unwrap_or_else(|| config.gemini_model.clone()),
-            AppType::OpenCode => provider
-                .settings_config
-                .get("models")
-                .and_then(|value| value.as_object())
-                .and_then(|models| models.keys().next().cloned())
-                .unwrap_or_else(|| config.codex_model.clone()),
-            AppType::Hermes => provider
-                .settings_config
-                .get("model")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-                .or_else(|| {
-                    provider
-                        .settings_config
-                        .get("models")
-                        .and_then(|value| value.as_object())
-                        .and_then(|models| models.keys().next().cloned())
-                })
-                .or_else(|| {
-                    provider
-                        .settings_config
-                        .get("models")
-                        .and_then(|value| value.as_array())
-                        .and_then(|models| models.first())
-                        .and_then(|model| model.get("id").and_then(|value| value.as_str()))
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| config.codex_model.clone()),
-            AppType::OpenClaw => provider
-                .settings_config
-                .get("models")
-                .and_then(|value| value.as_array())
-                .and_then(|models| models.first())
-                .and_then(|model| model.get("id").and_then(|value| value.as_str()))
-                .map(str::to_string)
-                .unwrap_or_else(|| config.codex_model.clone()),
-        }
-    }
-
-    pub(crate) fn extract_env_model(provider: &Provider, key: &str) -> Option<String> {
-        provider
-            .settings_config
-            .get("env")
-            .and_then(|env| env.get(key))
-            .and_then(|value| value.as_str())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    }
-
-    pub(crate) fn extract_codex_model(provider: &Provider) -> Option<String> {
-        let config_text = provider
-            .settings_config
-            .get("config")
-            .and_then(|value| value.as_str())?;
-        if config_text.trim().is_empty() {
-            return None;
-        }
-
-        let re = Regex::new(r#"(?m)^model\s*=\s*[\"']([^\"']+)[\"']"#).ok()?;
-        re.captures(config_text)
-            .and_then(|caps| caps.get(1))
-            .map(|m| m.as_str().trim().to_string())
-            .filter(|value| !value.is_empty())
-    }
-
     pub(crate) fn extract_base_url(
         provider: &Provider,
         app_type: &AppType,
     ) -> Result<String, AppError> {
         match app_type {
-            AppType::Claude => provider
-                .settings_config
-                .get("env")
-                .and_then(|value| value.as_object())
-                .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
-                .and_then(|value| value.as_str())
-                .or_else(|| {
-                    provider
-                        .settings_config
-                        .get("base_url")
-                        .and_then(|value| value.as_str())
-                })
-                .or_else(|| {
-                    provider
-                        .settings_config
-                        .get("baseURL")
-                        .and_then(|value| value.as_str())
-                })
-                .or_else(|| {
-                    provider
-                        .settings_config
-                        .get("apiEndpoint")
-                        .and_then(|value| value.as_str())
-                })
-                .map(|value| value.trim_end_matches('/').to_string())
-                .ok_or_else(|| {
-                    AppError::localized(
-                        "provider.claude.base_url.missing",
-                        "缺少 ANTHROPIC_BASE_URL 配置",
-                        "Missing ANTHROPIC_BASE_URL configuration",
-                    )
-                }),
-            AppType::Codex => {
-                if let Some(url) = provider
-                    .settings_config
-                    .get("base_url")
-                    .and_then(|value| value.as_str())
-                {
-                    return Ok(url.trim_end_matches('/').to_string());
-                }
-                if let Some(url) = provider
-                    .settings_config
-                    .get("baseURL")
-                    .and_then(|value| value.as_str())
-                {
-                    return Ok(url.trim_end_matches('/').to_string());
-                }
-
-                let config = provider.settings_config.get("config");
-                if let Some(url) = config
-                    .and_then(|value| value.get("base_url"))
-                    .and_then(|v| v.as_str())
-                {
-                    return Ok(url.trim_end_matches('/').to_string());
-                }
-                if let Some(config_text) = config.and_then(|value| value.as_str()) {
-                    if let Some(start) = config_text.find("base_url = \"") {
-                        let rest = &config_text[start + 12..];
-                        if let Some(end) = rest.find('"') {
-                            return Ok(rest[..end].trim_end_matches('/').to_string());
-                        }
-                    }
-                    if let Some(start) = config_text.find("base_url = '") {
-                        let rest = &config_text[start + 12..];
-                        if let Some(end) = rest.find('\'') {
-                            return Ok(rest[..end].trim_end_matches('/').to_string());
-                        }
-                    }
-                }
-
-                Err(AppError::localized(
-                    "provider.codex.base_url.missing",
-                    "config.toml 中缺少 base_url 配置",
-                    "base_url is missing from config.toml",
-                ))
+            AppType::OpenCode => {
+                let npm = Self::extract_opencode_npm(provider);
+                Self::resolve_opencode_base_url(provider, npm.as_deref())
             }
-            AppType::Gemini => {
-                use crate::gemini_config::json_to_env;
-                let env_map = json_to_env(&provider.settings_config)?;
-                Ok(env_map
-                    .get("GOOGLE_GEMINI_BASE_URL")
-                    .cloned()
-                    .or_else(|| env_map.get("GEMINI_BASE_URL").cloned())
-                    .or_else(|| env_map.get("BASE_URL").cloned())
-                    .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string())
-                    .trim_end_matches('/')
-                    .to_string())
-            }
-            AppType::OpenCode => Ok(provider
-                .settings_config
-                .get("options")
-                .and_then(|value| value.get("baseURL"))
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .trim_end_matches('/')
-                .to_string()),
-            AppType::Hermes => Ok(provider
-                .settings_config
-                .get("base_url")
-                .or_else(|| provider.settings_config.get("baseUrl"))
-                .or_else(|| provider.settings_config.get("baseURL"))
-                .or_else(|| provider.settings_config.get("endpoint"))
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .trim_end_matches('/')
-                .to_string()),
-            AppType::OpenClaw => Ok(provider
-                .settings_config
-                .get("baseUrl")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .trim_end_matches('/')
-                .to_string()),
+            AppType::Hermes => Self::extract_hermes_base_url(provider),
+            AppType::OpenClaw => Self::extract_openclaw_base_url(provider),
+            AppType::Claude | AppType::Codex | AppType::Gemini => get_adapter(app_type)
+                .extract_base_url(provider)
+                .map(|url| url.trim().trim_end_matches('/').to_string())
+                .map_err(|err| AppError::Message(format!("Failed to extract base_url: {err}"))),
         }
     }
 
-    pub(crate) fn extract_auth(
+    /// OpenCode: `{ npm, options: { baseURL, apiKey }, ... }`
+    ///
+    /// 用户未显式填 `options.baseURL` 时，按 `npm`（AI SDK 包）回退到包自带默认端点。
+    /// `@ai-sdk/openai-compatible` 无默认端点，必须显式填。
+    pub(crate) fn resolve_opencode_base_url(
         provider: &Provider,
-        app_type: &AppType,
-        base_url: &str,
-    ) -> Result<AuthInfo, AppError> {
-        match app_type {
-            AppType::Claude => {
-                let strategy = Self::detect_claude_auth_strategy(provider, base_url);
-                let api_key = Self::extract_claude_key(provider).ok_or_else(|| {
-                    AppError::localized(
-                        "provider.claude.api_key.missing",
-                        "缺少 API Key",
-                        "API key is missing",
-                    )
-                })?;
-                if strategy == AuthStrategy::GoogleOAuth {
-                    let trimmed = api_key.trim();
-                    if trimmed.starts_with("ya29.") {
-                        return Ok(AuthInfo::with_access_token(
-                            trimmed.to_string(),
-                            trimmed.to_string(),
-                        ));
-                    }
-                    if trimmed.starts_with('{') {
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                            if let Some(access_token) =
-                                value.get("access_token").and_then(|value| value.as_str())
-                            {
-                                if !access_token.trim().is_empty() {
-                                    return Ok(AuthInfo::with_access_token(
-                                        api_key,
-                                        access_token.trim().to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(AuthInfo::new(api_key, strategy))
-            }
-            AppType::Codex => Self::extract_codex_key(provider)
-                .map(|key| AuthInfo::new(key, AuthStrategy::Bearer))
-                .ok_or_else(|| {
-                    AppError::localized(
-                        "provider.codex.api_key.missing",
-                        "缺少 API Key",
-                        "API key is missing",
-                    )
-                }),
-            AppType::Gemini => Self::extract_gemini_auth(provider),
-            AppType::OpenCode => provider
-                .settings_config
-                .get("options")
-                .and_then(|value| value.get("apiKey"))
-                .and_then(|value| value.as_str())
-                .map(|key| AuthInfo::new(key.to_string(), AuthStrategy::Bearer))
-                .ok_or_else(|| {
-                    AppError::localized(
-                        "provider.opencode.api_key.missing",
-                        "缺少 API Key",
-                        "API key is missing",
-                    )
-                }),
-            AppType::Hermes => provider
-                .settings_config
-                .get("apiKey")
-                .or_else(|| provider.settings_config.get("api_key"))
-                .and_then(|value| value.as_str())
-                .map(|key| AuthInfo::new(key.to_string(), AuthStrategy::Bearer))
-                .ok_or_else(|| {
-                    AppError::localized(
-                        "provider.hermes.api_key.missing",
-                        "缺少 API Key",
-                        "API key is missing",
-                    )
-                }),
-            AppType::OpenClaw => provider
-                .settings_config
-                .get("apiKey")
-                .and_then(|value| value.as_str())
-                .map(|key| AuthInfo::new(key.to_string(), AuthStrategy::Bearer))
-                .ok_or_else(|| {
-                    AppError::localized(
-                        "provider.openclaw.api_key.missing",
-                        "缺少 API Key",
-                        "API key is missing",
-                    )
-                }),
+        npm: Option<&str>,
+    ) -> Result<String, AppError> {
+        if let Some(explicit) = Self::extract_opencode_base_url(provider) {
+            return Ok(explicit);
         }
+
+        let fallback = match npm {
+            Some("@ai-sdk/openai") => Some("https://api.openai.com/v1"),
+            Some("@ai-sdk/anthropic") => Some("https://api.anthropic.com"),
+            Some("@ai-sdk/google") => Some("https://generativelanguage.googleapis.com"),
+            _ => None,
+        };
+
+        fallback.map(str::to_string).ok_or_else(|| {
+            AppError::localized(
+                "opencode_base_url_missing",
+                "OpenCode 供应商缺少 options.baseURL，且当前 SDK 包没有默认端点",
+                "OpenCode provider is missing `options.baseURL` and the SDK package has no default endpoint",
+            )
+        })
     }
 
-    pub(crate) fn detect_claude_auth_strategy(provider: &Provider, base_url: &str) -> AuthStrategy {
-        if crate::proxy::providers::get_claude_api_format(provider) == "gemini_native" {
-            if let Some(key) = Self::extract_claude_key(provider) {
-                let trimmed = key.trim();
-                if trimmed.starts_with("ya29.") || trimmed.starts_with('{') {
-                    return AuthStrategy::GoogleOAuth;
-                }
-            }
-            return AuthStrategy::Google;
-        }
-
-        if base_url.contains("openrouter.ai") {
-            return AuthStrategy::Bearer;
-        }
-
-        let auth_mode = provider
+    fn extract_opencode_base_url(provider: &Provider) -> Option<String> {
+        provider
             .settings_config
-            .get("auth_mode")
+            .get("options")
+            .and_then(|value| value.get("baseURL"))
             .and_then(|value| value.as_str())
-            .or_else(|| {
-                provider
-                    .settings_config
-                    .get("env")
-                    .and_then(|env| env.get("AUTH_MODE"))
-                    .and_then(|value| value.as_str())
-            });
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+    }
 
-        match auth_mode {
-            Some("bearer_only") => AuthStrategy::ClaudeAuth,
-            _ => AuthStrategy::Anthropic,
-        }
+    fn extract_opencode_npm(provider: &Provider) -> Option<String> {
+        provider
+            .settings_config
+            .get("npm")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
+    fn extract_hermes_base_url(provider: &Provider) -> Result<String, AppError> {
+        provider
+            .settings_config
+            .get("base_url")
+            .or_else(|| provider.settings_config.get("baseUrl"))
+            .or_else(|| provider.settings_config.get("baseURL"))
+            .or_else(|| provider.settings_config.get("endpoint"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AppError::localized(
+                    "hermes_base_url_missing",
+                    "Hermes 供应商缺少 base_url",
+                    "Hermes provider is missing `base_url`",
+                )
+            })
+    }
+
+    fn extract_openclaw_base_url(provider: &Provider) -> Result<String, AppError> {
+        provider
+            .settings_config
+            .get("baseUrl")
+            .or_else(|| provider.settings_config.get("baseURL"))
+            .or_else(|| provider.settings_config.get("base_url"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AppError::localized(
+                    "openclaw_base_url_missing",
+                    "OpenClaw 供应商缺少 baseUrl",
+                    "OpenClaw provider is missing `baseUrl`",
+                )
+            })
     }
 
     pub(crate) fn extract_claude_key(provider: &Provider) -> Option<String> {
@@ -395,52 +174,8 @@ impl StreamCheckService {
             .get("config")
             .and_then(|value| value.get("api_key").or_else(|| value.get("apiKey")))
             .and_then(|value| value.as_str())
-            .map(|value| value.to_string())
+            .map(str::to_string)
             .filter(|value| !value.trim().is_empty())
-    }
-
-    pub(crate) fn extract_gemini_auth(provider: &Provider) -> Result<AuthInfo, AppError> {
-        use crate::gemini_config::json_to_env;
-        let env_map = json_to_env(&provider.settings_config)?;
-
-        if let Some(token) = env_map
-            .get("GOOGLE_ACCESS_TOKEN")
-            .or_else(|| env_map.get("GEMINI_ACCESS_TOKEN"))
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            return Ok(AuthInfo::with_access_token(token.clone(), token));
-        }
-
-        let key = env_map
-            .get("GEMINI_API_KEY")
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                AppError::localized(
-                    "gemini.missing_api_key",
-                    "缺少 GEMINI_API_KEY",
-                    "Missing GEMINI_API_KEY",
-                )
-            })?;
-
-        if key.starts_with("ya29.") {
-            return Ok(AuthInfo::with_access_token(key.clone(), key));
-        }
-        if key.starts_with('{') {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&key) {
-                if let Some(access_token) = value.get("access_token").and_then(|v| v.as_str()) {
-                    if !access_token.trim().is_empty() {
-                        return Ok(AuthInfo::with_access_token(
-                            key,
-                            access_token.trim().to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-
-        Ok(AuthInfo::new(key, AuthStrategy::Google))
     }
 
     pub(crate) fn build_client_for_provider(provider: &Provider) -> Result<Client, AppError> {

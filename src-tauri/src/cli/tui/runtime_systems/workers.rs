@@ -1280,7 +1280,13 @@ fn handle_app_data_req(
             app_state_epoch,
             app_type,
         } => {
-            let result = UiData::load(&app_type).map_err(|err| err.to_string());
+            let result = state_for_epoch(state_cache, app_state_epoch)
+                .and_then(|state| {
+                    state
+                        .reload_config_snapshot_from_db()
+                        .and_then(|()| UiData::load_fast_snapshot_from_state(state, &app_type))
+                })
+                .map_err(|err| err.to_string());
             (
                 AppDataLoadKind::Initial,
                 request_id,

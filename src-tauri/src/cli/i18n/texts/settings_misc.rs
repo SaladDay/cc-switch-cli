@@ -212,6 +212,30 @@ pub fn claude_plugin_sync_failed_warning(err: &str) -> String {
     }
 }
 
+pub fn codex_unified_session_history_label() -> &'static str {
+    if is_chinese() {
+        "统一 Codex 会话历史"
+    } else {
+        "Unified Codex session history"
+    }
+}
+
+pub fn codex_unified_session_history_confirm(enable: bool) -> String {
+    if is_chinese() {
+        if enable {
+            "确认开启统一 Codex 会话历史？\n官方订阅将使用共享 custom 供应商标识运行；已有官方会话不会自动迁移，可用 CLI 命令 settings codex-history migrate-existing 单独迁移。".to_string()
+        } else {
+            "确认关闭统一 Codex 会话历史？\n不会自动恢复已迁移的会话；如需恢复，请使用 CLI 命令 settings codex-history restore。".to_string()
+        }
+    } else {
+        if enable {
+            "Enable unified Codex session history?\nOfficial subscriptions will use the shared custom provider id. Existing official sessions are not migrated automatically; use settings codex-history migrate-existing from the CLI if needed.".to_string()
+        } else {
+            "Disable unified Codex session history?\nMigrated sessions are not restored automatically; use settings codex-history restore from the CLI if needed.".to_string()
+        }
+    }
+}
+
 // App Selection
 pub fn select_application() -> &'static str {
     if is_chinese() {
