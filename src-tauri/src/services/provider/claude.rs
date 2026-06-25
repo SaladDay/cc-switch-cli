@@ -270,63 +270,27 @@ impl ProviderService {
 
     pub(super) fn prepare_claude_live_write(
         provider: &Provider,
-        live_merge_base: Option<&Value>,
+        _live_merge_base: Option<&Value>,
         common_config_snippet: Option<&str>,
-        previous_common_config_snippet: Option<&str>,
+        _previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
         force_sync: bool,
-        resolution: live_merge::ConflictResolution<'_>,
+        _resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<PreparedLiveWrite, AppError> {
         if !force_sync && !crate::sync_policy::should_sync_live(&AppType::Claude) {
             return Ok(PreparedLiveWrite::Noop);
         }
 
-        let settings_path = get_claude_settings_path();
-        let content_to_write = Self::build_effective_live_snapshot(
+        // Upstream parity (sync_claude_live): build the provider's effective
+        // settings (provider config + common-config snippet) and OVERWRITE
+        // settings.json. Non-provider fields survive via the common-config
+        // snippet, not via a merge with the existing live file.
+        let settings = Self::build_effective_live_snapshot(
             &AppType::Claude,
             provider,
             common_config_snippet,
             apply_common_config,
         )?;
-        let local = if settings_path.exists() {
-            let local = read_json_file::<Value>(&settings_path)?;
-            let local =
-                common_config::strip_common_config_snippet_from_live_settings_or_provider_snapshot(
-                    &AppType::Claude,
-                    provider,
-                    local,
-                    previous_common_config_snippet,
-                );
-            if apply_common_config {
-                local
-            } else {
-                common_config::strip_common_config_snippet_from_live_settings_or_provider_snapshot(
-                    &AppType::Claude,
-                    provider,
-                    local,
-                    common_config_snippet,
-                )
-            }
-        } else {
-            json!({})
-        };
-        let settings = match live_merge_base {
-            Some(base) => live_merge::merge_json_with_base_live(
-                &AppType::Claude,
-                "settings.json",
-                local,
-                base,
-                &content_to_write,
-                resolution,
-            )?,
-            None => live_merge::merge_json_live(
-                &AppType::Claude,
-                "settings.json",
-                local,
-                &content_to_write,
-                resolution,
-            )?,
-        };
 
         Ok(PreparedLiveWrite::Claude { settings })
     }
