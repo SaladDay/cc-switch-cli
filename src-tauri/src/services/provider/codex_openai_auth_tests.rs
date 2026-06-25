@@ -132,6 +132,91 @@ fn switch_codex_provider_migrates_legacy_flat_config() {
 }
 
 #[test]
+#[serial]
+fn switch_codex_overwrites_config_toml_respecting_auth_mode() {
+    use crate::settings::{update_settings, AppSettings};
+
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+
+    // With preserve-on-switch enabled, switching to a third-party provider must
+    // NOT clobber an existing ChatGPT OAuth auth.json; the API key rides in
+    // config.toml instead, while config.toml is still a clean overwrite.
+    let previous_settings = crate::settings::get_settings();
+    update_settings(AppSettings {
+        preserve_codex_official_auth_on_switch: true,
+        ..AppSettings::default()
+    })
+    .expect("enable preserve-on-switch");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.providers.insert(
+            "thirdparty".to_string(),
+            Provider::with_id(
+                "thirdparty".to_string(),
+                "Third Party".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-thirdparty" },
+                    "config": "model_provider = \"custom\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.custom]\nbase_url = \"https://api.custom.example/v1\"\nwire_api = \"responses\"\n"
+                }),
+                Some("custom".to_string()),
+            ),
+        );
+    }
+
+    // Seed an existing ChatGPT OAuth login cache in auth.json.
+    crate::config::write_json_file(
+        &get_codex_auth_path(),
+        &json!({
+            "tokens": { "access_token": "oauth-access-token" },
+            "OPENAI_API_KEY": null
+        }),
+    )
+    .expect("seed live auth.json with OAuth cache");
+
+    let state = state_from_config(config);
+    let result = ProviderService::switch_with_resolution(
+        &state,
+        AppType::Codex,
+        "thirdparty",
+        prefer_incoming_conflicts(),
+    );
+
+    // Restore global settings before asserting so other serial tests are clean.
+    update_settings(previous_settings).expect("restore settings");
+    result.expect("switch should succeed");
+
+    // config.toml is overwritten with the provider's config + the API key as a
+    // bearer token (no auth.json write for third-party while preserving).
+    let config_text =
+        std::fs::read_to_string(get_codex_config_path()).expect("read codex config.toml");
+    assert!(
+        config_text.contains("base_url = \"https://api.custom.example/v1\""),
+        "config.toml should be overwritten with the third-party provider config: {config_text}"
+    );
+    assert!(
+        config_text.contains("experimental_bearer_token"),
+        "third-party API key should ride in config.toml as a bearer token: {config_text}"
+    );
+
+    // The ChatGPT OAuth login cache in auth.json must be preserved untouched.
+    let auth: Value = crate::config::read_json_file(&get_codex_auth_path())
+        .expect("auth.json should still exist");
+    assert_eq!(
+        auth.pointer("/tokens/access_token").and_then(Value::as_str),
+        Some("oauth-access-token"),
+        "preserve-on-switch must not clobber the OAuth auth.json"
+    );
+}
+
+#[test]
 fn migrate_legacy_codex_config_noop_for_new_format() {
     let new_format = "model_provider = \"openai\"\nmodel = \"gpt-4o\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"chat\"\n";
     let provider = Provider::with_id("p1".to_string(), "OpenAI".to_string(), json!({}), None);
