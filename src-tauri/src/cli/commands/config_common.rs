@@ -1,14 +1,12 @@
 use clap::Subcommand;
-use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
 
-use super::live_conflict::PromptConflictResolver;
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::cli::ui::{highlight, info, success};
 use crate::error::AppError;
-use crate::services::{provider::live_merge, ProviderService};
+use crate::services::ProviderService;
 use crate::store::AppState;
 
 #[derive(Subcommand, Debug, Clone)]
@@ -114,14 +112,6 @@ enum FollowUpMessage {
 
 fn get_state() -> Result<AppState, AppError> {
     AppState::try_new()
-}
-
-fn with_prompt_conflict_resolution<T>(
-    f: impl FnOnce(live_merge::ConflictResolution<'_>) -> Result<T, AppError>,
-) -> Result<T, AppError> {
-    let mut resolver = PromptConflictResolver;
-    let resolver = RefCell::new(&mut resolver as &mut dyn live_merge::ConflictResolver);
-    f(live_merge::ConflictResolution::Resolver(&resolver))
 }
 
 fn no_current_provider_message(action: CommonConfigSnippetAction) -> &'static str {
@@ -247,14 +237,7 @@ fn set(
     let snippet = canonical_common_snippet(app_type.clone(), &raw)?.unwrap_or_default();
 
     let state = get_state()?;
-    with_prompt_conflict_resolution(|resolution| {
-        ProviderService::set_common_config_snippet_with_resolution(
-            &state,
-            app_type.clone(),
-            Some(snippet),
-            resolution,
-        )
-    })?;
+    ProviderService::set_common_config_snippet(&state, app_type.clone(), Some(snippet))?;
 
     println!(
         "{}",
@@ -313,14 +296,11 @@ fn extract(
 
     if save {
         let snippet = canonical_common_snippet(app_type.clone(), &extracted)?.unwrap_or_default();
-        with_prompt_conflict_resolution(|resolution| {
-            ProviderService::set_common_config_snippet_with_resolution(
-                &state,
-                app_type.clone(),
-                Some(snippet.clone()),
-                resolution,
-            )
-        })?;
+        ProviderService::set_common_config_snippet(
+            &state,
+            app_type.clone(),
+            Some(snippet.clone()),
+        )?;
         println!("{}", success(texts::common_config_snippet_extracted()));
         if !snippet.trim().is_empty() {
             println!();
@@ -337,14 +317,7 @@ fn extract(
 
 fn clear(app_type: AppType, _apply: bool) -> Result<(), AppError> {
     let state = get_state()?;
-    with_prompt_conflict_resolution(|resolution| {
-        ProviderService::set_common_config_snippet_with_resolution(
-            &state,
-            app_type.clone(),
-            None,
-            resolution,
-        )
-    })?;
+    ProviderService::set_common_config_snippet(&state, app_type.clone(), None)?;
 
     println!(
         "{}",

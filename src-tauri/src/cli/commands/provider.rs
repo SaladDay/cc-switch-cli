@@ -1,7 +1,7 @@
 use clap::{Subcommand, ValueEnum};
-use std::{cell::RefCell, collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, path::PathBuf};
 
-use super::{live_conflict::PromptConflictResolver, provider_inspect, provider_usage_query};
+use super::{provider_inspect, provider_usage_query};
 use crate::app_config::AppType;
 use crate::cli::commands::provider_input::{
     build_provider_from_add_template, common_snippet_has_effective_config, current_timestamp,
@@ -15,7 +15,7 @@ use crate::cli::i18n::texts;
 use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
 use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
-use crate::services::{provider::live_merge, AuthService, ManagedAuthAccount, ProviderService};
+use crate::services::{AuthService, ManagedAuthAccount, ProviderService};
 use crate::store::AppState;
 use inquire::{Confirm, Select};
 
@@ -683,14 +683,6 @@ fn get_state() -> Result<AppState, AppError> {
     AppState::try_new()
 }
 
-fn with_prompt_conflict_resolution<T>(
-    f: impl FnOnce(live_merge::ConflictResolution<'_>) -> Result<T, AppError>,
-) -> Result<T, AppError> {
-    let mut resolver = PromptConflictResolver;
-    let resolver = RefCell::new(&mut resolver as &mut dyn live_merge::ConflictResolver);
-    f(live_merge::ConflictResolution::Resolver(&resolver))
-}
-
 fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let state = get_state()?;
     let app_str = app_type.as_str().to_string();
@@ -905,11 +897,9 @@ fn add_provider(app_type: AppType, template: Option<ProviderAddTemplate>) -> Res
         return Ok(());
     }
 
-    // 7. 调用 Service 层
+    // 7. 调用 Service 层（upstream parity：干净写入，无冲突提示）
     let provider_id = provider.id.clone();
-    with_prompt_conflict_resolution(|resolution| {
-        ProviderService::add_with_resolution(&state, app_type.clone(), provider, resolution)
-    })?;
+    ProviderService::add(&state, app_type.clone(), provider)?;
 
     // 8. 成功消息
     println!(
@@ -1026,10 +1016,8 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         return Ok(());
     }
 
-    // 8. 调用 Service 层
-    with_prompt_conflict_resolution(|resolution| {
-        ProviderService::update_with_resolution(&state, app_type.clone(), updated, resolution)
-    })?;
+    // 8. 调用 Service 层（upstream parity：干净写入，无冲突提示）
+    ProviderService::update(&state, app_type.clone(), updated)?;
 
     // 9. 成功消息
     println!(
