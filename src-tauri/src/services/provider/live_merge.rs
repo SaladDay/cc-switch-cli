@@ -232,26 +232,9 @@ fn merge_json_value(
             Ok(())
         }
         (local_value, incoming_value) => {
-            if local_value == incoming_value {
-                return Ok(());
-            }
-
-            let conflict = ConfigConflict {
-                app_type: app_type.clone(),
-                target: target.to_string(),
-                path: display_path(&path),
-                local: json_display(local_value),
-                incoming: json_display(incoming_value),
-            };
-            if resolution.collects_failures() {
-                conflicts.push(conflict);
-            } else {
-                match resolution.resolve(&[conflict])? {
-                    Some(ConflictChoice::UseIncoming) => {
-                        *local_value = incoming_value.clone();
-                    }
-                    Some(ConflictChoice::KeepLocal) | None => {}
-                }
+            // Prefer-incoming: cc-switch's value always wins on a scalar mismatch.
+            if local_value != incoming_value {
+                *local_value = incoming_value.clone();
             }
             Ok(())
         }
@@ -296,24 +279,13 @@ fn merge_json_value_with_base(
                         let base_value = base_map.and_then(|map| map.get(key));
                         if let Some(base_value) = base_value {
                             if incoming_value == base_value {
+                                // The user removed a key cc-switch did not change;
+                                // keep the user's removal.
                                 continue;
                             }
-
-                            let conflict = ConfigConflict {
-                                app_type: app_type.clone(),
-                                target: target.to_string(),
-                                path: display_path(&next_path),
-                                local: "<removed>".to_string(),
-                                incoming: json_display(incoming_value),
-                            };
-                            if resolution.collects_failures() {
-                                conflicts.push(conflict);
-                            } else if matches!(
-                                resolution.resolve(&[conflict])?,
-                                Some(ConflictChoice::UseIncoming)
-                            ) {
-                                local_map.insert(key.clone(), incoming_value.clone());
-                            }
+                            // cc-switch changed this key (prefer-incoming wins),
+                            // so re-introduce it.
+                            local_map.insert(key.clone(), incoming_value.clone());
                         } else {
                             local_map.insert(key.clone(), incoming_value.clone());
                         }
@@ -328,59 +300,20 @@ fn merge_json_value_with_base(
                     let Some(local_value) = local_map.get(key) else {
                         continue;
                     };
-                    let next_path = json_child_path(&path, key);
-                    if local_value == base_value {
-                        local_map.remove(key);
-                        continue;
-                    }
-
-                    let conflict = ConfigConflict {
-                        app_type: app_type.clone(),
-                        target: target.to_string(),
-                        path: display_path(&next_path),
-                        local: json_display(local_value),
-                        incoming: "<removed>".to_string(),
-                    };
-                    if resolution.collects_failures() {
-                        conflicts.push(conflict);
-                    } else if matches!(
-                        resolution.resolve(&[conflict])?,
-                        Some(ConflictChoice::UseIncoming)
-                    ) {
-                        local_map.remove(key);
-                    }
+                    let _ = local_value;
+                    // cc-switch removed this key (it existed in base but not in
+                    // incoming); prefer-incoming applies the removal.
+                    local_map.remove(key);
                 }
             }
             Ok(())
         }
         (local_value, base, incoming_value) => {
-            if local_value == incoming_value {
-                return Ok(());
-            }
-
-            let local_matches_base = base.is_some_and(|base| local_value == base);
-            let incoming_changed_from_base = base.is_none_or(|base| incoming_value != base);
-            if local_matches_base || !incoming_changed_from_base {
+            // Prefer-incoming: cc-switch's value always wins on a scalar mismatch,
+            // regardless of whether the user diverged from the base.
+            let _ = base;
+            if local_value != incoming_value {
                 *local_value = incoming_value.clone();
-                return Ok(());
-            }
-
-            let conflict = ConfigConflict {
-                app_type: app_type.clone(),
-                target: target.to_string(),
-                path: display_path(&path),
-                local: json_display(local_value),
-                incoming: json_display(incoming_value),
-            };
-            if resolution.collects_failures() {
-                conflicts.push(conflict);
-            } else {
-                match resolution.resolve(&[conflict])? {
-                    Some(ConflictChoice::UseIncoming) => {
-                        *local_value = incoming_value.clone();
-                    }
-                    Some(ConflictChoice::KeepLocal) | None => {}
-                }
             }
             Ok(())
         }
@@ -399,21 +332,8 @@ pub fn merge_env_live(
     for (key, incoming_value) in incoming {
         match local.get_mut(key) {
             Some(local_value) if local_value != incoming_value => {
-                let conflict = ConfigConflict {
-                    app_type: app_type.clone(),
-                    target: target.clone(),
-                    path: key.clone(),
-                    local: local_value.clone(),
-                    incoming: incoming_value.clone(),
-                };
-                if resolution.collects_failures() {
-                    conflicts.push(conflict);
-                } else if matches!(
-                    resolution.resolve(&[conflict])?,
-                    Some(ConflictChoice::UseIncoming)
-                ) {
-                    *local_value = incoming_value.clone();
-                }
+                // Prefer-incoming: cc-switch's value wins on a key mismatch.
+                *local_value = incoming_value.clone();
             }
             Some(_) => {}
             None => {
@@ -511,23 +431,8 @@ fn merge_toml_item(
         }
     }
 
-    if toml_items_equal(local, incoming) {
-        return Ok(());
-    }
-
-    let conflict = ConfigConflict {
-        app_type: app_type.clone(),
-        target: target.to_string(),
-        path: display_path(&path),
-        local: toml_display(local),
-        incoming: toml_display(incoming),
-    };
-    if resolution.collects_failures() {
-        conflicts.push(conflict);
-    } else if matches!(
-        resolution.resolve(&[conflict])?,
-        Some(ConflictChoice::UseIncoming)
-    ) {
+    // Prefer-incoming: cc-switch's value wins on a scalar mismatch.
+    if !toml_items_equal(local, incoming) {
         *local = incoming.clone();
     }
     Ok(())
@@ -567,30 +472,10 @@ fn merge_toml_item_with_base(
         }
     }
 
-    if toml_items_equal(local, incoming) {
-        return Ok(());
-    }
-
-    let local_matches_base = base.is_some_and(|base| toml_items_equal(local, base));
-    let incoming_changed_from_base = base.is_none_or(|base| !toml_items_equal(incoming, base));
-    if local_matches_base || !incoming_changed_from_base {
-        *local = incoming.clone();
-        return Ok(());
-    }
-
-    let conflict = ConfigConflict {
-        app_type: app_type.clone(),
-        target: target.to_string(),
-        path: display_path(&path),
-        local: toml_display(local),
-        incoming: toml_display(incoming),
-    };
-    if resolution.collects_failures() {
-        conflicts.push(conflict);
-    } else if matches!(
-        resolution.resolve(&[conflict])?,
-        Some(ConflictChoice::UseIncoming)
-    ) {
+    // Prefer-incoming: cc-switch's value wins on a scalar mismatch, regardless
+    // of whether the user diverged from the base.
+    let _ = base;
+    if !toml_items_equal(local, incoming) {
         *local = incoming.clone();
     }
     Ok(())
@@ -656,24 +541,12 @@ fn merge_toml_table_like_with_base(
             None => {
                 if let Some(base_item) = base_item {
                     if toml_items_equal(incoming_item, base_item) {
+                        // The user removed a key cc-switch did not change; keep
+                        // the user's removal.
                         continue;
                     }
-
-                    let conflict = ConfigConflict {
-                        app_type: app_type.clone(),
-                        target: target.to_string(),
-                        path: display_path(&next_path),
-                        local: "<removed>".to_string(),
-                        incoming: toml_display(incoming_item),
-                    };
-                    if resolution.collects_failures() {
-                        conflicts.push(conflict);
-                    } else if matches!(
-                        resolution.resolve(&[conflict])?,
-                        Some(ConflictChoice::UseIncoming)
-                    ) {
-                        local.insert(key, incoming_item.clone());
-                    }
+                    // cc-switch changed this key (prefer-incoming); re-introduce it.
+                    local.insert(key, incoming_item.clone());
                 } else {
                     local.insert(key, incoming_item.clone());
                 }
@@ -691,27 +564,10 @@ fn merge_toml_table_like_with_base(
             let Some(local_item) = local.get(&key) else {
                 continue;
             };
-            let next_path = toml_child_path(&path, &key);
-            if toml_items_equal(local_item, &base_item) {
-                local.remove(&key);
-                continue;
-            }
-
-            let conflict = ConfigConflict {
-                app_type: app_type.clone(),
-                target: target.to_string(),
-                path: display_path(&next_path),
-                local: toml_display(local_item),
-                incoming: "<removed>".to_string(),
-            };
-            if resolution.collects_failures() {
-                conflicts.push(conflict);
-            } else if matches!(
-                resolution.resolve(&[conflict])?,
-                Some(ConflictChoice::UseIncoming)
-            ) {
-                local.remove(&key);
-            }
+            let _ = (local_item, base_item);
+            // cc-switch removed this key (it existed in base but not in
+            // incoming); prefer-incoming applies the removal.
+            local.remove(&key);
         }
     }
 
@@ -819,24 +675,24 @@ mod tests {
     }
 
     #[test]
-    fn json_merge_conflicts_on_scalar_difference() {
+    fn json_merge_prefers_incoming_on_scalar_difference() {
         let local = json!({ "env": { "MODEL": "local" } });
         let incoming = json!({ "env": { "MODEL": "incoming" } });
 
-        let err = merge_json_live(
+        let merged = merge_json_live(
             &AppType::Claude,
             "settings.json",
             local,
             &incoming,
-            ConflictPolicy::Fail.into(),
+            ConflictPolicy::PreferIncoming.into(),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(err.to_string().contains("env.MODEL"));
+        assert_eq!(merged, json!({ "env": { "MODEL": "incoming" } }));
     }
 
     #[test]
-    fn json_merge_collects_multiple_fail_policy_conflicts() {
+    fn json_merge_prefers_incoming_for_multiple_differences() {
         let local = json!({
             "env": {
                 "MODEL": "local",
@@ -850,18 +706,24 @@ mod tests {
             }
         });
 
-        let err = merge_json_live(
+        let merged = merge_json_live(
             &AppType::Claude,
             "settings.json",
             local,
             &incoming,
-            ConflictPolicy::Fail.into(),
+            ConflictPolicy::PreferIncoming.into(),
         )
-        .unwrap_err();
-        let message = err.to_string();
+        .unwrap();
 
-        assert!(message.contains("env.MODEL"));
-        assert!(message.contains("env.TOKEN"));
+        assert_eq!(
+            merged,
+            json!({
+                "env": {
+                    "MODEL": "incoming",
+                    "TOKEN": "incoming-token"
+                }
+            })
+        );
     }
 
     #[test]
@@ -917,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn json_merge_with_base_conflicts_when_local_and_incoming_changed() {
+    fn json_merge_with_base_prefers_incoming_when_local_and_incoming_changed() {
         let base = json!({
             "options": {
                 "baseURL": "https://old.example.com/v1",
@@ -937,19 +799,25 @@ mod tests {
             }
         });
 
-        let err = merge_json_with_base_live(
+        let merged = merge_json_with_base_live(
             &AppType::OpenCode,
             "opencode.json provider.local",
             local,
             &base,
             &incoming,
-            ConflictPolicy::Fail.into(),
+            ConflictPolicy::PreferIncoming.into(),
         )
-        .unwrap_err();
-        let message = err.to_string();
+        .unwrap();
 
-        assert!(message.contains("options.baseURL"), "{message}");
-        assert!(!message.contains("options.apiKey"), "{message}");
+        // Prefer-incoming: cc-switch's values win even where the user diverged.
+        assert_eq!(
+            merged.pointer("/options/baseURL").and_then(Value::as_str),
+            Some("https://incoming.example.com/v1")
+        );
+        assert_eq!(
+            merged.pointer("/options/apiKey").and_then(Value::as_str),
+            Some("sk-new")
+        );
     }
 
     #[test]
@@ -990,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn json_merge_with_base_conflicts_on_deleted_key_changed_locally() {
+    fn json_merge_with_base_prefers_incoming_removal_when_changed_locally() {
         let base = json!({
             "modalities": { "input": ["text", "image"] }
         });
@@ -999,17 +867,19 @@ mod tests {
         });
         let incoming = json!({});
 
-        let err = merge_json_with_base_live(
+        let merged = merge_json_with_base_live(
             &AppType::OpenCode,
             "opencode.json provider.vision",
             local,
             &base,
             &incoming,
-            ConflictPolicy::Fail.into(),
+            ConflictPolicy::PreferIncoming.into(),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(err.to_string().contains("modalities"));
+        // Prefer-incoming: cc-switch removed the key, so the removal wins even
+        // though the user had locally edited it.
+        assert!(merged.get("modalities").is_none());
     }
 
     #[test]
@@ -1050,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn json_merge_with_base_conflicts_when_live_deleted_key_and_incoming_changed() {
+    fn json_merge_with_base_prefers_incoming_when_live_deleted_key_and_incoming_changed() {
         let base = json!({
             "options": {
                 "baseURL": "https://old.example.com/v1",
@@ -1069,19 +939,26 @@ mod tests {
             }
         });
 
-        let err = merge_json_with_base_live(
+        let merged = merge_json_with_base_live(
             &AppType::OpenCode,
             "opencode.json provider.vision",
             local,
             &base,
             &incoming,
-            ConflictPolicy::Fail.into(),
+            ConflictPolicy::PreferIncoming.into(),
         )
-        .unwrap_err();
-        let message = err.to_string();
+        .unwrap();
 
-        assert!(message.contains("options.apiKey"), "{message}");
-        assert!(!message.contains("options.baseURL"), "{message}");
+        // Prefer-incoming: cc-switch re-introduces apiKey (it changed it from
+        // base) and updates baseURL.
+        assert_eq!(
+            merged.pointer("/options/baseURL").and_then(Value::as_str),
+            Some("https://new.example.com/v1")
+        );
+        assert_eq!(
+            merged.pointer("/options/apiKey").and_then(Value::as_str),
+            Some("sk-new")
+        );
     }
 
     #[test]
@@ -1111,17 +988,18 @@ api_key_env_var = "KEY"
     }
 
     #[test]
-    fn toml_merge_conflicts_on_scalar_difference() {
-        let err = merge_toml_live(
+    fn toml_merge_prefers_incoming_on_scalar_difference() {
+        let merged = merge_toml_live(
             &AppType::Codex,
             "config.toml",
             "model = \"local\"",
             "model = \"incoming\"",
-            ConflictPolicy::Fail.into(),
+            ConflictPolicy::PreferIncoming.into(),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(err.to_string().contains("model"));
+        assert!(merged.contains("model = \"incoming\""));
+        assert!(!merged.contains("model = \"local\""));
     }
 
     #[test]
@@ -1182,8 +1060,8 @@ wire_api = "responses"
     }
 
     #[test]
-    fn toml_merge_collects_multiple_fail_policy_conflicts() {
-        let err = merge_toml_live(
+    fn toml_merge_prefers_incoming_for_multiple_differences() {
+        let merged = merge_toml_live(
             &AppType::Codex,
             "config.toml",
             r#"
@@ -1194,17 +1072,17 @@ model_provider = "local-provider"
 model = "incoming"
 model_provider = "incoming-provider"
 "#,
-            ConflictPolicy::Fail.into(),
+            ConflictPolicy::PreferIncoming.into(),
         )
-        .unwrap_err();
-        let message = err.to_string();
+        .unwrap();
 
-        assert!(message.contains("model"));
-        assert!(message.contains("model_provider"));
+        assert!(merged.contains("model = \"incoming\""));
+        assert!(merged.contains("model_provider = \"incoming-provider\""));
+        assert!(!merged.contains("local"));
     }
 
     #[test]
-    fn env_merge_collects_multiple_fail_policy_conflicts() {
+    fn env_merge_prefers_incoming_for_multiple_differences() {
         let local = HashMap::from([
             ("API_KEY".to_string(), "local".to_string()),
             ("BASE_URL".to_string(), "https://local.example".to_string()),
@@ -1217,17 +1095,19 @@ model_provider = "incoming-provider"
             ),
         ]);
 
-        let err = merge_env_live(
+        let merged = merge_env_live(
             &AppType::Gemini,
             ".env",
             local,
             &incoming,
-            ConflictPolicy::Fail.into(),
+            ConflictPolicy::PreferIncoming.into(),
         )
-        .unwrap_err();
-        let message = err.to_string();
+        .unwrap();
 
-        assert!(message.contains("API_KEY"));
-        assert!(message.contains("BASE_URL"));
+        assert_eq!(merged.get("API_KEY").map(String::as_str), Some("incoming"));
+        assert_eq!(
+            merged.get("BASE_URL").map(String::as_str),
+            Some("https://incoming.example")
+        );
     }
 }
