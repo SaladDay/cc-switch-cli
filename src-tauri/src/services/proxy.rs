@@ -1597,13 +1597,7 @@ impl ProxyService {
             provider,
             &mut provider_snapshot,
         )?;
-        Self::merge_live_backup_snapshot(
-            app_type,
-            Some(original_live),
-            None,
-            provider_snapshot,
-            live_merge::ConflictPolicy::PreferIncoming.into(),
-        )
+        Self::merge_live_backup_snapshot(app_type, Some(original_live), None, provider_snapshot)
     }
 
     async fn save_failover_live_snapshot(
@@ -2104,18 +2098,16 @@ impl ProxyService {
             existing_backup_value.as_ref(),
             None,
             backup_snapshot,
-            live_merge::ConflictPolicy::PreferIncoming.into(),
         )?;
         self.save_live_backup_snapshot(app_type, &backup_snapshot)
             .await
     }
 
-    pub(crate) async fn prepare_live_backup_from_provider_with_resolution(
+    pub(crate) async fn prepare_live_backup_from_provider(
         &self,
         app_type: &str,
         provider: &Provider,
         previous_provider: Option<&Provider>,
-        resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<Value, String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
         let mut backup_snapshot = self.build_live_snapshot_from_provider(&app_type, provider)?;
@@ -2141,7 +2133,6 @@ impl ProxyService {
             existing_backup_value.as_ref(),
             previous_backup_snapshot.as_ref(),
             backup_snapshot,
-            resolution,
         )
     }
 
@@ -2189,7 +2180,6 @@ impl ProxyService {
         existing_backup: Option<&Value>,
         previous_backup_snapshot: Option<&Value>,
         backup_snapshot: Value,
-        resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<Value, String> {
         match app_type {
             AppType::Claude => match (existing_backup, previous_backup_snapshot) {
@@ -2199,7 +2189,6 @@ impl ProxyService {
                     existing.clone(),
                     base,
                     &backup_snapshot,
-                    resolution,
                 )
                 .map_err(|error| error.to_string()),
                 (Some(existing), None) => live_merge::merge_json_live(
@@ -2207,7 +2196,6 @@ impl ProxyService {
                     "proxy live backup",
                     existing.clone(),
                     &backup_snapshot,
-                    resolution,
                 )
                 .map_err(|error| error.to_string()),
                 (None, _) => Ok(backup_snapshot),
@@ -2216,7 +2204,6 @@ impl ProxyService {
                 existing_backup,
                 previous_backup_snapshot,
                 backup_snapshot,
-                resolution,
             ),
             AppType::Gemini => {
                 let incoming_env = backup_snapshot
@@ -2235,7 +2222,6 @@ impl ProxyService {
                         existing.clone(),
                         base,
                         &incoming_snapshot,
-                        resolution,
                     )
                     .map_err(|error| error.to_string()),
                     (Some(existing), None) => live_merge::merge_json_live(
@@ -2243,7 +2229,6 @@ impl ProxyService {
                         "proxy live backup",
                         existing.clone(),
                         &incoming_snapshot,
-                        resolution,
                     )
                     .map_err(|error| error.to_string()),
                     (None, _) => Ok(incoming_snapshot),
@@ -2257,7 +2242,6 @@ impl ProxyService {
         existing_backup: Option<&Value>,
         previous_backup_snapshot: Option<&Value>,
         mut incoming_backup: Value,
-        resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<Value, String> {
         let Some(existing_backup) = existing_backup else {
             return Ok(incoming_backup);
@@ -2283,7 +2267,6 @@ impl ProxyService {
                 existing_auth,
                 &base_auth,
                 &incoming_auth,
-                resolution,
             )
         } else {
             live_merge::merge_json_live(
@@ -2291,7 +2274,6 @@ impl ProxyService {
                 "proxy live backup auth",
                 existing_auth,
                 &incoming_auth,
-                resolution,
             )
         }
         .map_err(|error| error.to_string())?;
@@ -2315,7 +2297,6 @@ impl ProxyService {
                 existing_config,
                 base_config,
                 incoming_config,
-                resolution,
             )
         } else {
             live_merge::merge_toml_live(
@@ -2323,7 +2304,6 @@ impl ProxyService {
                 "proxy live backup config",
                 existing_config,
                 incoming_config,
-                resolution,
             )
         }
         .map_err(|error| error.to_string())?;
@@ -2398,11 +2378,10 @@ impl ProxyService {
 
         if should_sync_live {
             let backup_snapshot = self
-                .prepare_live_backup_from_provider_with_resolution(
+                .prepare_live_backup_from_provider(
                     app_type_enum.as_str(),
                     &provider,
                     previous_provider.as_ref(),
-                    live_merge::ConflictPolicy::PreferIncoming.into(),
                 )
                 .await?;
             self.save_live_backup_snapshot(app_type_enum.as_str(), &backup_snapshot)

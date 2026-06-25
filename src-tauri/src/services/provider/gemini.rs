@@ -180,50 +180,12 @@ impl ProviderService {
         Ok(())
     }
 
-    #[expect(
-        dead_code,
-        reason = "kept for direct Gemini live writes without custom resolution"
-    )]
-    pub(crate) fn write_gemini_live(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-    ) -> Result<(), AppError> {
-        Self::write_gemini_live_with_resolution(
-            provider,
-            common_config_snippet,
-            None,
-            false,
-            live_merge::ConflictPolicy::Fail.into(),
-        )
-    }
-
     pub(crate) fn write_gemini_live_force(
         provider: &Provider,
         common_config_snippet: Option<&str>,
     ) -> Result<(), AppError> {
-        Self::write_gemini_live_with_resolution(
-            provider,
-            common_config_snippet,
-            None,
-            true,
-            live_merge::ConflictPolicy::Fail.into(),
-        )
-    }
-
-    pub(super) fn write_gemini_live_with_resolution(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-        previous_common_config_snippet: Option<&str>,
-        force_sync: bool,
-        resolution: live_merge::ConflictResolution<'_>,
-    ) -> Result<(), AppError> {
-        let prepared = Self::prepare_gemini_live_write(
-            provider,
-            common_config_snippet,
-            previous_common_config_snippet,
-            force_sync,
-            resolution,
-        )?;
+        let prepared =
+            Self::prepare_gemini_live_write(provider, common_config_snippet, None, true)?;
         Self::apply_gemini_live_write(&prepared)
     }
 
@@ -232,7 +194,6 @@ impl ProviderService {
         common_config_snippet: Option<&str>,
         previous_common_config_snippet: Option<&str>,
         force_sync: bool,
-        _resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<PreparedLiveWrite, AppError> {
         use crate::gemini_config::{
             env_to_json, get_gemini_settings_path, json_to_env, read_gemini_env,

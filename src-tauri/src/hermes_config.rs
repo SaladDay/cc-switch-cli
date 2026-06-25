@@ -666,27 +666,11 @@ pub fn get_provider(name: &str) -> Result<Option<Value>, AppError> {
 ///   on disk but not submitted by the UI are preserved.
 /// - Holds the write lock end-to-end to avoid TOCTOU races.
 pub fn set_provider(name: &str, provider_config: Value) -> Result<HermesWriteOutcome, AppError> {
-    set_provider_with_resolution(
-        name,
-        provider_config,
-        live_merge::ConflictPolicy::PreferIncoming.into(),
-    )
-}
-
-pub fn set_provider_with_resolution(
-    name: &str,
-    provider_config: Value,
-    resolution: live_merge::ConflictResolution<'_>,
-) -> Result<HermesWriteOutcome, AppError> {
-    let providers_value = prepare_provider_with_resolution(name, provider_config, resolution)?;
+    let providers_value = prepare_provider(name, provider_config)?;
     write_prepared_providers(&providers_value)
 }
 
-pub fn prepare_provider_with_resolution(
-    name: &str,
-    provider_config: Value,
-    resolution: live_merge::ConflictResolution<'_>,
-) -> Result<serde_yaml::Value, AppError> {
+pub fn prepare_provider(name: &str, provider_config: Value) -> Result<serde_yaml::Value, AppError> {
     let config = read_hermes_config()?;
     ensure_provider_writable(&config, name, "edit")?;
 
@@ -726,7 +710,6 @@ pub fn prepare_provider_with_resolution(
             format!("config.yaml custom_providers.{name}"),
             existing_json,
             &submitted,
-            resolution,
         )?;
         *existing = json_to_yaml(&merged)?;
     } else {

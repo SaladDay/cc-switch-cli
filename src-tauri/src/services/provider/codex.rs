@@ -421,42 +421,6 @@ impl ProviderService {
     /// Aligned with upstream: the stored `settings_config.config` is the full config.toml text.
     /// We write it directly to `~/.codex/config.toml`, optionally merging the common config snippet.
     /// Auth is handled separately via auth.json.
-    #[expect(
-        dead_code,
-        reason = "kept for direct Codex live writes without custom resolution"
-    )]
-    pub(super) fn write_codex_live(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-        apply_common_config: bool,
-    ) -> Result<(), AppError> {
-        Self::write_codex_live_with_resolution(
-            provider,
-            common_config_snippet,
-            None,
-            apply_common_config,
-            live_merge::ConflictPolicy::Fail.into(),
-        )
-    }
-
-    pub(super) fn write_codex_live_with_resolution(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-        previous_common_config_snippet: Option<&str>,
-        apply_common_config: bool,
-        resolution: live_merge::ConflictResolution<'_>,
-    ) -> Result<(), AppError> {
-        let prepared = Self::prepare_codex_live_write(
-            provider,
-            common_config_snippet,
-            previous_common_config_snippet,
-            apply_common_config,
-            false,
-            resolution,
-        )?;
-        Self::apply_codex_live_write(&prepared)
-    }
-
     pub(crate) fn write_codex_live_force(
         provider: &Provider,
         common_config_snippet: Option<&str>,
@@ -468,7 +432,6 @@ impl ProviderService {
             None,
             apply_common_config,
             true,
-            live_merge::ConflictPolicy::PreferIncoming.into(),
         )?;
         Self::apply_codex_live_write(&prepared)
     }
@@ -479,7 +442,6 @@ impl ProviderService {
         _previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
         force_sync: bool,
-        _resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<PreparedLiveWrite, AppError> {
         if !force_sync && !crate::sync_policy::should_sync_live(&AppType::Codex) {
             return Ok(PreparedLiveWrite::Noop);

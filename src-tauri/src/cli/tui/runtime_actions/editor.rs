@@ -11,7 +11,6 @@ use crate::openclaw_config::{
     OpenClawEnvConfig, OpenClawToolsConfig,
 };
 use crate::provider::Provider;
-use crate::services::provider::live_merge;
 use crate::services::{McpService, PromptService, ProviderService};
 use crate::settings::{set_webdav_sync_settings, WebDavSyncSettings};
 
@@ -797,12 +796,7 @@ fn submit_provider_add(
         )
         .map(|_| true)
     } else {
-        ProviderService::add_with_resolution(
-            &state,
-            ctx.app.app_type.clone(),
-            provider,
-            live_merge::ConflictPolicy::PreferIncoming.into(),
-        )
+        ProviderService::add(&state, ctx.app.app_type.clone(), provider)
     };
 
     match result {
@@ -848,12 +842,7 @@ fn submit_provider_edit(
     }
 
     let state = load_state()?;
-    let result = ProviderService::update_with_resolution(
-        &state,
-        ctx.app.app_type.clone(),
-        provider,
-        live_merge::ConflictPolicy::PreferIncoming.into(),
-    );
+    let result = ProviderService::update(&state, ctx.app.app_type.clone(), provider);
 
     if let Err(err) = result {
         ctx.app.push_toast(err.to_string(), ToastKind::Error);

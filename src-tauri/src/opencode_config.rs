@@ -104,44 +104,19 @@ fn set_provider_value(
     write_opencode_config(&full_config)
 }
 
-pub fn set_provider_with_resolution(
-    id: &str,
-    provider: Value,
-    resolution: live_merge::ConflictResolution<'_>,
-) -> Result<(), AppError> {
-    let full_config = prepare_provider_with_resolution(id, provider, resolution)?;
-    write_opencode_config(&full_config)
-}
-
-pub fn prepare_provider_with_resolution(
-    id: &str,
-    provider: Value,
-    resolution: live_merge::ConflictResolution<'_>,
-) -> Result<Value, AppError> {
-    prepare_provider_with_base_and_resolution(id, None, provider, resolution)
-}
-
-pub fn prepare_provider_with_base_and_resolution(
+pub fn prepare_provider_with_base(
     id: &str,
     base_provider: Option<Value>,
     provider: Value,
-    resolution: live_merge::ConflictResolution<'_>,
 ) -> Result<Value, AppError> {
-    prepare_provider_with_base_deleted_keys_and_resolution(
-        id,
-        base_provider,
-        provider,
-        &[],
-        resolution,
-    )
+    prepare_provider_with_base_deleted_keys(id, base_provider, provider, &[])
 }
 
-fn prepare_provider_with_base_deleted_keys_and_resolution(
+fn prepare_provider_with_base_deleted_keys(
     id: &str,
     base_provider: Option<Value>,
     provider: Value,
     deleted_keys: &[&str],
-    resolution: live_merge::ConflictResolution<'_>,
 ) -> Result<Value, AppError> {
     let mut full_config = read_opencode_config()?;
 
@@ -166,14 +141,12 @@ fn prepare_provider_with_base_deleted_keys_and_resolution(
                     existing.clone(),
                     &base_provider,
                     &provider,
-                    resolution,
                 )?,
                 None => live_merge::merge_json_live(
                     &crate::app_config::AppType::OpenCode,
                     format!("opencode.json provider.{id}"),
                     existing.clone(),
                     &provider,
-                    resolution,
                 )?,
             },
             None => provider,
@@ -254,37 +227,10 @@ pub fn set_typed_provider(id: &str, config: &OpenCodeProviderConfig) -> Result<(
     set_provider_value(id, value, false)
 }
 
-#[expect(
-    dead_code,
-    reason = "kept for direct typed OpenCode provider writes with conflict resolution"
-)]
-pub fn set_typed_provider_with_resolution(
-    id: &str,
-    config: &OpenCodeProviderConfig,
-    resolution: live_merge::ConflictResolution<'_>,
-) -> Result<(), AppError> {
-    let value =
-        serde_json::to_value(config).map_err(|source| AppError::JsonSerialize { source })?;
-    set_provider_with_resolution(id, value, resolution)
-}
-
-#[expect(
-    dead_code,
-    reason = "kept for direct typed OpenCode provider writes with conflict resolution"
-)]
-pub fn prepare_typed_provider_with_resolution(
-    id: &str,
-    config: &OpenCodeProviderConfig,
-    resolution: live_merge::ConflictResolution<'_>,
-) -> Result<Value, AppError> {
-    prepare_typed_provider_with_base_and_resolution(id, None, config, resolution)
-}
-
-pub fn prepare_typed_provider_with_base_and_resolution(
+pub fn prepare_typed_provider_with_base(
     id: &str,
     base_config: Option<&OpenCodeProviderConfig>,
     config: &OpenCodeProviderConfig,
-    resolution: live_merge::ConflictResolution<'_>,
 ) -> Result<Value, AppError> {
     let base_value = base_config
         .map(serde_json::to_value)
@@ -299,13 +245,7 @@ pub fn prepare_typed_provider_with_base_and_resolution(
     if config.modalities.is_none() {
         deleted_keys.push("modalities");
     }
-    prepare_provider_with_base_deleted_keys_and_resolution(
-        id,
-        base_value,
-        value,
-        &deleted_keys,
-        resolution,
-    )
+    prepare_provider_with_base_deleted_keys(id, base_value, value, &deleted_keys)
 }
 
 pub fn get_mcp_servers() -> Result<Map<String, Value>, AppError> {
@@ -429,13 +369,8 @@ mod tests {
             serde_json::from_value(provider_without_modalities("https://old.example.com/v1"))
                 .expect("deserialize typed provider");
 
-        let prepared = prepare_typed_provider_with_base_and_resolution(
-            "vision",
-            Some(&base_config),
-            &config,
-            live_merge::ConflictPolicy::Fail.into(),
-        )
-        .expect("prepare typed provider");
+        let prepared = prepare_typed_provider_with_base("vision", Some(&base_config), &config)
+            .expect("prepare typed provider");
         let provider = prepared["provider"]["vision"]
             .as_object()
             .expect("serialized provider object");

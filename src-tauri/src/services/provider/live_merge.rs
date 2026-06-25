@@ -1,280 +1,89 @@
-use std::collections::HashMap;
-use std::fmt;
+//! Prefer-incoming live-config merge primitives.
+//!
+//! These merges always prefer the incoming (cc-switch) value and never surface
+//! conflicts. The base-aware variants additionally retain user edits that
+//! cc-switch did not touch (a field is only changed when the incoming value
+//! differs from the base), which is what the proxy-takeover backup merge relies
+//! on. Provider switch/add/update writes are clean overwrites and do not use
+//! these merges directly; the additive apps (OpenCode/Hermes/OpenClaw) and the
+//! proxy takeover backup do.
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
 use serde_json::Value;
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConfigConflict {
-    pub app_type: AppType,
-    pub target: String,
-    pub path: String,
-    pub local: String,
-    pub incoming: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConflictChoice {
-    KeepLocal,
-    UseIncoming,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConflictPolicy {
-    Fail,
-    PreferLocal,
-    PreferIncoming,
-}
-
-impl ConflictPolicy {
-    fn choice_for(self, conflicts: &[ConfigConflict]) -> Result<Option<ConflictChoice>, AppError> {
-        match self {
-            ConflictPolicy::Fail => {
-                if conflicts.is_empty() {
-                    Ok(None)
-                } else {
-                    Err(conflict_error(conflicts))
-                }
-            }
-            ConflictPolicy::PreferLocal => Ok(Some(ConflictChoice::KeepLocal)),
-            ConflictPolicy::PreferIncoming => Ok(Some(ConflictChoice::UseIncoming)),
-        }
-    }
-}
-
-pub trait ConflictResolver {
-    fn resolve_conflict(&mut self, conflict: &ConfigConflict) -> Result<ConflictChoice, AppError>;
-}
-
-#[derive(Default)]
-pub struct ConflictCollector {
-    conflicts: Vec<ConfigConflict>,
-}
-
-impl ConflictCollector {
-    pub fn into_conflicts(self) -> Vec<ConfigConflict> {
-        self.conflicts
-    }
-}
-
-impl ConflictResolver for ConflictCollector {
-    fn resolve_conflict(&mut self, conflict: &ConfigConflict) -> Result<ConflictChoice, AppError> {
-        self.conflicts.push(conflict.clone());
-        Ok(ConflictChoice::KeepLocal)
-    }
-}
-
-impl<F> ConflictResolver for F
-where
-    F: FnMut(&ConfigConflict) -> Result<ConflictChoice, AppError>,
-{
-    fn resolve_conflict(&mut self, conflict: &ConfigConflict) -> Result<ConflictChoice, AppError> {
-        self(conflict)
-    }
-}
-
-#[derive(Clone, Copy)]
-pub enum ConflictResolution<'a> {
-    Policy(ConflictPolicy),
-    Resolver(&'a std::cell::RefCell<&'a mut dyn ConflictResolver>),
-}
-
-impl fmt::Debug for ConflictResolution<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Policy(policy) => f.debug_tuple("Policy").field(policy).finish(),
-            Self::Resolver(_) => f.write_str("Resolver(<callback>)"),
-        }
-    }
-}
-
-impl ConflictResolution<'_> {
-    fn resolve(self, conflicts: &[ConfigConflict]) -> Result<Option<ConflictChoice>, AppError> {
-        match self {
-            Self::Policy(policy) => policy.choice_for(conflicts),
-            Self::Resolver(resolver) => {
-                if conflicts.is_empty() {
-                    return Ok(None);
-                }
-
-                let mut resolver = resolver.borrow_mut();
-                let mut choice = None;
-                for conflict in conflicts {
-                    choice = Some(resolver.resolve_conflict(conflict)?);
-                }
-                Ok(choice)
-            }
-        }
-    }
-
-    fn collects_failures(self) -> bool {
-        matches!(self, Self::Policy(ConflictPolicy::Fail))
-    }
-}
-
-impl From<ConflictPolicy> for ConflictResolution<'_> {
-    fn from(policy: ConflictPolicy) -> Self {
-        Self::Policy(policy)
-    }
-}
-
-pub fn conflict_error(conflicts: &[ConfigConflict]) -> AppError {
-    let mut message = String::from("Live configuration has conflicting local changes:");
-    for conflict in conflicts {
-        message.push_str("\n- ");
-        message.push_str(conflict.app_type.as_str());
-        message.push(' ');
-        message.push_str(&conflict.target);
-        message.push(' ');
-        message.push_str(&conflict.path);
-        message.push_str(" (local: ");
-        message.push_str(&conflict.local);
-        message.push_str(", cc-switch: ");
-        message.push_str(&conflict.incoming);
-        message.push(')');
-    }
-    AppError::Message(message)
-}
-
-pub fn resolve_conflict_choice(
-    conflict: ConfigConflict,
-    resolution: ConflictResolution<'_>,
-) -> Result<ConflictChoice, AppError> {
-    Ok(resolution
-        .resolve(&[conflict])?
-        .unwrap_or(ConflictChoice::KeepLocal))
-}
-
+/// Deep-merge `incoming` into `local`, preferring the incoming value on every
+/// scalar mismatch. Keys present only in `local` are retained; keys present in
+/// `incoming` are added or overwritten.
 pub fn merge_json_live(
-    app_type: &AppType,
+    _app_type: &AppType,
     target: impl Into<String>,
     local: Value,
     incoming: &Value,
-    resolution: ConflictResolution<'_>,
 ) -> Result<Value, AppError> {
-    let target = target.into();
+    let _ = target.into();
     let mut merged = local;
-    let mut conflicts = Vec::new();
-    merge_json_value(
-        app_type,
-        &target,
-        String::new(),
-        &mut merged,
-        incoming,
-        resolution,
-        &mut conflicts,
-    )?;
-    if resolution.collects_failures() && !conflicts.is_empty() {
-        return Err(conflict_error(&conflicts));
-    }
+    merge_json_value(&mut merged, incoming);
     Ok(merged)
 }
 
+/// Base-aware deep merge that prefers incoming. A field is only changed when the
+/// incoming value differs from the base, so user edits cc-switch did not touch
+/// are retained; cc-switch's removals (keys in base but absent in incoming) are
+/// applied.
 pub fn merge_json_with_base_live(
-    app_type: &AppType,
+    _app_type: &AppType,
     target: impl Into<String>,
     local: Value,
     base: &Value,
     incoming: &Value,
-    resolution: ConflictResolution<'_>,
 ) -> Result<Value, AppError> {
-    let target = target.into();
+    let _ = target.into();
     let mut merged = local;
-    let mut conflicts = Vec::new();
-    merge_json_value_with_base(
-        app_type,
-        &target,
-        String::new(),
-        &mut merged,
-        Some(base),
-        incoming,
-        resolution,
-        &mut conflicts,
-    )?;
-    if resolution.collects_failures() && !conflicts.is_empty() {
-        return Err(conflict_error(&conflicts));
-    }
+    merge_json_value_with_base(&mut merged, Some(base), incoming);
     Ok(merged)
 }
 
-fn merge_json_value(
-    app_type: &AppType,
-    target: &str,
-    path: String,
-    local: &mut Value,
-    incoming: &Value,
-    resolution: ConflictResolution<'_>,
-    conflicts: &mut Vec<ConfigConflict>,
-) -> Result<(), AppError> {
+fn merge_json_value(local: &mut Value, incoming: &Value) {
     match (local, incoming) {
         (Value::Object(local_map), Value::Object(incoming_map)) => {
             for (key, incoming_value) in incoming_map {
-                let next_path = json_child_path(&path, key);
                 match local_map.get_mut(key) {
-                    Some(local_value) => merge_json_value(
-                        app_type,
-                        target,
-                        next_path,
-                        local_value,
-                        incoming_value,
-                        resolution,
-                        conflicts,
-                    )?,
+                    Some(local_value) => merge_json_value(local_value, incoming_value),
                     None => {
                         local_map.insert(key.clone(), incoming_value.clone());
                     }
                 }
             }
-            Ok(())
         }
         (local_value, incoming_value) => {
-            // Prefer-incoming: cc-switch's value always wins on a scalar mismatch.
+            // Prefer-incoming: cc-switch's value wins on a scalar mismatch.
             if local_value != incoming_value {
                 *local_value = incoming_value.clone();
             }
-            Ok(())
         }
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "recursive merge carries immutable context plus per-node state"
-)]
-fn merge_json_value_with_base(
-    app_type: &AppType,
-    target: &str,
-    path: String,
-    local: &mut Value,
-    base: Option<&Value>,
-    incoming: &Value,
-    resolution: ConflictResolution<'_>,
-    conflicts: &mut Vec<ConfigConflict>,
-) -> Result<(), AppError> {
+fn merge_json_value_with_base(local: &mut Value, base: Option<&Value>, incoming: &Value) {
     if base.is_some_and(|base| base == incoming) {
-        return Ok(());
+        return;
     }
 
     match (local, base, incoming) {
         (Value::Object(local_map), base, Value::Object(incoming_map)) => {
             let base_map = base.and_then(Value::as_object);
             for (key, incoming_value) in incoming_map {
-                let next_path = json_child_path(&path, key);
                 match local_map.get_mut(key) {
                     Some(local_value) => merge_json_value_with_base(
-                        app_type,
-                        target,
-                        next_path,
                         local_value,
                         base_map.and_then(|map| map.get(key)),
                         incoming_value,
-                        resolution,
-                        conflicts,
-                    )?,
+                    ),
                     None => {
                         let base_value = base_map.and_then(|map| map.get(key));
                         if let Some(base_value) = base_value {
@@ -300,35 +109,40 @@ fn merge_json_value_with_base(
                     let Some(local_value) = local_map.get(key) else {
                         continue;
                     };
-                    let _ = local_value;
+                    if local_value == base_value {
+                        local_map.remove(key);
+                        continue;
+                    }
                     // cc-switch removed this key (it existed in base but not in
                     // incoming); prefer-incoming applies the removal.
                     local_map.remove(key);
                 }
             }
-            Ok(())
         }
-        (local_value, base, incoming_value) => {
+        (local_value, _base, incoming_value) => {
             // Prefer-incoming: cc-switch's value always wins on a scalar mismatch,
             // regardless of whether the user diverged from the base.
-            let _ = base;
             if local_value != incoming_value {
                 *local_value = incoming_value.clone();
             }
-            Ok(())
         }
     }
 }
 
+/// Merge environment variables, preferring the incoming value on a key mismatch.
+/// Keys present only in `local` are retained.
+///
+/// Retained as a prefer-incoming primitive even though no production caller uses
+/// it today (Gemini `.env` is a full overwrite); kept for parity with the other
+/// merge primitives and exercised by the unit tests.
+#[allow(dead_code)]
 pub fn merge_env_live(
-    app_type: &AppType,
+    _app_type: &AppType,
     target: impl Into<String>,
     mut local: HashMap<String, String>,
     incoming: &HashMap<String, String>,
-    resolution: ConflictResolution<'_>,
 ) -> Result<HashMap<String, String>, AppError> {
-    let target = target.into();
-    let mut conflicts = Vec::new();
+    let _ = target.into();
     for (key, incoming_value) in incoming {
         match local.get_mut(key) {
             Some(local_value) if local_value != incoming_value => {
@@ -341,64 +155,44 @@ pub fn merge_env_live(
             }
         }
     }
-    if resolution.collects_failures() && !conflicts.is_empty() {
-        return Err(conflict_error(&conflicts));
-    }
     Ok(local)
 }
 
+/// Merge TOML documents, preferring incoming values on scalar mismatches and
+/// retaining local-only keys.
 pub fn merge_toml_live(
     app_type: &AppType,
     target: impl Into<String>,
     local_text: &str,
     incoming_text: &str,
-    resolution: ConflictResolution<'_>,
 ) -> Result<String, AppError> {
     let target = target.into();
     let mut local_doc = parse_toml_live(local_text, &target)?;
     let incoming_doc = parse_toml_live(incoming_text, &target)?;
-    let mut conflicts = Vec::new();
-    merge_toml_table_like(
-        app_type,
-        &target,
-        String::new(),
-        local_doc.as_table_mut(),
-        incoming_doc.as_table(),
-        resolution,
-        &mut conflicts,
-    )?;
-    if resolution.collects_failures() && !conflicts.is_empty() {
-        return Err(conflict_error(&conflicts));
-    }
+    let _ = app_type;
+    merge_toml_table_like(local_doc.as_table_mut(), incoming_doc.as_table());
     Ok(local_doc.to_string())
 }
 
+/// Base-aware TOML merge that prefers incoming, retaining user edits cc-switch
+/// did not touch and applying cc-switch's removals.
 pub fn merge_toml_with_base_live(
     app_type: &AppType,
     target: impl Into<String>,
     local_text: &str,
     base_text: &str,
     incoming_text: &str,
-    resolution: ConflictResolution<'_>,
 ) -> Result<String, AppError> {
     let target = target.into();
     let mut local_doc = parse_toml_live(local_text, &target)?;
     let base_doc = parse_toml_live(base_text, &target)?;
     let incoming_doc = parse_toml_live(incoming_text, &target)?;
-    let mut conflicts = Vec::new();
+    let _ = app_type;
     merge_toml_table_like_with_base(
-        app_type,
-        &target,
-        String::new(),
         local_doc.as_table_mut(),
         Some(base_doc.as_table()),
         incoming_doc.as_table(),
-        resolution,
-        &mut conflicts,
-    )?;
-    if resolution.collects_failures() && !conflicts.is_empty() {
-        return Err(conflict_error(&conflicts));
-    }
+    );
     Ok(local_doc.to_string())
 }
 
@@ -408,26 +202,11 @@ fn parse_toml_live(text: &str, target: &str) -> Result<DocumentMut, AppError> {
         .map_err(|e| AppError::Config(format!("TOML parse error in {target}: {e}")))
 }
 
-fn merge_toml_item(
-    app_type: &AppType,
-    target: &str,
-    path: String,
-    local: &mut Item,
-    incoming: &Item,
-    resolution: ConflictResolution<'_>,
-    conflicts: &mut Vec<ConfigConflict>,
-) -> Result<(), AppError> {
+fn merge_toml_item(local: &mut Item, incoming: &Item) {
     if let Some(incoming_table) = incoming.as_table_like() {
         if let Some(local_table) = local.as_table_like_mut() {
-            return merge_toml_table_like(
-                app_type,
-                target,
-                path,
-                local_table,
-                incoming_table,
-                resolution,
-                conflicts,
-            );
+            merge_toml_table_like(local_table, incoming_table);
+            return;
         }
     }
 
@@ -435,109 +214,48 @@ fn merge_toml_item(
     if !toml_items_equal(local, incoming) {
         *local = incoming.clone();
     }
-    Ok(())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "recursive TOML item merge carries immutable context plus per-node state"
-)]
-fn merge_toml_item_with_base(
-    app_type: &AppType,
-    target: &str,
-    path: String,
-    local: &mut Item,
-    base: Option<&Item>,
-    incoming: &Item,
-    resolution: ConflictResolution<'_>,
-    conflicts: &mut Vec<ConfigConflict>,
-) -> Result<(), AppError> {
+fn merge_toml_item_with_base(local: &mut Item, base: Option<&Item>, incoming: &Item) {
     if base.is_some_and(|base| toml_items_equal(base, incoming)) {
-        return Ok(());
+        return;
     }
 
     if let Some(incoming_table) = incoming.as_table_like() {
         if let Some(local_table) = local.as_table_like_mut() {
             let base_table = base.and_then(Item::as_table_like);
-            return merge_toml_table_like_with_base(
-                app_type,
-                target,
-                path,
-                local_table,
-                base_table,
-                incoming_table,
-                resolution,
-                conflicts,
-            );
+            merge_toml_table_like_with_base(local_table, base_table, incoming_table);
+            return;
         }
     }
 
     // Prefer-incoming: cc-switch's value wins on a scalar mismatch, regardless
     // of whether the user diverged from the base.
-    let _ = base;
     if !toml_items_equal(local, incoming) {
         *local = incoming.clone();
     }
-    Ok(())
 }
 
-fn merge_toml_table_like(
-    app_type: &AppType,
-    target: &str,
-    path: String,
-    local: &mut dyn TableLike,
-    incoming: &dyn TableLike,
-    resolution: ConflictResolution<'_>,
-    conflicts: &mut Vec<ConfigConflict>,
-) -> Result<(), AppError> {
+fn merge_toml_table_like(local: &mut dyn TableLike, incoming: &dyn TableLike) {
     for (key, incoming_item) in incoming.iter() {
-        let next_path = toml_child_path(&path, key);
         match local.get_mut(key) {
-            Some(local_item) => merge_toml_item(
-                app_type,
-                target,
-                next_path,
-                local_item,
-                incoming_item,
-                resolution,
-                conflicts,
-            )?,
+            Some(local_item) => merge_toml_item(local_item, incoming_item),
             None => {
                 local.insert(key, incoming_item.clone());
             }
         }
     }
-    Ok(())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "recursive TOML table merge carries immutable context plus per-node state"
-)]
 fn merge_toml_table_like_with_base(
-    app_type: &AppType,
-    target: &str,
-    path: String,
     local: &mut dyn TableLike,
     base: Option<&dyn TableLike>,
     incoming: &dyn TableLike,
-    resolution: ConflictResolution<'_>,
-    conflicts: &mut Vec<ConfigConflict>,
-) -> Result<(), AppError> {
+) {
     for (key, incoming_item) in incoming.iter() {
-        let next_path = toml_child_path(&path, key);
         let base_item = base.and_then(|table| table.get(key));
         match local.get_mut(key) {
-            Some(local_item) => merge_toml_item_with_base(
-                app_type,
-                target,
-                next_path,
-                local_item,
-                base_item,
-                incoming_item,
-                resolution,
-                conflicts,
-            )?,
+            Some(local_item) => merge_toml_item_with_base(local_item, base_item, incoming_item),
             None => {
                 if let Some(base_item) = base_item {
                     if toml_items_equal(incoming_item, base_item) {
@@ -564,14 +282,15 @@ fn merge_toml_table_like_with_base(
             let Some(local_item) = local.get(&key) else {
                 continue;
             };
-            let _ = (local_item, base_item);
+            if toml_items_equal(local_item, &base_item) {
+                local.remove(&key);
+                continue;
+            }
             // cc-switch removed this key (it existed in base but not in
             // incoming); prefer-incoming applies the removal.
             local.remove(&key);
         }
     }
-
-    Ok(())
 }
 
 fn toml_items_equal(left: &Item, right: &Item) -> bool {
@@ -598,41 +317,6 @@ fn toml_tables_equal(left: &dyn TableLike, right: &dyn TableLike) -> bool {
         })
 }
 
-fn json_child_path(parent: &str, key: &str) -> String {
-    if parent.is_empty() {
-        key.to_string()
-    } else {
-        format!("{parent}.{key}")
-    }
-}
-
-fn toml_child_path(parent: &str, key: &str) -> String {
-    if parent.is_empty() {
-        key.to_string()
-    } else {
-        format!("{parent}.{key}")
-    }
-}
-
-fn display_path(path: &str) -> String {
-    if path.is_empty() {
-        "<root>".to_string()
-    } else {
-        path.to_string()
-    }
-}
-
-fn json_display(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        _ => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
-    }
-}
-
-fn toml_display(item: &Item) -> String {
-    item.to_string().trim().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,14 +337,7 @@ mod tests {
             }
         });
 
-        let merged = merge_json_live(
-            &AppType::Claude,
-            "settings.json",
-            local,
-            &incoming,
-            ConflictPolicy::Fail.into(),
-        )
-        .unwrap();
+        let merged = merge_json_live(&AppType::Claude, "settings.json", local, &incoming).unwrap();
 
         assert_eq!(
             merged,
@@ -679,14 +356,7 @@ mod tests {
         let local = json!({ "env": { "MODEL": "local" } });
         let incoming = json!({ "env": { "MODEL": "incoming" } });
 
-        let merged = merge_json_live(
-            &AppType::Claude,
-            "settings.json",
-            local,
-            &incoming,
-            ConflictPolicy::PreferIncoming.into(),
-        )
-        .unwrap();
+        let merged = merge_json_live(&AppType::Claude, "settings.json", local, &incoming).unwrap();
 
         assert_eq!(merged, json!({ "env": { "MODEL": "incoming" } }));
     }
@@ -706,14 +376,7 @@ mod tests {
             }
         });
 
-        let merged = merge_json_live(
-            &AppType::Claude,
-            "settings.json",
-            local,
-            &incoming,
-            ConflictPolicy::PreferIncoming.into(),
-        )
-        .unwrap();
+        let merged = merge_json_live(&AppType::Claude, "settings.json", local, &incoming).unwrap();
 
         assert_eq!(
             merged,
@@ -731,14 +394,7 @@ mod tests {
         let local = json!({ "array": ["local"] });
         let incoming = json!({ "array": ["incoming"] });
 
-        let merged = merge_json_live(
-            &AppType::Claude,
-            "settings.json",
-            local,
-            &incoming,
-            ConflictPolicy::PreferIncoming.into(),
-        )
-        .unwrap();
+        let merged = merge_json_live(&AppType::Claude, "settings.json", local, &incoming).unwrap();
 
         assert_eq!(merged, json!({ "array": ["incoming"] }));
     }
@@ -771,7 +427,6 @@ mod tests {
             local,
             &base,
             &incoming,
-            ConflictPolicy::Fail.into(),
         )
         .unwrap();
 
@@ -805,7 +460,6 @@ mod tests {
             local,
             &base,
             &incoming,
-            ConflictPolicy::PreferIncoming.into(),
         )
         .unwrap();
 
@@ -845,7 +499,6 @@ mod tests {
             local,
             &base,
             &incoming,
-            ConflictPolicy::Fail.into(),
         )
         .unwrap();
 
@@ -873,7 +526,6 @@ mod tests {
             local,
             &base,
             &incoming,
-            ConflictPolicy::PreferIncoming.into(),
         )
         .unwrap();
 
@@ -908,7 +560,6 @@ mod tests {
             local,
             &base,
             &incoming,
-            ConflictPolicy::Fail.into(),
         )
         .unwrap();
 
@@ -945,7 +596,6 @@ mod tests {
             local,
             &base,
             &incoming,
-            ConflictPolicy::PreferIncoming.into(),
         )
         .unwrap();
 
@@ -974,14 +624,7 @@ model = "sonnet"
 api_key_env_var = "KEY"
 "#;
 
-        let merged = merge_toml_live(
-            &AppType::Codex,
-            "config.toml",
-            local,
-            incoming,
-            ConflictPolicy::Fail.into(),
-        )
-        .unwrap();
+        let merged = merge_toml_live(&AppType::Codex, "config.toml", local, incoming).unwrap();
 
         assert!(merged.contains("base_url = \"https://local.example\""));
         assert!(merged.contains("api_key_env_var = \"KEY\""));
@@ -994,7 +637,6 @@ api_key_env_var = "KEY"
             "config.toml",
             "model = \"local\"",
             "model = \"incoming\"",
-            ConflictPolicy::PreferIncoming.into(),
         )
         .unwrap();
 
@@ -1030,15 +672,9 @@ base_url = "https://aihubmix.example/v1"
 wire_api = "responses"
 "#;
 
-        let merged = merge_toml_with_base_live(
-            &AppType::Codex,
-            "config.toml",
-            local,
-            base,
-            incoming,
-            ConflictPolicy::PreferIncoming.into(),
-        )
-        .unwrap();
+        let merged =
+            merge_toml_with_base_live(&AppType::Codex, "config.toml", local, base, incoming)
+                .unwrap();
         let parsed: toml::Value = toml::from_str(&merged).expect("parse merged TOML");
         let providers = parsed
             .get("model_providers")
@@ -1072,7 +708,6 @@ model_provider = "local-provider"
 model = "incoming"
 model_provider = "incoming-provider"
 "#,
-            ConflictPolicy::PreferIncoming.into(),
         )
         .unwrap();
 
@@ -1095,14 +730,7 @@ model_provider = "incoming-provider"
             ),
         ]);
 
-        let merged = merge_env_live(
-            &AppType::Gemini,
-            ".env",
-            local,
-            &incoming,
-            ConflictPolicy::PreferIncoming.into(),
-        )
-        .unwrap();
+        let merged = merge_env_live(&AppType::Gemini, ".env", local, &incoming).unwrap();
 
         assert_eq!(merged.get("API_KEY").map(String::as_str), Some("incoming"));
         assert_eq!(

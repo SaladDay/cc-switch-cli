@@ -214,42 +214,6 @@ impl ProviderService {
         Ok(())
     }
 
-    #[expect(
-        dead_code,
-        reason = "kept for direct Claude live writes without custom resolution"
-    )]
-    pub(super) fn write_claude_live(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-        apply_common_config: bool,
-    ) -> Result<(), AppError> {
-        Self::write_claude_live_with_resolution(
-            provider,
-            common_config_snippet,
-            None,
-            apply_common_config,
-            live_merge::ConflictPolicy::Fail.into(),
-        )
-    }
-
-    pub(super) fn write_claude_live_with_resolution(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-        previous_common_config_snippet: Option<&str>,
-        apply_common_config: bool,
-        resolution: live_merge::ConflictResolution<'_>,
-    ) -> Result<(), AppError> {
-        let prepared = Self::prepare_claude_live_write(
-            provider,
-            common_config_snippet,
-            previous_common_config_snippet,
-            apply_common_config,
-            false,
-            resolution,
-        )?;
-        Self::apply_claude_live_write(&prepared)
-    }
-
     pub(crate) fn write_claude_live_force(
         provider: &Provider,
         common_config_snippet: Option<&str>,
@@ -261,7 +225,6 @@ impl ProviderService {
             None,
             apply_common_config,
             true,
-            live_merge::ConflictPolicy::Fail.into(),
         )?;
         Self::apply_claude_live_write(&prepared)
     }
@@ -272,7 +235,6 @@ impl ProviderService {
         _previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
         force_sync: bool,
-        _resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<PreparedLiveWrite, AppError> {
         if !force_sync && !crate::sync_policy::should_sync_live(&AppType::Claude) {
             return Ok(PreparedLiveWrite::Noop);

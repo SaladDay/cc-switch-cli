@@ -21,10 +21,6 @@ fn with_common_enabled(mut provider: Provider) -> Provider {
     provider
 }
 
-fn prefer_incoming_conflicts() -> live_merge::ConflictResolution<'static> {
-    live_merge::ConflictPolicy::PreferIncoming.into()
-}
-
 #[test]
 fn extract_codex_common_config_excludes_profile_model_selection() {
     let extracted = ProviderService::extract_codex_common_config_from_config_toml(
@@ -221,13 +217,7 @@ command = "npx"
     .expect("seed live config.toml");
 
     let state = state_from_config(config);
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p2",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch should succeed");
+    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
 
     (temp_home, env, state)
 }
@@ -566,13 +556,8 @@ fn codex_switch_overwrites_existing_auth_json_for_openai_official_provider() {
 
     let state = state_from_config(config);
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p2",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch to official should succeed");
+    ProviderService::switch(&state, AppType::Codex, "p2")
+        .expect("switch to official should succeed");
 
     let live_auth: Value = crate::config::read_json_file(&auth_path).expect("read auth.json");
     assert_eq!(
@@ -635,13 +620,8 @@ fn codex_switch_removes_empty_auth_json_for_openai_official_provider() {
 
     let state = state_from_config(config);
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "codex-official",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch to official should succeed without saved auth");
+    ProviderService::switch(&state, AppType::Codex, "codex-official")
+        .expect("switch to official should succeed without saved auth");
 
     assert!(
         !auth_path.exists(),
@@ -694,20 +674,8 @@ fn codex_switch_preserves_base_url_and_wire_api_across_multiple_switches() {
 
     // Seed initial live config for p1, then switch to p2, then back to p1.
     ProviderService::switch(&state, AppType::Codex, "p1").expect("seed p1 live");
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p2",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch to p2");
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p1",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch back to p1");
+    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
+    ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
 
     let live_text =
         std::fs::read_to_string(get_codex_config_path()).expect("read live config.toml");
@@ -806,13 +774,7 @@ trust_level = "trusted"
     )
     .expect("seed live config.toml with runtime project trust");
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p2",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch to p2");
+    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
 
     let cfg = state.config.read().expect("read config after switch");
     let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
@@ -867,13 +829,7 @@ trust_level = "trusted"
         "clean overwrite should not inject p1's runtime project trust into p2's live config"
     );
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p1",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch back to p1");
+    ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
     // Switching back to p1 reapplies its common-config opt-in (set during the
     // backfill that auto-extracted the runtime projects), so the project trust
     // returns to the live config via the common snippet.
@@ -932,13 +888,7 @@ fn codex_switch_backfill_migrates_existing_common_meta_for_current_provider() {
     )
     .expect("seed live config.toml");
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p2",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch away from p1");
+    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch away from p1");
 
     {
         let cfg = state.config.read().expect("read config after switch");
@@ -964,13 +914,7 @@ fn codex_switch_backfill_migrates_existing_common_meta_for_current_provider() {
         );
     }
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p1",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch back to p1");
+    ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
     let live_config = std::fs::read_to_string(get_codex_config_path()).expect("read live config");
     assert!(
         live_config.contains("disable_response_storage = true"),
@@ -1862,7 +1806,7 @@ fn sync_current_to_live_prefers_effective_current_from_local_settings() {
     crate::settings::set_current_provider(&AppType::Claude, Some("p2"))
         .expect("set local effective current override");
 
-    ProviderService::sync_current_to_live_with_resolution(&state, prefer_incoming_conflicts())
+    ProviderService::sync_current_to_live(&state)
         .expect("sync_current_to_live should use effective current provider");
 
     let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
@@ -2766,13 +2710,7 @@ fn provider_update_strips_common_snippet_before_claude_snapshot_persist() {
         None,
     ));
 
-    ProviderService::update_with_resolution(
-        &state,
-        AppType::Claude,
-        provider,
-        prefer_incoming_conflicts(),
-    )
-    .expect("update should succeed");
+    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
 
     let cfg = state.config.read().expect("read config after update");
     let provider = cfg
@@ -2855,13 +2793,7 @@ fn provider_update_does_not_infer_claude_common_config_opt_in() {
         None,
     );
 
-    ProviderService::update_with_resolution(
-        &state,
-        AppType::Claude,
-        provider,
-        prefer_incoming_conflicts(),
-    )
-    .expect("update should succeed");
+    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
 
     let cfg = state.config.read().expect("read config after update");
     let provider = cfg
@@ -3038,13 +2970,7 @@ fn provider_update_treats_settings_effective_current_as_current_for_live_write()
         None,
     );
 
-    ProviderService::update_with_resolution(
-        &state,
-        AppType::Claude,
-        provider,
-        prefer_incoming_conflicts(),
-    )
-    .expect("update should succeed");
+    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
 
     let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
     let live_env = live
@@ -3136,13 +3062,7 @@ fn provider_update_clears_invalid_local_current_override_and_falls_back_to_store
         None,
     );
 
-    ProviderService::update_with_resolution(
-        &state,
-        AppType::Claude,
-        provider,
-        prefer_incoming_conflicts(),
-    )
-    .expect("update should succeed");
+    ProviderService::update(&state, AppType::Claude, provider).expect("update should succeed");
 
     assert_eq!(
         crate::settings::get_current_provider(&AppType::Claude),
@@ -3208,13 +3128,7 @@ fn common_config_snippet_is_not_persisted_into_provider_snapshot_on_switch() {
     ProviderService::add(&state, AppType::Claude, p1).expect("add p1");
     ProviderService::add(&state, AppType::Claude, p2).expect("add p2");
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Claude,
-        "p2",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch to p2");
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
 
     let cfg = state.config.read().expect("read config");
     let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
@@ -3300,13 +3214,7 @@ fn switch_backfill_preserves_matching_common_fields_when_meta_missing() {
     )
     .expect("seed live settings with provider-owned fields matching common snippet");
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Claude,
-        "p2",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch to p2");
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
 
     let cfg = state.config.read().expect("read config");
     let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
@@ -4246,13 +4154,7 @@ base_url = "http://localhost:8080"
     }
     std::fs::write(&config_path, config_toml).expect("seed config.toml");
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p2",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch should succeed");
+    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
 
     let cfg = state.config.read().expect("read config after switch");
     let extracted = cfg
@@ -4567,13 +4469,7 @@ fn codex_switch_auto_extracted_common_normalizes_other_existing_provider_snapsho
     )
     .expect("seed config.toml");
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p2",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch should succeed");
+    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
 
     let cfg = state.config.read().expect("read config after switch");
     assert_eq!(
@@ -4678,13 +4574,8 @@ fn codex_switch_auto_extracted_common_skips_unparseable_other_provider_snapshots
     )
     .expect("seed config.toml");
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p2",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch should skip broken legacy snapshots");
+    ProviderService::switch(&state, AppType::Codex, "p2")
+        .expect("switch should skip broken legacy snapshots");
 
     let cfg = state.config.read().expect("read config after switch");
     assert_eq!(
@@ -4762,13 +4653,7 @@ fn common_config_snippet_can_be_disabled_per_provider_for_codex() {
 
     let state = state_from_config(config);
 
-    ProviderService::switch_with_resolution(
-        &state,
-        AppType::Codex,
-        "p2",
-        prefer_incoming_conflicts(),
-    )
-    .expect("switch should succeed");
+    ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
 
     let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert!(
