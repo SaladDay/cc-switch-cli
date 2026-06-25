@@ -394,6 +394,15 @@ impl ProviderService {
                 raw_settings.insert("auth".to_string(), auth);
             }
             raw_settings.insert("config".to_string(), Value::String(text));
+            // Preserve the live model catalog so it round-trips across switches.
+            // Without this the outgoing provider's snapshot loses `modelCatalog`,
+            // and switching back to it strips `model_catalog_json` from config.toml
+            // (effectively disabling the catalog). Mirrors read_codex_live_settings_with_model_catalog.
+            if let Ok(Some(model_catalog)) =
+                crate::codex_config::read_codex_model_catalog_simplified_from_live()
+            {
+                raw_settings.insert("modelCatalog".to_string(), model_catalog);
+            }
             snapshot_provider.settings_config = Value::Object(raw_settings);
             snapshot_provider = Self::migrate_provider_snapshot_for_storage(
                 &AppType::Codex,

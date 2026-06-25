@@ -563,6 +563,37 @@ fn set_codex_model_catalog_json_field(
     Ok(doc.to_string())
 }
 
+/// Strip provider-owned fields from a Codex `config.toml` text so that a live
+/// config used to seed a failover snapshot cannot contaminate another provider.
+///
+/// Removed keys: `model`, `model_provider`, `base_url`, `model_providers`,
+/// `experimental_bearer_token`, and `model_catalog_json`. These are the
+/// active provider's routing, selected model, credentials, and catalog
+/// reference; each failover target brings its own values via its snapshot, so
+/// the live config must only contribute user-level customizations (e.g.
+/// `model_reasoning_effort`, `disable_response_storage`, `[projects.*]`).
+///
+/// Note: `experimental_bearer_token` carries the active provider's API key when
+/// `preserve_codex_official_auth_on_switch` is set, so leaving it in would leak
+/// one provider's credential into another provider's failover snapshot.
+pub fn strip_codex_provider_routing(config_text: &str) -> String {
+    let Ok(mut doc) = config_text.parse::<DocumentMut>() else {
+        return config_text.to_string();
+    };
+    let root = doc.as_table_mut();
+    for key in [
+        "model",
+        "model_provider",
+        "base_url",
+        "model_providers",
+        "experimental_bearer_token",
+        "model_catalog_json",
+    ] {
+        root.remove(key);
+    }
+    doc.to_string()
+}
+
 #[derive(Clone, Debug)]
 pub struct PreparedCodexConfigText {
     pub config_text: String,
@@ -1344,6 +1375,53 @@ mod tests {
     use std::env;
     use std::ffi::OsString;
     use tempfile::TempDir;
+
+    #[test]
+    fn strip_codex_provider_routing_removes_routing_and_keeps_other_keys() {
+        let input = "\nmodel = \"gpt-4o\"\nmodel_provider = \"alpha\"\nbase_url = \"https://legacy.example/v1\"\nexperimental_bearer_token = \"sk-alpha-secret\"\nmodel_catalog_json = \"cc-switch-model-catalog.json\"\nmodel_reasoning_effort = \"high\"\n\n[model_providers.alpha]\nbase_url = \"https://alpha.example/v1\"\nwire_api = \"chat\"\n\n[projects.foo]\nmodel = \"gpt-4o\"\n";
+        let stripped = strip_codex_provider_routing(input);
+
+        assert!(
+            !stripped.contains("model_provider"),
+            "model_provider removed: {stripped}"
+        );
+        assert!(
+            !stripped.contains("model_providers"),
+            "model_providers table removed: {stripped}"
+        );
+        assert!(
+            !stripped.contains("alpha"),
+            "no alpha routing leaked: {stripped}"
+        );
+        assert!(
+            !stripped.contains("sk-alpha-secret"),
+            "experimental_bearer_token (credential) removed: {stripped}"
+        );
+        assert!(
+            !stripped.contains("model_catalog_json"),
+            "model_catalog_json removed: {stripped}"
+        );
+        assert!(
+            !stripped.contains("base_url"),
+            "top-level base_url removed: {stripped}"
+        );
+        assert!(
+            stripped.contains("model_reasoning_effort"),
+            "non-routing top-level key preserved: {stripped}"
+        );
+        assert!(
+            stripped.contains("[projects.foo]"),
+            "non-routing table preserved: {stripped}"
+        );
+    }
+
+    #[test]
+    fn strip_codex_provider_routing_handles_empty_and_invalid_toml() {
+        assert_eq!(strip_codex_provider_routing(""), "");
+        let invalid = "this is not = = valid toml }}}";
+        let result = strip_codex_provider_routing(invalid);
+        assert_eq!(result, invalid, "invalid toml returned unchanged");
+    }
 
     struct CodexHomeEnvGuard {
         original: Option<OsString>,
