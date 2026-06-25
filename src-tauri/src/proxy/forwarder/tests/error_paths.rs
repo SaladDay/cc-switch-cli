@@ -1,4 +1,7 @@
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 use axum::http::{HeaderMap, StatusCode};
 use serde_json::{json, Value};
@@ -10,6 +13,7 @@ use super::{
 };
 use crate::{
     app_config::AppType,
+    provider::Provider,
     proxy::{
         error::ProxyError,
         forwarder::{ForwardOptions, RequestForwarder, StreamingResponse},
@@ -43,6 +47,7 @@ async fn single_provider_buffered_claude_non_2xx_returns_upstream_error() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -97,6 +102,7 @@ async fn last_provider_429_returns_upstream_error() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -158,6 +164,7 @@ async fn last_streaming_provider_429_returns_upstream_error() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -200,6 +207,7 @@ async fn buffered_timeout_includes_body_read_budget_after_headers() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_millis(50)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -238,6 +246,7 @@ async fn buffered_body_timeout_after_response_does_not_failover() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_millis(50)),
                 bypass_circuit_breaker: false,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -285,6 +294,7 @@ async fn buffered_transport_retry_shares_request_timeout_budget() {
                 max_retries: 1,
                 request_timeout: Some(Duration::from_millis(50)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -317,6 +327,7 @@ async fn buffered_connect_error_maps_to_forward_failed() {
                 max_retries: 2,
                 request_timeout: Some(Duration::from_secs(1)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -324,6 +335,94 @@ async fn buffered_connect_error_maps_to_forward_failed() {
         .expect_err("connect failures should map to forward failed");
 
     assert!(matches!(error, ProxyError::ForwardFailed(_)));
+}
+
+/// 非 Claude app（Codex）的 provider 构造，base_url 指向 closed port 会触发连接拒绝
+/// （可重试的 transport 错误），且 `uses_internal_transport_retry(Codex) == true`，
+/// 因此 forwarder 会真正进入 transport 重试循环。
+fn codex_provider(base_url: &str) -> Provider {
+    Provider::with_id(
+        "codex".to_string(),
+        "Codex Provider".to_string(),
+        json!({
+            "base_url": base_url,
+            "apiKey": "codex-key",
+        }),
+        None,
+    )
+}
+
+#[tokio::test]
+async fn buffered_transport_retry_sleeps_configured_interval_between_attempts() {
+    // 连接 closed port：连接拒绝是 is_connect() ⇒ 可重试的 transport 错误。
+    // 用 Codex 而非 Claude：Claude 的 allow_transport_retry == false，根本不重试。
+    let provider = codex_provider(&closed_base_url().await);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    db.save_provider("codex", &provider)
+        .expect("save provider for health tracking");
+
+    let body = json!({"model": "gpt-5.4", "input": "hi", "stream": false});
+    let started = Instant::now();
+    let _ = forwarder
+        .forward_buffered_response(
+            &AppType::Codex,
+            "/v1/chat/completions",
+            body,
+            &HeaderMap::new(),
+            vec![provider],
+            ForwardOptions {
+                max_retries: 1,
+                // request_timeout 远大于 interval*retries，确保落到 connect-error 重试分支
+                // 而非 timeout 分支（两者都会 sleep，但我们要测的是 connect 重试路径）。
+                request_timeout: Some(Duration::from_secs(5)),
+                bypass_circuit_breaker: true,
+                retry_interval_seconds: Some(Duration::from_millis(150)),
+            },
+            RectifierConfig::default(),
+        )
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(150),
+        "retry should sleep the configured interval; took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn buffered_transport_retry_with_zero_interval_does_not_sleep() {
+    // 对照组：interval 为 None 时两次连接失败之间不应 sleep，整体远小于 150ms。
+    let provider = codex_provider(&closed_base_url().await);
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+    db.save_provider("codex", &provider)
+        .expect("save provider for health tracking");
+
+    let body = json!({"model": "gpt-5.4", "input": "hi", "stream": false});
+    let started = Instant::now();
+    let _ = forwarder
+        .forward_buffered_response(
+            &AppType::Codex,
+            "/v1/chat/completions",
+            body,
+            &HeaderMap::new(),
+            vec![provider],
+            ForwardOptions {
+                max_retries: 2,
+                request_timeout: Some(Duration::from_secs(5)),
+                bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
+            },
+            RectifierConfig::default(),
+        )
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "no interval ⇒ immediate retries, should be fast; took {elapsed:?}"
+    );
 }
 
 #[tokio::test]
@@ -371,6 +470,7 @@ async fn buffered_rectifier_retry_shares_request_timeout_budget() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_millis(50)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -442,6 +542,7 @@ async fn streaming_transport_timeout_fails_over_without_same_provider_retry() {
                 max_retries: 1,
                 request_timeout: Some(Duration::from_millis(50)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )
@@ -499,6 +600,7 @@ async fn claude_streaming_success_path_does_not_trigger_rectifier_retry() {
                 max_retries: 0,
                 request_timeout: Some(Duration::from_secs(2)),
                 bypass_circuit_breaker: true,
+                retry_interval_seconds: None,
             },
             RectifierConfig::default(),
         )

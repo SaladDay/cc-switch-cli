@@ -33,6 +33,10 @@ pub enum ProxyCommand {
         /// Set the selected app's daemon worker listen port
         #[arg(long)]
         listen_port: Option<u16>,
+
+        /// Set the selected app's fixed transport-retry interval in seconds (0 = immediate)
+        #[arg(long)]
+        retry_interval_seconds: Option<u32>,
     },
 
     /// Start the local proxy in the foreground for debugging
@@ -60,7 +64,13 @@ pub fn execute(cmd: ProxyCommand, app: Option<AppType>) -> Result<(), AppError> 
         ProxyCommand::Config {
             listen_address,
             listen_port,
-        } => configure_proxy(app_type, listen_address, listen_port),
+            retry_interval_seconds,
+        } => configure_proxy(
+            app_type,
+            listen_address,
+            listen_port,
+            retry_interval_seconds,
+        ),
         ProxyCommand::Serve {
             listen_address,
             listen_port,
@@ -90,8 +100,31 @@ fn show_proxy() -> Result<(), AppError> {
         .block_on(state.proxy_service.get_takeover_status())
         .map_err(AppError::Message)?;
 
+    // 读取各 app 的 per-app 重试间隔（只读、不写入；缺失行返回默认 0）。
+    let retry_intervals = [
+        (AppType::Claude, "Claude"),
+        (AppType::Codex, "Codex"),
+        (AppType::Gemini, "Gemini"),
+    ]
+    .into_iter()
+    .map(|(app, label)| {
+        let seconds = runtime
+            .block_on(state.db.get_proxy_config_for_app_or_default(app.as_str()))
+            .map(|cfg| cfg.retry_interval_seconds)
+            .unwrap_or(0);
+        (label, seconds)
+    })
+    .collect::<Vec<_>>();
+
     println!("{}", highlight(crate::t!("Local Proxy", "本地代理")));
-    for line in build_proxy_overview_lines(&state, &config, &status, &app_ports, &takeovers) {
+    for line in build_proxy_overview_lines(
+        &state,
+        &config,
+        &status,
+        &app_ports,
+        &takeovers,
+        &retry_intervals,
+    ) {
         println!("{line}");
     }
 
@@ -132,12 +165,19 @@ fn set_proxy_enabled(app_type: AppType, enabled: bool) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 重试间隔允许的最大值（秒）。
+///
+/// 重试间隔不计入单次请求的超时预算（每次重试会重新计算 remaining_timeout），
+/// 过大的值会让整体请求远超 request_timeout，这里设一个合理上限避免误配。
+const MAX_RETRY_INTERVAL_SECONDS: u32 = 300;
+
 fn configure_proxy(
     app_type: AppType,
     listen_address: Option<String>,
     listen_port: Option<u16>,
+    retry_interval_seconds: Option<u32>,
 ) -> Result<(), AppError> {
-    if listen_address.is_none() && listen_port.is_none() {
+    if listen_address.is_none() && listen_port.is_none() && retry_interval_seconds.is_none() {
         return show_proxy();
     }
     let listen_address = listen_address.map(|address| address.trim().to_string());
@@ -147,13 +187,22 @@ fn configure_proxy(
     if let Some(port) = listen_port {
         validate_proxy_listen_port(port)?;
     }
-    if listen_port.is_some()
-        && !matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
-    {
+    // 重试间隔与 listen_port 一样，仅在 Claude/Codex/Gemini 上有意义
+    // （这三个 app 走 proxy_config 的 per-app 配置）。
+    let needs_proxy_app = listen_port.is_some() || retry_interval_seconds.is_some();
+    if needs_proxy_app && !matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
         return Err(AppError::InvalidInput(format!(
-            "proxy takeover is not supported for {}",
+            "proxy config is not supported for {}",
             app_type.as_str()
         )));
+    }
+    if let Some(seconds) = retry_interval_seconds {
+        if seconds > MAX_RETRY_INTERVAL_SECONDS {
+            return Err(AppError::InvalidInput(format!(
+                "retry interval {}s exceeds maximum {}s",
+                seconds, MAX_RETRY_INTERVAL_SECONDS
+            )));
+        }
     }
     let state = get_state()?;
     let runtime = create_runtime()?;
@@ -199,6 +248,22 @@ fn configure_proxy(
                 crate::t!("Proxy listen port", "代理监听端口"),
                 app_type.as_str(),
                 port
+            ))
+        );
+    }
+
+    if let Some(seconds) = retry_interval_seconds {
+        // 读-改-写：proxy_config 没有 per-app 的单字段 setter，走标准更新路径。
+        let mut config = runtime.block_on(state.db.get_proxy_config_for_app(app_type.as_str()))?;
+        config.retry_interval_seconds = seconds;
+        runtime.block_on(state.db.update_proxy_config_for_app(config))?;
+        println!(
+            "{}",
+            success(&format!(
+                "{} {}: {}s",
+                crate::t!("Proxy retry interval", "代理重试间隔"),
+                app_type.as_str(),
+                seconds
             ))
         );
     }
@@ -474,6 +539,7 @@ fn build_proxy_overview_lines(
     status: &crate::ProxyStatus,
     app_ports: &[(AppType, u16)],
     takeovers: &crate::proxy::types::ProxyTakeoverStatus,
+    retry_intervals: &[(&str, u32)],
 ) -> Vec<String> {
     let current_providers = AppType::all()
         .map(|app| {
@@ -566,6 +632,8 @@ fn build_proxy_overview_lines(
         crate::t!("Auto failover:", "自动故障转移：").to_string(),
     ]);
     lines.extend(build_auto_failover_status_lines(state));
+    lines.extend([String::new(), build_retry_interval_header()]);
+    lines.extend(build_retry_interval_lines(retry_intervals));
     lines.extend([
         String::new(),
         crate::t!("Current providers:", "当前供应商：").to_string(),
@@ -636,6 +704,25 @@ fn build_auto_failover_status_lines(state: &AppState) -> Vec<String> {
         )
     })
     .collect()
+}
+
+fn build_retry_interval_header() -> String {
+    crate::t!("Retry interval:", "重试间隔：").to_string()
+}
+
+/// 渲染各 app 的 per-app 重试间隔。`0` 显示为「立即」（保持旧行为），否则显示秒数。
+fn build_retry_interval_lines(retry_intervals: &[(&str, u32)]) -> Vec<String> {
+    retry_intervals
+        .iter()
+        .map(|(label, seconds)| {
+            let value = if *seconds == 0 {
+                crate::t!("immediate", "立即").to_string()
+            } else {
+                format!("{seconds}s")
+            };
+            format!("- {label}: {value}")
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -724,7 +811,15 @@ mod tests {
             gemini: true,
         };
 
-        let lines = build_proxy_overview_lines(&state, &config, &status, &app_ports, &takeover);
+        let retry_intervals = [("Claude", 0u32), ("Codex", 0u32), ("Gemini", 0u32)];
+        let lines = build_proxy_overview_lines(
+            &state,
+            &config,
+            &status,
+            &app_ports,
+            &takeover,
+            &retry_intervals,
+        );
         let output = lines.join("\n");
 
         assert!(
@@ -792,7 +887,15 @@ mod tests {
         let takeover = ProxyTakeoverStatus::default();
         let app_ports = load_proxy_app_ports(&state).expect("load app proxy ports");
 
-        let lines = build_proxy_overview_lines(&state, &config, &status, &app_ports, &takeover);
+        let retry_intervals = [("Claude", 0u32), ("Codex", 0u32), ("Gemini", 0u32)];
+        let lines = build_proxy_overview_lines(
+            &state,
+            &config,
+            &status,
+            &app_ports,
+            &takeover,
+            &retry_intervals,
+        );
         let output = lines.join("\n");
 
         assert!(

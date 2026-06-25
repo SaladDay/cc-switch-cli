@@ -503,6 +503,66 @@ fn schema_migration_v4_adds_pricing_model_columns() {
 }
 
 #[test]
+fn schema_migration_v11_adds_retry_interval_seconds() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    // 模拟一个 v11 数据库：proxy_config 已是 per-app 结构，但尚无 retry_interval_seconds 列。
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_config (
+            app_type TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
+            streaming_idle_timeout INTEGER NOT NULL DEFAULT 120,
+            non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
+            circuit_failure_threshold INTEGER NOT NULL DEFAULT 4,
+            circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
+            circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60,
+            circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
+            circuit_min_requests INTEGER NOT NULL DEFAULT 10
+        );
+        INSERT INTO proxy_config (app_type, max_retries) VALUES ('codex', 3);
+        "#,
+    )
+    .expect("seed v11 schema");
+
+    assert!(
+        !Database::has_column(&conn, "proxy_config", "retry_interval_seconds")
+            .expect("check column before migration"),
+        "column should not exist before migration"
+    );
+
+    Database::set_user_version(&conn, 11).expect("set user_version=11");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    let column = get_column_info(&conn, "proxy_config", "retry_interval_seconds");
+    assert_eq!(column.r#type, "INTEGER");
+    assert_eq!(column.notnull, 1);
+    assert_eq!(
+        normalize_default(&column.default).as_deref(),
+        Some("0"),
+        "default must be 0 to preserve immediate-retry behavior"
+    );
+
+    // 老库已有数据保留，新列取默认值 0。
+    let (max_retries, interval): (i64, i64) = conn
+        .query_row(
+            "SELECT max_retries, retry_interval_seconds FROM proxy_config WHERE app_type = 'codex'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read migrated row");
+    assert_eq!(max_retries, 3, "pre-existing data must survive migration");
+    assert_eq!(interval, 0, "new column defaults to 0 on existing rows");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn startup_migration_repairs_legacy_request_logs_before_session_index() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute_batch(

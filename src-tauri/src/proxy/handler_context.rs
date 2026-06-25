@@ -125,6 +125,15 @@ impl HandlerContext {
             self.app_proxy.non_streaming_timeout as u64,
         ))
     }
+
+    /// 连接阶段/首字前 transport 重试之间的固定等待时间。
+    /// `0` 表示立即重试（返回 `None`，forwarder 不 sleep）。
+    pub fn retry_interval(&self) -> Option<Duration> {
+        match self.app_proxy.retry_interval_seconds {
+            0 => None,
+            seconds => Some(Duration::from_secs(seconds as u64)),
+        }
+    }
 }
 
 #[cfg(test)]

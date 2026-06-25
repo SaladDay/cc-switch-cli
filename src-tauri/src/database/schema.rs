@@ -124,6 +124,7 @@ impl Database {
             circuit_failure_threshold INTEGER NOT NULL DEFAULT 4, circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
             circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60, circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
             circuit_min_requests INTEGER NOT NULL DEFAULT 10,
+            retry_interval_seconds INTEGER NOT NULL DEFAULT 0,
             default_cost_multiplier TEXT NOT NULL DEFAULT '1',
             pricing_model_source TEXT NOT NULL DEFAULT 'response',
             created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -426,6 +427,13 @@ impl Database {
                         );
                         Self::migrate_v10_to_v11(conn)?;
                         Self::set_user_version(conn, 11)?;
+                    }
+                    11 => {
+                        log::info!(
+                            "迁移数据库从 v11 到 v12（proxy_config 增加固定重试间隔 retry_interval_seconds）"
+                        );
+                        Self::migrate_v11_to_v12(conn)?;
+                        Self::set_user_version(conn, 12)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -757,6 +765,7 @@ impl Database {
             circuit_failure_threshold INTEGER NOT NULL DEFAULT 4, circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
             circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60, circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
             circuit_min_requests INTEGER NOT NULL DEFAULT 10,
+            retry_interval_seconds INTEGER NOT NULL DEFAULT 0,
             default_cost_multiplier TEXT NOT NULL DEFAULT '1',
             pricing_model_source TEXT NOT NULL DEFAULT 'response',
             created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1344,6 +1353,26 @@ impl Database {
         .map_err(|e| AppError::Database(format!("创建故障转移 Live 配置快照表失败: {e}")))?;
 
         log::info!("v10 -> v11 迁移完成：已添加故障转移 Live 配置快照表");
+        Ok(())
+    }
+
+    /// v11 -> v12 迁移：为 proxy_config 增加固定重试间隔列
+    ///
+    /// `retry_interval_seconds` 默认 0（立即重试），保持升级前的旧行为。
+    /// 新建库的 CREATE TABLE 已包含该列，此处对老库用幂等 ALTER 补齐。
+    /// 部分迁移测试会用不含 proxy_config 的最小 schema 驱动完整迁移链，因此先确认表存在。
+    fn migrate_v11_to_v12(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_config")? {
+            Self::add_column_if_missing(
+                conn,
+                "proxy_config",
+                "retry_interval_seconds",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            log::info!("v11 -> v12 迁移完成：proxy_config 已增加 retry_interval_seconds 列");
+        } else {
+            log::info!("v11 -> v12：proxy_config 不存在，跳过 retry_interval_seconds 列");
+        }
         Ok(())
     }
 

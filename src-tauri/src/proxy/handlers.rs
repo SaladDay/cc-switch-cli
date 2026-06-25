@@ -162,6 +162,7 @@ async fn handle_claude_request(
             max_retries: context.app_proxy.max_retries,
             request_timeout: first_byte_timeout,
             bypass_circuit_breaker: !context.app_proxy.auto_failover_enabled,
+            retry_interval_seconds: context.retry_interval(),
         };
         let forward_result = match forwarder
             .forward_response_detailed(
@@ -278,6 +279,7 @@ async fn handle_claude_request(
         max_retries: context.app_proxy.max_retries,
         request_timeout: context.non_streaming_timeout(),
         bypass_circuit_breaker: !context.app_proxy.auto_failover_enabled,
+        retry_interval_seconds: context.retry_interval(),
     };
 
     let forward_result = match forwarder
@@ -497,12 +499,14 @@ async fn handle_passthrough_request(
             max_retries: context.app_proxy.max_retries,
             request_timeout: context.streaming_first_byte_timeout(),
             bypass_circuit_breaker: !context.app_proxy.auto_failover_enabled,
+            retry_interval_seconds: context.retry_interval(),
         }
     } else {
         ForwardOptions {
             max_retries: context.app_proxy.max_retries,
             request_timeout: context.non_streaming_timeout(),
             bypass_circuit_breaker: !context.app_proxy.auto_failover_enabled,
+            retry_interval_seconds: context.retry_interval(),
         }
     };
 

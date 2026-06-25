@@ -208,6 +208,8 @@ pub struct AppProxyConfig {
     pub auto_failover_enabled: bool,
     /// 最大重试次数
     pub max_retries: u32,
+    /// 重试间隔（秒）- 连接阶段/首字前 transport 重试之间的固定等待时间，0 表示立即重试
+    pub retry_interval_seconds: u32,
     /// 流式首字超时（秒）
     pub streaming_first_byte_timeout: u32,
     /// 流式静默超时（秒）
