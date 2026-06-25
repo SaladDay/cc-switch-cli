@@ -30,20 +30,6 @@ fn read_openclaw_live_config_json5(path: &std::path::Path) -> serde_json::Value 
     json5::from_str(&source).expect("parse openclaw live config as json5")
 }
 
-fn assert_live_conflict(err: AppError, paths: &[&str]) {
-    let message = err.to_string();
-    assert!(
-        message.contains("Live configuration has conflicting local changes"),
-        "expected live conflict summary, got: {message}"
-    );
-    for path in paths {
-        assert!(
-            message.contains(path),
-            "expected conflict path {path}, got: {message}"
-        );
-    }
-}
-
 fn openclaw_db_providers(state: &AppState) -> IndexMap<String, Provider> {
     state
         .db
@@ -265,7 +251,7 @@ command = "echo"
 }
 
 #[test]
-fn provider_service_switch_codex_conflicting_live_auth_fails_when_preservation_off() {
+fn provider_service_switch_codex_overwrites_live_auth_when_preservation_off() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -333,34 +319,37 @@ requires_openai_auth = true
 
     let state = state_from_config(initial_config);
 
-    let err = ProviderService::switch(&state, AppType::Codex, "third-party")
-        .expect_err("conflicting Codex auth should fail non-interactively");
-    assert_live_conflict(err, &["OPENAI_API_KEY"]);
+    // Upstream parity (clean-write, preservation OFF): switching to a
+    // third-party provider OVERWRITES auth.json with the provider's API key and
+    // overwrites config.toml. The live OAuth cache is intentionally replaced
+    // because preserve_codex_official_auth_on_switch is off.
+    ProviderService::switch(&state, AppType::Codex, "third-party")
+        .expect("clean-write switch should succeed");
 
     let auth_value: serde_json::Value =
         read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
     assert_eq!(
-        auth_value, live_auth,
-        "failed switch should leave auth.json untouched"
+        auth_value
+            .get("OPENAI_API_KEY")
+            .and_then(|value| value.as_str()),
+        Some("third-party-key"),
+        "clean switch should overwrite auth.json with the incoming provider key"
     );
 
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
-    assert_eq!(
-        config_text, third_party_config,
-        "failed switch should leave config.toml untouched"
+    assert!(
+        config_text.contains("aihubmix"),
+        "clean switch should overwrite config.toml with the third-party provider: {config_text}"
     );
 
-    let guard = state
-        .config
-        .read()
-        .expect("read config after failed switch");
+    let guard = state.config.read().expect("read config after switch");
     let manager = guard
         .get_manager(&AppType::Codex)
-        .expect("codex manager after failed switch");
+        .expect("codex manager after switch");
     assert_eq!(
-        manager.current, "legacy-provider",
-        "failed switch should roll back current provider"
+        manager.current, "third-party",
+        "switch should update the current provider"
     );
 }
 
@@ -1503,7 +1492,7 @@ fn switch_gemini_merges_existing_settings_preserving_mcp_servers() {
 }
 
 #[test]
-fn provider_service_switch_claude_merges_live_and_state() {
+fn provider_service_switch_claude_overwrites_live_with_provider_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -1562,6 +1551,9 @@ fn provider_service_switch_claude_merges_live_and_state() {
     ProviderService::switch(&state, AppType::Claude, "new-provider")
         .expect("switch provider should succeed");
 
+    // Upstream parity (clean-write): settings.json is OVERWRITTEN with the new
+    // provider's effective config. Local-only fields that are neither in the
+    // provider nor the common-config snippet are NOT preserved.
     let live_after: serde_json::Value =
         read_json_file(&settings_path).expect("read claude live settings");
     assert_eq!(
@@ -1572,20 +1564,16 @@ fn provider_service_switch_claude_merges_live_and_state() {
         Some("fresh-key"),
         "live settings.json should include new provider auth"
     );
-    assert_eq!(
+    assert!(
         live_after
             .get("env")
             .and_then(|env| env.get("LOCAL_ONLY"))
-            .and_then(|key| key.as_str()),
-        Some("keep-me"),
-        "live settings.json should preserve local-only env keys"
+            .is_none(),
+        "clean overwrite should not retain local-only env keys"
     );
-    assert_eq!(
-        live_after
-            .pointer("/workspace/path")
-            .and_then(|value| value.as_str()),
-        Some("/tmp/workspace"),
-        "live settings.json should preserve local-only nested objects"
+    assert!(
+        live_after.get("workspace").is_none(),
+        "clean overwrite should not retain local-only nested objects"
     );
     assert_eq!(
         live_after
@@ -1615,7 +1603,7 @@ fn provider_service_switch_claude_merges_live_and_state() {
 }
 
 #[test]
-fn provider_service_switch_claude_conflict_fails_without_touching_live_or_state() {
+fn provider_service_switch_claude_overwrites_live_discarding_unstored_edits() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -1671,40 +1659,36 @@ fn provider_service_switch_claude_conflict_fails_without_touching_live_or_state(
 
     let state = state_from_config(config);
 
-    let err = ProviderService::switch(&state, AppType::Claude, "new-provider")
-        .expect_err("conflicting live settings should fail non-interactively");
-    let message = err.to_string();
-    assert!(
-        message.contains("Live configuration has conflicting local changes"),
-        "expected conflict summary, got: {message}"
-    );
-    assert!(
-        message.contains("env.ANTHROPIC_API_KEY"),
-        "expected conflicting env path, got: {message}"
-    );
-    assert!(
-        message.contains("workspace.path"),
-        "expected conflicting workspace path, got: {message}"
-    );
+    // Upstream parity: switching to a provider whose values diverge from the
+    // live file's unstored edits succeeds and overwrites with the provider's
+    // values (no conflict is surfaced).
+    ProviderService::switch(&state, AppType::Claude, "new-provider")
+        .expect("clean-write switch should succeed");
 
     let live_after: serde_json::Value =
-        read_json_file(&settings_path).expect("read claude live settings after failed switch");
+        read_json_file(&settings_path).expect("read claude live settings after switch");
     assert_eq!(
-        live_after, legacy_live,
-        "failed conflict switch should restore original live settings"
+        live_after
+            .pointer("/env/ANTHROPIC_API_KEY")
+            .and_then(|value| value.as_str()),
+        Some("fresh-key"),
+    );
+    assert_eq!(
+        live_after
+            .pointer("/workspace/path")
+            .and_then(|value| value.as_str()),
+        Some("/tmp/new-workspace"),
+        "incoming provider workspace should win on a clean write"
     );
 
     let guard = state
         .config
         .read()
-        .expect("read claude config after failed switch");
+        .expect("read claude config after switch");
     let manager = guard
         .get_manager(&AppType::Claude)
-        .expect("claude manager after failed switch");
-    assert_eq!(
-        manager.current, "old-provider",
-        "failed conflict switch should roll back current provider"
-    );
+        .expect("claude manager after switch");
+    assert_eq!(manager.current, "new-provider", "current provider updated");
 }
 
 #[test]
@@ -3951,7 +3935,7 @@ fn provider_service_switch_codex_missing_auth_is_rejected() {
 }
 
 #[test]
-fn provider_service_switch_codex_openai_official_merges_auth_json_from_provider_snapshot() {
+fn provider_service_switch_codex_openai_official_overwrites_auth_json_from_provider_snapshot() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -3959,7 +3943,7 @@ fn provider_service_switch_codex_openai_official_merges_auth_json_from_provider_
     std::fs::create_dir_all(home.join(".codex")).expect("create codex dir (initialized)");
 
     let auth_path = cc_switch_lib::get_codex_auth_path();
-    std::fs::write(&auth_path, r#"{"LOCAL_ONLY":"preserve-me"}"#).expect("seed auth.json");
+    std::fs::write(&auth_path, r#"{"LOCAL_ONLY":"discard-me"}"#).expect("seed auth.json");
     assert!(auth_path.exists(), "auth.json should exist before switch");
 
     let mut config = MultiAppConfig::default();
@@ -4000,17 +3984,19 @@ fn provider_service_switch_codex_openai_official_merges_auth_json_from_provider_
     ProviderService::switch(&state, AppType::Codex, "p1")
         .expect("switch to OpenAI official provider should succeed");
 
+    // Upstream parity (clean-write): an official provider with login material
+    // OVERWRITES auth.json with the provider snapshot's auth (Write branch). The
+    // live-only auth field is not preserved.
     let auth_value: serde_json::Value =
         read_json_file(&auth_path).expect("read auth.json after switch");
     assert_eq!(
         auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
         Some("sk-official"),
-        "auth.json should add the provider snapshot auth key"
+        "auth.json should be overwritten with the provider snapshot auth key"
     );
-    assert_eq!(
-        auth_value.get("LOCAL_ONLY").and_then(|v| v.as_str()),
-        Some("preserve-me"),
-        "auth.json should preserve local-only auth fields"
+    assert!(
+        auth_value.get("LOCAL_ONLY").is_none(),
+        "clean overwrite should not retain local-only auth fields"
     );
 }
 
@@ -4151,6 +4137,9 @@ fn provider_service_switch_codex_openai_official_preserves_oauth_auth_and_common
     ProviderService::switch(&state, AppType::Codex, "p1")
         .expect("switch to stripped OpenAI official provider should succeed");
 
+    // Upstream parity (clean-write): the official provider's stored OAuth auth
+    // snapshot is written to auth.json (Write branch). The auth.json is
+    // overwritten, so live-only fields are not retained.
     let auth_value: serde_json::Value =
         read_json_file(&auth_path).expect("read auth.json after switch");
     assert_eq!(
@@ -4158,10 +4147,9 @@ fn provider_service_switch_codex_openai_official_preserves_oauth_auth_and_common
         json!("oauth-token"),
         "official provider should restore the stored OAuth auth snapshot"
     );
-    assert_eq!(
-        auth_value.get("LOCAL_ONLY").and_then(|v| v.as_str()),
-        Some("preserve-me"),
-        "official provider should preserve local-only auth fields"
+    assert!(
+        auth_value.get("LOCAL_ONLY").is_none(),
+        "clean overwrite should not retain local-only auth fields"
     );
 
     let live_text =

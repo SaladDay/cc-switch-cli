@@ -738,4 +738,52 @@ model_provider = "incoming-provider"
             Some("https://incoming.example")
         );
     }
+
+    #[test]
+    fn json_merge_with_base_retains_user_edit_cc_switch_did_not_change() {
+        // This is the proxy-takeover retention guarantee: a base-aware merge
+        // keeps a user's live edit on any field cc-switch did NOT change
+        // (incoming == base), while still applying the fields cc-switch did
+        // change. No conflict is surfaced.
+        let base = json!({
+            "options": {
+                "baseURL": "https://base.example/v1",
+                "apiKey": "sk-base"
+            }
+        });
+        // The user edited apiKey in the live file during the takeover session.
+        let local = json!({
+            "options": {
+                "baseURL": "https://base.example/v1",
+                "apiKey": "sk-user-edited"
+            }
+        });
+        // cc-switch only changed baseURL; apiKey is unchanged from base.
+        let incoming = json!({
+            "options": {
+                "baseURL": "https://incoming.example/v1",
+                "apiKey": "sk-base"
+            }
+        });
+
+        let merged = merge_json_with_base_live(
+            &AppType::Claude,
+            "proxy live backup",
+            local,
+            &base,
+            &incoming,
+        )
+        .unwrap();
+
+        assert_eq!(
+            merged.pointer("/options/baseURL").and_then(Value::as_str),
+            Some("https://incoming.example/v1"),
+            "cc-switch's change to baseURL is applied"
+        );
+        assert_eq!(
+            merged.pointer("/options/apiKey").and_then(Value::as_str),
+            Some("sk-user-edited"),
+            "the user's edit is retained where cc-switch did not change the field"
+        );
+    }
 }
