@@ -232,7 +232,7 @@ impl ProviderService {
         common_config_snippet: Option<&str>,
         previous_common_config_snippet: Option<&str>,
         force_sync: bool,
-        resolution: live_merge::ConflictResolution<'_>,
+        _resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<PreparedLiveWrite, AppError> {
         use crate::gemini_config::{
             env_to_json, get_gemini_settings_path, json_to_env, read_gemini_env,
@@ -280,13 +280,14 @@ impl ProviderService {
                 local_env.remove(key);
             }
         }
-        let env = live_merge::merge_env_live(
-            &AppType::Gemini,
-            ".env",
-            local_env,
-            &incoming_env,
-            resolution,
-        )?;
+        // Upstream parity (write_gemini_live): the .env file is a full overwrite
+        // with the provider's effective env for API-key providers. Google
+        // Official providers carry no API-key env, so we keep the local env with
+        // the stale API-key keys stripped above (preserving unrelated user keys).
+        let env = match auth_type {
+            GeminiAuthType::GoogleOfficial => local_env,
+            GeminiAuthType::ApiKey => incoming_env,
+        };
 
         let mut incoming_config = match content_to_write.get("config") {
             Some(Value::Null) | None => json!({}),
@@ -335,19 +336,26 @@ impl ProviderService {
             Value::String(Self::gemini_security_selected_type(auth_type).to_string()),
         );
 
+        // Upstream parity (write_gemini_live): settings.json is a SHALLOW merge
+        // of the provider's config keys into the existing file, preserving
+        // unrelated user fields such as mcpServers. Only the .env file is a full
+        // overwrite.
         let settings_path = get_gemini_settings_path();
-        let local_config = if settings_path.exists() {
-            read_json_file(&settings_path)?
+        let mut settings = if settings_path.exists() {
+            read_json_file::<Value>(&settings_path)?
         } else {
             json!({})
         };
-        let settings = live_merge::merge_json_live(
-            &AppType::Gemini,
-            "settings.json",
-            local_config,
-            &incoming_config,
-            resolution,
-        )?;
+        if !settings.is_object() {
+            settings = json!({});
+        }
+        if let (Some(settings_obj), Some(incoming_obj)) =
+            (settings.as_object_mut(), incoming_config.as_object())
+        {
+            for (key, value) in incoming_obj {
+                settings_obj.insert(key.clone(), value.clone());
+            }
+        }
 
         Ok(PreparedLiveWrite::Gemini {
             env,

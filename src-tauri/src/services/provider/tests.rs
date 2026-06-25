@@ -5608,6 +5608,88 @@ fn switching_google_official_gemini_clears_stale_api_key_env() {
 
 #[test]
 #[serial]
+fn switch_preserves_gemini_mcp_servers_after_clean_env_overwrite() {
+    // Upstream parity: .env is a full overwrite, but settings.json is a shallow
+    // merge that preserves user-managed mcpServers (and other unrelated keys).
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
+        .expect("create ~/.gemini (initialized)");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Gemini);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Gemini)
+            .expect("gemini manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "First".to_string(),
+                json!({ "env": { "GEMINI_API_KEY": "token1" } }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Second".to_string(),
+                json!({ "env": { "GEMINI_API_KEY": "token2" } }),
+                None,
+            ),
+        );
+    }
+
+    crate::gemini_config::write_gemini_env_atomic(&std::collections::HashMap::from([
+        ("GEMINI_API_KEY".to_string(), "token1".to_string()),
+        ("USER_DEFINED_ENV".to_string(), "stale".to_string()),
+    ]))
+    .expect("seed current gemini env");
+    write_json_file(
+        &crate::gemini_config::get_gemini_settings_path(),
+        &json!({
+            "mcpServers": { "my-server": { "command": "node", "args": ["server.js"] } },
+            "theme": "dark"
+        }),
+    )
+    .expect("seed gemini settings.json with user mcpServers");
+
+    let state = state_from_config(config);
+    ProviderService::switch(&state, AppType::Gemini, "p2").expect("switch to p2");
+
+    // .env is a full overwrite: the stale unrelated key is gone, token updated.
+    let live_env = crate::gemini_config::read_gemini_env().expect("read gemini env");
+    assert_eq!(
+        live_env.get("GEMINI_API_KEY").map(String::as_str),
+        Some("token2"),
+    );
+    assert!(
+        !live_env.contains_key("USER_DEFINED_ENV"),
+        ".env should be fully overwritten for API-key Gemini providers"
+    );
+
+    // settings.json is a shallow merge: mcpServers and unrelated keys survive.
+    let settings: Value = read_json_file(&crate::gemini_config::get_gemini_settings_path())
+        .expect("read gemini settings");
+    assert_eq!(
+        settings
+            .pointer("/mcpServers/my-server/command")
+            .and_then(Value::as_str),
+        Some("node"),
+        "user mcpServers must be preserved through a clean env overwrite"
+    );
+    assert_eq!(
+        settings.pointer("/theme").and_then(Value::as_str),
+        Some("dark"),
+        "unrelated settings.json fields must be preserved"
+    );
+}
+
+#[test]
+#[serial]
 fn updating_common_snippet_removes_stale_fields_from_other_gemini_provider_snapshots() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
