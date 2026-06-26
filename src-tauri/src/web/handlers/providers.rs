@@ -99,6 +99,17 @@ pub fn dispatch(state: &AppState, command: &str, args: &Value) -> Option<Result<
                 .map_err(WebError::Domain)
         }
 
+        // Single source of truth for provider presets: the web dashboard fetches
+        // the exact same per-app template set the cc-switch-cli TUI offers,
+        // built from the shared `ProviderAddFormState` machinery so the desktop
+        // frontend's much larger commercial catalog is replaced by the CLI's.
+        "get_provider_presets" => match app(args) {
+            Ok(t) => {
+                to_value(crate::cli::tui::form::provider_templates::provider_presets_for_app(&t))
+            }
+            Err(e) => Err(e),
+        },
+
         // update_tray_menu is handled by `meta`. Desktop-only / not-yet-mapped
         // commands (claude_desktop_*, universal_*, open_provider_terminal,
         // get_*_live_provider_ids) fall through to 501.

@@ -180,3 +180,64 @@ async fn web_bridge_handles_async_and_cross_module_commands() {
 
     server.abort();
 }
+
+#[tokio::test]
+#[serial]
+async fn web_bridge_serves_provider_presets() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let (base, server) = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // Claude preset catalog: the CLI's template set (Custom is dropped), in the
+    // frontend preset envelope. First entry is the official preset.
+    let res = client
+        .post(format!("{base}/api/invoke/get_provider_presets"))
+        .header("x-cc-switch-token", TOKEN)
+        .json(&json!({ "app": "claude" }))
+        .send()
+        .await
+        .expect("get_provider_presets request");
+    assert_eq!(res.status(), 200);
+    let body: serde_json::Value = res.json().await.expect("presets json");
+    let presets = body.as_array().expect("presets is an array");
+    assert_eq!(
+        presets.len(),
+        8,
+        "claude presets = 9 templates minus Custom"
+    );
+    assert_eq!(presets[0]["name"], "Claude Official");
+    assert_eq!(presets[0]["isOfficial"], json!(true));
+    assert!(
+        presets[0]["settingsConfig"]["env"].is_object(),
+        "claude preset carries settingsConfig.env"
+    );
+
+    // Codex presets expose top-level auth/config (TOML), not settingsConfig.
+    let res = client
+        .post(format!("{base}/api/invoke/get_provider_presets"))
+        .header("x-cc-switch-token", TOKEN)
+        .json(&json!({ "app": "codex" }))
+        .send()
+        .await
+        .expect("get_provider_presets codex request");
+    assert_eq!(res.status(), 200);
+    let body: serde_json::Value = res.json().await.expect("codex presets json");
+    let presets = body.as_array().expect("codex presets array");
+    let deepseek = presets
+        .iter()
+        .find(|p| p["name"] == "DeepSeek")
+        .expect("codex deepseek preset");
+    assert!(
+        deepseek.get("settingsConfig").is_none(),
+        "codex presets must not nest settingsConfig"
+    );
+    assert!(deepseek["config"]
+        .as_str()
+        .is_some_and(|c| c.contains("deepseek")));
+    assert!(deepseek["modelCatalog"].is_array());
+
+    server.abort();
+}

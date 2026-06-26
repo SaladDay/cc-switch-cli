@@ -1,5 +1,6 @@
 use crate::app_config::AppType;
 use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::{
@@ -784,5 +785,273 @@ impl ProviderAddFormState {
         self.codex_local_routing_field_idx = 0;
         self.codex_model_catalog_idx = 0;
         self.codex_model_catalog_field = CodexModelCatalogField::Model;
+    }
+}
+
+/// A provider preset as consumed by the web frontend's add-provider dialog.
+///
+/// This mirrors the frontend `ProviderPreset` / `CodexProviderPreset` shapes
+/// (camelCase) so the web build can render the exact same per-app template list
+/// the cc-switch-cli TUI offers — a single source of truth. Every field is built
+/// by reusing [`ProviderAddFormState::apply_template`] +
+/// [`ProviderAddFormState::to_provider_json_value`], then reshaping the produced
+/// provider JSON into the preset envelope the frontend expects.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProviderPresetDto {
+    name: String,
+    website_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_official: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_partner: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partner_promotion_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key_field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_type: Option<String>,
+    #[serde(rename = "requiresOAuth", skip_serializing_if = "Option::is_none")]
+    requires_oauth: Option<bool>,
+    // Codex consumes top-level `auth` + `config` (TOML) + `modelCatalog`, not
+    // `settingsConfig`; the other apps consume `settingsConfig` directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_catalog: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codex_chat_reasoning: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settings_config: Option<Value>,
+}
+
+/// Build the ordered provider-preset list for `app_type`, matching the TUI's
+/// template order (builtins ++ sponsors ++ after-sponsor builtins). The bare
+/// `Custom` builtin is skipped — the frontend renders its own "custom" button.
+pub(crate) fn provider_presets_for_app(app_type: &AppType) -> Vec<ProviderPresetDto> {
+    let builtin = provider_builtin_template_defs(app_type);
+    let sponsors = provider_sponsor_presets(app_type);
+    let after = provider_after_sponsor_template_defs(app_type);
+    let total = builtin.len() + sponsors.len() + after.len();
+    let mut out = Vec::with_capacity(total);
+
+    for idx in 0..total {
+        let mut template_id: Option<ProviderTemplateId> = None;
+        let mut sponsor: Option<&SponsorProviderPreset> = None;
+        if idx < builtin.len() {
+            template_id = Some(builtin[idx].id);
+        } else if idx < builtin.len() + sponsors.len() {
+            sponsor = Some(&sponsors[idx - builtin.len()]);
+        } else {
+            template_id = Some(after[idx - builtin.len() - sponsors.len()].id);
+        }
+
+        // The bare custom template yields a degenerate empty config; skip it.
+        if matches!(template_id, Some(ProviderTemplateId::Custom)) {
+            continue;
+        }
+
+        let mut state = ProviderAddFormState::new(app_type.clone());
+        state.apply_template(idx, &[]);
+        let provider_json = state.to_provider_json_value();
+        out.push(build_preset_dto(
+            app_type,
+            &provider_json,
+            template_id,
+            sponsor,
+        ));
+    }
+
+    out
+}
+
+fn build_preset_dto(
+    app_type: &AppType,
+    provider_json: &Value,
+    template_id: Option<ProviderTemplateId>,
+    sponsor: Option<&SponsorProviderPreset>,
+) -> ProviderPresetDto {
+    let empty = serde_json::Map::new();
+    let obj = provider_json.as_object().unwrap_or(&empty);
+    let meta = obj.get("meta").and_then(Value::as_object);
+
+    let obj_str = |key: &str| obj.get(key).and_then(Value::as_str).map(str::to_string);
+    let meta_str = |key: &str| {
+        meta.and_then(|m| m.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let meta_bool = |key: &str| meta.and_then(|m| m.get(key)).and_then(Value::as_bool);
+
+    let name = obj_str("name").unwrap_or_default();
+    let website_url = obj_str("websiteUrl").unwrap_or_default();
+    let category = obj_str("category").or_else(|| meta_str("category"));
+    let provider_type = meta_str("providerType");
+    let requires_oauth = provider_type.as_ref().map(|_| true);
+
+    // `to_provider_json_value` drops the register link; source it from the
+    // sponsor table (only sponsor slots have one).
+    let api_key_url = sponsor
+        .map(|s| s.register_url.to_string())
+        .filter(|url| !url.is_empty());
+
+    let is_official = match template_id {
+        Some(ProviderTemplateId::ClaudeOfficial)
+        | Some(ProviderTemplateId::OpenAiOfficial)
+        | Some(ProviderTemplateId::GoogleOAuth) => Some(true),
+        _ if category.as_deref() == Some("official") => Some(true),
+        _ => None,
+    };
+
+    let mut dto = ProviderPresetDto {
+        name,
+        website_url,
+        api_key_url,
+        is_official,
+        is_partner: meta_bool("isPartner"),
+        partner_promotion_key: meta_str("partnerPromotionKey"),
+        category,
+        icon: obj_str("icon"),
+        icon_color: obj_str("iconColor"),
+        api_format: None,
+        api_key_field: None,
+        provider_type,
+        requires_oauth,
+        auth: None,
+        config: None,
+        model_catalog: None,
+        codex_chat_reasoning: None,
+        settings_config: None,
+    };
+
+    let settings = obj.get("settingsConfig");
+
+    match app_type {
+        AppType::Codex => {
+            let ssc = settings.and_then(Value::as_object);
+            dto.auth = Some(
+                ssc.and_then(|s| s.get("auth"))
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            );
+            dto.config = Some(
+                ssc.and_then(|s| s.get("config"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            );
+            dto.model_catalog = ssc
+                .and_then(|s| s.get("modelCatalog"))
+                .and_then(|catalog| catalog.get("models"))
+                .cloned();
+            dto.api_format = meta_str("apiFormat");
+            dto.codex_chat_reasoning = meta.and_then(|m| m.get("codexChatReasoning")).cloned();
+        }
+        AppType::Claude => {
+            dto.settings_config = settings.cloned();
+            dto.api_format = meta_str("apiFormat");
+            dto.api_key_field = meta_str("apiKeyField");
+        }
+        _ => {
+            dto.settings_config = settings.cloned();
+        }
+    }
+
+    dto
+}
+
+#[cfg(test)]
+mod preset_dto_tests {
+    use super::*;
+
+    #[test]
+    fn preset_counts_match_cli_templates_minus_custom() {
+        assert_eq!(provider_presets_for_app(&AppType::Claude).len(), 8);
+        assert_eq!(provider_presets_for_app(&AppType::Codex).len(), 7);
+        assert_eq!(provider_presets_for_app(&AppType::Gemini).len(), 4);
+        assert_eq!(provider_presets_for_app(&AppType::OpenCode).len(), 3);
+        assert_eq!(provider_presets_for_app(&AppType::OpenClaw).len(), 3);
+        assert_eq!(provider_presets_for_app(&AppType::Hermes).len(), 2);
+    }
+
+    #[test]
+    fn claude_official_is_first_with_empty_env() {
+        let presets = provider_presets_for_app(&AppType::Claude);
+        let official = &presets[0];
+        assert_eq!(official.name, "Claude Official");
+        assert_eq!(official.is_official, Some(true));
+        let env = official
+            .settings_config
+            .as_ref()
+            .and_then(|s| s.get("env"))
+            .and_then(Value::as_object)
+            .expect("claude official env object");
+        assert!(env.is_empty(), "claude official env should be empty");
+        assert!(
+            official.auth.is_none(),
+            "claude preset must not carry codex auth"
+        );
+    }
+
+    #[test]
+    fn claude_sponsor_carries_register_link_and_partner_flag() {
+        let presets = provider_presets_for_app(&AppType::Claude);
+        let claudeapi = presets
+            .iter()
+            .find(|p| p.name == "ClaudeAPI")
+            .expect("claudeapi sponsor present");
+        assert_eq!(claudeapi.is_partner, Some(true));
+        assert_eq!(
+            claudeapi.partner_promotion_key.as_deref(),
+            Some("claudeapi")
+        );
+        assert!(claudeapi
+            .api_key_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("https://")));
+    }
+
+    #[test]
+    fn codex_deepseek_uses_top_level_config_and_catalog() {
+        let presets = provider_presets_for_app(&AppType::Codex);
+        let deepseek = presets
+            .iter()
+            .find(|p| p.name == "DeepSeek")
+            .expect("codex deepseek present");
+        assert!(
+            deepseek.settings_config.is_none(),
+            "codex must not nest settingsConfig"
+        );
+        assert!(deepseek
+            .config
+            .as_deref()
+            .is_some_and(|cfg| cfg.contains("deepseek")));
+        assert!(
+            deepseek.model_catalog.is_some(),
+            "deepseek exposes a model catalog"
+        );
+        assert_eq!(deepseek.api_format.as_deref(), Some("openai_chat"));
+        assert!(deepseek.auth.is_some());
+    }
+
+    #[test]
+    fn codex_official_is_marked_official() {
+        let presets = provider_presets_for_app(&AppType::Codex);
+        let official = &presets[0];
+        assert_eq!(official.name, "OpenAI Official");
+        assert_eq!(official.is_official, Some(true));
+        assert!(official.config.is_some());
     }
 }

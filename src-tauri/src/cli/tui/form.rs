@@ -10,7 +10,7 @@ mod prompt;
 mod provider_json;
 mod provider_state;
 mod provider_state_loading;
-mod provider_templates;
+pub(crate) mod provider_templates;
 
 #[cfg(test)]
 mod tests;
