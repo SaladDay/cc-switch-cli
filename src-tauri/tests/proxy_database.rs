@@ -193,6 +193,18 @@ fn app_proxy_preferred_ports_round_trip() -> Result<(), AppError> {
     Ok(())
 }
 
+#[test]
+fn default_app_proxy_preferred_ports_are_distinct() -> Result<(), AppError> {
+    let db = Database::memory()?;
+
+    assert_eq!(db.get_app_proxy_preferred_port("claude")?, 15721);
+    assert_eq!(db.get_app_proxy_preferred_port("codex")?, 15722);
+    assert_eq!(db.get_app_proxy_preferred_port("gemini")?, 15723);
+    assert_eq!(db.get_app_proxy_preferred_port("unknown")?, 15724);
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn app_preferred_port_falls_back_to_legacy_proxy_config() -> Result<(), AppError> {
     let db = Database::memory()?;
