@@ -14357,6 +14357,112 @@ mod tests {
     }
 
     #[test]
+    fn sessions_page_keys_move_selection_by_page_and_clamp() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Sessions;
+        app.focus = Focus::Content;
+        app.sessions.pane = SessionsPane::List;
+        app.sessions.loaded_once = true;
+        app.sessions.provider_id = Some("claude".to_string());
+        app.last_size = Size {
+            width: 120,
+            height: 40,
+        };
+        for i in 0..200 {
+            app.sessions.rows.push(session_meta(
+                "claude",
+                &format!("s{i}"),
+                "Title",
+                "/tmp/p",
+                "/tmp/s.jsonl",
+                "claude --resume",
+            ));
+        }
+        // page size = last_size.height(40) - chrome(9)
+        let page = 40usize - 9;
+
+        app.on_sessions_key(key(KeyCode::PageDown), &data());
+        assert_eq!(app.sessions.selected_idx, page);
+
+        app.on_sessions_key(key(KeyCode::End), &data());
+        assert_eq!(app.sessions.selected_idx, 199);
+
+        // PageDown at the bottom is clamped to the last row.
+        app.on_sessions_key(key(KeyCode::PageDown), &data());
+        assert_eq!(app.sessions.selected_idx, 199);
+
+        app.on_sessions_key(key(KeyCode::PageUp), &data());
+        assert_eq!(app.sessions.selected_idx, 199 - page);
+
+        app.on_sessions_key(key(KeyCode::Home), &data());
+        assert_eq!(app.sessions.selected_idx, 0);
+
+        // PageUp at the top stays at 0.
+        app.on_sessions_key(key(KeyCode::PageUp), &data());
+        assert_eq!(app.sessions.selected_idx, 0);
+    }
+
+    #[test]
+    fn session_scan_cache_restores_for_the_whole_run() {
+        let mut sessions = SessionsState::default();
+        let req = sessions.start_scan("claude".to_string());
+        assert!(sessions.finish_scan(req, vec![session_meta_for_app("claude")]));
+        assert!(sessions.scan_cache.contains_key("claude"));
+
+        // Switching to another provider clears the live rows...
+        let _ = sessions.start_scan("codex".to_string());
+        assert!(sessions.rows.is_empty());
+
+        // ...switching back hits the cache and restores instantly, no re-scan.
+        assert!(sessions.restore_from_scan_cache("claude"));
+        assert_eq!(sessions.rows.len(), 1);
+        assert!(sessions.loaded_once);
+        assert_eq!(sessions.provider_id.as_deref(), Some("claude"));
+
+        // The cache never expires within a run, so a repeat restore still hits
+        // (only a manual `r` reload re-scans, which goes through start_scan).
+        let _ = sessions.start_scan("codex".to_string());
+        assert!(sessions.restore_from_scan_cache("claude"));
+        assert_eq!(sessions.rows.len(), 1);
+
+        // A provider that was never scanned is a miss.
+        assert!(!sessions.restore_from_scan_cache("gemini"));
+    }
+
+    #[test]
+    fn deleting_session_updates_scan_cache_to_prevent_resurrection() {
+        let mut sessions = SessionsState::default();
+        let req = sessions.start_scan("claude".to_string());
+        let a = session_meta(
+            "claude",
+            "a",
+            "A",
+            "/tmp",
+            "/tmp/a.jsonl",
+            "claude --resume a",
+        );
+        let b = session_meta(
+            "claude",
+            "b",
+            "B",
+            "/tmp",
+            "/tmp/b.jsonl",
+            "claude --resume b",
+        );
+        let key_b = session_key(&b);
+        assert!(sessions.finish_scan(req, vec![a, b]));
+        assert_eq!(sessions.scan_cache.get("claude").unwrap().rows.len(), 2);
+
+        assert!(sessions.remove_session_by_key(&key_b));
+        assert_eq!(sessions.rows.len(), 1);
+        // The cached snapshot drops the deleted session too, so a cache restore
+        // cannot resurrect it.
+        let cached = sessions.scan_cache.get("claude").unwrap();
+        assert_eq!(cached.rows.len(), 1);
+        assert!(cached.rows.iter().all(|s| session_key(s) != key_b));
+    }
+
+    #[test]
     fn claude_model_fill_all_a_opens_confirm_without_changing_values() {
         let mut app = setup_claude_model_picker_with_models();
 

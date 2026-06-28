@@ -125,6 +125,11 @@ pub(crate) enum AppDataReq {
         generation: u64,
         app_state_epoch: u64,
         app_type: AppType,
+        /// Other visible apps to pre-seed from the same in-memory snapshot, each
+        /// paired with its own request_id (matching a pending entry registered by
+        /// the cache). Lets one initial request warm every visible app so the first
+        /// switch renders real data instead of an empty placeholder.
+        extras: Vec<(AppType, u64)>,
     },
     Load {
         request_id: u64,

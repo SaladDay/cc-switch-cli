@@ -209,6 +209,28 @@ fn render_provider_empty_state(frame: &mut Frame<'_>, area: Rect, theme: &super:
     );
 }
 
+/// Shown for a cold-switched app whose real data hasn't arrived yet. Distinct
+/// from the empty state so a freshly switched-to app reads as "loading", never
+/// as "no providers / import config".
+fn render_provider_loading_state(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
+    let content_lines = vec![Line::styled(
+        texts::tui_provider_loading(),
+        Style::default().fg(theme.comment),
+    )];
+    let top_padding = area.height.saturating_sub(content_lines.len() as u16) / 2;
+    let mut lines = Vec::with_capacity(top_padding as usize + content_lines.len());
+    for _ in 0..top_padding {
+        lines.push(Line::raw(""));
+    }
+    lines.extend(content_lines);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 pub(super) fn render_providers(
     frame: &mut Frame<'_>,
     app: &App,
@@ -239,8 +261,12 @@ pub(super) fn render_providers(
     if app.focus == Focus::Content {
         let mut keys = Vec::new();
         if data.providers.rows.is_empty() {
-            keys.push(("Enter", texts::tui_key_import_current_config()));
-            keys.push(("a", texts::tui_key_add_provider()));
+            // While the cold-switched app is still loading, don't offer
+            // import/add — the list isn't really empty, just not here yet.
+            if !data.providers.loading {
+                keys.push(("Enter", texts::tui_key_import_current_config()));
+                keys.push(("a", texts::tui_key_add_provider()));
+            }
         } else if visible.is_empty() {
             keys.push(("a", texts::tui_key_add()));
         } else {
@@ -277,7 +303,11 @@ pub(super) fn render_providers(
     }
 
     if data.providers.rows.is_empty() {
-        render_provider_empty_state(frame, chunks[1], theme);
+        if data.providers.loading {
+            render_provider_loading_state(frame, chunks[1], theme);
+        } else {
+            render_provider_empty_state(frame, chunks[1], theme);
+        }
         return;
     }
 

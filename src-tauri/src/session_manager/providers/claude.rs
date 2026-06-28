@@ -19,14 +19,7 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
     let mut files = Vec::new();
     collect_jsonl_files(&root, &mut files);
 
-    let mut sessions = Vec::new();
-    for path in files {
-        if let Some(meta) = parse_session(&path) {
-            sessions.push(meta);
-        }
-    }
-
-    sessions
+    super::utils::parse_sessions_parallel(files, parse_session)
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {

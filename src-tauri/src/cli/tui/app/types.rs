@@ -142,6 +142,15 @@ pub struct PricingState {
     pub selected_idx: usize,
 }
 
+/// A stashed scan result for one provider, reused on re-entry/app-switch so the
+/// list renders instantly instead of re-reading every session file from disk.
+/// The cache lives for the whole TUI run (the process is short-lived) and is
+/// only refreshed by an explicit manual reload (`r`), never automatically.
+#[derive(Debug, Clone)]
+pub struct CachedScan {
+    pub rows: Vec<crate::session_manager::SessionMeta>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionsState {
     pub provider_id: Option<String>,
@@ -166,6 +175,7 @@ pub struct SessionsState {
     pub message_active: Option<u64>,
     pub delete_seq: u64,
     pub delete_active: HashSet<u64>,
+    pub scan_cache: std::collections::HashMap<String, CachedScan>,
 }
 
 impl Default for SessionsState {
@@ -193,6 +203,7 @@ impl Default for SessionsState {
             message_active: None,
             delete_seq: 0,
             delete_active: HashSet::new(),
+            scan_cache: std::collections::HashMap::new(),
         }
     }
 }
@@ -252,6 +263,36 @@ impl SessionsState {
         }) {
             self.clear_detail();
         }
+        if let Some(provider_id) = self.provider_id.clone() {
+            self.scan_cache.insert(
+                provider_id,
+                CachedScan {
+                    rows: self.rows.clone(),
+                },
+            );
+        }
+        true
+    }
+
+    /// Restore this provider's list from the in-memory scan cache, skipping the
+    /// disk scan entirely. The cache is valid for the whole run; a manual reload
+    /// (`r`) bypasses this and re-scans. Returns true on a hit.
+    pub(crate) fn restore_from_scan_cache(&mut self, provider_id: &str) -> bool {
+        let Some(cached) = self.scan_cache.get(provider_id) else {
+            return false;
+        };
+        let rows = cached.rows.clone();
+        if self.provider_id.as_deref() != Some(provider_id) {
+            self.clear_detail();
+        }
+        self.rows = rows;
+        self.provider_id = Some(provider_id.to_string());
+        self.selected_idx = 0;
+        self.reset_time_anchor();
+        self.loading = false;
+        self.loaded_once = true;
+        self.last_error = None;
+        self.scan_active = None;
         true
     }
 
@@ -356,6 +397,11 @@ impl SessionsState {
             return false;
         }
         self.selected_idx = self.selected_idx.min(self.rows.len().saturating_sub(1));
+        if let Some(provider_id) = self.provider_id.clone() {
+            if let Some(cached) = self.scan_cache.get_mut(&provider_id) {
+                cached.rows = self.rows.clone();
+            }
+        }
         if self.detail_key.as_deref() == Some(key) {
             self.clear_detail();
         }
@@ -635,10 +681,6 @@ pub enum Overlay {
         provider_id: String,
         selected: usize,
     },
-    ProviderSwitchLiveConflicts {
-        provider_id: String,
-        conflicts: Vec<crate::services::provider::live_merge::ConfigConflict>,
-    },
     FailoverQueueManager {
         selected: usize,
     },
@@ -773,7 +815,6 @@ impl Overlay {
                 | Overlay::TextView(_)
                 | Overlay::CommonSnippetPicker { .. }
                 | Overlay::ProviderTestMenu { .. }
-                | Overlay::ProviderSwitchLiveConflicts { .. }
                 | Overlay::FailoverQueueManager { .. }
                 | Overlay::ClaudeApiFormatPicker { .. }
                 | Overlay::UsageQueryTemplatePicker { .. }
@@ -814,7 +855,6 @@ impl Overlay {
             | Overlay::TextView(_)
             | Overlay::CommonSnippetPicker { .. }
             | Overlay::ProviderTestMenu { .. }
-            | Overlay::ProviderSwitchLiveConflicts { .. }
             | Overlay::FailoverQueueManager { .. }
             | Overlay::ClaudeApiFormatPicker { .. }
             | Overlay::UsageQueryTemplatePicker { .. }

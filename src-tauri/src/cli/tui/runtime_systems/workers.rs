@@ -1279,7 +1279,10 @@ fn handle_app_data_req(
             generation,
             app_state_epoch,
             app_type,
+            extras,
         } => {
+            // Build the active app first and send it immediately so the UI paints
+            // as soon as possible; the config snapshot is reloaded once here.
             let result = state_for_epoch(state_cache, app_state_epoch)
                 .and_then(|state| {
                     state
@@ -1287,14 +1290,31 @@ fn handle_app_data_req(
                         .and_then(|()| UiData::load_fast_snapshot_from_state(state, &app_type))
                 })
                 .map_err(|err| err.to_string());
-            (
-                AppDataLoadKind::Initial,
+            let _ = tx.send(AppDataMsg::Loaded {
+                kind: AppDataLoadKind::Initial,
                 request_id,
                 generation,
                 app_state_epoch,
                 app_type,
                 result,
-            )
+            });
+
+            // Warm the remaining visible apps from the SAME cached state (no extra
+            // DB open, SnapshotOnly), one Initial message each.
+            for (extra_app, extra_request_id) in extras {
+                let extra_result = state_for_epoch(state_cache, app_state_epoch)
+                    .and_then(|state| UiData::load_fast_snapshot_from_state(state, &extra_app))
+                    .map_err(|err| err.to_string());
+                let _ = tx.send(AppDataMsg::Loaded {
+                    kind: AppDataLoadKind::Initial,
+                    request_id: extra_request_id,
+                    generation,
+                    app_state_epoch,
+                    app_type: extra_app,
+                    result: extra_result,
+                });
+            }
+            return;
         }
         AppDataReq::Load {
             request_id,
@@ -1324,7 +1344,10 @@ fn handle_app_data_req(
             app_state_epoch,
             app_type,
         } => {
-            let result = UiData::load(&app_type).map_err(|err| err.to_string());
+            // Skip the usage/pricing aggregation here; it is deferred and loaded
+            // lazily by the usage-pricing worker when the Usage view is opened.
+            let result =
+                UiData::load_without_usage_pricing(&app_type).map_err(|err| err.to_string());
             (
                 AppDataLoadKind::Full,
                 request_id,
@@ -1855,6 +1878,7 @@ mod tests {
             generation: 0,
             app_state_epoch: 0,
             app_type: AppType::Claude,
+            extras: Vec::new(),
         }]);
         let mut deferred = std::collections::VecDeque::new();
 

@@ -214,43 +214,6 @@ impl ProviderService {
         Ok(())
     }
 
-    #[expect(
-        dead_code,
-        reason = "kept for direct Claude live writes without custom resolution"
-    )]
-    pub(super) fn write_claude_live(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-        apply_common_config: bool,
-    ) -> Result<(), AppError> {
-        Self::write_claude_live_with_resolution(
-            provider,
-            common_config_snippet,
-            None,
-            apply_common_config,
-            live_merge::ConflictPolicy::Fail.into(),
-        )
-    }
-
-    pub(super) fn write_claude_live_with_resolution(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-        previous_common_config_snippet: Option<&str>,
-        apply_common_config: bool,
-        resolution: live_merge::ConflictResolution<'_>,
-    ) -> Result<(), AppError> {
-        let prepared = Self::prepare_claude_live_write(
-            provider,
-            None,
-            common_config_snippet,
-            previous_common_config_snippet,
-            apply_common_config,
-            false,
-            resolution,
-        )?;
-        Self::apply_claude_live_write(&prepared)
-    }
-
     pub(crate) fn write_claude_live_force(
         provider: &Provider,
         common_config_snippet: Option<&str>,
@@ -258,77 +221,53 @@ impl ProviderService {
     ) -> Result<(), AppError> {
         let prepared = Self::prepare_claude_live_write(
             provider,
-            None,
             common_config_snippet,
             None,
             apply_common_config,
             true,
-            live_merge::ConflictPolicy::Fail.into(),
         )?;
         Self::apply_claude_live_write(&prepared)
     }
 
     pub(super) fn prepare_claude_live_write(
         provider: &Provider,
-        live_merge_base: Option<&Value>,
         common_config_snippet: Option<&str>,
-        previous_common_config_snippet: Option<&str>,
+        _previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
         force_sync: bool,
-        resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<PreparedLiveWrite, AppError> {
         if !force_sync && !crate::sync_policy::should_sync_live(&AppType::Claude) {
             return Ok(PreparedLiveWrite::Noop);
         }
 
-        let settings_path = get_claude_settings_path();
-        let content_to_write = Self::build_effective_live_snapshot(
+        // Upstream parity (sync_claude_live): build the provider's effective
+        // settings (provider config + common-config snippet) and OVERWRITE
+        // settings.json. Non-provider fields survive via the common-config
+        // snippet, not via a merge with the existing live file.
+        let mut settings = Self::build_effective_live_snapshot(
             &AppType::Claude,
             provider,
             common_config_snippet,
             apply_common_config,
         )?;
-        let local = if settings_path.exists() {
-            let local = read_json_file::<Value>(&settings_path)?;
-            let local =
-                common_config::strip_common_config_snippet_from_live_settings_or_provider_snapshot(
-                    &AppType::Claude,
-                    provider,
-                    local,
-                    previous_common_config_snippet,
-                );
-            if apply_common_config {
-                local
-            } else {
-                common_config::strip_common_config_snippet_from_live_settings_or_provider_snapshot(
-                    &AppType::Claude,
-                    provider,
-                    local,
-                    common_config_snippet,
-                )
-            }
-        } else {
-            json!({})
-        };
-        let settings = match live_merge_base {
-            Some(base) => live_merge::merge_json_with_base_live(
-                &AppType::Claude,
-                "settings.json",
-                local,
-                base,
-                &content_to_write,
-                resolution,
-            )?,
-            None => live_merge::merge_json_live(
-                &AppType::Claude,
-                "settings.json",
-                local,
-                &content_to_write,
-                resolution,
-            )?,
-        };
+        // Upstream parity (sanitize_claude_settings_for_live): CC-Switch's
+        // internal-only fields must never be written into Claude Code's
+        // settings.json. The stored provider snapshot keeps them (meta /
+        // settings_config), so this only strips them from the live file.
+        Self::sanitize_claude_settings_for_live(&mut settings);
 
         Ok(PreparedLiveWrite::Claude { settings })
+    }
+
+    /// Mirror of upstream `sanitize_claude_settings_for_live`: remove CC-Switch
+    /// internal-only fields that must not leak into Claude Code's settings.json.
+    fn sanitize_claude_settings_for_live(settings: &mut Value) {
+        if let Some(obj) = settings.as_object_mut() {
+            obj.remove("api_format");
+            obj.remove("apiFormat");
+            obj.remove("openrouter_compat_mode");
+            obj.remove("openrouterCompatMode");
+        }
     }
 
     pub(super) fn apply_claude_live_write(prepared: &PreparedLiveWrite) -> Result<(), AppError> {

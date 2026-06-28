@@ -3153,6 +3153,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_provider_loading() -> &'static str {
+        if is_chinese() {
+            "加载中…"
+        } else {
+            "Loading…"
+        }
+    }
+
     pub fn tui_provider_empty_subtitle() -> &'static str {
         if is_chinese() {
             "如果你已有配置，请点击\"导入当前配置\"，所有数据将安全保存在 default 供应商中"

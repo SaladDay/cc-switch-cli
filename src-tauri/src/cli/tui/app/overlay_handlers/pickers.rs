@@ -333,6 +333,22 @@ impl App {
             accounts.len()
         };
 
+        // The status is fetched on demand when this picker opens, so it may not
+        // be loaded yet. Until it is, keep the picker open but inert except for
+        // Esc — otherwise a premature Enter (binding row 0) would silently bind
+        // the empty/None selection before the accounts have arrived.
+        let status_loaded = self
+            .managed_auth_status
+            .as_ref()
+            .is_some_and(|status| status.provider == auth_provider)
+            && !self.managed_auth_loading;
+        if !status_loaded {
+            if matches!(key.code, KeyCode::Esc) {
+                self.overlay = Overlay::None;
+            }
+            return Some(Action::None);
+        }
+
         if row_count == 0 {
             self.overlay = Overlay::None;
             return Some(Action::None);

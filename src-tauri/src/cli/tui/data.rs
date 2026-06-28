@@ -183,6 +183,11 @@ pub struct ProvidersSnapshot {
     pub current_id: String,
     pub rows: Vec<ProviderRow>,
     pub live_ids: HashSet<String>,
+    /// True only for the transient projection shown while a cold-switched app's
+    /// real data is still loading. Lets the renderer show a "loading" state
+    /// instead of the "no providers / import config" empty CTA, so a freshly
+    /// switched-to app never momentarily looks empty.
+    pub loading: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -904,6 +909,16 @@ impl UiData {
         Ok(data)
     }
 
+    /// Like [`load`], but skips the usage/pricing aggregation (several DB
+    /// GROUP-BY queries + the pricing snapshot). Used for the active app's
+    /// post-startup full reload so that work is deferred until the Usage view is
+    /// actually opened (`usage`/`pricing` are left at their defaults and filled
+    /// in lazily by the usage-pricing worker).
+    pub fn load_without_usage_pricing(app_type: &AppType) -> Result<Self, AppError> {
+        let state = load_state()?;
+        Self::load_base_from_state(&state, app_type)
+    }
+
     pub(crate) fn load_fast_snapshot_from_state(
         state: &AppState,
         app_type: &AppType,
@@ -963,7 +978,10 @@ impl UiData {
         proxy.current_app_target = None;
 
         Self {
-            providers: ProvidersSnapshot::default(),
+            providers: ProvidersSnapshot {
+                loading: true,
+                ..ProvidersSnapshot::default()
+            },
             mcp: self.mcp.clone(),
             prompts: PromptsSnapshot::default(),
             config: self.config.loading_projection(app_type),
@@ -1220,6 +1238,7 @@ fn load_providers_with_mode(
         current_id,
         rows,
         live_ids,
+        loading: false,
     })
 }
 

@@ -331,6 +331,13 @@ impl App {
                         binding: true,
                         selected_account_id: selected,
                     };
+                    // managed_auth status is no longer fetched at startup, so pull
+                    // it on demand the first time this picker is opened.
+                    if self.managed_auth_status.is_none() {
+                        return Action::ManagedAuthRefresh {
+                            auth_provider: "codex_oauth".to_string(),
+                        };
+                    }
                 }
                 Action::None
             }

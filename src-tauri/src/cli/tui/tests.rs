@@ -205,6 +205,196 @@ fn app_data_send_failure_does_not_block_retry() {
 }
 
 #[test]
+fn initial_load_preseeds_extra_visible_apps_for_instant_switch() {
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    let pending = cache
+        .queue_initial_app_data_load(&tx, &AppType::Claude, &[AppType::Codex])
+        .expect("queue initial load");
+
+    // Both the active app and every extra visible app get a pending Initial entry.
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Claude).copied(),
+        Some(pending)
+    );
+    let codex_pending = cache
+        .pending_by_app
+        .get(&AppType::Codex)
+        .copied()
+        .expect("codex should have a pre-seed pending entry");
+    assert_eq!(codex_pending.kind, AppDataLoadKind::Initial);
+
+    // A single InitialLoad request carries the extras as (app, request_id) pairs.
+    let req = rx.recv().expect("initial request should be queued");
+    let extras = match req {
+        AppDataReq::InitialLoad {
+            app_type: AppType::Claude,
+            extras,
+            ..
+        } => extras,
+        other => panic!("unexpected initial request: {other:?}"),
+    };
+    assert_eq!(extras, vec![(AppType::Codex, codex_pending.request_id)]);
+
+    // Worker reply for the (non-active) Codex snapshot seeds by_app with real rows.
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut startup_overlay = Some(Overlay::None);
+
+    let mut codex_data = UiData::default();
+    codex_data.providers.rows.push(super::data::ProviderRow {
+        id: "codex-default".to_string(),
+        provider: crate::provider::Provider::with_id(
+            "codex-default".to_string(),
+            "Codex Default".to_string(),
+            json!({}),
+            None,
+        ),
+        api_url: None,
+        is_current: true,
+        is_in_config: true,
+        is_saved: true,
+        is_default_model: false,
+        primary_model_id: None,
+        default_model_id: None,
+    });
+
+    let handled = handle_initial_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut startup_overlay,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Initial,
+            request_id: codex_pending.request_id,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Ok(codex_data),
+        },
+    )
+    .expect("handling the codex pre-seed should succeed");
+    assert!(handled);
+    assert!(cache.by_app.contains_key(&AppType::Codex));
+    assert!(!cache.pending_by_app.contains_key(&AppType::Codex));
+    assert!(!cache.incomplete_by_app.contains(&AppType::Codex));
+
+    // Switching to Codex now hits the cache: real providers render immediately,
+    // no background load is queued, and the empty placeholder never shows.
+    let (switch_tx, switch_rx) = mpsc::channel();
+    cache
+        .switch_to(&mut app, &mut data, Some(&switch_tx), AppType::Codex)
+        .expect("switch to codex should use the pre-seeded cache");
+    assert_eq!(app.app_type, AppType::Codex);
+    assert!(
+        !data.providers.rows.is_empty(),
+        "pre-seeded providers should render on the first switch"
+    );
+    assert!(
+        switch_rx.try_recv().is_err(),
+        "a cache hit must not queue a background load"
+    );
+}
+
+#[test]
+fn initial_load_extra_app_failure_does_not_abort_startup() {
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    cache
+        .queue_initial_app_data_load(&tx, &AppType::Claude, &[AppType::Codex])
+        .expect("queue initial load");
+    let codex_request_id = cache
+        .pending_by_app
+        .get(&AppType::Codex)
+        .copied()
+        .expect("codex pending")
+        .request_id;
+    let _ = rx.recv().expect("initial request");
+
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut startup_overlay = Some(Overlay::None);
+
+    // A failed pre-seed for a non-active app is swallowed (no Err propagation),
+    // leaving it uncached so the first switch falls back to a lazy load.
+    let handled = handle_initial_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut startup_overlay,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Initial,
+            request_id: codex_request_id,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Err("boom".to_string()),
+        },
+    )
+    .expect("a non-active pre-seed failure must not abort startup");
+    assert!(handled);
+    assert!(!cache.by_app.contains_key(&AppType::Codex));
+    assert!(!cache.pending_by_app.contains_key(&AppType::Codex));
+}
+
+#[test]
+fn lightweight_preseed_excludes_additive_apps() {
+    // Pure in-memory snapshot apps are eager-seeded at startup.
+    for app in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+        assert!(
+            is_lightweight_preseed_app(&app),
+            "{app:?} should be eagerly pre-seeded"
+        );
+    }
+    // Additive apps read live config files even in SnapshotOnly mode, so they
+    // lazy-load on first switch instead of paying that I/O at startup.
+    for app in [AppType::OpenCode, AppType::Hermes, AppType::OpenClaw] {
+        assert!(
+            !is_lightweight_preseed_app(&app),
+            "{app:?} should lazy-load, not pre-seed"
+        );
+    }
+}
+
+#[test]
+fn current_app_reloaded_keeps_other_apps_cache() {
+    let app = App::new(Some(AppType::Claude));
+    let data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+
+    // A cold app (Codex) is pre-seeded; the active app (Claude) reloads fresh.
+    cache.by_app.insert(AppType::Codex, UiData::default());
+    cache.handle_data_reloaded(&app, &data, CacheInvalidation::CurrentAppReloaded);
+    assert!(
+        cache.by_app.contains_key(&AppType::Codex),
+        "current-app reload must not wipe other apps' pre-seed"
+    );
+    assert!(cache.by_app.contains_key(&AppType::Claude));
+
+    // A genuine cross-app invalidation still clears everything (then re-remembers
+    // the active app), so stale cross-app data can't linger.
+    cache.by_app.insert(AppType::Codex, UiData::default());
+    cache.handle_data_reloaded(&app, &data, CacheInvalidation::DataReloaded);
+    assert!(!cache.by_app.contains_key(&AppType::Codex));
+    assert!(cache.by_app.contains_key(&AppType::Claude));
+}
+
+#[test]
+fn app_switch_projection_marks_providers_loading() {
+    let data = UiData::default();
+    let projection = data.app_switch_loading_projection(&AppType::Codex);
+    assert!(
+        projection.providers.loading,
+        "cold-switch projection must flag loading so the empty CTA isn't shown"
+    );
+    assert!(projection.providers.rows.is_empty());
+}
+
+#[test]
 fn stale_app_data_result_does_not_overwrite_current_app() {
     let mut app = App::new(Some(AppType::Claude));
     let mut data = UiData::default();

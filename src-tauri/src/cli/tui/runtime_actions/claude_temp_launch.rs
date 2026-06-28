@@ -139,6 +139,7 @@ mod tests {
                         current_id: current_id.to_string(),
                         rows,
                         live_ids: Default::default(),
+                        loading: false,
                     },
                     ..UiData::default()
                 },

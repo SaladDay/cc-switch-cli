@@ -577,21 +577,6 @@ pub(super) fn strip_common_config_from_live_settings_or_provider_snapshot(
     )
 }
 
-pub(super) fn strip_common_config_snippet_from_live_settings_or_provider_snapshot(
-    app_type: &AppType,
-    provider: &Provider,
-    live_settings: Value,
-    snippet: Option<&str>,
-) -> Value {
-    strip_common_config_snippet_from_live_settings_with_fallback(
-        app_type,
-        provider,
-        live_settings,
-        snippet,
-        Some(&provider.settings_config),
-    )
-}
-
 fn strip_common_config_snippet_from_live_settings_with_fallback(
     app_type: &AppType,
     provider: &Provider,

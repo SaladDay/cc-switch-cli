@@ -33,14 +33,7 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
     let archived_root = config_dir.join("archived_sessions");
     collect_jsonl_files(&archived_root, &mut files);
 
-    let mut sessions = Vec::new();
-    for path in files {
-        if let Some(meta) = parse_session(&path) {
-            sessions.push(meta);
-        }
-    }
-
-    sessions
+    super::utils::parse_sessions_parallel(files, parse_session)
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {

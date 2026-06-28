@@ -135,7 +135,16 @@ fn render_session_list(
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
-    let rows = visible.iter().map(|session| {
+    // Only build Row objects for the rows actually on screen. Without this the
+    // table allocates a title/time/Line/Span for every filtered session each
+    // frame (O(n)); windowing keeps it O(viewport) even with thousands of rows.
+    let total = visible.len();
+    let selected = app.sessions.selected_idx.min(total.saturating_sub(1));
+    let start = message_window_start(total, selected, inner.height);
+    let visible_rows = inner.height.saturating_sub(1).max(1) as usize;
+    let end = (start + visible_rows).min(total);
+
+    let rows = visible[start..end].iter().map(|session| {
         let title = session_title(session);
         let time = session
             .last_active_at
@@ -163,8 +172,10 @@ fn render_session_list(
         .row_highlight_style(selection_style(theme))
         .highlight_symbol(highlight_symbol(theme));
 
+    // The rows are pre-sliced to the window, so the highlight index is relative
+    // to `start`.
     let mut state = TableState::default();
-    state.select(Some(app.sessions.selected_idx));
+    state.select(Some(selected - start));
     frame.render_stateful_widget(table, inset_left(inner, CONTENT_INSET_LEFT), &mut state);
 }
 

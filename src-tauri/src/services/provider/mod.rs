@@ -142,7 +142,6 @@ struct PostCommitAction {
     app_type: AppType,
     provider: Provider,
     previous_provider: Option<Provider>,
-    claude_live_merge_base: Option<Value>,
     backup: LiveSnapshot,
     sync_mcp: bool,
     refresh_snapshot: bool,
@@ -636,24 +635,12 @@ impl ProviderService {
     where
         F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
     {
-        Self::run_transaction_with_resolution(state, live_merge::ConflictPolicy::Fail.into(), f)
-    }
-
-    fn run_transaction_with_resolution<R, F>(
-        state: &AppState,
-        resolution: live_merge::ConflictResolution<'_>,
-        f: F,
-    ) -> Result<R, AppError>
-    where
-        F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
-    {
-        Self::run_staged_transaction(state, None, resolution, f)
+        Self::run_staged_transaction(state, None, f)
     }
 
     fn run_staged_transaction<R, F>(
         state: &AppState,
         preserved_current_apps: Option<&[AppType]>,
-        resolution: live_merge::ConflictResolution<'_>,
         f: F,
     ) -> Result<R, AppError>
     where
@@ -666,7 +653,7 @@ impl ProviderService {
         let mut candidate = original.clone();
         let (result, action) = f(&mut candidate)?;
         let prepared = action
-            .map(|action| Self::prepare_post_commit_action(state, action, resolution))
+            .map(|action| Self::prepare_post_commit_action(state, action))
             .transpose()?;
 
         {
@@ -725,10 +712,6 @@ impl ProviderService {
         Ok(result)
     }
 
-    #[expect(
-        dead_code,
-        reason = "kept for callers that preserve current providers without custom resolution"
-    )]
     fn run_transaction_preserving_current_providers<R, F>(
         state: &AppState,
         preserved_current_apps: &[AppType],
@@ -737,24 +720,7 @@ impl ProviderService {
     where
         F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
     {
-        Self::run_transaction_preserving_current_providers_with_resolution(
-            state,
-            preserved_current_apps,
-            live_merge::ConflictPolicy::Fail.into(),
-            f,
-        )
-    }
-
-    fn run_transaction_preserving_current_providers_with_resolution<R, F>(
-        state: &AppState,
-        preserved_current_apps: &[AppType],
-        resolution: live_merge::ConflictResolution<'_>,
-        f: F,
-    ) -> Result<R, AppError>
-    where
-        F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
-    {
-        Self::run_staged_transaction(state, Some(preserved_current_apps), resolution, f)
+        Self::run_staged_transaction(state, Some(preserved_current_apps), f)
     }
 
     fn restore_config_only(state: &AppState, snapshot: MultiAppConfig) -> Result<(), AppError> {
@@ -803,20 +769,15 @@ impl ProviderService {
     fn prepare_post_commit_action(
         state: &AppState,
         action: PostCommitAction,
-        resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<PreparedPostCommitAction, AppError> {
         let effect = if action.takeover_active {
-            let backup_snapshot = futures::executor::block_on(
-                state
-                    .proxy_service
-                    .prepare_live_backup_from_provider_with_resolution(
-                        action.app_type.as_str(),
-                        &action.provider,
-                        action.previous_provider.as_ref(),
-                        resolution,
-                    ),
-            )
-            .map_err(AppError::Message)?;
+            let backup_snapshot =
+                futures::executor::block_on(state.proxy_service.prepare_live_backup_from_provider(
+                    action.app_type.as_str(),
+                    &action.provider,
+                    action.previous_provider.as_ref(),
+                ))
+                .map_err(AppError::Message)?;
             PreparedPostCommitEffect::ProxyLiveBackup(backup_snapshot)
         } else {
             let apply_common_config = action
@@ -825,15 +786,13 @@ impl ProviderService {
                 .as_ref()
                 .and_then(|meta| meta.apply_common_config)
                 .unwrap_or(false);
-            PreparedPostCommitEffect::Live(Self::prepare_live_snapshot_with_resolution(
+            PreparedPostCommitEffect::Live(Self::prepare_live_snapshot(
                 &action.app_type,
                 &action.provider,
                 action.previous_provider.as_ref(),
-                action.claude_live_merge_base.as_ref(),
                 action.common_config_snippet.as_deref(),
                 action.previous_common_config_snippet.as_deref(),
                 apply_common_config,
-                resolution,
             )?)
         };
 
@@ -1302,7 +1261,6 @@ impl ProviderService {
             app_type: app_type.clone(),
             provider,
             previous_provider: None,
-            claude_live_merge_base: None,
             backup: Self::capture_live_snapshot(app_type)?,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
             refresh_snapshot: false,
@@ -1701,20 +1659,6 @@ impl ProviderService {
         app_type: AppType,
         snippet: Option<String>,
     ) -> Result<(), AppError> {
-        Self::set_common_config_snippet_with_resolution(
-            state,
-            app_type,
-            snippet,
-            live_merge::ConflictPolicy::Fail.into(),
-        )
-    }
-
-    pub(crate) fn set_common_config_snippet_with_resolution(
-        state: &AppState,
-        app_type: AppType,
-        snippet: Option<String>,
-        resolution: live_merge::ConflictResolution<'_>,
-    ) -> Result<(), AppError> {
         let normalized_snippet = snippet.and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -1724,6 +1668,10 @@ impl ProviderService {
             }
         });
         Self::validate_common_config_snippet(&app_type, normalized_snippet.as_deref())?;
+
+        // 清空（None）→ 记录 cleared=true，避免下次启动自动重新播种；
+        // 设置非空片段 → cleared=false。
+        let snippet_cleared = normalized_snippet.is_none();
 
         let app_type_clone = app_type.clone();
         let (effective_current_provider, db_providers) = if app_type.is_additive_mode() {
@@ -1783,10 +1731,9 @@ impl ProviderService {
             }
         };
 
-        Self::run_transaction_preserving_current_providers_with_resolution(
+        Self::run_transaction_preserving_current_providers(
             state,
             std::slice::from_ref(&app_type),
-            resolution,
             move |config| {
                 config.ensure_app(&app_type_clone);
 
@@ -1843,7 +1790,15 @@ impl ProviderService {
                 )?;
                 Ok(((), action))
             },
-        )
+        )?;
+
+        // 与启动期 best-effort 播种不同，这里传播错误：若该标记写入失败，
+        // 下次启动会误判为"未清空"并把刚清空的片段重新播种回来。
+        state
+            .db
+            .set_config_snippet_cleared(app_type.as_str(), snippet_cleared)?;
+
+        Ok(())
     }
 
     pub fn clear_common_config_snippet(
@@ -1885,20 +1840,6 @@ impl ProviderService {
 
     /// 新增供应商
     pub fn add(state: &AppState, app_type: AppType, provider: Provider) -> Result<bool, AppError> {
-        Self::add_with_resolution(
-            state,
-            app_type,
-            provider,
-            live_merge::ConflictPolicy::Fail.into(),
-        )
-    }
-
-    pub(crate) fn add_with_resolution(
-        state: &AppState,
-        app_type: AppType,
-        provider: Provider,
-        resolution: live_merge::ConflictResolution<'_>,
-    ) -> Result<bool, AppError> {
         let mut provider = provider;
         // 归一化 Claude 模型键
         Self::normalize_provider_if_claude(&app_type, &mut provider);
@@ -1913,7 +1854,7 @@ impl ProviderService {
             state.db.get_current_provider(app_type.as_str())?
         };
 
-        Self::run_transaction_with_resolution(state, resolution, move |config| {
+        Self::run_transaction(state, move |config| {
             let common_config_snippet = config.common_config_snippets.get(&app_type_clone).cloned();
             let mut provider_to_store = provider_clone.clone();
             Self::normalize_provider_for_storage(
@@ -1969,7 +1910,6 @@ impl ProviderService {
                     app_type: app_type_clone.clone(),
                     provider: provider_to_store.clone(),
                     previous_provider: None,
-                    claude_live_merge_base: None,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
@@ -1994,20 +1934,6 @@ impl ProviderService {
         app_type: AppType,
         provider: Provider,
     ) -> Result<bool, AppError> {
-        Self::update_with_resolution(
-            state,
-            app_type,
-            provider,
-            live_merge::ConflictPolicy::Fail.into(),
-        )
-    }
-
-    pub(crate) fn update_with_resolution(
-        state: &AppState,
-        app_type: AppType,
-        provider: Provider,
-        resolution: live_merge::ConflictResolution<'_>,
-    ) -> Result<bool, AppError> {
         let mut provider = provider;
         // 归一化 Claude 模型键
         Self::normalize_provider_if_claude(&app_type, &mut provider);
@@ -2024,7 +1950,7 @@ impl ProviderService {
             )
         };
 
-        Self::run_transaction_with_resolution(state, resolution, move |config| {
+        Self::run_transaction(state, move |config| {
             let common_config_snippet = config.common_config_snippets.get(&app_type_clone).cloned();
             let manager = config
                 .get_manager_mut(&app_type_clone)
@@ -2132,7 +2058,6 @@ impl ProviderService {
                     app_type: app_type_clone.clone(),
                     provider: merged,
                     previous_provider,
-                    claude_live_merge_base: None,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
@@ -2606,13 +2531,6 @@ impl ProviderService {
     /// （`~/.codex/config.toml`、Claude `settings.json` 等）尚未同步。
     /// 对齐上游 `sync_current_to_live` 行为。
     pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
-        Self::sync_current_to_live_with_resolution(state, live_merge::ConflictPolicy::Fail.into())
-    }
-
-    pub(crate) fn sync_current_to_live_with_resolution(
-        state: &AppState,
-        resolution: live_merge::ConflictResolution<'_>,
-    ) -> Result<(), AppError> {
         use crate::services::mcp::McpService;
 
         // 在读锁下收集所有需要的数据，避免持锁写文件
@@ -2674,14 +2592,7 @@ impl ProviderService {
                 continue;
             }
 
-            Self::write_live_snapshot_with_resolution(
-                app_type,
-                provider,
-                snippet.as_deref(),
-                None,
-                true,
-                resolution,
-            )?;
+            Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)?;
         }
 
         if let Err(e) =
@@ -2699,74 +2610,6 @@ impl ProviderService {
         }
 
         Ok(())
-    }
-
-    pub(crate) fn preview_switch_live_conflicts(
-        state: &AppState,
-        app_type: AppType,
-        provider_id: &str,
-    ) -> Result<Vec<live_merge::ConfigConflict>, AppError> {
-        if !app_type.is_additive_mode() {
-            let providers = state.db.get_all_providers(app_type.as_str())?;
-            providers.get(provider_id).ok_or_else(|| {
-                AppError::localized(
-                    "provider.not_found",
-                    format!("供应商不存在: {provider_id}"),
-                    format!("Provider not found: {provider_id}"),
-                )
-            })?;
-
-            let is_app_taken_over =
-                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                    .ok()
-                    .flatten()
-                    .is_some();
-            let running_takeover_active = state
-                .proxy_service
-                .is_app_takeover_active_blocking(&app_type)
-                .map_err(AppError::Message)?;
-            let live_taken_over = state
-                .proxy_service
-                .detect_takeover_in_live_config_for_app(&app_type);
-            if is_app_taken_over || live_taken_over || running_takeover_active {
-                return Ok(Vec::new());
-            }
-        }
-
-        let effective_current_provider = if app_type.is_additive_mode() {
-            None
-        } else {
-            crate::settings::get_effective_current_provider(&state.db, &app_type)?
-        };
-        let previous_common_config_snippet = if app_type.is_additive_mode() {
-            None
-        } else {
-            state.db.get_config_snippet(app_type.as_str())?
-        };
-        let mut candidate = {
-            let guard = state.config.read().map_err(AppError::from)?;
-            guard.clone()
-        };
-        let action = Self::prepare_switch_post_commit_action(
-            &mut candidate,
-            &app_type,
-            provider_id,
-            effective_current_provider.as_deref(),
-            previous_common_config_snippet,
-        )?;
-
-        let mut collector = live_merge::ConflictCollector::default();
-        {
-            let resolver = &mut collector as &mut dyn live_merge::ConflictResolver;
-            let resolver = std::cell::RefCell::new(resolver);
-            Self::prepare_post_commit_action(
-                state,
-                action,
-                live_merge::ConflictResolution::Resolver(&resolver),
-            )?;
-        }
-
-        Ok(collector.into_conflicts())
     }
 
     fn prepare_switch_post_commit_action(
@@ -2798,7 +2641,6 @@ impl ProviderService {
                 app_type: app_type.clone(),
                 provider,
                 previous_provider: None,
-                claude_live_merge_base: None,
                 backup: Self::capture_live_snapshot(app_type)?,
                 sync_mcp: matches!(app_type, AppType::OpenCode),
                 refresh_snapshot: false,
@@ -2818,14 +2660,6 @@ impl ProviderService {
                     .and_then(|manager| manager.providers.get(current_id))
                     .cloned()
             });
-        let claude_live_merge_base =
-            if matches!(app_type, AppType::Claude) && get_claude_settings_path().exists() {
-                previous_provider
-                    .as_ref()
-                    .map(|provider| provider.settings_config.clone())
-            } else {
-                None
-            };
         let provider = match app_type {
             AppType::Codex => {
                 Self::prepare_switch_codex(config, provider_id, effective_current_provider)?
@@ -2845,7 +2679,6 @@ impl ProviderService {
             app_type: app_type.clone(),
             provider,
             previous_provider,
-            claude_live_merge_base,
             backup,
             sync_mcp: true,
             refresh_snapshot: true,
@@ -2858,20 +2691,6 @@ impl ProviderService {
 
     /// 切换指定应用的供应商
     pub fn switch(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
-        Self::switch_with_resolution(
-            state,
-            app_type,
-            provider_id,
-            live_merge::ConflictPolicy::Fail.into(),
-        )
-    }
-
-    pub(crate) fn switch_with_resolution(
-        state: &AppState,
-        app_type: AppType,
-        provider_id: &str,
-        resolution: live_merge::ConflictResolution<'_>,
-    ) -> Result<(), AppError> {
         if !app_type.is_additive_mode() {
             let providers = state.db.get_all_providers(app_type.as_str())?;
             providers.get(provider_id).ok_or_else(|| {
@@ -2925,7 +2744,7 @@ impl ProviderService {
             state.db.get_config_snippet(app_type.as_str())?
         };
 
-        Self::run_transaction_with_resolution(state, resolution, move |config| {
+        Self::run_transaction(state, move |config| {
             let action = Self::prepare_switch_post_commit_action(
                 config,
                 &app_type_clone,
@@ -2949,50 +2768,24 @@ impl ProviderService {
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
-        Self::write_live_snapshot_with_resolution(
-            app_type,
-            provider,
-            common_config_snippet,
-            None,
-            apply_common_config,
-            live_merge::ConflictPolicy::Fail.into(),
-        )
-    }
-
-    fn write_live_snapshot_with_resolution(
-        app_type: &AppType,
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-        previous_common_config_snippet: Option<&str>,
-        apply_common_config: bool,
-        resolution: live_merge::ConflictResolution<'_>,
-    ) -> Result<(), AppError> {
-        let prepared = Self::prepare_live_snapshot_with_resolution(
+        let prepared = Self::prepare_live_snapshot(
             app_type,
             provider,
             None,
-            None,
             common_config_snippet,
-            previous_common_config_snippet,
+            None,
             apply_common_config,
-            resolution,
         )?;
         Self::apply_prepared_live_snapshot(&prepared)
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "dispatch wrapper threads app-specific live sync context"
-    )]
-    fn prepare_live_snapshot_with_resolution(
+    fn prepare_live_snapshot(
         app_type: &AppType,
         provider: &Provider,
         previous_provider: Option<&Provider>,
-        claude_live_merge_base: Option<&Value>,
         common_config_snippet: Option<&str>,
         previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
-        resolution: live_merge::ConflictResolution<'_>,
     ) -> Result<PreparedLiveWrite, AppError> {
         let apply_common_config = Self::resolve_live_apply_common_config(
             app_type,
@@ -3008,16 +2801,13 @@ impl ProviderService {
                 previous_common_config_snippet,
                 apply_common_config,
                 false,
-                resolution,
             ),
             AppType::Claude => Self::prepare_claude_live_write(
                 provider,
-                claude_live_merge_base,
                 common_config_snippet,
                 previous_common_config_snippet,
                 apply_common_config,
                 false,
-                resolution,
             ),
             AppType::Gemini => Self::prepare_gemini_live_write(
                 provider,
@@ -3028,7 +2818,6 @@ impl ProviderService {
                 },
                 previous_common_config_snippet,
                 false,
-                resolution,
             ),
             AppType::OpenCode => {
                 let config_to_write = if let Some(obj) = provider.settings_config.as_object() {
@@ -3054,18 +2843,16 @@ impl ProviderService {
                             )
                             .ok()
                         });
-                        crate::opencode_config::prepare_typed_provider_with_base_and_resolution(
+                        crate::opencode_config::prepare_typed_provider_with_base(
                             &provider.id,
                             previous_config.as_ref(),
                             &config,
-                            resolution,
                         )?
                     }
-                    Err(_) => crate::opencode_config::prepare_provider_with_base_and_resolution(
+                    Err(_) => crate::opencode_config::prepare_provider_with_base(
                         &provider.id,
                         previous_provider.map(|previous| previous.settings_config.clone()),
                         config_to_write,
-                        resolution,
                     )?,
                 };
                 Ok(PreparedLiveWrite::OpenCode { config })
@@ -3078,10 +2865,9 @@ impl ProviderService {
                         "Hermes configuration must be a JSON object",
                     ));
                 }
-                let providers = crate::hermes_config::prepare_provider_with_resolution(
+                let providers = crate::hermes_config::prepare_provider(
                     &provider.id,
                     provider.settings_config.clone(),
-                    resolution,
                 )?;
                 Ok(PreparedLiveWrite::Hermes { providers })
             }
@@ -3096,12 +2882,8 @@ impl ProviderService {
 
                 let config = Self::parse_openclaw_provider_settings(&settings_config)?;
                 Self::validate_openclaw_provider_models(&provider.id, &config)?;
-                let models = crate::openclaw_config::prepare_typed_provider_with_resolution(
-                    &provider.id,
-                    &config,
-                    resolution,
-                )
-                .map_err(Self::normalize_openclaw_live_write_error)?;
+                let models = crate::openclaw_config::prepare_typed_provider(&provider.id, &config)
+                    .map_err(Self::normalize_openclaw_live_write_error)?;
                 Ok(PreparedLiveWrite::OpenClaw { models })
             }
         }

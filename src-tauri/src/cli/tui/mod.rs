@@ -232,32 +232,6 @@ fn queue_current_quota_refresh_if_due(
     }
 }
 
-fn queue_managed_auth_refresh(
-    app: &mut App,
-    managed_auth_req_tx: Option<&mpsc::Sender<ManagedAuthReq>>,
-    auth_provider: &str,
-) {
-    let Some(tx) = managed_auth_req_tx else {
-        app.managed_auth_loading = false;
-        app.push_toast(
-            texts::tui_toast_managed_auth_worker_unavailable("auth worker is not running"),
-            ToastKind::Warning,
-        );
-        return;
-    };
-
-    app.managed_auth_loading = true;
-    if let Err(error) = tx.send(ManagedAuthReq::Refresh {
-        auth_provider: auth_provider.to_string(),
-    }) {
-        app.managed_auth_loading = false;
-        app.push_toast(
-            texts::tui_toast_managed_auth_request_failed(&error.to_string()),
-            ToastKind::Warning,
-        );
-    }
-}
-
 fn queue_provider_quota_refresh(
     app: &mut App,
     data: &mut data::UiData,
@@ -318,6 +292,23 @@ fn usage_pricing_range_matches_active(
     }
 }
 
+/// Whether a cached `(app, cached_range)` entry already provides the data a
+/// request for `requested` needs. The fixed ranges (Today/7d/30d) are computed
+/// together, so any cached fixed range covers another; a custom range must
+/// match exactly, and fixed/custom never cover each other.
+fn usage_pricing_cache_satisfies(
+    cached: data::UsageRangePreset,
+    requested: data::UsageRangePreset,
+) -> bool {
+    match (cached, requested) {
+        (data::UsageRangePreset::Custom(cached), data::UsageRangePreset::Custom(requested)) => {
+            cached == requested
+        }
+        (data::UsageRangePreset::Custom(_), _) | (_, data::UsageRangePreset::Custom(_)) => false,
+        _ => true,
+    }
+}
+
 fn align_usage_to_active_range(
     usage: &mut data::UsageSnapshot,
     active_range: data::UsageRangePreset,
@@ -334,6 +325,11 @@ fn align_usage_to_active_range(
 pub(crate) enum CacheInvalidation {
     None,
     CurrentAppDataChanged,
+    /// The current app's data was fully reloaded fresh (e.g. the post-startup
+    /// SyncLive refresh, or a current-app mutation's reload). Only the current
+    /// app's cache entry is refreshed; other apps' pre-seeded snapshots are kept
+    /// (their DB rows weren't touched), so a cold switch to them stays instant.
+    CurrentAppReloaded,
     DataReloaded,
     AppStateRecreated,
 }
@@ -526,6 +522,7 @@ impl UiDataByAppCache {
         &mut self,
         app_data_req_tx: &mpsc::Sender<AppDataReq>,
         app_type: &AppType,
+        extra_apps: &[AppType],
     ) -> Result<PendingAppDataLoad, AppError> {
         if self.pending_by_app.contains_key(app_type) {
             return Err(AppError::Message(
@@ -542,14 +539,44 @@ impl UiDataByAppCache {
         };
         self.pending_by_app.insert(app_type.clone(), pending);
         self.incomplete_by_app.insert(app_type.clone());
+
+        // Warm the remaining visible apps from the same in-memory snapshot the
+        // worker already holds, so the first switch to them renders real data
+        // instead of the empty "no providers" placeholder. Each gets its own
+        // pending Initial entry keyed by request_id; they share generation/epoch.
+        let mut extras: Vec<(AppType, u64)> = Vec::new();
+        for extra in extra_apps {
+            if extra == app_type || self.pending_by_app.contains_key(extra) {
+                continue;
+            }
+            self.next_app_data_request_id = self.next_app_data_request_id.wrapping_add(1);
+            let extra_request_id = self.next_app_data_request_id;
+            self.pending_by_app.insert(
+                extra.clone(),
+                PendingAppDataLoad {
+                    kind: AppDataLoadKind::Initial,
+                    request_id: extra_request_id,
+                    generation: pending.generation,
+                    app_state_epoch: pending.app_state_epoch,
+                },
+            );
+            self.incomplete_by_app.insert(extra.clone());
+            extras.push((extra.clone(), extra_request_id));
+        }
+
         if let Err(err) = app_data_req_tx.send(AppDataReq::InitialLoad {
             request_id: pending.request_id,
             generation: pending.generation,
             app_state_epoch: pending.app_state_epoch,
             app_type: app_type.clone(),
+            extras: extras.clone(),
         }) {
             self.pending_by_app.remove(app_type);
             self.incomplete_by_app.remove(app_type);
+            for (extra, _) in &extras {
+                self.pending_by_app.remove(extra);
+                self.incomplete_by_app.remove(extra);
+            }
             return Err(AppError::Message(format!(
                 "Initial app data load request failed: {err}"
             )));
@@ -595,6 +622,36 @@ impl UiDataByAppCache {
 
     fn mark_app_data_loaded(&mut self, app_type: &AppType) {
         self.incomplete_by_app.remove(app_type);
+    }
+
+    /// Queue a usage/pricing load only if that (app, range) isn't already cached
+    /// or in flight. Used to lazily populate usage when the Usage view opens,
+    /// now that the startup full-load defers the aggregation.
+    fn ensure_usage_pricing_loaded(
+        &mut self,
+        app: &mut App,
+        usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+        app_type: &AppType,
+        range: data::UsageRangePreset,
+    ) {
+        if self
+            .pending_usage_pricing_by_key
+            .contains_key(&(app_type.clone(), range))
+        {
+            return;
+        }
+        // A cached fixed range already covers any other fixed range, so don't
+        // re-aggregate when the user toggles Today/7d/30d.
+        let already_cached = self
+            .usage_pricing_by_key
+            .keys()
+            .any(|(cached_app, cached_range)| {
+                cached_app == app_type && usage_pricing_cache_satisfies(*cached_range, range)
+            });
+        if already_cached {
+            return;
+        }
+        self.queue_usage_pricing_load(app, usage_pricing_req_tx, app_type, range);
     }
 
     fn queue_usage_pricing_load(
@@ -692,6 +749,9 @@ impl UiDataByAppCache {
     ) {
         match invalidation {
             CacheInvalidation::None | CacheInvalidation::CurrentAppDataChanged => {}
+            // Current app reloaded fresh: keep every other app's cache (and the
+            // data_generation) intact; only the current entry is refreshed below.
+            CacheInvalidation::CurrentAppReloaded => {}
             CacheInvalidation::DataReloaded => self.clear(),
             CacheInvalidation::AppStateRecreated => self.clear_after_app_state_recreated(),
         }
@@ -803,6 +863,55 @@ fn queue_background_session_usage_sync(
     }
 }
 
+/// Lazily kick off the session-usage sync the first time a Usage route is shown
+/// this run. The sync scans the whole session-log history (expensive on large
+/// histories) and only feeds the Usage view, so it is deferred off startup.
+fn maybe_queue_usage_session_sync(
+    app: &App,
+    sync_req_tx: Option<&mpsc::Sender<SessionUsageSyncReq>>,
+    sync_tracker: &mut RequestTracker,
+    started: &mut bool,
+) {
+    if *started {
+        return;
+    }
+    if !matches!(
+        app.route,
+        route::Route::Usage | route::Route::UsageLogs | route::Route::UsageLogDetail { .. }
+    ) {
+        return;
+    }
+    *started = true;
+    queue_background_session_usage_sync(sync_req_tx, sync_tracker);
+}
+
+/// Lazily load the active app's usage/pricing when a Usage or Pricing view is
+/// shown. The startup full-load no longer computes it, so this fills it in on
+/// demand; the cache guard keeps it from re-querying every frame.
+fn maybe_queue_usage_pricing_on_view(
+    app: &mut App,
+    data_cache: &mut UiDataByAppCache,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+) {
+    let is_usage = matches!(
+        app.route,
+        route::Route::Usage | route::Route::UsageLogs | route::Route::UsageLogDetail { .. }
+    );
+    let is_pricing = matches!(app.route, route::Route::Pricing);
+    if !is_usage && !is_pricing {
+        return;
+    }
+    let app_type = app.app_type.clone();
+    // The Pricing view needs the pricing snapshot, which only fixed ranges
+    // produce (a custom range yields `pricing: None`); force a fixed range there.
+    let range = if is_pricing && matches!(app.usage.range, data::UsageRangePreset::Custom(_)) {
+        data::UsageRangePreset::SevenDays
+    } else {
+        app.usage.range
+    };
+    data_cache.ensure_usage_pricing_loaded(app, usage_pricing_req_tx, &app_type, range);
+}
+
 fn handle_session_usage_sync_msg(
     app: &mut App,
     data: &mut data::UiData,
@@ -830,18 +939,18 @@ fn handle_session_usage_sync_msg(
     data_cache.clear_usage_pricing_after_external_usage_sync();
 
     let current_app_type = app.app_type.clone();
-    data_cache.queue_usage_pricing_load(
-        app,
-        usage_pricing_req_tx,
-        &current_app_type,
-        data::UsageRangePreset::SevenDays,
-    );
-    if matches!(app.usage.range, data::UsageRangePreset::Custom(_)) {
+    // Always refresh the range the user is actually viewing (Today / 30d / custom),
+    // otherwise the active range would show stale numbers after the sync finishes
+    // while the user is sitting on the Usage view.
+    let active_range = app.usage.range;
+    data_cache.queue_usage_pricing_load(app, usage_pricing_req_tx, &current_app_type, active_range);
+    // Keep the default 7-day window warm too (used as the cached default).
+    if !matches!(active_range, data::UsageRangePreset::SevenDays) {
         data_cache.queue_usage_pricing_load(
             app,
             usage_pricing_req_tx,
             &current_app_type,
-            app.usage.range,
+            data::UsageRangePreset::SevenDays,
         );
     }
     data_cache.remember_current(&app.app_type, data);
@@ -890,13 +999,17 @@ fn handle_app_data_msg(
                         data_cache.mark_app_data_loaded(&app_type);
                         if app.app_type == app_type {
                             *data = loaded;
+                            // A full reload of the CURRENT app must not wipe the
+                            // pre-seeded snapshots of the other apps (their DB rows
+                            // weren't touched), so scope the invalidation to the
+                            // current app instead of a global clear.
                             if let Err(err) = apply_loaded_data_cache_invalidation(
                                 app,
                                 data,
                                 data_cache,
                                 quota_req_tx,
                                 usage_pricing_req_tx,
-                                CacheInvalidation::DataReloaded,
+                                CacheInvalidation::CurrentAppReloaded,
                             ) {
                                 app.push_toast(err.to_string(), ToastKind::Warning);
                             }
@@ -977,9 +1090,12 @@ fn handle_initial_app_data_msg(
                 AppDataLoadFinish::Stale | AppDataLoadFinish::Ignored => return Ok(false),
             }
 
-            let mut loaded = result.map_err(AppError::Message)?;
-            data_cache.mark_app_data_loaded(&app_type);
             if app.app_type == app_type {
+                // The active app must load for the UI to be usable, so a failure
+                // here still aborts startup and leaves it "incomplete" (unchanged
+                // behavior: mark_app_data_loaded only runs after a successful load).
+                let mut loaded = result.map_err(AppError::Message)?;
+                data_cache.mark_app_data_loaded(&app_type);
                 loaded.quota = data.quota.clone();
                 *data = loaded;
                 app.overlay = startup_overlay.take().unwrap_or(Overlay::None);
@@ -993,7 +1109,13 @@ fn handle_initial_app_data_msg(
                 data_cache.remember_current(&app.app_type, data);
                 queue_current_quota_refresh_if_due(app, data, quota_req_tx);
             } else {
-                data_cache.by_app.insert(app_type, loaded);
+                // A pre-seeded extra app only warms the cache. Mark it done either
+                // way; on failure skip the insert so the first switch falls back to
+                // a lazy load instead of aborting startup over a non-active app.
+                data_cache.mark_app_data_loaded(&app_type);
+                if let Ok(loaded) = result {
+                    data_cache.by_app.insert(app_type, loaded);
+                }
             }
             Ok(true)
         }
@@ -1079,7 +1201,6 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ConfigWebDavMigrateV1ToV2 => CacheInvalidation::AppStateRecreated,
 
         Action::ProviderSwitch { .. }
-        | Action::ProviderSwitchResolveLiveConflicts { .. }
         | Action::ProviderRemoveFromConfig { .. }
         | Action::ProviderSetDefaultModel { .. }
         | Action::ProviderImportLiveConfig
@@ -1205,7 +1326,7 @@ fn apply_current_app_data_changed(
                 data_cache,
                 quota_req_tx,
                 usage_pricing_req_tx,
-                CacheInvalidation::DataReloaded,
+                CacheInvalidation::CurrentAppReloaded,
             )
         }
     }
@@ -1413,6 +1534,12 @@ fn queue_sessions_refresh_if_needed(
         return;
     }
 
+    // Reuse a fresh cached scan so toggling between apps is instant; `r`
+    // (Action::SessionsRefresh) bypasses this path and always re-scans.
+    if app.sessions.restore_from_scan_cache(&provider_id) {
+        return;
+    }
+
     let Some(tx) = session_req_tx else {
         app.sessions.loading = false;
         app.sessions.loaded_once = true;
@@ -1470,15 +1597,6 @@ fn queue_local_env_refresh_if_available(
     }
 }
 
-fn queue_managed_auth_refresh_if_available(
-    app: &mut App,
-    managed_auth_req_tx: Option<&mpsc::Sender<ManagedAuthReq>>,
-) {
-    if let Some(tx) = managed_auth_req_tx {
-        queue_managed_auth_refresh(app, Some(tx), "codex_oauth");
-    }
-}
-
 fn is_initial_loading_quit_key(key: &KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => true,
@@ -1527,6 +1645,14 @@ fn should_exit_after_initial_loading(
     !initial_data_loading && !has_initial_data_error && quit_requested
 }
 
+/// Apps whose startup snapshot (SnapshotOnly `UiData`) is a pure in-memory read
+/// of the already-loaded `MultiAppConfig`, cheap enough to eagerly pre-seed at
+/// startup. Additive apps (OpenCode/Hermes/OpenClaw) read live config files even
+/// in SnapshotOnly mode, so they are excluded and lazy-load on first switch.
+fn is_lightweight_preseed_app(app_type: &AppType) -> bool {
+    matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+}
+
 pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let _panic_hook = PanicRestoreHookGuard::install();
     let mut terminal = TuiTerminal::new()?;
@@ -1542,6 +1668,10 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let mut webdav_loading = RequestTracker::default();
     let mut update_check = RequestTracker::default();
     let mut session_usage_sync = RequestTracker::default();
+    // Session usage sync scans every session log file, which is expensive with a
+    // large history. It only feeds the Usage view, so defer it until the user
+    // first opens a Usage route instead of paying it on every startup.
+    let mut session_usage_sync_started = false;
 
     let speedtest = match start_speedtest_system() {
         Ok(system) => Some(system),
@@ -1702,7 +1832,21 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let mut initial_loading_quit_requested = false;
     if let Some(app_data) = app_data.as_ref() {
         initial_data_loading = true;
-        if let Err(err) = data_cache.queue_initial_app_data_load(&app_data.req_tx, &app.app_type) {
+        // Pre-seed the OTHER visible apps from the same startup snapshot so cold
+        // switches are instant — but only the lightweight ones whose snapshot is
+        // a pure in-memory read (Claude/Codex/Gemini). Additive apps
+        // (OpenCode/Hermes/OpenClaw) read live config files even in SnapshotOnly
+        // mode, so they are left to lazy-load on first switch (the providers
+        // loading state covers the brief gap) rather than pay that I/O at startup.
+        let extra_apps: Vec<AppType> = crate::settings::get_visible_apps()
+            .ordered_enabled()
+            .into_iter()
+            .filter(|candidate| candidate != &app.app_type)
+            .filter(is_lightweight_preseed_app)
+            .collect();
+        if let Err(err) =
+            data_cache.queue_initial_app_data_load(&app_data.req_tx, &app.app_type, &extra_apps)
+        {
             initial_data_loading = false;
             initial_data_error = Some(err);
         }
@@ -1716,11 +1860,6 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             quota.as_ref().map(|s| &s.req_tx),
         );
         queue_local_env_refresh_if_available(&mut app, local_env.as_ref().map(|s| &s.req_tx));
-        queue_managed_auth_refresh_if_available(&mut app, managed_auth.as_ref().map(|s| &s.req_tx));
-        queue_background_session_usage_sync(
-            session_usage.as_ref().map(|s| &s.req_tx),
-            &mut session_usage_sync,
-        );
     }
 
     loop {
@@ -1768,14 +1907,6 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         queue_local_env_refresh_if_available(
                             &mut app,
                             local_env.as_ref().map(|s| &s.req_tx),
-                        );
-                        queue_managed_auth_refresh_if_available(
-                            &mut app,
-                            managed_auth.as_ref().map(|s| &s.req_tx),
-                        );
-                        queue_background_session_usage_sync(
-                            session_usage.as_ref().map(|s| &s.req_tx),
-                            &mut session_usage_sync,
                         );
                     }
                     Ok(false) => {}
@@ -1825,14 +1956,6 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                             queue_local_env_refresh_if_available(
                                 &mut app,
                                 local_env.as_ref().map(|s| &s.req_tx),
-                            );
-                            queue_managed_auth_refresh_if_available(
-                                &mut app,
-                                managed_auth.as_ref().map(|s| &s.req_tx),
-                            );
-                            queue_background_session_usage_sync(
-                                session_usage.as_ref().map(|s| &s.req_tx),
-                                &mut session_usage_sync,
                             );
                         }
                         Ok(false) => {}
@@ -2116,6 +2239,22 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 _ => {}
             }
         }
+
+        // Kick off the deferred session-usage sync the first time the user lands
+        // on a Usage route (not at startup).
+        maybe_queue_usage_session_sync(
+            &app,
+            session_usage.as_ref().map(|s| &s.req_tx),
+            &mut session_usage_sync,
+            &mut session_usage_sync_started,
+        );
+        // Lazily aggregate usage/pricing (deferred off the startup full-load)
+        // once the user is actually on a Usage route.
+        maybe_queue_usage_pricing_on_view(
+            &mut app,
+            &mut data_cache,
+            usage_pricing.as_ref().map(|s| &s.req_tx),
+        );
 
         if last_tick.elapsed() >= tick_rate {
             app.on_tick();

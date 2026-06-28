@@ -7,6 +7,40 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.8.5] - 2026-06-25
+
+### Changed
+
+- **Provider / Live Config**: Reworked how provider switching writes the live config. The on-switch config merge added in 5.8.4 is gone — switching now writes the selected provider's config directly and no longer pops "Live configuration conflicts" prompts on a normal switch. Shared, non-provider settings (Claude `hooks` / `permissions` / `statusLine`, Codex shared TOML tables, Gemini proxy env) are carried through the common-config snippet instead of a per-switch merge. Codex `auth.json` keeps its preserve/write/delete handling so switching to a third-party provider no longer clobbers a ChatGPT login cache, and Gemini `settings.json` keeps user `mcpServers`.
+
+### Added
+
+- **Provider / Common Config**: Auto-seed common config snippets from existing live files on first setup for Claude, Codex, and Gemini, so shared settings carry across provider switches out of the box. Skipped once a snippet exists or has been explicitly cleared. [#276](https://github.com/SaladDay/cc-switch-cli/pull/276)
+- **Deeplink**: Add the `deeplink` command to import providers, MCP servers, prompts, and skills via `ccswitch://v1/import?...`. [#226](https://github.com/SaladDay/cc-switch-cli/pull/226)
+- **Codex / TUI**: Add a unified Codex session history setting.
+
+### Fixed
+
+- **Provider / Codex**: Fix config corruption when switching Codex providers, where the previous provider's API URL/key leaked into the newly selected provider's config. Fixes [#303](https://github.com/SaladDay/cc-switch-cli/issues/303), and the spurious "Live configuration conflicts" prompt on a normal switch. Fixes [#287](https://github.com/SaladDay/cc-switch-cli/issues/287).
+- **Provider / Claude**: Stop CC-Switch internal-only fields (`api_format` and friends) from leaking into Claude Code's live `settings.json`.
+- **Proxy / Takeover**: Refresh the takeover backup on hot-switch. [#295](https://github.com/SaladDay/cc-switch-cli/pull/295)
+- **Stream Check / Codex**: Probe Codex chat providers by reachability. [#288](https://github.com/SaladDay/cc-switch-cli/pull/288)
+
+### Docs
+
+- **Proxy**: Document the Windows managed-session limitation. [#299](https://github.com/SaladDay/cc-switch-cli/pull/299)
+
+### Performance
+
+- **TUI**: Show the shell before the full data refresh, and move session usage sync off TUI startup for a faster launch.
+
+### Thanks
+
+Thanks to everyone who helped land this release:
+
+- Code & PRs: [@jiawei666](https://github.com/jiawei666), [@LeonardoTan19](https://github.com/LeonardoTan19), [@hutiefang76](https://github.com/hutiefang76), [@unive3sal](https://github.com/unive3sal), [@louisneal](https://github.com/louisneal)
+- Reports & diagnosis behind the provider-switch rework: [@Mang30](https://github.com/Mang30), [@zhongwangninja](https://github.com/zhongwangninja), [@KiBlazer](https://github.com/KiBlazer), [@zj1123581321](https://github.com/zj1123581321), [@xyooz](https://github.com/xyooz), [@louisneal](https://github.com/louisneal)
+
 ## [5.8.4] - 2026-06-19
 
 ### Added

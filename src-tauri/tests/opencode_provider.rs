@@ -35,6 +35,50 @@ fn read_opencode_live(path: &std::path::Path) -> serde_json::Value {
 }
 
 #[test]
+fn additive_switch_preserves_sibling_providers() {
+    // Additive apps merge a single provider INTO the multi-provider live file;
+    // switching/activating one provider must NOT drop sibling providers.
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let state = state_from_config(MultiAppConfig::default());
+
+    ProviderService::add(
+        &state,
+        AppType::OpenCode,
+        opencode_provider("alpha", "Alpha", "https://alpha.example/v1"),
+    )
+    .expect("add alpha");
+    ProviderService::add(
+        &state,
+        AppType::OpenCode,
+        opencode_provider("beta", "Beta", "https://beta.example/v1"),
+    )
+    .expect("add beta");
+
+    // Re-activate beta (additive switch) and confirm alpha still present.
+    ProviderService::switch(&state, AppType::OpenCode, "beta").expect("switch to beta");
+
+    let live = read_opencode_live(&opencode_config_path(home));
+    let providers = live
+        .get("provider")
+        .and_then(|value| value.as_object())
+        .expect("opencode config should contain provider map");
+    assert!(
+        providers.contains_key("alpha"),
+        "sibling provider alpha must survive an additive switch"
+    );
+    assert!(providers.contains_key("beta"));
+    assert_eq!(
+        live.pointer("/provider/alpha/options/baseURL")
+            .and_then(serde_json::Value::as_str),
+        Some("https://alpha.example/v1"),
+        "sibling provider config must be preserved intact"
+    );
+}
+
+#[test]
 fn opencode_provider_modalities_round_trips_to_live_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -222,22 +266,8 @@ fn opencode_add_syncs_all_providers_to_live_config() {
     assert!(providers.contains_key("anthropic"));
 }
 
-fn assert_live_conflict(err: AppError, paths: &[&str]) {
-    let message = err.to_string();
-    assert!(
-        message.contains("Live configuration has conflicting local changes"),
-        "expected live conflict summary, got: {message}"
-    );
-    for path in paths {
-        assert!(
-            message.contains(path),
-            "expected conflict path {path}, got: {message}"
-        );
-    }
-}
-
 #[test]
-fn opencode_update_live_backed_provider_conflicts_on_changed_live_field() {
+fn opencode_update_live_backed_provider_prefers_incoming_on_changed_live_field() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -282,7 +312,10 @@ fn opencode_update_live_backed_provider_conflicts_on_changed_live_field() {
     .expect("seed opencode live config");
 
     let state = state_from_config(config);
-    let err = ProviderService::update(
+    // Upstream parity (prefer-incoming): updating a live-backed provider merges
+    // the incoming provider fragment into the multi-provider file, preferring
+    // cc-switch's values over a locally-edited live field (no conflict prompt).
+    ProviderService::update(
         &state,
         AppType::OpenCode,
         opencode_provider(
@@ -291,13 +324,13 @@ fn opencode_update_live_backed_provider_conflicts_on_changed_live_field() {
             "https://new.example.com/v1",
         ),
     )
-    .expect_err("changed live opencode field should conflict by default");
-    assert_live_conflict(err, &["options.baseURL"]);
+    .expect("prefer-incoming update should succeed");
 
     let live = read_opencode_live(&opencode_path);
     assert_eq!(
         live["provider"]["live-provider"]["options"]["baseURL"],
-        json!("https://local-edited.example.com/v1")
+        json!("https://new.example.com/v1"),
+        "incoming provider baseURL should win over the locally edited live value"
     );
 }
 

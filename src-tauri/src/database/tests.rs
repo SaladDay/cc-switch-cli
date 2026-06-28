@@ -2858,4 +2858,41 @@ fn model_route_cascade_delete_on_provider_removal() {
         routes.is_empty(),
         "model_routes should be empty after provider cascade delete"
     );
+fn should_auto_extract_config_snippet_respects_snippet_and_cleared_flag() {
+    let db = Database::memory().expect("create memory db");
+
+    // 全新状态：无片段、未清空 → 允许自动播种
+    assert!(db
+        .should_auto_extract_config_snippet("claude")
+        .expect("gate"));
+    assert!(!db.is_config_snippet_cleared("claude").expect("cleared"));
+
+    // 有片段 → 不再自动播种
+    db.set_config_snippet("claude", Some("{\"a\":1}".to_string()))
+        .expect("set snippet");
+    assert!(!db
+        .should_auto_extract_config_snippet("claude")
+        .expect("gate after set"));
+
+    // 删除片段并标记为已清空 → 仍不自动播种
+    db.set_config_snippet("claude", None)
+        .expect("clear snippet");
+    db.set_config_snippet_cleared("claude", true)
+        .expect("set cleared");
+    assert!(db
+        .is_config_snippet_cleared("claude")
+        .expect("cleared true"));
+    assert!(!db
+        .should_auto_extract_config_snippet("claude")
+        .expect("gate after cleared"));
+
+    // 取消清空标记 → 重新允许自动播种
+    db.set_config_snippet_cleared("claude", false)
+        .expect("unset cleared");
+    assert!(!db
+        .is_config_snippet_cleared("claude")
+        .expect("cleared false"));
+    assert!(db
+        .should_auto_extract_config_snippet("claude")
+        .expect("gate after unset"));
 }

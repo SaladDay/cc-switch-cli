@@ -566,6 +566,33 @@ impl App {
                 }
                 Action::None
             }
+            KeyCode::PageDown => {
+                if matches!(self.sessions.pane, SessionsPane::List) && !visible.is_empty() {
+                    let page = self.sessions_list_page_size();
+                    self.sessions.selected_idx =
+                        (self.sessions.selected_idx + page).min(visible.len() - 1);
+                }
+                Action::None
+            }
+            KeyCode::PageUp => {
+                if matches!(self.sessions.pane, SessionsPane::List) {
+                    let page = self.sessions_list_page_size();
+                    self.sessions.selected_idx = self.sessions.selected_idx.saturating_sub(page);
+                }
+                Action::None
+            }
+            KeyCode::Home => {
+                if matches!(self.sessions.pane, SessionsPane::List) {
+                    self.sessions.selected_idx = 0;
+                }
+                Action::None
+            }
+            KeyCode::End => {
+                if matches!(self.sessions.pane, SessionsPane::List) && !visible.is_empty() {
+                    self.sessions.selected_idx = visible.len() - 1;
+                }
+                Action::None
+            }
             KeyCode::Enter => match self.sessions.pane {
                 SessionsPane::List => self.open_selected_session_detail(data),
                 SessionsPane::Detail => {
@@ -642,6 +669,17 @@ impl App {
             KeyCode::Char('r') => Action::SessionsRefresh,
             _ => Action::None,
         }
+    }
+
+    /// Approximate the session list viewport height for PageUp/PageDown, derived
+    /// from the last rendered terminal size minus the surrounding chrome.
+    fn sessions_list_page_size(&self) -> usize {
+        // Rows consumed around the list body: outer border (2) + key bar (1) +
+        // summary bar (3) + list border (2) + table header (1).
+        const SESSIONS_LIST_CHROME_ROWS: usize = 9;
+        (self.last_size.height as usize)
+            .saturating_sub(SESSIONS_LIST_CHROME_ROWS)
+            .max(1)
     }
 
     fn selected_session_from_visible<'a>(

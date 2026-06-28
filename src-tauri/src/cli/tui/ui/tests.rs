@@ -1579,6 +1579,7 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
                 primary_model_id: Some("claude-sonnet-4".to_string()),
                 default_model_id: None,
             }],
+            loading: false,
         },
         mcp: McpSnapshot::default(),
         prompts: PromptsSnapshot::default(),

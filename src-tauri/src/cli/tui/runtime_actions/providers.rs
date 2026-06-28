@@ -4,7 +4,6 @@ use crate::error::AppError;
 #[cfg(test)]
 use crate::openclaw_config::OpenClawDefaultModel;
 use crate::proxy::providers::get_claude_api_format;
-use crate::services::provider::live_merge::ConflictPolicy;
 use crate::services::provider::ProviderSortUpdate;
 use crate::services::ProviderService;
 
@@ -99,27 +98,10 @@ fn refresh_provider_data_after_write_with_config(
 }
 
 pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
+    // Upstream parity: provider switch is a clean write; no live-conflict
+    // preview/overlay is surfaced.
     let state = load_state()?;
-    let conflicts =
-        ProviderService::preview_switch_live_conflicts(&state, ctx.app.app_type.clone(), &id)?;
-    if !conflicts.is_empty() {
-        ctx.app.overlay = Overlay::ProviderSwitchLiveConflicts {
-            provider_id: id,
-            conflicts,
-        };
-        return Ok(());
-    }
-
-    do_switch(ctx, state, id, ConflictPolicy::Fail)
-}
-
-pub(super) fn switch_with_conflict_policy(
-    ctx: &mut RuntimeActionContext<'_>,
-    id: String,
-    policy: ConflictPolicy,
-) -> Result<(), AppError> {
-    let state = load_state()?;
-    do_switch(ctx, state, id, policy)
+    do_switch(ctx, state, id)
 }
 
 pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
@@ -145,7 +127,6 @@ fn do_switch(
     ctx: &mut RuntimeActionContext<'_>,
     state: crate::store::AppState,
     id: String,
-    policy: ConflictPolicy,
 ) -> Result<(), AppError> {
     let switched_provider = ctx
         .data
@@ -154,7 +135,7 @@ fn do_switch(
         .iter()
         .find(|row| row.id == id)
         .map(|row| row.provider.clone());
-    ProviderService::switch_with_resolution(&state, ctx.app.app_type.clone(), &id, policy.into())?;
+    ProviderService::switch(&state, ctx.app.app_type.clone(), &id)?;
     if let Some(provider) = switched_provider.as_ref() {
         if let Err(err) =
             crate::claude_plugin::sync_claude_plugin_on_provider_switch(&ctx.app.app_type, provider)

@@ -74,6 +74,40 @@ impl Database {
         }
     }
 
+    /// 通用配置片段“已被用户显式清空”标记的键名
+    fn config_snippet_cleared_key(app_type: &str) -> String {
+        format!("common_config_{app_type}_cleared")
+    }
+
+    /// 通用配置片段是否被用户显式清空
+    pub fn is_config_snippet_cleared(&self, app_type: &str) -> Result<bool, AppError> {
+        Ok(self
+            .get_setting(&Self::config_snippet_cleared_key(app_type))?
+            .as_deref()
+            == Some("true"))
+    }
+
+    /// 设置/清除“通用配置片段已被显式清空”标记
+    pub fn set_config_snippet_cleared(
+        &self,
+        app_type: &str,
+        cleared: bool,
+    ) -> Result<(), AppError> {
+        let key = Self::config_snippet_cleared_key(app_type);
+        if cleared {
+            self.set_setting(&key, "true")
+        } else {
+            self.delete_setting(&key)
+        }
+    }
+
+    /// 当前是否允许从 live 配置自动播种通用配置片段：
+    /// 片段为空且未被用户显式清空时返回 true
+    pub fn should_auto_extract_config_snippet(&self, app_type: &str) -> Result<bool, AppError> {
+        Ok(self.get_config_snippet(app_type)?.is_none()
+            && !self.is_config_snippet_cleared(app_type)?)
+    }
+
     // --- 全局出站代理 ---
 
     /// 全局代理 URL 的存储键名

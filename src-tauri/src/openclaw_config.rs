@@ -747,20 +747,7 @@ pub fn set_provider(id: &str, provider_config: Value) -> Result<OpenClawWriteOut
     write_root_section("models", &models_value)
 }
 
-pub fn set_provider_with_resolution(
-    id: &str,
-    provider_config: Value,
-    resolution: live_merge::ConflictResolution<'_>,
-) -> Result<OpenClawWriteOutcome, AppError> {
-    let models_value = prepare_provider_with_resolution(id, provider_config, resolution)?;
-    write_prepared_models(&models_value)
-}
-
-pub fn prepare_provider_with_resolution(
-    id: &str,
-    provider_config: Value,
-    resolution: live_merge::ConflictResolution<'_>,
-) -> Result<Value, AppError> {
+pub fn prepare_provider(id: &str, provider_config: Value) -> Result<Value, AppError> {
     let mut full_config = read_openclaw_config()?;
     {
         let root = ensure_object(&mut full_config);
@@ -780,7 +767,6 @@ pub fn prepare_provider_with_resolution(
                 format!("openclaw.json models.providers.{id}"),
                 existing.clone(),
                 &provider_config,
-                resolution,
             )?,
             None => provider_config,
         };
@@ -879,28 +865,13 @@ pub fn set_typed_provider(
     set_provider(id, value)
 }
 
-#[expect(
-    dead_code,
-    reason = "kept for direct typed OpenClaw provider writes with conflict resolution"
-)]
-pub fn set_typed_provider_with_resolution(
+pub fn prepare_typed_provider(
     id: &str,
     config: &OpenClawProviderConfig,
-    resolution: live_merge::ConflictResolution<'_>,
-) -> Result<OpenClawWriteOutcome, AppError> {
-    let value =
-        serde_json::to_value(config).map_err(|source| AppError::JsonSerialize { source })?;
-    set_provider_with_resolution(id, value, resolution)
-}
-
-pub fn prepare_typed_provider_with_resolution(
-    id: &str,
-    config: &OpenClawProviderConfig,
-    resolution: live_merge::ConflictResolution<'_>,
 ) -> Result<Value, AppError> {
     let value =
         serde_json::to_value(config).map_err(|source| AppError::JsonSerialize { source })?;
-    prepare_provider_with_resolution(id, value, resolution)
+    prepare_provider(id, value)
 }
 
 #[allow(dead_code)]
