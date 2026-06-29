@@ -17,7 +17,7 @@ use tokio::time::timeout;
 
 use crate::app_config::AppType;
 pub use crate::app_config::{InstalledSkill, SkillApps, UnmanagedSkill};
-use crate::config::get_app_config_dir;
+use crate::config::{create_managed_config_dir_all, get_app_config_dir};
 use crate::database::Database;
 use crate::error::{format_skill_error, AppError};
 
@@ -115,6 +115,15 @@ pub enum SyncMethod {
     Copy,
 }
 
+/// Explicit app matrix submitted when importing unmanaged skills.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSkillSelection {
+    pub directory: String,
+    #[serde(default)]
+    pub apps: SkillApps,
+}
+
 /// skills.json (SSOT index; no DB).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -186,6 +195,118 @@ pub struct Skill {
     pub repo_name: Option<String>,
     #[serde(rename = "repoBranch")]
     pub repo_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SkillsShApiResponse {
+    pub query: String,
+    #[serde(rename = "searchType")]
+    #[allow(dead_code)]
+    pub search_type: String,
+    pub skills: Vec<SkillsShApiSkill>,
+    pub count: usize,
+    #[allow(dead_code)]
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SkillsShApiSkill {
+    #[allow(dead_code)]
+    pub id: String,
+    #[serde(rename = "skillId")]
+    pub skill_id: String,
+    pub name: String,
+    pub installs: u64,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsShSearchResult {
+    pub skills: Vec<SkillsShDiscoverableSkill>,
+    pub total_count: usize,
+    pub query: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsShDiscoverableSkill {
+    pub key: String,
+    pub name: String,
+    pub directory: String,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub repo_branch: String,
+    pub installs: u64,
+    pub readme_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SkillsDiscoverCache {
+    version: u32,
+    repos_fingerprint: String,
+    skills: Vec<Skill>,
+}
+
+impl From<SkillsShDiscoverableSkill> for DiscoverableSkill {
+    fn from(skill: SkillsShDiscoverableSkill) -> Self {
+        Self {
+            key: skill.key,
+            name: skill.name,
+            description: String::new(),
+            directory: skill.directory,
+            readme_url: skill.readme_url,
+            repo_owner: skill.repo_owner,
+            repo_name: skill.repo_name,
+            repo_branch: skill.repo_branch,
+        }
+    }
+}
+
+fn skills_sh_api_skill_to_discoverable(
+    skill: SkillsShApiSkill,
+) -> Option<SkillsShDiscoverableSkill> {
+    let (owner, repo) = skill.source.split_once('/')?;
+    if owner.contains('.')
+        || repo.contains('.')
+        || owner.trim().is_empty()
+        || repo.trim().is_empty()
+    {
+        return None;
+    }
+
+    Some(SkillsShDiscoverableSkill {
+        key: format!("{owner}/{repo}:{}", skill.skill_id),
+        name: skill.name,
+        directory: skill.skill_id,
+        repo_owner: owner.to_string(),
+        repo_name: repo.to_string(),
+        repo_branch: "main".to_string(),
+        installs: skill.installs,
+        readme_url: Some(format!("https://github.com/{owner}/{repo}")),
+    })
+}
+
+fn discoverable_from_repo_spec(spec: &str) -> Option<DiscoverableSkill> {
+    let (repo_spec, directory) = spec.split_once(':')?;
+    let (owner, repo) = repo_spec.split_once('/')?;
+    let owner = owner.trim();
+    let repo = repo.trim();
+    let directory = directory.trim();
+    if owner.is_empty() || repo.is_empty() || directory.is_empty() {
+        return None;
+    }
+
+    Some(DiscoverableSkill {
+        key: spec.to_string(),
+        name: directory.to_string(),
+        description: String::new(),
+        directory: directory.to_string(),
+        readme_url: Some(format!("https://github.com/{owner}/{repo}")),
+        repo_owner: owner.to_string(),
+        repo_name: repo.to_string(),
+        repo_branch: "main".to_string(),
+    })
 }
 
 /// Skill metadata extracted from SKILL.md YAML front matter.
@@ -385,14 +506,19 @@ impl SkillService {
         !matches!(app, AppType::OpenClaw)
     }
 
-    fn supported_skill_apps() -> impl Iterator<Item = AppType> {
+    pub fn supported_skill_apps() -> impl Iterator<Item = AppType> {
         [
             AppType::Claude,
             AppType::Codex,
             AppType::Gemini,
             AppType::OpenCode,
+            AppType::Hermes,
         ]
         .into_iter()
+    }
+
+    fn skill_source_apps() -> impl Iterator<Item = AppType> {
+        AppType::all()
     }
 
     pub fn new() -> Result<Self, AppError> {
@@ -417,7 +543,7 @@ impl SkillService {
 
     pub fn get_ssot_dir() -> Result<PathBuf, AppError> {
         let dir = get_app_config_dir().join("skills");
-        fs::create_dir_all(&dir).map_err(|e| AppError::io(&dir, e))?;
+        create_managed_config_dir_all(&dir)?;
         Ok(dir)
     }
 
@@ -444,6 +570,11 @@ impl SkillService {
                     return Ok(custom.join("skills"));
                 }
             }
+            AppType::Hermes => {
+                if let Some(custom) = crate::settings::get_hermes_override_dir() {
+                    return Ok(custom.join("skills"));
+                }
+            }
             AppType::OpenClaw => {
                 if let Some(custom) = crate::settings::get_openclaw_override_dir() {
                     return Ok(custom.join("skills"));
@@ -464,6 +595,7 @@ impl SkillService {
             AppType::Codex => home.join(".codex").join("skills"),
             AppType::Gemini => home.join(".gemini").join("skills"),
             AppType::OpenCode => home.join(".config").join("opencode").join("skills"),
+            AppType::Hermes => home.join(".hermes").join("skills"),
             AppType::OpenClaw => home.join(".openclaw").join("skills"),
         })
     }
@@ -542,7 +674,6 @@ impl SkillService {
 
                 // Prefer looking in apps where this skill is enabled; fallback to all apps.
                 let mut candidates: Vec<AppType> = Self::supported_skill_apps()
-                    .into_iter()
                     .filter(|app| record.apps.is_enabled_for(app))
                     .collect();
                 if candidates.is_empty() {
@@ -927,6 +1058,42 @@ impl SkillService {
         Ok(())
     }
 
+    pub fn set_apps(directory_or_id: &str, apps: SkillApps) -> Result<bool, AppError> {
+        let mut index = Self::load_index()?;
+        let Some(dir) = Self::resolve_directory_from_input(&index, directory_or_id) else {
+            return Err(AppError::Message(format!(
+                "未找到已安装的 Skill: {directory_or_id}"
+            )));
+        };
+
+        let Some(record) = index.skills.get_mut(&dir) else {
+            return Err(AppError::Message(format!("未找到已安装的 Skill: {dir}")));
+        };
+
+        let before = record.apps.clone();
+        record.apps = apps.clone();
+        let directory = record.directory.clone();
+        let sync_method = index.sync_method;
+        let changes = Self::supported_skill_apps()
+            .filter_map(|app| {
+                let before_enabled = before.is_enabled_for(&app);
+                let after_enabled = apps.is_enabled_for(&app);
+                (before_enabled != after_enabled).then_some((app, after_enabled))
+            })
+            .collect::<Vec<_>>();
+
+        for (app, enabled) in changes {
+            if enabled {
+                Self::sync_to_app_dir(&directory, &app, sync_method)?;
+            } else {
+                Self::remove_from_app(&directory, &app)?;
+            }
+        }
+
+        Self::save_index(&index)?;
+        Ok(true)
+    }
+
     pub fn uninstall(directory_or_id: &str) -> Result<(), AppError> {
         let index = Self::load_index()?;
         let Some(dir) = Self::resolve_directory_from_input(&index, directory_or_id) else {
@@ -946,6 +1113,7 @@ impl SkillService {
             AppType::Codex,
             AppType::Gemini,
             AppType::OpenCode,
+            AppType::Hermes,
         ] {
             if let Err(e) = Self::remove_from_app(&dir, &app) {
                 log::warn!("从 {app:?} 删除 Skill {dir} 失败: {e}");
@@ -1114,10 +1282,43 @@ impl SkillService {
             .collect();
 
         match matches.len() {
-            0 => Err(AppError::Message(format!("未找到可安装的 Skill: {spec}"))),
+            0 => self.resolve_skills_sh_install_spec(spec).await,
             1 => Ok(matches[0].clone()),
             _ => Err(AppError::Message(format!(
                 "Skill 名称不唯一，请使用完整 key（owner/name:directory）: {spec}"
+            ))),
+        }
+    }
+
+    async fn resolve_skills_sh_install_spec(
+        &self,
+        spec: &str,
+    ) -> Result<DiscoverableSkill, AppError> {
+        if let Some(discoverable) = discoverable_from_repo_spec(spec) {
+            return Ok(discoverable);
+        }
+
+        let result = self.search_skills_sh(spec, 20, 0).await?;
+
+        if let Some(found) = result
+            .skills
+            .iter()
+            .find(|s| s.key == spec || s.directory.eq_ignore_ascii_case(spec))
+        {
+            return Ok(found.clone().into());
+        }
+
+        let matches: Vec<SkillsShDiscoverableSkill> = result
+            .skills
+            .into_iter()
+            .filter(|s| s.name.eq_ignore_ascii_case(spec))
+            .collect();
+
+        match matches.len() {
+            0 => Err(AppError::Message(format!("未找到可安装的 Skill: {spec}"))),
+            1 => Ok(matches[0].clone().into()),
+            _ => Err(AppError::Message(format!(
+                "Skill 名称不唯一，请使用完整 key: {spec}"
             ))),
         }
     }
@@ -1131,7 +1332,7 @@ impl SkillService {
         let managed: HashSet<String> = index.skills.keys().cloned().collect();
 
         let mut scan_sources: Vec<(PathBuf, String)> = Vec::new();
-        for app in Self::supported_skill_apps() {
+        for app in Self::skill_source_apps() {
             if let Ok(app_dir) = Self::get_app_skills_dir(&app) {
                 scan_sources.push((app_dir, app.as_str().to_string()));
             }
@@ -1167,7 +1368,11 @@ impl SkillService {
                 }
 
                 let skill_md = path.join("SKILL.md");
+                if !skill_md.exists() {
+                    continue;
+                }
                 let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
+                let path_display = path.display().to_string();
 
                 unmanaged
                     .entry(dir_name.clone())
@@ -1181,6 +1386,7 @@ impl SkillService {
                         name,
                         description,
                         found_in: vec![label.clone()],
+                        path: path_display,
                     });
             }
         }
@@ -1188,7 +1394,26 @@ impl SkillService {
         Ok(unmanaged.into_values().collect())
     }
 
-    pub fn import_from_apps(directories: Vec<String>) -> Result<Vec<InstalledSkill>, AppError> {
+    pub fn import_from_app_dirs(directories: Vec<String>) -> Result<Vec<InstalledSkill>, AppError> {
+        let scan = Self::scan_unmanaged()?;
+        let imports = directories
+            .into_iter()
+            .map(|directory| {
+                let apps = scan
+                    .iter()
+                    .find(|skill| skill.directory == directory)
+                    .map(|skill| SkillApps::from_labels(&skill.found_in))
+                    .unwrap_or_default();
+                ImportSkillSelection { directory, apps }
+            })
+            .collect();
+
+        Self::import_from_apps(imports)
+    }
+
+    pub fn import_from_apps(
+        imports: Vec<ImportSkillSelection>,
+    ) -> Result<Vec<InstalledSkill>, AppError> {
         let mut index = Self::load_index()?;
         let ssot_dir = Self::get_ssot_dir()?;
         let agents_lock = parse_agents_lock();
@@ -1197,11 +1422,11 @@ impl SkillService {
         merge_repos_from_lock(
             &mut index.repos,
             &agents_lock,
-            directories.iter().map(|s| s.as_str()),
+            imports.iter().map(|selection| selection.directory.as_str()),
         );
 
         let mut search_sources: Vec<(PathBuf, String)> = Vec::new();
-        for app in Self::supported_skill_apps() {
+        for app in Self::skill_source_apps() {
             if let Ok(app_dir) = Self::get_app_skills_dir(&app) {
                 search_sources.push((app_dir, app.as_str().to_string()));
             }
@@ -1211,9 +1436,9 @@ impl SkillService {
         }
         search_sources.push((ssot_dir.clone(), "cc-switch".to_string()));
 
-        for dir_name in directories {
+        for selection in imports {
+            let dir_name = selection.directory;
             let mut source_path: Option<PathBuf> = None;
-            let mut found_in: Vec<String> = Vec::new();
 
             for (base, label) in &search_sources {
                 let skill_path = base.join(&dir_name);
@@ -1221,11 +1446,14 @@ impl SkillService {
                     if source_path.is_none() {
                         source_path = Some(skill_path);
                     }
-                    found_in.push(label.clone());
+                    log::debug!("Skill '{dir_name}' found in source '{label}'");
                 }
             }
 
             let Some(source) = source_path else { continue };
+            if !source.join("SKILL.md").exists() {
+                continue;
+            }
 
             let dest = ssot_dir.join(&dir_name);
             if !dest.exists() {
@@ -1234,7 +1462,7 @@ impl SkillService {
 
             let skill_md = dest.join("SKILL.md");
             let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
-            let apps = SkillApps::from_labels(&found_in);
+            let apps = selection.apps;
             let (id, repo_owner, repo_name, repo_branch, readme_url) =
                 build_repo_info_from_lock(&agents_lock, &dir_name);
 
@@ -1286,9 +1514,72 @@ impl SkillService {
         Ok(skills)
     }
 
+    pub async fn search_skills_sh(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<SkillsShSearchResult, AppError> {
+        let limit = limit.clamp(1, 100);
+        let url = url::Url::parse_with_params(
+            "https://skills.sh/api/search",
+            &[
+                ("q", query),
+                ("limit", &limit.to_string()),
+                ("offset", &offset.to_string()),
+            ],
+        )
+        .map_err(|e| AppError::Message(format!("Invalid skills.sh search URL: {e}")))?;
+
+        let response = self
+            .http_client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| AppError::Message(format!("skills.sh search request failed: {e}")))?
+            .error_for_status()
+            .map_err(|e| AppError::Message(format!("skills.sh search failed: {e}")))?
+            .json::<SkillsShApiResponse>()
+            .await
+            .map_err(|e| AppError::Message(format!("Failed to parse skills.sh response: {e}")))?;
+
+        let skills = response
+            .skills
+            .into_iter()
+            .filter_map(|skill| skills_sh_api_skill_to_discoverable(skill))
+            .collect();
+
+        Ok(SkillsShSearchResult {
+            skills,
+            total_count: response.count,
+            query: response.query,
+        })
+    }
+
     pub async fn list_skills(&self) -> Result<Vec<Skill>, AppError> {
         let mut index = Self::load_index()?;
         let _ = Self::migrate_ssot_if_pending(&mut index)?;
+        self.list_skills_for_index(&index).await
+    }
+
+    pub async fn list_skills_cached(&self, force_refresh: bool) -> Result<Vec<Skill>, AppError> {
+        let mut index = Self::load_index()?;
+        let _ = Self::migrate_ssot_if_pending(&mut index)?;
+        let fingerprint = Self::repos_fingerprint(&index.repos);
+
+        if !force_refresh {
+            if let Some(skills) = Self::load_discover_cache(&fingerprint)? {
+                return Ok(Self::apply_installed_state(skills, &index));
+            }
+        }
+
+        let skills = self.list_skills_for_index(&index).await?;
+        Self::save_discover_cache(&fingerprint, &skills)?;
+        Ok(skills)
+    }
+
+    async fn list_skills_for_index(&self, index: &SkillsIndex) -> Result<Vec<Skill>, AppError> {
         let discoverable = self.discover_available(index.repos.clone()).await?;
         let installed_dirs: HashSet<String> =
             index.skills.keys().map(|s| s.to_lowercase()).collect();
@@ -1318,5 +1609,189 @@ impl SkillService {
         Self::deduplicate_skills(&mut out);
         out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         Ok(out)
+    }
+
+    fn discover_cache_path() -> PathBuf {
+        get_app_config_dir()
+            .join("cache")
+            .join("skills-discover.json")
+    }
+
+    fn repos_fingerprint(repos: &[SkillRepo]) -> String {
+        let mut enabled = repos
+            .iter()
+            .filter(|repo| repo.enabled)
+            .map(|repo| format!("{}/{}@{}", repo.owner, repo.name, repo.branch))
+            .collect::<Vec<_>>();
+        enabled.sort();
+        enabled.join("|")
+    }
+
+    fn load_discover_cache(fingerprint: &str) -> Result<Option<Vec<Skill>>, AppError> {
+        let path = Self::discover_cache_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&path)
+            .map_err(|e| AppError::Message(format!("Failed to read skills discover cache: {e}")))?;
+        let cache: SkillsDiscoverCache = serde_json::from_str(&content).map_err(|e| {
+            AppError::Message(format!("Failed to parse skills discover cache: {e}"))
+        })?;
+        if cache.version == SKILLS_INDEX_VERSION && cache.repos_fingerprint == fingerprint {
+            Ok(Some(cache.skills))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn apply_installed_state(mut skills: Vec<Skill>, index: &SkillsIndex) -> Vec<Skill> {
+        let installed_keys = index
+            .skills
+            .values()
+            .map(|skill| {
+                (
+                    skill.directory.to_lowercase(),
+                    skill
+                        .repo_owner
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase(),
+                    skill
+                        .repo_name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase(),
+                )
+            })
+            .collect::<HashSet<_>>();
+        let installed_dirs = index
+            .skills
+            .keys()
+            .map(|directory| directory.to_lowercase())
+            .collect::<HashSet<_>>();
+
+        for skill in &mut skills {
+            let repo_key = (
+                skill.directory.to_lowercase(),
+                skill
+                    .repo_owner
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_lowercase(),
+                skill
+                    .repo_name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_lowercase(),
+            );
+            skill.installed = installed_keys.contains(&repo_key)
+                || installed_dirs.contains(&skill.directory.to_lowercase());
+        }
+        skills
+    }
+
+    fn save_discover_cache(fingerprint: &str, skills: &[Skill]) -> Result<(), AppError> {
+        let path = Self::discover_cache_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                AppError::Message(format!("Failed to create skills cache dir: {e}"))
+            })?;
+        }
+        let cache = SkillsDiscoverCache {
+            version: SKILLS_INDEX_VERSION,
+            repos_fingerprint: fingerprint.to_string(),
+            skills: skills.to_vec(),
+        };
+        let content = serde_json::to_string_pretty(&cache).map_err(|e| {
+            AppError::Message(format!("Failed to encode skills discover cache: {e}"))
+        })?;
+        fs::write(path, content)
+            .map_err(|e| AppError::Message(format!("Failed to write skills discover cache: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skills_sh_api_skill_maps_github_source() {
+        let skill = skills_sh_api_skill_to_discoverable(SkillsShApiSkill {
+            id: "skill-key".to_string(),
+            skill_id: "hello-skill".to_string(),
+            name: "Hello Skill".to_string(),
+            installs: 42,
+            source: "owner/repo".to_string(),
+        })
+        .expect("github source should map");
+
+        assert_eq!(skill.key, "owner/repo:hello-skill");
+        assert_eq!(skill.directory, "hello-skill");
+        assert_eq!(skill.repo_owner, "owner");
+        assert_eq!(skill.repo_name, "repo");
+        assert_eq!(skill.repo_branch, "main");
+        assert_eq!(skill.installs, 42);
+        assert_eq!(
+            skill.readme_url.as_deref(),
+            Some("https://github.com/owner/repo")
+        );
+    }
+
+    #[test]
+    fn skills_sh_api_skill_filters_non_github_source() {
+        let skill = skills_sh_api_skill_to_discoverable(SkillsShApiSkill {
+            id: "skill-key".to_string(),
+            skill_id: "hello-skill".to_string(),
+            name: "Hello Skill".to_string(),
+            installs: 42,
+            source: "skills.example.com/repo".to_string(),
+        });
+
+        assert!(skill.is_none());
+    }
+
+    #[test]
+    fn discoverable_from_repo_spec_builds_installable_skill() {
+        let skill =
+            discoverable_from_repo_spec("owner/repo:hello-skill").expect("repo spec should map");
+
+        assert_eq!(skill.key, "owner/repo:hello-skill");
+        assert_eq!(skill.directory, "hello-skill");
+        assert_eq!(skill.repo_owner, "owner");
+        assert_eq!(skill.repo_name, "repo");
+        assert_eq!(skill.repo_branch, "main");
+        assert_eq!(
+            skill.readme_url.as_deref(),
+            Some("https://github.com/owner/repo")
+        );
+    }
+
+    #[test]
+    fn repos_fingerprint_is_order_stable_for_enabled_repos() {
+        let repos = vec![
+            SkillRepo {
+                owner: "b".to_string(),
+                name: "repo".to_string(),
+                branch: "main".to_string(),
+                enabled: true,
+            },
+            SkillRepo {
+                owner: "a".to_string(),
+                name: "repo".to_string(),
+                branch: "dev".to_string(),
+                enabled: true,
+            },
+            SkillRepo {
+                owner: "ignored".to_string(),
+                name: "repo".to_string(),
+                branch: "main".to_string(),
+                enabled: false,
+            },
+        ];
+
+        assert_eq!(
+            SkillService::repos_fingerprint(&repos),
+            "a/repo@dev|b/repo@main"
+        );
     }
 }

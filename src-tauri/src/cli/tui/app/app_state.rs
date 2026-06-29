@@ -3,11 +3,29 @@ use super::*;
 #[derive(Debug, Clone)]
 pub enum Action {
     None,
+    #[allow(dead_code)]
     ReloadData,
     SwitchRoute(Route),
     Quit,
     SetAppType(AppType),
     LocalEnvRefresh,
+
+    SessionsRefresh,
+    SessionMessagesLoad {
+        key: String,
+        provider_id: String,
+        source_path: String,
+    },
+    SessionResume {
+        command: String,
+        cwd: Option<String>,
+    },
+    SessionDelete {
+        key: String,
+        provider_id: String,
+        session_id: String,
+        source_path: String,
+    },
 
     SkillsToggle {
         directory: String,
@@ -31,6 +49,8 @@ pub enum Action {
     },
     SkillsDiscover {
         query: String,
+        source: SkillsDiscoverSource,
+        force: bool,
     },
     SkillsRepoAdd {
         spec: String,
@@ -45,9 +65,10 @@ pub enum Action {
         enabled: bool,
     },
     SkillsOpenImport,
+    #[allow(dead_code)]
     SkillsScanUnmanaged,
     SkillsImportFromApps {
-        directories: Vec<String>,
+        imports: Vec<crate::services::skill::ImportSkillSelection>,
     },
 
     ProviderSwitch {
@@ -59,9 +80,6 @@ pub enum Action {
     ProviderSetDefaultModel {
         provider_id: String,
         model_id: String,
-    },
-    ProviderSwitchForce {
-        id: String,
     },
     ProviderImportLiveConfig,
     ProviderDelete {
@@ -76,14 +94,45 @@ pub enum Action {
     ProviderStreamCheck {
         id: String,
     },
+    ProviderSetFailoverQueue {
+        id: String,
+        enabled: bool,
+    },
+    ProviderMoveFailoverQueue {
+        id: String,
+        direction: MoveDirection,
+    },
     ProviderQuotaRefresh {
         id: String,
     },
     ProviderModelFetch {
         base_url: String,
         api_key: Option<String>,
+        codex_oauth: bool,
+        codex_oauth_account_id: Option<String>,
         field: ProviderAddField,
         claude_idx: Option<usize>,
+    },
+    UsageCustomRange {
+        range: data::UsageCustomRange,
+    },
+    PricingDelete {
+        model_id: String,
+    },
+
+    ManagedAuthRefresh {
+        auth_provider: String,
+    },
+    ManagedAuthStartLogin {
+        auth_provider: String,
+    },
+    ManagedAuthSetDefault {
+        auth_provider: String,
+        account_id: String,
+    },
+    ManagedAuthRemove {
+        auth_provider: String,
+        account_id: String,
     },
 
     McpToggle {
@@ -105,8 +154,27 @@ pub enum Action {
     PromptDeactivate {
         id: String,
     },
+    #[allow(dead_code)]
+    PromptUpdateMetadata {
+        old_id: String,
+        new_id: String,
+        name: String,
+        description: Option<String>,
+    },
+    PromptSave {
+        old_id: Option<String>,
+        new_id: String,
+        name: String,
+        description: Option<String>,
+        content: String,
+    },
     PromptDelete {
         id: String,
+    },
+    PromptFormOpenExternal,
+    PromptOpenImportCandidate {
+        filename: String,
+        content: String,
     },
 
     ConfigExport {
@@ -124,12 +192,8 @@ pub enum Action {
     ConfigShowFull,
     ConfigValidate,
     ConfigOpenProxyHelp,
-    ConfigCommonSnippetClear {
-        app_type: AppType,
-    },
-    ConfigCommonSnippetApply {
-        app_type: AppType,
-    },
+    ConfirmCommonConfigNotice,
+    ConfirmUsageQueryNotice,
     ConfigWebDavCheckConnection,
     ConfigWebDavUpload,
     ConfigWebDavDownload,
@@ -154,6 +218,14 @@ pub enum Action {
     OpenClawOpenDirectory {
         subdir: String,
     },
+    HermesMemoryOpen {
+        kind: crate::hermes_config::MemoryKind,
+    },
+    HermesMemorySetEnabled {
+        kind: crate::hermes_config::MemoryKind,
+        enabled: bool,
+    },
+    HermesOpenMemoryDirectory,
     ConfigReset,
 
     EditorSubmit {
@@ -162,6 +234,12 @@ pub enum Action {
     },
     EditorDiscard,
     EditorOpenExternal,
+    EditorFormatCommonSnippet {
+        app_type: AppType,
+    },
+    EditorExtractCommonSnippet {
+        app_type: AppType,
+    },
 
     SetSkipClaudeOnboarding {
         enabled: bool,
@@ -169,6 +247,10 @@ pub enum Action {
     SetClaudePluginIntegration {
         enabled: bool,
     },
+    SetCodexUnifiedSessionHistory {
+        enabled: bool,
+    },
+    #[allow(dead_code)]
     SetProxyEnabled {
         enabled: bool,
     },
@@ -178,20 +260,33 @@ pub enum Action {
     SetProxyListenPort {
         port: u16,
     },
-    SetOpenClawConfigDir {
-        path: Option<String>,
-    },
-    SetProxyTakeover {
+    SetProxyAutoFailover {
         app_type: AppType,
         enabled: bool,
+    },
+    EnableProxyAndAutoFailover {
+        app_type: AppType,
+    },
+    SetOpenClawConfigDir {
+        path: Option<String>,
     },
     SetManagedProxyForCurrentApp {
         app_type: AppType,
         enabled: bool,
     },
     SetLanguage(Language),
+    SetVisibleAppsMode {
+        mode: crate::settings::VisibleAppsMode,
+    },
     SetVisibleApps {
         apps: crate::settings::VisibleApps,
+    },
+    ConfirmVisibleAppsAutoDetection {
+        use_auto: bool,
+    },
+    SwitchVisibleAppsToManual {
+        apps: crate::settings::VisibleApps,
+        selected: usize,
     },
 
     CheckUpdate,
@@ -210,6 +305,7 @@ pub enum ConfigItem {
     Restore,
     Validate,
     CommonSnippet,
+    #[allow(dead_code)]
     Proxy,
     OpenClawWorkspace,
     OpenClawEnv,
@@ -343,21 +439,27 @@ impl ConfigItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsItem {
     Language,
+    VisibleAppsMode,
     VisibleApps,
     OpenClawConfigDir,
+    ManagedAccounts,
     SkipClaudeOnboarding,
     ClaudePluginIntegration,
+    CodexUnifiedSessionHistory,
     Proxy,
     CheckForUpdates,
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 7] = [
+    pub const ALL: [SettingsItem; 10] = [
+        SettingsItem::ManagedAccounts,
         SettingsItem::Language,
+        SettingsItem::VisibleAppsMode,
         SettingsItem::VisibleApps,
         SettingsItem::OpenClawConfigDir,
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,
+        SettingsItem::CodexUnifiedSessionHistory,
         SettingsItem::Proxy,
         SettingsItem::CheckForUpdates,
     ];
@@ -367,13 +469,21 @@ impl SettingsItem {
 pub enum LocalProxySettingsItem {
     ListenAddress,
     ListenPort,
+    AutoFailover,
 }
 
 impl LocalProxySettingsItem {
-    pub const ALL: [LocalProxySettingsItem; 2] = [
+    pub const ALL: [LocalProxySettingsItem; 3] = [
         LocalProxySettingsItem::ListenAddress,
         LocalProxySettingsItem::ListenPort,
+        LocalProxySettingsItem::AutoFailover,
     ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDirection {
+    Up,
+    Down,
 }
 
 #[derive(Debug, Clone)]
@@ -444,10 +554,16 @@ pub struct App {
     pub proxy_visual_transition: Option<ProxyVisualTransition>,
     pub quota_auto_target_key: Option<String>,
     pub quota_last_auto_tick: Option<u64>,
+    pub prompt_import_prompted_apps: HashSet<String>,
+    pub common_config_notice_confirmed: bool,
+    pub usage_query_notice_confirmed: bool,
 
     pub local_env_results: Vec<crate::services::local_env_check::ToolCheckResult>,
     pub local_env_loading: bool,
 
+    pub usage: UsageState,
+    pub pricing: PricingState,
+    pub sessions: SessionsState,
     pub provider_idx: usize,
     pub mcp_idx: usize,
     pub prompt_idx: usize,
@@ -457,11 +573,18 @@ pub struct App {
     pub skills_unmanaged_idx: usize,
     pub skills_discover_results: Vec<crate::services::skill::Skill>,
     pub skills_discover_query: String,
+    pub skills_discover_source: SkillsDiscoverSource,
+    pub skills_discover_loading: bool,
+    pub skills_discover_request_id: u64,
+    pub skills_discover_active_request_id: Option<u64>,
+    pub skills_discover_cache:
+        HashMap<(SkillsDiscoverSource, String), Vec<crate::services::skill::Skill>>,
     pub skills_unmanaged_results: Vec<crate::services::skill::UnmanagedSkill>,
     pub skills_unmanaged_selected: HashSet<String>,
     pub config_idx: usize,
     pub workspace_idx: usize,
     pub daily_memory_idx: usize,
+    pub hermes_memory_idx: usize,
     pub openclaw_tools_form: Option<OpenClawToolsFormState>,
     pub openclaw_agents_form: Option<OpenClawAgentsFormState>,
     pub openclaw_daily_memory_search_query: String,
@@ -469,7 +592,12 @@ pub struct App {
         Vec<crate::commands::workspace::DailyMemorySearchResult>,
     pub config_webdav_idx: usize,
     pub webdav_quick_setup_username: Option<String>,
+    #[allow(dead_code)]
     pub language_idx: usize,
     pub settings_idx: usize,
     pub settings_proxy_idx: usize,
+    pub settings_managed_accounts_idx: usize,
+    pub managed_auth_status: Option<crate::services::ManagedAuthStatus>,
+    pub managed_auth_loading: bool,
+    pub managed_auth_login: Option<ManagedAuthLoginState>,
 }

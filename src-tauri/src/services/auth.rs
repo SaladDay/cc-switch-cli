@@ -181,40 +181,15 @@ impl AuthService {
 mod tests {
     use super::*;
     use crate::test_support::lock_test_home_and_settings;
-    use std::{env, ffi::OsString};
-
-    struct ConfigDirEnvGuard {
-        original: Option<OsString>,
-    }
-
-    impl ConfigDirEnvGuard {
-        fn set(value: Option<&str>) -> Self {
-            let original = env::var_os("CC_SWITCH_CONFIG_DIR");
-            match value {
-                Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-                None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
-            }
-            Self { original }
-        }
-    }
-
-    impl Drop for ConfigDirEnvGuard {
-        fn drop(&mut self) {
-            match self.original.as_ref() {
-                Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-                None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
-            }
-        }
-    }
 
     #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "test serializes global auth manager state"
+    )]
     async fn auth_status_marks_default_account() {
         let _lock = lock_test_home_and_settings();
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-        CodexOAuthService::reset_for_tests();
-
-        CodexOAuthService::seed_account_for_tests(
+        let _manager = CodexOAuthService::test_manager_with_account(
             "acc-123",
             "rt-1",
             Some("a@example.com"),

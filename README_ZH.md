@@ -2,14 +2,16 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.3.4-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.8.6-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Claude Code、Codex、Gemini、OpenCode 与 OpenClaw 的命令行管理工具**
+**支持 TUI + CLI 双模式的 Claude Code、Codex、Gemini、OpenCode、Hermes 与 OpenClaw 管理工具**
 
-统一管理 Claude Code、Codex、Gemini、OpenCode 与 OpenClaw 的供应商配置，并按应用提供 MCP 服务器、Skills 扩展、提示词、本地代理路由和环境检查等能力。
+日常切换、账号和会话管理可使用交互式 TUI；脚本化、自动化和终端工作流可使用 CLI。
+
+统一管理供应商配置、MCP 服务器、Skills 扩展、提示词、本地代理路由、用量统计和环境检查等能力。
 
 [English](README.md) | 中文
 
@@ -33,6 +35,16 @@
 <table>
   <tr>
     <td width="180">
+      <a href="https://console.claudeapi.com/register?source=cc-switch-cli">
+        <img src="assets/partners/logos/claudeapi.png" alt="ClaudeAPI" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>ClaudeAPI</b> 赞助本项目！<b>ClaudeAPI</b> 是一家专注 Claude 的 API 接入服务商，走官方与 AWS 渠道，主打高稳定、低延迟，完整支持 Claude Code、Codex 与 Agent 工作流。支持企业对接、发票服务，并可在 <b>CC-Switch CLI</b> 中一键配置调用。CC-Switch CLI 用户专属福利：通过<a href="https://console.claudeapi.com/register?source=cc-switch-cli">此链接</a>注册，即可领取免费测试额度。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://www.packyapi.com/register?aff=cc-switch-cli">
         <img src="assets/partners/logos/packycode.png" alt="PackyCode" width="150">
       </a>
@@ -47,6 +59,26 @@
   </tr>
   <tr>
     <td width="180">
+      <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
+        <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>Cubence</b> 赞助本项目！Cubence 是一家致力为客户提供稳定、高效的API中转服务商。从25年9月运营至今，提供了Claude code、Codex、Gemini等多种模型支持。通过<a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">此链接</a>注册，并在充值时使用 <code>CCSCLI</code> 优惠码享受9折优惠。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
+      <a href="https://runapi.co/register?aff=kTlB">
+        <img src="assets/partners/logos/runapi.png" alt="RunAPI" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>RunAPI</b> 赞助本项目！<a href="https://runapi.co/register?aff=kTlB"><b>RunAPI</b></a> 是高效稳定的 API 平台和 OpenRouter 平替，一个 API Key 即可访问 OpenAI、Claude、Gemini、DeepSeek、Grok 等 150+ 主流模型，低至 1 折，极其稳定，可以无缝兼容 Claude Code、OpenClaw 等工具。cc-switch-cli 用户专属福利：注册联系管理员即可领取 ￥7 的免费额度。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://www.aicodemirror.com/register?invitecode=77V9EA">
         <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
       </a>
@@ -54,18 +86,6 @@
     <td>
       感谢 <b>AICodeMirror</b> 赞助本项目！<b>AICodeMirror</b> 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级并发、快速开票与 7x24 专属技术支持。Claude Code / Codex / Gemini 官方通道价格低至原价的 <b>38% / 2% / 9%</b>，充值另有折上折！<br/>
       <b>AICodeMirror</b> 为 cc-switch-cli 用户提供专属福利：通过<a href="https://www.aicodemirror.com/register?invitecode=77V9EA">此链接</a>注册，首充可享 <b>8 折</b>，即 <b>20% off</b>，企业客户最高可享 <b>75 折</b>，即 <b>25% off</b>。
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://www.right.codes/register?aff=ccswitch-cli">
-        <img src="assets/partners/logos/rightcode.jpg" alt="RightCode" width="150">
-      </a>
-    </td>
-    <td>
-      感谢 <b>RightCode</b> 赞助本项目！<br/>
-      RightCode 为 Claude Code、Codex、Gemini 等模型提供稳定的路由服务，拥有高性价比的 Codex 月付方案，且<b>支持额度滚存——当天未用完的额度可顺延至次日使用。</b><br/>
-      RightCode 为 CC-Switch CLI 用户提供了特别优惠：通过<a href="https://www.right.codes/register?aff=ccswitch-cli">此链接</a>注册，每次充值均可获得实付金额 <b>25%</b> 的按量额度！
     </td>
   </tr>
   <tr>
@@ -105,18 +125,23 @@
 
 ## 🚀 快速开始
 
-**交互模式（推荐）**
+**TUI 模式（推荐）**
 ```bash
 cc-switch
 ```
-🤩 按照屏幕菜单探索功能。
+使用全屏界面切换供应商、管理账号、查看会话并检查代理状态。
 
 **命令行模式**
 ```bash
 cc-switch provider list              # 列出供应商
 cc-switch provider switch <id>       # 切换供应商
+cc-switch use <id>                   # 切换供应商（快捷命令）
 cc-switch provider export <id>       # 导出 Claude 供应商为独立 settings 文件
 cc-switch provider stream-check <id> # 检查供应商流式健康
+cc-switch start <claude|codex> <id> --dry-run # 预览启动配置
+cc-switch auth list                  # 查看托管的 ChatGPT/Codex OAuth 账号
+cc-switch sessions list --all        # 查看历史会话
+cc-switch sessions sync-usage --all  # 导入本地会话 token / cost 用量
 cc-switch config webdav show         # 查看 WebDAV 同步设置
 cc-switch env tools                  # 检查本地 CLI 工具
 cc-switch mcp sync                   # 同步 MCP 服务器
@@ -126,9 +151,10 @@ cc-switch proxy show                 # 查看代理路由和状态
 cc-switch --app claude provider list    # 管理 Claude 供应商
 cc-switch --app codex mcp sync          # 同步 Codex MCP 服务器
 cc-switch --app gemini prompts list     # 列出 Gemini 提示词
+cc-switch --app hermes provider list    # 管理 Hermes 供应商
 cc-switch --app openclaw provider list  # 管理 OpenClaw 供应商
 
-# 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`openclaw`
+# 支持的应用：`claude`（默认）、`codex`、`gemini`、`opencode`、`hermes`、`openclaw`
 ```
 
 完整命令列表请参考「功能特性」章节。
@@ -213,7 +239,23 @@ move cc-switch.exe C:\Windows\System32\
 
 </details>
 
-### 方法 2：从源码构建
+### 方法 2：使用 Homebrew 安装
+
+如果你在使用 Homebrew，可以直接通过 Homebrew 安装 cc-switch。
+
+```bash
+brew install cc-switch-cli
+```
+
+更新：
+
+```bash
+brew upgrade cc-switch-cli
+```
+
+请注意，如果你通过 Homebrew 安装了 cc-switch，请避免使用 cc-switch 内置的更新功能，因为这会影响 Homebrew 自身的升级功能。
+
+### 方法 3：从源码构建
 
 **前提条件：**
 - Rust 1.85+（[通过 rustup 安装](https://rustup.rs/)）
@@ -242,7 +284,7 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ### 🔌 供应商管理
 
-管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode** 与 **OpenClaw** 的 API 配置。
+管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode**、**Hermes** 与 **OpenClaw** 的 API 配置。
 
 **功能：** 一键切换、Claude 独立 settings 导出、多端点支持、API 密钥管理、远端模型发现，以及按应用提供的速度测试、流式健康检查等诊断能力。
 
@@ -250,6 +292,7 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 cc-switch provider list              # 列出所有供应商
 cc-switch provider current           # 显示当前供应商
 cc-switch provider switch <id>       # 切换供应商
+cc-switch use <id>                   # 切换供应商（快捷命令）
 cc-switch provider add               # 添加新供应商
 cc-switch provider edit <id>         # 编辑现有供应商
 cc-switch provider duplicate <id>    # 复制供应商
@@ -261,9 +304,23 @@ cc-switch provider fetch-models <id> # 拉取远端模型列表
 cc-switch provider export <id> --output ~/.claude/settings-demo.json # 自定义 settings 文件路径
 ```
 
+### 🔐 托管账号
+
+本地管理 ChatGPT/Codex OAuth 账号，并在供应商配置中复用；也可以通过本地代理将 Codex OAuth 账号作为 Claude Code 供应商使用。
+
+**功能：** 设备码登录、账号列表、默认账号选择、账号移除，以及无需在每个供应商里复制长期 token 的账号绑定。
+
+```bash
+cc-switch auth status                # 查看托管账号状态
+cc-switch auth login                 # 使用 ChatGPT/Codex OAuth 登录
+cc-switch auth list                  # 列出已登录账号
+cc-switch auth default <account-id>  # 设置默认账号
+cc-switch auth remove <account-id>   # 移除账号
+```
+
 ### 🛠️ MCP 服务器管理
 
-跨 Claude、Codex、Gemini 与 OpenCode 管理模型上下文协议服务器。
+跨 Claude、Codex、Gemini、OpenCode 与 Hermes 管理模型上下文协议服务器。
 
 **功能：** 统一管理、多应用支持、三种传输类型（stdio/http/sse）、自动同步，以及面向 TOML / JSON live 配置的格式适配。
 
@@ -283,14 +340,15 @@ cc-switch mcp import --app claude    # 从实时配置导入
 
 管理 AI 编码助手的系统提示词预设。
 
-**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)、OpenCode (`AGENTS.md`)、OpenClaw (`AGENTS.md`)。
+**跨应用支持：** Claude (`CLAUDE.md`)、Codex (`AGENTS.md`)、Gemini (`GEMINI.md`)、OpenCode (`AGENTS.md`)、Hermes (`AGENTS.md`)、OpenClaw (`AGENTS.md`)。
 
 ```bash
 cc-switch prompts list               # 列出提示词预设
 cc-switch prompts current            # 显示当前活动提示词
 cc-switch prompts activate <id>      # 激活提示词
 cc-switch prompts deactivate         # 停用当前激活的提示词
-cc-switch prompts create             # 创建新提示词预设
+cc-switch prompts create [name]      # 创建新提示词预设，可直接指定名称
+cc-switch prompts rename <id> [name] # 重命名提示词预设，不传名称时进入交互
 cc-switch prompts edit <id>          # 编辑提示词预设
 cc-switch prompts show <id>          # 显示完整内容
 cc-switch prompts delete <id>        # 删除提示词
@@ -298,7 +356,7 @@ cc-switch prompts delete <id>        # 删除提示词
 
 ### 🎯 Skills 管理
 
-通过社区技能扩展 Claude Code/Codex/Gemini/OpenCode 的能力。
+通过社区技能扩展 Claude Code/Codex/Gemini/OpenCode/Hermes 的能力。
 
 **功能：** SSOT 技能仓库、多应用启用/禁用、同步到应用目录、扫描/导入未管理技能、仓库发现。
 
@@ -319,6 +377,20 @@ cc-switch skills repos add <repo>    # 添加仓库（owner/name[@branch] 或 Gi
 cc-switch skills repos remove <repo> # 移除仓库（owner/name 或 GitHub URL）
 cc-switch skills repos enable <repo> # 启用仓库但保留当前分支
 cc-switch skills repos disable <repo> # 禁用仓库但保留当前分支
+```
+
+### 🕘 历史会话与用量统计
+
+查看历史会话，一键 resume，删除旧会话，并将本地会话日志导入 token / cost 统计，方便管理用量。
+
+**功能：** 跨应用扫描会话、消息预览、一键恢复、删除确认、JSON 输出，以及 Claude、Codex、Gemini、OpenCode 的用量同步。
+
+```bash
+cc-switch sessions list --all        # 列出支持应用的历史会话
+cc-switch sessions show <id>         # 查看会话信息和消息
+cc-switch sessions resume <id>       # 恢复会话
+cc-switch sessions delete <id>       # 删除会话
+cc-switch sessions sync-usage --all  # 同步本地日志到用量统计
 ```
 
 ### ⚙️ 配置管理
@@ -363,27 +435,42 @@ cc-switch config webdav migrate-v1-to-v2
 cc-switch config reset               # 重置为默认配置
 ```
 
-### 🌉 代理管理
+### 🌉 代理管理与模型接入
 
-查看并控制服务于各应用的本地多应用代理。
+查看并控制由守护进程管理的按应用代理路由。
 
-**功能：** 持久化开关、当前路由检查、首页遥测，以及用于调试的前台运行模式。
+**功能：** 每个应用可独立启用/禁用代理、每个应用可配置监听端口、由 daemon 管理 worker、当前路由检查、首页遥测、token 统计，以及用于调试的前台运行模式。
+
+本地代理可将 Claude Code、Codex、Gemini 路由到 CC-Switch，适配 OpenAI Responses API 与 Chat Completions 供应商，并在目标应用支持的路径下接入 DeepSeek、Kimi、Qwen、OpenRouter、xAI、Groq、Mistral 等主流 OpenAI-compatible 模型。
 
 ```bash
-cc-switch proxy show                 # 显示代理配置和路由
-cc-switch proxy enable               # 启用持久化代理开关
-cc-switch proxy disable              # 禁用持久化代理开关
-cc-switch proxy serve                # 以前台模式运行代理
+cc-switch proxy show                              # 显示代理配置、路由和 daemon worker 状态
+cc-switch proxy enable                            # 启用 Claude 代理路由（默认应用）
+cc-switch --app codex proxy enable                # 启用 Codex 代理路由
+cc-switch --app gemini proxy disable              # 禁用 Gemini 代理路由
+cc-switch --app claude proxy config --listen-port 15721
+cc-switch --app codex proxy config --listen-port 15722
+cc-switch proxy serve --takeover claude           # 前台调试模式；存在 daemon 托管路由时会拒绝运行
 ```
+
+普通 CLI/TUI 的代理启用/禁用操作都会通过 daemon 执行。首次启用任一应用代理路由时 daemon 会自动启动；每个活跃的受支持应用（Claude、Codex、Gemini）各有一个 worker；当没有任何活跃代理路由时 daemon 会自动退出。
+
+> **平台支持：** 由 daemon 托管的代理依赖 Unix 域 socket 的 supervisor，**仅在 macOS 和 Linux 上可用**。在 Windows 上，`proxy enable` / `proxy disable` 以及 `daemon` 子命令不可用，会报错 `managed sessions are only supported on unix`。Windows 上如需本地代理，请改用前台模式直接启动中转（不依赖 supervisor）：
+>
+> ```bash
+> cc-switch proxy serve --takeover claude
+> ```
+>
+> `proxy show` 与 `proxy config` 在所有平台均可用。参见 [#294](https://github.com/SaladDay/cc-switch-cli/issues/294)。
 
 ### 🧪 环境与本地工具
 
-检查环境变量冲突，以及 Claude/Codex/Gemini/OpenCode CLI 是否已经装好。
+检查环境变量冲突，以及 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLI 是否已经装好。
 
 ```bash
 cc-switch env check                  # 检查环境变量冲突
 cc-switch env list                   # 列出相关环境变量
-cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode CLI
+cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLI
 ```
 
 ### 🌐 多语言支持
@@ -425,7 +512,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 - **SQLite 持久化**：核心数据默认存放在 `~/.cc-switch/cc-switch.db`（若设置 `CC_SWITCH_CONFIG_DIR` 则改为该目录下）；旧版 `config.json` 仅保留给兼容与迁移路径使用
 - **Skills SSOT**：技能源文件默认保存在 `~/.cc-switch/skills/`（若设置 `CC_SWITCH_CONFIG_DIR` 则改为 `$CC_SWITCH_CONFIG_DIR/skills/`），安装状态和启用状态由数据库统一记录
-- **安全 Live 同步（默认）**：若目标应用尚未初始化，将跳过写入 live 文件（避免意外创建 `~/.claude`、`~/.codex`、`~/.gemini`、`~/.config/opencode` 或 `~/.openclaw`）
+- **安全 Live 同步（默认）**：若目标应用尚未初始化，将跳过写入 live 文件（避免意外创建 `~/.claude`、`~/.codex`、`~/.gemini`、`~/.config/opencode`、`~/.hermes` 或 `~/.openclaw`）
 - **原子写入**：临时文件 + 重命名模式防止损坏
 - **服务层复用**：100% 复用原 GUI 版本
 - **并发安全**：RwLock 配合作用域守卫
@@ -444,8 +531,10 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 **实时配置：**
 - Claude: `~/.claude/settings.json`（供应商 / 通用配置）, `~/.claude.json`（MCP）, `~/.claude/CLAUDE.md`（提示词）
 - Codex: `~/.codex/auth.json`（认证状态）, `~/.codex/config.toml`（供应商 / 通用配置 + MCP）, `~/.codex/AGENTS.md`（提示词）
+  - Codex 配置目录优先使用 CC-Switch 的手动覆盖设置；未配置覆盖时，如果 `$CODEX_HOME` 指向已存在的目录则跟随 Codex 使用它，否则使用 `$HOME/.codex`。
 - Gemini: `~/.gemini/.env`（供应商环境变量）, `~/.gemini/settings.json`（设置 + MCP）, `~/.gemini/GEMINI.md`（提示词）
 - OpenCode: `~/.config/opencode/opencode.json`（供应商 + MCP + 运行时配置）, `~/.config/opencode/AGENTS.md`（提示词）
+- Hermes: `~/.hermes/config.yaml`（供应商 + MCP + 记忆设置）, `~/.hermes/AGENTS.md`（提示词）, `~/.hermes/skills/`（技能）, `~/.hermes/memories/`（记忆）
 - OpenClaw: `~/.openclaw/openclaw.json`（供应商 + Env/Tools/Agents Defaults）, `~/.openclaw/AGENTS.md`（提示词）
 
 ---
@@ -457,7 +546,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 <br>
 
-首先确认目标 CLI 已经至少运行过一次（即对应配置目录已存在）。如果应用未初始化，CC-Switch 会出于安全原因跳过写入 live 文件，并提示一条 warning。请先运行一次目标 CLI（例如 `claude --help` / `codex --help` / `gemini --help` / `opencode --help` / `openclaw --help`），然后再切换一次供应商。
+首先确认目标 CLI 已经至少运行过一次（即对应配置目录已存在）。如果应用未初始化，CC-Switch 会出于安全原因跳过写入 live 文件，并提示一条 warning。请先运行一次目标 CLI（例如 `claude --help` / `codex --help` / `gemini --help` / `opencode --help` / `openclaw --help`），或为 Hermes 创建 `~/.hermes` 目录，然后再切换一次供应商。
 
 这通常是由**环境变量冲突**引起的。如果你在系统环境变量中设置了 API 密钥（如 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`），它们会覆盖 CC-Switch 的配置。
 
@@ -487,15 +576,62 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 </details>
 
 <details>
+<summary><b>代理启动时报 `Address already in use`，该怎么处理？</b></summary>
+
+<br>
+
+这表示代理监听端口已经被其他进程占用。常见场景是升级或调试后，旧版 `cc-switch daemon` / `cc-switch proxy serve` 仍在后台运行，但新版进程没有接管到它。
+
+先确认当前代理端口。默认可从 `cc-switch proxy show` 里查看，例如 `配置 15722`。
+
+**macOS / Linux：**
+
+```bash
+# 查看哪个进程占用了端口。把 15722 替换成你的代理端口。
+lsof -nP -iTCP:15722 -sTCP:LISTEN
+
+# 查看 cc-switch 相关进程，确认 daemon 和 proxy worker。
+ps -axo pid,ppid,stat,command | grep '[c]c-switch'
+
+# 如果 daemon 能连上，优先正常停止。
+cc-switch daemon stop
+
+# 如果 daemon 不可达，但端口仍被旧进程占用，手动结束对应 PID。
+kill <worker-pid> <daemon-pid>
+
+# 仍未退出时再强制结束。
+kill -9 <worker-pid> <daemon-pid>
+```
+
+只结束命令里明确显示为 `cc-switch daemon start` 或 `cc-switch proxy serve` 的进程。不要按端口号盲目结束其他应用。
+
+**Windows：**
+
+```powershell
+netstat -ano | findstr :15722
+taskkill /PID <pid> /F
+```
+
+清理后重新运行：
+
+```bash
+cc-switch proxy show
+cc-switch
+```
+
+</details>
+
+<details>
 <summary><b>支持哪些应用？</b></summary>
 
 <br>
 
-CC-Switch 目前支持五个 AI 编程助手：
+CC-Switch 目前支持六个 AI 编程助手：
 - **Claude Code** (`--app claude`，默认)
 - **Codex** (`--app codex`)
 - **Gemini** (`--app gemini`)
 - **OpenCode** (`--app opencode`)
+- **Hermes** (`--app hermes`)
 - **OpenClaw** (`--app openclaw`)
 
 使用全局 `--app` 参数指定要管理的应用：

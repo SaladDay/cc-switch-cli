@@ -4,9 +4,15 @@ use crate::app_config::AppType;
 pub enum Route {
     Main,
     Providers,
+    Usage,
+    UsageLogs,
+    UsageLogDetail { request_id: String },
+    Pricing,
+    Sessions,
     ProviderDetail { id: String },
     Mcp,
     Prompts,
+    HermesMemory,
     Config,
     ConfigOpenClawWorkspace,
     ConfigOpenClawDailyMemory,
@@ -20,14 +26,18 @@ pub enum Route {
     SkillDetail { directory: String },
     Settings,
     SettingsProxy,
+    SettingsManagedAccounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavItem {
     Main,
     Providers,
+    Usage,
+    Sessions,
     Mcp,
     Prompts,
+    HermesMemory,
     Config,
     Skills,
     OpenClawWorkspace,
@@ -39,33 +49,51 @@ pub enum NavItem {
 }
 
 impl NavItem {
-    pub const ALL: [NavItem; 8] = [
+    pub const ALL: [NavItem; 10] = [
         NavItem::Main,
         NavItem::Providers,
         NavItem::Mcp,
         NavItem::Skills,
+        NavItem::Sessions,
         NavItem::Prompts,
+        NavItem::Usage,
         NavItem::Config,
         NavItem::Settings,
         NavItem::Exit,
     ];
 
-    pub const OPENCLAW_ALL: [NavItem; 8] = [
+    pub const OPENCLAW_ALL: [NavItem; 11] = [
         NavItem::Main,
         NavItem::Providers,
+        NavItem::Sessions,
         NavItem::OpenClawWorkspace,
         NavItem::OpenClawEnv,
         NavItem::OpenClawTools,
         NavItem::OpenClawAgents,
+        NavItem::Usage,
+        NavItem::Config,
+        NavItem::Settings,
+        NavItem::Exit,
+    ];
+
+    pub const HERMES_ALL: [NavItem; 10] = [
+        NavItem::Main,
+        NavItem::Providers,
+        NavItem::Mcp,
+        NavItem::Skills,
+        NavItem::Sessions,
+        NavItem::HermesMemory,
+        NavItem::Usage,
+        NavItem::Config,
         NavItem::Settings,
         NavItem::Exit,
     ];
 
     pub fn all_for_app(app_type: &AppType) -> &'static [NavItem] {
-        if matches!(app_type, AppType::OpenClaw) {
-            &Self::OPENCLAW_ALL
-        } else {
-            &Self::ALL
+        match app_type {
+            AppType::OpenClaw => &Self::OPENCLAW_ALL,
+            AppType::Hermes => &Self::HERMES_ALL,
+            _ => &Self::ALL,
         }
     }
 
@@ -73,8 +101,11 @@ impl NavItem {
         match self {
             NavItem::Main => Some(Route::Main),
             NavItem::Providers => Some(Route::Providers),
+            NavItem::Usage => Some(Route::Usage),
+            NavItem::Sessions => Some(Route::Sessions),
             NavItem::Mcp => Some(Route::Mcp),
             NavItem::Prompts => Some(Route::Prompts),
+            NavItem::HermesMemory => Some(Route::HermesMemory),
             NavItem::Config => Some(Route::Config),
             NavItem::Skills => Some(Route::Skills),
             NavItem::OpenClawWorkspace => Some(Route::ConfigOpenClawWorkspace),
@@ -89,7 +120,7 @@ impl NavItem {
 
 #[cfg(test)]
 mod tests {
-    use super::NavItem;
+    use super::{NavItem, Route};
 
     #[test]
     fn skills_appears_before_prompts_in_nav() {
@@ -106,5 +137,78 @@ mod tests {
             skills < prompts,
             "skills should appear above prompts in the left nav"
         );
+    }
+
+    #[test]
+    fn sessions_appears_after_mcp_and_skills_before_prompts_in_nav() {
+        let sessions = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Sessions))
+            .expect("sessions nav item should exist");
+        let mcp = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Mcp))
+            .expect("mcp nav item should exist");
+        let skills = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Skills))
+            .expect("skills nav item should exist");
+        let prompts = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Prompts))
+            .expect("prompts nav item should exist");
+
+        assert!(mcp < sessions && skills < sessions && sessions < prompts);
+    }
+
+    #[test]
+    fn usage_appears_after_prompts_before_config_in_nav() {
+        let prompts = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Prompts))
+            .expect("prompts nav item should exist");
+        let usage = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Usage))
+            .expect("usage nav item should exist");
+        let config = NavItem::ALL
+            .iter()
+            .position(|item| matches!(item, NavItem::Config))
+            .expect("config nav item should exist");
+
+        assert!(prompts < usage && usage < config);
+    }
+
+    #[test]
+    fn pricing_is_not_a_top_level_nav_item() {
+        for nav_items in [
+            NavItem::ALL.as_slice(),
+            NavItem::OPENCLAW_ALL.as_slice(),
+            NavItem::HERMES_ALL.as_slice(),
+        ] {
+            assert!(nav_items
+                .iter()
+                .all(|item| item.to_route() != Some(Route::Pricing)));
+        }
+    }
+
+    #[test]
+    fn hermes_nav_uses_memory_instead_of_prompts() {
+        assert!(NavItem::HERMES_ALL
+            .iter()
+            .any(|item| matches!(item, NavItem::HermesMemory)));
+        assert!(NavItem::HERMES_ALL
+            .iter()
+            .any(|item| matches!(item, NavItem::Config)));
+        assert!(!NavItem::HERMES_ALL
+            .iter()
+            .any(|item| matches!(item, NavItem::Prompts)));
+    }
+
+    #[test]
+    fn openclaw_nav_keeps_generic_config_entry() {
+        assert!(NavItem::OPENCLAW_ALL
+            .iter()
+            .any(|item| matches!(item, NavItem::Config)));
     }
 }

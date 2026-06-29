@@ -7,13 +7,7 @@ fn main() {
     // 解析命令行参数
     let cli = Cli::parse();
 
-    // 初始化日志（交互模式和命令行模式都避免干扰输出）
-    let log_level = if cli.verbose {
-        "debug"
-    } else {
-        "error" // 默认只显示错误日志，避免 INFO 日志干扰命令输出
-    };
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
+    init_logger_if_needed(&cli);
 
     // Best-effort cleanup of orphaned temp credential files from previous sessions
     let _ = cc_switch_lib::cli::orphan_scan::scan_and_clean(&std::env::temp_dir());
@@ -25,33 +19,94 @@ fn main() {
     }
 }
 
+fn init_logger_if_needed(cli: &Cli) {
+    if command_uses_own_logger(&cli.command) {
+        return;
+    }
+
+    // 初始化日志（交互模式和命令行模式都避免干扰输出）
+    let log_level = if cli.verbose {
+        "debug"
+    } else {
+        "error" // 默认只显示错误日志，避免 INFO 日志干扰命令输出
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
+}
+
+fn command_uses_own_logger(command: &Option<Commands>) -> bool {
+    match command {
+        #[cfg(unix)]
+        Some(Commands::Daemon(cc_switch_lib::cli::commands::daemon::DaemonCommand::Start {
+            ..
+        })) => true,
+        _ => false,
+    }
+}
+
 fn run(cli: Cli) -> Result<(), AppError> {
+    if database_access_required(&cli.command) {
+        // 在打开数据库前检查已有配置目录、数据库文件和备份目录权限。
+        // This ensures the chmod happens before database initialization,
+        // and also ensures that the user is only queried once.
+        cc_switch_lib::validate_config_dir()?;
+        cc_switch_lib::prompt_fix_permissions()?;
+    }
     initialize_startup_state_if_needed(&cli.command)?;
 
     match cli.command {
         // Default to interactive mode if no command is provided
         None | Some(Commands::Interactive) => cc_switch_lib::cli::interactive::run(cli.app),
+        Some(Commands::Auth(cmd)) => cc_switch_lib::cli::commands::auth::execute(cmd),
         Some(Commands::Provider(cmd)) => {
             cc_switch_lib::cli::commands::provider::execute(cmd, cli.app)
         }
+        Some(Commands::Use { id }) => cc_switch_lib::cli::commands::provider::execute(
+            cc_switch_lib::cli::commands::provider::ProviderCommand::Switch { id },
+            cli.app,
+        ),
         Some(Commands::Mcp(cmd)) => cc_switch_lib::cli::commands::mcp::execute(cmd, cli.app),
         Some(Commands::Prompts(cmd)) => {
             cc_switch_lib::cli::commands::prompts::execute(cmd, cli.app)
         }
         Some(Commands::Skills(cmd)) => cc_switch_lib::cli::commands::skills::execute(cmd, cli.app),
         Some(Commands::Config(cmd)) => cc_switch_lib::cli::commands::config::execute(cmd, cli.app),
-        Some(Commands::Proxy(cmd)) => cc_switch_lib::cli::commands::proxy::execute(cmd),
+        Some(Commands::Proxy(cmd)) => cc_switch_lib::cli::commands::proxy::execute(cmd, cli.app),
+        Some(Commands::Settings(cmd)) => cc_switch_lib::cli::commands::settings::execute(cmd),
+        Some(Commands::Failover(cmd)) => {
+            cc_switch_lib::cli::commands::failover::execute(cmd, cli.app)
+        }
+        Some(Commands::Sessions(cmd)) => {
+            cc_switch_lib::cli::commands::sessions::execute(cmd, cli.app)
+        }
+        Some(Commands::Hermes(cmd)) => cc_switch_lib::cli::commands::hermes::execute(cmd),
         #[cfg(any(unix, windows))]
         Some(Commands::Start(cmd)) => cc_switch_lib::cli::commands::start::execute(cmd),
+        #[cfg(unix)]
+        Some(Commands::Daemon(cmd)) => cc_switch_lib::cli::commands::daemon::execute(cmd),
         Some(Commands::Env(cmd)) => cc_switch_lib::cli::commands::env::execute(cmd, cli.app),
+        Some(Commands::Deeplink(cmd)) => {
+            cc_switch_lib::cli::commands::deeplink::execute(cmd, cli.app)
+        }
         Some(Commands::Update(cmd)) => cc_switch_lib::cli::commands::update::execute(cmd),
         Some(Commands::Completions(cmd)) => cc_switch_lib::cli::commands::completions::execute(cmd),
+        Some(Commands::Internal(cmd)) => cc_switch_lib::cli::commands::internal::execute(cmd),
     }
 }
 
 fn command_requires_startup_state(command: &Option<Commands>) -> bool {
+    #[cfg(unix)]
+    if std::env::var_os(cc_switch_lib::daemon::supervisor::DAEMON_SOCKET_ENV).is_some() {
+        return false;
+    }
+
     match command {
-        Some(Commands::Completions(_)) | Some(Commands::Update(_)) => false,
+        Some(Commands::Completions(_))
+        | Some(Commands::Auth(_))
+        | Some(Commands::Update(_))
+        | Some(Commands::Internal(_))
+        | Some(Commands::Sessions(_)) => false,
+        #[cfg(unix)]
+        Some(Commands::Daemon(_)) => false,
         _ => true,
     }
 }
@@ -63,9 +118,19 @@ fn initialize_startup_state_if_needed(command: &Option<Commands>) -> Result<(), 
     Ok(())
 }
 
+fn database_access_required(command: &Option<Commands>) -> bool {
+    !matches!(
+        command,
+        Some(Commands::Completions(_)) | Some(Commands::Update(_))
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{command_requires_startup_state, initialize_startup_state_if_needed};
+    use super::{
+        command_requires_startup_state, command_uses_own_logger, database_access_required,
+        initialize_startup_state_if_needed,
+    };
     use cc_switch_lib::cli::Cli;
     use clap::Parser;
     use serial_test::serial;
@@ -102,6 +167,21 @@ mod tests {
             .expect("set future schema version");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn daemon_start_uses_daemon_file_logger() {
+        let cli = Cli::parse_from(["cc-switch", "daemon", "start"]);
+
+        assert!(command_uses_own_logger(&cli.command));
+    }
+
+    #[test]
+    fn normal_commands_use_env_logger() {
+        let cli = Cli::parse_from(["cc-switch", "provider", "list"]);
+
+        assert!(!command_uses_own_logger(&cli.command));
+    }
+
     #[test]
     fn update_and_completions_skip_startup_state() {
         let update = Cli::parse_from(["cc-switch", "update"]);
@@ -110,6 +190,15 @@ mod tests {
         let completions_status = Cli::parse_from(["cc-switch", "completions", "status"]);
         let completions_uninstall =
             Cli::parse_from(["cc-switch", "completions", "uninstall", "--shell", "bash"]);
+        let internal_capture = Cli::parse_from([
+            "cc-switch",
+            "internal",
+            "capture-codex-temp",
+            "official",
+            "/tmp/codex-home",
+        ]);
+        let sessions = Cli::parse_from(["cc-switch", "sessions", "list"]);
+        let auth = Cli::parse_from(["cc-switch", "auth", "status"]);
         let provider = Cli::parse_from(["cc-switch", "provider", "list"]);
 
         assert!(!command_requires_startup_state(&update.command));
@@ -123,7 +212,42 @@ mod tests {
         assert!(!command_requires_startup_state(
             &completions_uninstall.command
         ));
+        assert!(!command_requires_startup_state(&internal_capture.command));
+        assert!(!command_requires_startup_state(&sessions.command));
+        assert!(!command_requires_startup_state(&auth.command));
         assert!(command_requires_startup_state(&provider.command));
+    }
+
+    #[test]
+    fn completions_update_skip_database_access() {
+        let update = Cli::parse_from(["cc-switch", "update"]);
+        let completions = Cli::parse_from(["cc-switch", "completions", "bash"]);
+
+        assert!(!database_access_required(&update.command));
+        assert!(!database_access_required(&completions.command));
+    }
+
+    #[test]
+    fn normal_commands_require_database_access() {
+        let provider = Cli::parse_from(["cc-switch", "provider", "list"]);
+        let mcp = Cli::parse_from(["cc-switch", "mcp", "list"]);
+        let config = Cli::parse_from(["cc-switch", "config", "validate"]);
+        let proxy = Cli::parse_from(["cc-switch", "proxy", "show"]);
+        let interactive = Cli::parse_from(["cc-switch"]);
+        let internal = Cli::parse_from([
+            "cc-switch",
+            "internal",
+            "capture-codex-temp",
+            "official",
+            "/tmp/codex-home",
+        ]);
+
+        assert!(database_access_required(&provider.command));
+        assert!(database_access_required(&mcp.command));
+        assert!(database_access_required(&config.command));
+        assert!(database_access_required(&proxy.command));
+        assert!(database_access_required(&interactive.command));
+        assert!(database_access_required(&internal.command));
     }
 
     #[test]
@@ -140,6 +264,24 @@ mod tests {
 
     #[test]
     #[serial]
+    fn internal_commands_bypass_future_schema_database_gate() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        seed_future_schema_database(temp.path());
+        let _guard = ConfigDirEnvGuard::set(temp.path());
+
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "internal",
+            "capture-codex-temp",
+            "official",
+            "/tmp/codex-home",
+        ]);
+        initialize_startup_state_if_needed(&cli.command)
+            .expect("internal commands should not touch startup state");
+    }
+
+    #[test]
+    #[serial]
     fn provider_commands_still_fail_on_future_schema_database() {
         let temp = tempfile::tempdir().expect("create temp dir");
         seed_future_schema_database(temp.path());
@@ -149,7 +291,7 @@ mod tests {
         let err = initialize_startup_state_if_needed(&cli.command)
             .expect_err("provider command should still require startup state");
         assert!(
-            err.to_string().contains("数据库版本过新"),
+            err.to_string().contains("由较新版本的 CC Switch 创建"),
             "unexpected error: {err}"
         );
     }

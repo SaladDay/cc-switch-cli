@@ -1,4 +1,4 @@
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -6,6 +6,18 @@ use std::time::Duration;
 use crate::error::AppError;
 
 use super::ProviderService;
+
+const KNOWN_COMPAT_SUFFIXES: &[&str] = &[
+    "/api/claudecode",
+    "/api/anthropic",
+    "/apps/anthropic",
+    "/api/coding",
+    "/claudecode",
+    "/anthropic",
+    "/step_plan",
+    "/coding",
+    "/claude",
+];
 
 impl ProviderService {
     /// 尝试从远端拉取模型列表
@@ -22,18 +34,7 @@ impl ProviderService {
             ));
         }
 
-        let mut candidate_urls = Vec::new();
-
-        // 如果用户直接填了 /v1/models 或者 /models，我们就直接用
-        if base_url.ends_with("/models") {
-            candidate_urls.push(base_url.to_string());
-        } else {
-            // 智能适配：如果没带 /models，尝试追加
-            candidate_urls.push(format!("{}/models", base_url));
-            if !base_url.ends_with("/v1") && !base_url.ends_with("/v1beta") {
-                candidate_urls.push(format!("{}/v1/models", base_url));
-            }
-        }
+        let candidate_urls = build_provider_model_candidate_urls(base_url);
 
         let client = Client::builder()
             .timeout(Duration::from_secs(5))
@@ -110,9 +111,15 @@ impl ProviderService {
                                 Some(format!("Failed to parse JSON response (URL: {})", url));
                         }
                     } else {
-                        let err = format!("HTTP {} (URL: {})", resp.status(), url);
+                        let status = resp.status();
+                        let err = format!("HTTP {} (URL: {})", status, url);
                         last_err_zh = Some(err.clone());
                         last_err_en = Some(err);
+                        if status != StatusCode::NOT_FOUND
+                            && status != StatusCode::METHOD_NOT_ALLOWED
+                        {
+                            break;
+                        }
                     }
                 }
                 Err(e) => {
@@ -130,5 +137,73 @@ impl ProviderService {
             format!("拉取失败: {}", err_zh),
             format!("Fetch failed: {}", err_en),
         ))
+    }
+}
+
+fn build_provider_model_candidate_urls(base_url: &str) -> Vec<String> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Vec::new();
+    }
+    if base.ends_with("/models") {
+        return vec![base.to_string()];
+    }
+
+    let append_models = format!("{base}/models");
+    let append_versioned_models = if base.ends_with("/v1") || base.ends_with("/v1beta") {
+        None
+    } else {
+        Some(format!("{base}/v1/models"))
+    };
+
+    let mut urls = Vec::new();
+    if let Some(stripped) = strip_compat_suffix(base) {
+        if let Some(versioned) = append_versioned_models {
+            urls.push(versioned);
+        } else {
+            urls.push(append_models.clone());
+        }
+        let root = stripped.trim_end_matches('/');
+        if !root.is_empty() && root.contains("://") {
+            urls.push(format!("{root}/v1/models"));
+            urls.push(format!("{root}/models"));
+        }
+    } else {
+        urls.push(append_models);
+        if let Some(versioned) = append_versioned_models {
+            urls.push(versioned);
+        }
+    }
+
+    let mut seen = HashSet::new();
+    urls.retain(|url| seen.insert(url.clone()));
+    urls
+}
+
+fn strip_compat_suffix(base: &str) -> Option<&str> {
+    let lower = base.to_ascii_lowercase();
+    KNOWN_COMPAT_SUFFIXES.iter().find_map(|suffix| {
+        lower
+            .ends_with(suffix)
+            .then(|| &base[..base.len() - suffix.len()])
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_provider_model_candidate_urls;
+
+    #[test]
+    fn model_candidates_strip_deepseek_anthropic_suffix() {
+        let urls = build_provider_model_candidate_urls("https://api.deepseek.com/anthropic");
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://api.deepseek.com/anthropic/v1/models".to_string(),
+                "https://api.deepseek.com/v1/models".to_string(),
+                "https://api.deepseek.com/models".to_string(),
+            ]
+        );
     }
 }

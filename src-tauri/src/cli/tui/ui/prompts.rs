@@ -43,13 +43,21 @@ pub(super) fn render_prompts(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(texts::menu_manage_prompts());
+        .title(format!(
+            "{} · {}",
+            texts::menu_manage_prompts(),
+            app.app_type.as_str()
+        ));
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
         .split(inner);
 
     if app.focus == Focus::Content {
@@ -58,14 +66,16 @@ pub(super) fn render_prompts(
             chunks[0],
             theme,
             &[
+                ("Space", texts::tui_key_toggle()),
+                ("a", texts::tui_key_add()),
                 ("Enter", texts::tui_key_view()),
-                ("a", texts::tui_key_activate()),
-                ("x", texts::tui_key_deactivate_active()),
                 ("e", texts::tui_key_edit()),
                 ("d", texts::tui_key_delete()),
             ],
         );
     }
+
+    render_summary_bar(frame, chunks[1], theme, prompts_summary(data));
 
     let table = Table::new(
         rows,
@@ -82,5 +92,18 @@ pub(super) fn render_prompts(
 
     let mut state = TableState::default();
     state.select(Some(app.prompt_idx));
-    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(table, inset_left(chunks[2], CONTENT_INSET_LEFT), &mut state);
+}
+
+fn prompts_summary(data: &UiData) -> String {
+    let count = data.prompts.rows.len();
+    let active = data
+        .prompts
+        .rows
+        .iter()
+        .find(|row| row.prompt.enabled)
+        .map(|row| row.prompt.name.as_str())
+        .unwrap_or_else(|| texts::tui_prompt_no_active_summary());
+
+    texts::tui_prompts_summary(count, active)
 }

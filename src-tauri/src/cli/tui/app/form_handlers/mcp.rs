@@ -37,7 +37,7 @@ impl App {
         match mcp.focus {
             FormFocus::Fields => self.handle_mcp_fields_key(key),
             FormFocus::JsonPreview => self.handle_mcp_json_preview_key(key),
-            FormFocus::Templates => None,
+            FormFocus::Templates | FormFocus::Content => None,
         }
     }
 
@@ -50,7 +50,12 @@ impl App {
             self.push_toast(texts::tui_toast_mcp_missing_fields(), ToastKind::Warning);
             return Action::None;
         }
-        if mcp.command.is_blank() {
+        if mcp.server_type.is_remote() {
+            if mcp.url.is_blank() {
+                self.push_toast(texts::tui_toast_url_empty(), ToastKind::Warning);
+                return Action::None;
+            }
+        } else if mcp.command.is_blank() {
             self.push_toast(texts::tui_toast_command_empty(), ToastKind::Warning);
             return Action::None;
         }
@@ -68,10 +73,7 @@ impl App {
     }
 
     fn handle_mcp_fields_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let (fields, selected, editing) = match self.prepare_mcp_field_selection() {
-            Some(state) => state,
-            None => return None,
-        };
+        let (fields, selected, editing) = self.prepare_mcp_field_selection()?;
 
         if editing {
             self.handle_mcp_field_editing(selected, key)
@@ -90,46 +92,13 @@ impl App {
                 mcp.editing = false;
                 Some(Action::None)
             }
-            KeyCode::Left => {
+            _ => {
+                TextEditCommand::from_key(key)?;
                 if let Some(input) = mcp.input_mut(selected) {
-                    input.move_left();
+                    input.apply_key(key);
                 }
                 Some(Action::None)
             }
-            KeyCode::Right => {
-                if let Some(input) = mcp.input_mut(selected) {
-                    input.move_right();
-                }
-                Some(Action::None)
-            }
-            KeyCode::Home => {
-                if let Some(input) = mcp.input_mut(selected) {
-                    input.move_home();
-                }
-                Some(Action::None)
-            }
-            KeyCode::End => {
-                if let Some(input) = mcp.input_mut(selected) {
-                    input.move_end();
-                }
-                Some(Action::None)
-            }
-            KeyCode::Backspace => {
-                let _ = mcp.input_mut(selected).map(|input| input.backspace());
-                Some(Action::None)
-            }
-            KeyCode::Delete => {
-                let _ = mcp.input_mut(selected).map(|input| input.delete());
-                Some(Action::None)
-            }
-            KeyCode::Char(c) => {
-                if c.is_control() {
-                    return Some(Action::None);
-                }
-                let _ = mcp.input_mut(selected).map(|input| input.insert_char(c));
-                Some(Action::None)
-            }
-            _ => None,
         }
     }
 
@@ -140,14 +109,14 @@ impl App {
         key: KeyEvent,
     ) -> Option<Action> {
         match key.code {
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 let Some(FormState::McpAdd(mcp)) = self.form.as_mut() else {
                     return None;
                 };
                 mcp.field_idx = mcp.field_idx.saturating_sub(1);
                 Some(Action::None)
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 let Some(FormState::McpAdd(mcp)) = self.form.as_mut() else {
                     return None;
                 };
@@ -159,6 +128,11 @@ impl App {
                     return None;
                 };
                 match selected {
+                    McpAddField::Type => {
+                        self.overlay = Overlay::McpTypePicker {
+                            selected: mcp.server_type.picker_index(),
+                        };
+                    }
                     McpAddField::Env => {
                         let selected = 0;
                         self.overlay = Overlay::McpEnvPicker { selected };
@@ -166,6 +140,8 @@ impl App {
                     McpAddField::AppClaude => mcp.apps.claude = !mcp.apps.claude,
                     McpAddField::AppCodex => mcp.apps.codex = !mcp.apps.codex,
                     McpAddField::AppGemini => mcp.apps.gemini = !mcp.apps.gemini,
+                    McpAddField::AppOpenCode => mcp.apps.opencode = !mcp.apps.opencode,
+                    McpAddField::AppHermes => mcp.apps.hermes = !mcp.apps.hermes,
                     _ => {
                         if selected == McpAddField::Id && mcp.locked_id().is_some() {
                             return Some(Action::None);
@@ -187,11 +163,11 @@ impl App {
         };
 
         match key.code {
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 mcp.json_scroll = mcp.json_scroll.saturating_sub(1);
                 Some(Action::None)
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 mcp.json_scroll = mcp.json_scroll.saturating_add(1);
                 Some(Action::None)
             }

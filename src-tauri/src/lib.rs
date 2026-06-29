@@ -3,14 +3,19 @@ mod app_config;
 mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
+mod codex_history_migration;
 pub mod commands;
 mod config;
+#[cfg(unix)]
+pub mod daemon;
 mod database;
 mod deeplink;
 mod error;
 mod gemini_config;
 mod gemini_mcp;
+pub mod hermes_config;
 mod import_export;
+#[allow(dead_code)]
 mod init_status;
 mod mcp;
 mod openclaw_config;
@@ -21,9 +26,11 @@ mod provider;
 mod provider_defaults;
 mod proxy;
 mod services;
+mod session_manager;
 mod settings;
 mod store;
 mod sync_policy;
+mod usage_events;
 mod usage_script;
 
 #[cfg(test)]
@@ -33,16 +40,20 @@ pub(crate) mod test_support;
 pub mod cli;
 
 // Public exports
-pub use app_config::{AppType, McpApps, McpServer, MultiAppConfig};
+pub use app_config::{AppType, McpApps, McpServer, MultiAppConfig, SkillApps};
 pub use claude_plugin::{
     sync_claude_plugin_on_provider_switch, sync_claude_plugin_on_settings_toggle,
 };
 pub use codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic};
 pub use config::{
-    get_app_config_dir, get_claude_mcp_path, get_claude_settings_path, read_json_file,
+    check_permissions, get_app_config_dir, get_claude_mcp_path, get_claude_settings_path,
+    prompt_fix_permissions, read_json_file, validate_config_dir,
 };
 pub use database::{Database, FailoverQueueItem};
-pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkImportRequest};
+pub use deeplink::{
+    import_mcp_from_deeplink, import_prompt_from_deeplink, import_provider_from_deeplink,
+    import_skill_from_deeplink, parse_deeplink_url, DeepLinkImportRequest, McpImportResult,
+};
 pub use error::AppError;
 pub use import_export::export_config_to_file;
 pub use mcp::{
@@ -51,14 +62,14 @@ pub use mcp::{
     sync_enabled_to_codex, sync_enabled_to_gemini, sync_single_server_to_claude,
     sync_single_server_to_codex, sync_single_server_to_gemini,
 };
-pub use provider::{Provider, ProviderMeta};
+pub use provider::{Provider, ProviderMeta, UsageScript};
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
 pub use services::{
     AuthService, ConfigService, CredentialStatus, EndpointLatency, ExtraUsage, HealthStatus,
-    ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus, McpService,
-    PromptService, ProviderService, ProxyService, QuotaTier, SkillService, SpeedtestService,
-    StreamCheckConfig, StreamCheckResult, StreamCheckService, SubscriptionQuota, SyncDecision,
-    WebDavSyncService, WebDavSyncSummary,
+    ImportSkillSelection, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus,
+    McpService, PromptService, ProviderService, ProxyService, QuotaTier, SkillService,
+    SpeedtestService, StreamCheckConfig, StreamCheckResult, StreamCheckService, SubscriptionQuota,
+    SyncDecision, WebDavSyncService, WebDavSyncSummary,
 };
 pub use settings::{
     get_enable_claude_plugin_integration, get_skip_claude_onboarding, get_webdav_sync_settings,

@@ -7,6 +7,7 @@ use serde_json::json;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum ProxyError {
     #[error("proxy server is already running")]
     AlreadyRunning,
@@ -219,6 +220,7 @@ fn summarize_text_for_log(text: &str, max_chars: usize) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ErrorCategory {
     Retryable,
     NonRetryable,

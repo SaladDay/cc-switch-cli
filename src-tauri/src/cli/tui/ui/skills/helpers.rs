@@ -42,6 +42,9 @@ pub(super) fn enabled_skill_apps_text(apps: &crate::app_config::SkillApps) -> St
     if apps.opencode {
         enabled.push("OpenCode");
     }
+    if apps.hermes {
+        enabled.push("Hermes");
+    }
 
     if enabled.is_empty() {
         texts::none().to_string()

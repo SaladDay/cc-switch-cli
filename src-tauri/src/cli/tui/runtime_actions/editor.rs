@@ -4,6 +4,7 @@ use crate::app_config::{AppType, McpServer};
 use crate::cli::i18n::texts;
 use crate::cli::tui::form::strip_common_config_from_settings;
 use crate::commands::workspace;
+use crate::database::ModelPricingUpdate;
 use crate::error::AppError;
 use crate::openclaw_config::{
     set_agents_defaults, set_env_config, set_tools_config, OpenClawAgentsDefaults,
@@ -13,22 +14,13 @@ use crate::provider::Provider;
 use crate::services::{McpService, PromptService, ProviderService};
 use crate::settings::{set_webdav_sync_settings, WebDavSyncSettings};
 
-use super::super::app::{EditorSubmit, Overlay, TextViewState, ToastKind};
+use super::super::app::{CommonSnippetViewSource, EditorSubmit, ToastKind};
 use super::super::data::{load_state, UiData};
 use super::super::form::FormState;
-use super::helpers::{refresh_openclaw_workspace_data, run_external_editor_for_current_editor};
+use super::helpers::{
+    refresh_openclaw_workspace_data, run_external_editor_for_current_editor, select_prompt_by_id,
+};
 use super::RuntimeActionContext;
-
-fn is_codex_official_provider(provider: &Provider) -> bool {
-    provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.codex_official)
-        .unwrap_or(false)
-        || provider.category.as_deref() == Some("official")
-        || provider.website_url.as_deref() == Some("https://chatgpt.com/codex")
-        || provider.name.trim().eq_ignore_ascii_case("OpenAI Official")
-}
 
 fn validate_provider_submit(
     app_type: &AppType,
@@ -43,7 +35,7 @@ fn validate_provider_submit(
         });
     }
 
-    if matches!(app_type, AppType::Codex) && !is_codex_official_provider(provider) {
+    if matches!(app_type, AppType::Codex) && !provider.is_codex_official() {
         let parsed = crate::cli::tui::form::parse_codex_config_snippet(
             provider
                 .settings_config
@@ -63,10 +55,183 @@ fn validate_provider_submit(
     None
 }
 
+fn refresh_provider_data_after_write(
+    ctx: &mut RuntimeActionContext<'_>,
+    state: &crate::store::AppState,
+) -> Result<(), AppError> {
+    let app_type = ctx.app.app_type.clone();
+    state.reload_config_snapshot_from_db()?;
+    ctx.data
+        .refresh_current_app_provider_data(state, &app_type)?;
+    ctx.app.clamp_selections(ctx.data);
+    ctx.data.mark_current_app_data_changed();
+    Ok(())
+}
+
 pub(super) fn open_external(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
     ctx.terminal.with_terminal_restored(|| {
         run_external_editor_for_current_editor(ctx.app, crate::cli::editor::open_external_editor)
     })
+}
+
+enum CommonSnippetFormat {
+    Empty,
+    Formatted(String),
+    InvalidJson(String),
+    InvalidToml(String),
+    NotObject,
+    SerializeFailed(String),
+}
+
+fn canonical_common_snippet(app_type: &AppType, content: &str) -> CommonSnippetFormat {
+    let edited = content.trim();
+    if edited.is_empty() {
+        return CommonSnippetFormat::Empty;
+    }
+
+    if matches!(app_type, AppType::Codex) {
+        return match edited.parse::<toml_edit::DocumentMut>() {
+            Ok(doc) => CommonSnippetFormat::Formatted(doc.to_string().trim().to_string()),
+            Err(e) => CommonSnippetFormat::InvalidToml(e.to_string()),
+        };
+    }
+
+    let value: Value = match serde_json::from_str(edited) {
+        Ok(value) => value,
+        Err(e) => return CommonSnippetFormat::InvalidJson(e.to_string()),
+    };
+
+    if !value.is_object() {
+        return CommonSnippetFormat::NotObject;
+    }
+
+    match serde_json::to_string_pretty(&value) {
+        Ok(pretty) => CommonSnippetFormat::Formatted(pretty),
+        Err(e) => CommonSnippetFormat::SerializeFailed(e.to_string()),
+    }
+}
+
+pub(super) fn format_common_snippet(
+    ctx: &mut RuntimeActionContext<'_>,
+    app_type: AppType,
+) -> Result<(), AppError> {
+    let Some(editor) = ctx.app.editor.as_mut() else {
+        return Ok(());
+    };
+    let EditorSubmit::ConfigCommonSnippet {
+        app_type: editor_app_type,
+        ..
+    } = &editor.submit
+    else {
+        return Ok(());
+    };
+    if editor_app_type != &app_type {
+        return Ok(());
+    }
+
+    let formatted = match canonical_common_snippet(&app_type, &editor.text()) {
+        CommonSnippetFormat::Empty => String::new(),
+        CommonSnippetFormat::Formatted(value) => value,
+        CommonSnippetFormat::InvalidToml(err) => {
+            ctx.app.push_toast(
+                texts::common_config_snippet_invalid_toml(&err),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+        CommonSnippetFormat::InvalidJson(err) => {
+            ctx.app.push_toast(
+                texts::common_config_snippet_invalid_json(&err),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+        CommonSnippetFormat::NotObject => {
+            ctx.app
+                .push_toast(texts::common_config_snippet_not_object(), ToastKind::Error);
+            return Ok(());
+        }
+        CommonSnippetFormat::SerializeFailed(err) => {
+            ctx.app
+                .push_toast(texts::failed_to_serialize_json(&err), ToastKind::Error);
+            return Ok(());
+        }
+    };
+
+    if let Some(editor) = ctx.app.editor.as_mut() {
+        editor.replace_text(formatted);
+    }
+    ctx.app
+        .push_toast(texts::common_config_snippet_formatted(), ToastKind::Success);
+    Ok(())
+}
+
+pub(super) fn extract_common_snippet_into_editor(
+    ctx: &mut RuntimeActionContext<'_>,
+    app_type: AppType,
+) -> Result<(), AppError> {
+    let source = ctx
+        .app
+        .editor
+        .as_ref()
+        .and_then(|editor| match &editor.submit {
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: editor_app_type,
+                source,
+            } if editor_app_type == &app_type => Some(*source),
+            _ => None,
+        });
+    if !matches!(
+        source,
+        Some(crate::cli::tui::app::CommonSnippetViewSource::ProviderForm)
+    ) {
+        return Ok(());
+    }
+
+    let settings_config = {
+        let Some(FormState::ProviderAdd(provider)) = ctx.app.form.as_ref() else {
+            return Ok(());
+        };
+
+        if provider.app_type != app_type {
+            return Ok(());
+        }
+
+        let provider_value = match provider
+            .to_provider_json_value_with_common_config(&ctx.data.config.common_snippet)
+        {
+            Ok(value) => value,
+            Err(err) => {
+                ctx.app.push_toast(err, ToastKind::Error);
+                return Ok(());
+            }
+        };
+        provider_value
+            .get("settingsConfig")
+            .cloned()
+            .unwrap_or_else(|| json!({}))
+    };
+
+    let extracted = ProviderService::extract_common_config_snippet_from_settings(
+        app_type.clone(),
+        &settings_config,
+    )?;
+    if !crate::cli::tui::form::ProviderAddFormState::snippet_has_effective_common_config(
+        &app_type, &extracted,
+    ) {
+        ctx.app.push_toast(
+            texts::common_config_snippet_extract_empty(),
+            ToastKind::Info,
+        );
+        return Ok(());
+    }
+
+    if let Some(editor) = ctx.app.editor.as_mut() {
+        editor.replace_text(extracted);
+    }
+    ctx.app
+        .push_toast(texts::common_config_snippet_extracted(), ToastKind::Success);
+    Ok(())
 }
 
 pub(super) fn submit(
@@ -75,10 +240,18 @@ pub(super) fn submit(
     content: String,
 ) -> Result<(), AppError> {
     match submit {
+        EditorSubmit::PromptCreate {
+            id,
+            name,
+            description,
+        } => submit_prompt_create(ctx, id, name, description, content),
         EditorSubmit::PromptEdit { id } => submit_prompt_edit(ctx, id, content),
         EditorSubmit::ProviderFormApplyJson => submit_provider_form_apply_json(ctx, content),
         EditorSubmit::ProviderFormApplyOpenClawModels => {
             submit_provider_form_apply_openclaw_models(ctx, content)
+        }
+        EditorSubmit::ProviderFormApplyUsageScriptCode => {
+            submit_provider_form_apply_usage_script_code(ctx, content)
         }
         EditorSubmit::ProviderFormApplyCodexAuth => {
             submit_provider_form_apply_codex_auth(ctx, content)
@@ -88,10 +261,11 @@ pub(super) fn submit(
         }
         EditorSubmit::ProviderAdd => submit_provider_add(ctx, content),
         EditorSubmit::ProviderEdit { id } => submit_provider_edit(ctx, id, content),
+        EditorSubmit::PricingEdit { model_id } => submit_pricing_edit(ctx, model_id, content),
         EditorSubmit::McpAdd => submit_mcp_add(ctx, content),
         EditorSubmit::McpEdit { id } => submit_mcp_edit(ctx, id, content),
-        EditorSubmit::ConfigCommonSnippet { app_type } => {
-            submit_config_common_snippet(ctx, app_type, content)
+        EditorSubmit::ConfigCommonSnippet { app_type, source } => {
+            submit_config_common_snippet(ctx, app_type, source, content)
         }
         EditorSubmit::OpenClawWorkspaceFile { filename } => {
             submit_openclaw_workspace_file(ctx, filename, content)
@@ -99,11 +273,59 @@ pub(super) fn submit(
         EditorSubmit::OpenClawDailyMemoryFile { filename } => {
             submit_openclaw_daily_memory_file(ctx, filename, content)
         }
+        EditorSubmit::HermesMemory { kind } => submit_hermes_memory(ctx, kind, content),
         EditorSubmit::ConfigOpenClawEnv => submit_openclaw_env(ctx, content),
         EditorSubmit::ConfigOpenClawTools => submit_openclaw_tools(ctx, content),
         EditorSubmit::ConfigOpenClawAgents => submit_openclaw_agents(ctx, content),
         EditorSubmit::ConfigWebDavSettings => submit_webdav_settings(ctx, content),
     }
+}
+
+fn submit_hermes_memory(
+    ctx: &mut RuntimeActionContext<'_>,
+    kind: crate::hermes_config::MemoryKind,
+    content: String,
+) -> Result<(), AppError> {
+    crate::hermes_config::write_memory(kind, &content)?;
+    ctx.app.editor = None;
+    ctx.app.push_toast(
+        texts::tui_hermes_memory_saved(super::config::hermes_memory_kind_label(kind)),
+        ToastKind::Success,
+    );
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+fn submit_prompt_create(
+    ctx: &mut RuntimeActionContext<'_>,
+    id: String,
+    name: String,
+    description: Option<String>,
+    content: String,
+) -> Result<(), AppError> {
+    let state = load_state()?;
+    let prompt = match PromptService::create_prompt_with_id(
+        &state,
+        ctx.app.app_type.clone(),
+        Some(&id),
+        &name,
+        description.as_deref(),
+        &content,
+    ) {
+        Ok(prompt) => prompt,
+        Err(err) => {
+            ctx.app.push_toast(err.to_string(), ToastKind::Error);
+            return Ok(());
+        }
+    };
+
+    ctx.app.editor = None;
+    ctx.app.form = None;
+    ctx.app
+        .push_toast(texts::tui_toast_prompt_created(), ToastKind::Success);
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    select_prompt_by_id(ctx.app, ctx.data, &prompt.id);
+    Ok(())
 }
 
 fn submit_openclaw_workspace_file(
@@ -390,6 +612,18 @@ fn submit_provider_form_apply_openclaw_models(
     Ok(())
 }
 
+fn submit_provider_form_apply_usage_script_code(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    if let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_mut() {
+        form.usage_query_code = content;
+        form.touch_usage_query();
+    }
+    ctx.app.editor = None;
+    Ok(())
+}
+
 fn submit_provider_form_apply_codex_auth(
     ctx: &mut RuntimeActionContext<'_>,
     content: String,
@@ -521,6 +755,10 @@ fn submit_provider_add(
             return Ok(());
         }
     };
+    let copy_source_id = match ctx.app.form.as_ref() {
+        Some(FormState::ProviderAdd(form)) => form.copy_source_id.clone(),
+        _ => None,
+    };
 
     if let Some(message) = validate_provider_submit(&ctx.app.app_type, &provider, false) {
         ctx.app.push_toast(message, ToastKind::Warning);
@@ -536,6 +774,7 @@ fn submit_provider_add(
             .unwrap_or_default()
     };
     let Some(provider_id) = crate::cli::tui::form::resolve_provider_id_for_submit(
+        &ctx.app.app_type,
         &provider.name,
         &provider.id,
         &existing_ids,
@@ -548,13 +787,25 @@ fn submit_provider_add(
     };
     provider.id = provider_id;
 
-    match ProviderService::add(&state, ctx.app.app_type.clone(), provider) {
+    let result = if let Some(copy_source_id) = copy_source_id {
+        ProviderService::duplicate(
+            &state,
+            ctx.app.app_type.clone(),
+            &copy_source_id,
+            Some(provider),
+        )
+        .map(|_| true)
+    } else {
+        ProviderService::add(&state, ctx.app.app_type.clone(), provider)
+    };
+
+    match result {
         Ok(true) => {
             ctx.app.editor = None;
             ctx.app.form = None;
             ctx.app
                 .push_toast(texts::tui_toast_provider_add_finished(), ToastKind::Success);
-            *ctx.data = UiData::load(&ctx.app.app_type)?;
+            refresh_provider_data_after_write(ctx, &state)?;
         }
         Ok(false) => {
             ctx.app
@@ -604,9 +855,99 @@ fn submit_provider_edit(
         texts::tui_toast_provider_edit_finished(),
         ToastKind::Success,
     );
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    refresh_provider_data_after_write(ctx, &state)?;
     Ok(())
 }
+
+#[derive(serde::Deserialize)]
+struct PricingEditPayload {
+    model_id: String,
+    display_name: String,
+    input_cost_per_million: String,
+    output_cost_per_million: String,
+    cache_read_cost_per_million: String,
+    cache_creation_cost_per_million: String,
+}
+
+fn submit_pricing_edit(
+    ctx: &mut RuntimeActionContext<'_>,
+    model_id: String,
+    content: String,
+) -> Result<(), AppError> {
+    let payload: PricingEditPayload = match serde_json::from_str(&content) {
+        Ok(payload) => payload,
+        Err(e) => {
+            ctx.app.push_toast(
+                texts::tui_toast_invalid_json(&e.to_string()),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+    };
+
+    if payload.model_id.trim() != model_id {
+        ctx.app.push_toast(
+            crate::t!(
+                "Model id cannot be changed from this editor.",
+                "不能在此编辑器中修改模型 ID。"
+            ),
+            ToastKind::Warning,
+        );
+        return Ok(());
+    }
+    let pricing = match ModelPricingUpdate::new(
+        model_id,
+        payload.display_name,
+        payload.input_cost_per_million,
+        payload.output_cost_per_million,
+        payload.cache_read_cost_per_million,
+        payload.cache_creation_cost_per_million,
+    ) {
+        Ok(pricing) => pricing,
+        Err(err) => {
+            ctx.app.push_toast(err.to_string(), ToastKind::Warning);
+            return Ok(());
+        }
+    };
+
+    let state = load_state()?;
+    if let Err(err) = state.db.upsert_model_pricing(&pricing) {
+        ctx.app.push_toast(err.to_string(), ToastKind::Error);
+        return Ok(());
+    }
+    let backfilled = match state
+        .db
+        .backfill_missing_usage_costs_for_model(&pricing.model_id)
+    {
+        Ok(count) => count,
+        Err(err) => {
+            ctx.app.push_toast(err.to_string(), ToastKind::Warning);
+            0
+        }
+    };
+
+    ctx.app.editor = None;
+    if backfilled > 0 {
+        ctx.app.push_toast(
+            format!(
+                "{} {} {}",
+                crate::t!("Model pricing updated.", "模型定价已更新。"),
+                crate::t!("Usage costs backfilled:", "已回填用量费用:"),
+                backfilled,
+            ),
+            ToastKind::Success,
+        );
+    } else {
+        ctx.app.push_toast(
+            crate::t!("Model pricing updated.", "模型定价已更新。"),
+            ToastKind::Success,
+        );
+    }
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.clamp_selections(ctx.data);
+    Ok(())
+}
+
 fn submit_mcp_add(ctx: &mut RuntimeActionContext<'_>, content: String) -> Result<(), AppError> {
     let server: McpServer = match serde_json::from_str(&content) {
         Ok(s) => s,
@@ -679,54 +1020,38 @@ fn submit_mcp_edit(
 fn submit_config_common_snippet(
     ctx: &mut RuntimeActionContext<'_>,
     app_type: AppType,
+    source: CommonSnippetViewSource,
     content: String,
 ) -> Result<(), AppError> {
-    let edited = content.trim().to_string();
-    let (next_snippet, toast) = if edited.is_empty() {
-        (None, texts::common_config_snippet_cleared())
-    } else if matches!(app_type, AppType::Codex) {
-        let doc: toml_edit::DocumentMut = match edited.parse() {
-            Ok(v) => v,
-            Err(e) => {
-                ctx.app.push_toast(
-                    texts::common_config_snippet_invalid_toml(&e.to_string()),
-                    ToastKind::Error,
-                );
-                return Ok(());
-            }
-        };
-        let canonical = doc.to_string().trim().to_string();
-        (Some(canonical), texts::common_config_snippet_saved())
-    } else {
-        let value: Value = match serde_json::from_str(&edited) {
-            Ok(v) => v,
-            Err(e) => {
-                ctx.app.push_toast(
-                    texts::common_config_snippet_invalid_json(&e.to_string()),
-                    ToastKind::Error,
-                );
-                return Ok(());
-            }
-        };
-
-        if !value.is_object() {
+    let (next_snippet, toast) = match canonical_common_snippet(&app_type, &content) {
+        CommonSnippetFormat::Empty => (None, texts::common_config_snippet_cleared()),
+        CommonSnippetFormat::Formatted(value) => {
+            (Some(value), texts::common_config_snippet_saved())
+        }
+        CommonSnippetFormat::InvalidToml(err) => {
+            ctx.app.push_toast(
+                texts::common_config_snippet_invalid_toml(&err),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+        CommonSnippetFormat::InvalidJson(err) => {
+            ctx.app.push_toast(
+                texts::common_config_snippet_invalid_json(&err),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+        CommonSnippetFormat::NotObject => {
             ctx.app
                 .push_toast(texts::common_config_snippet_not_object(), ToastKind::Error);
             return Ok(());
         }
-
-        let pretty = match serde_json::to_string_pretty(&value) {
-            Ok(v) => v,
-            Err(e) => {
-                ctx.app.push_toast(
-                    texts::failed_to_serialize_json(&e.to_string()),
-                    ToastKind::Error,
-                );
-                return Ok(());
-            }
-        };
-
-        (Some(pretty), texts::common_config_snippet_saved())
+        CommonSnippetFormat::SerializeFailed(err) => {
+            ctx.app
+                .push_toast(texts::failed_to_serialize_json(&err), ToastKind::Error);
+            return Ok(());
+        }
     };
 
     let state = load_state()?;
@@ -743,19 +1068,9 @@ fn submit_config_common_snippet(
     ctx.app.editor = None;
     ctx.app.push_toast(toast, ToastKind::Success);
     *ctx.data = UiData::load(&ctx.app.app_type)?;
-
-    let snippet = next_snippet.unwrap_or_else(|| {
-        texts::tui_default_common_snippet_for_app(app_type.as_str()).to_string()
-    });
-    ctx.app.overlay = Overlay::CommonSnippetView {
-        app_type: app_type.clone(),
-        view: TextViewState {
-            title: texts::tui_common_snippet_title(app_type.as_str()),
-            lines: snippet.lines().map(|s| s.to_string()).collect(),
-            scroll: 0,
-            action: None,
-        },
-    };
+    if matches!(source, CommonSnippetViewSource::Global) {
+        ctx.app.overlay = crate::cli::tui::app::Overlay::None;
+    }
     Ok(())
 }
 
@@ -819,6 +1134,7 @@ mod tests {
         _lock: TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
+        old_config_dir: Option<OsString>,
     }
 
     impl EnvGuard {
@@ -826,14 +1142,17 @@ mod tests {
             let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
                 _lock: lock,
                 old_home,
                 old_userprofile,
+                old_config_dir,
             }
         }
     }
@@ -848,6 +1167,10 @@ mod tests {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
             }
+            match &self.old_config_dir {
+                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
         }
@@ -860,8 +1183,10 @@ mod tests {
     impl SettingsGuard {
         fn with_openclaw_dir(path: &Path) -> Self {
             let previous = get_settings();
-            let mut settings = AppSettings::default();
-            settings.openclaw_config_dir = Some(path.display().to_string());
+            let settings = AppSettings {
+                openclaw_config_dir: Some(path.display().to_string()),
+                ..Default::default()
+            };
             update_settings(settings).expect("set openclaw override dir");
             Self { previous }
         }
@@ -905,6 +1230,211 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
+    fn submit_config_common_snippet_returns_to_form_without_view_overlay() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Claude,
+                source: crate::cli::tui::app::CommonSnippetViewSource::ProviderForm,
+            },
+            r#"{"env":{"COMMON_FLAG":"1"}}"#.to_string(),
+        )
+        .expect("common snippet submit should succeed");
+
+        assert!(ctx.app.editor.is_none());
+        assert!(matches!(
+            ctx.app.overlay,
+            crate::cli::tui::app::Overlay::None
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn format_common_snippet_updates_editor_buffer_without_saving() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+        fixture.app.open_editor(
+            "Common Snippet",
+            crate::cli::tui::app::EditorKind::Json,
+            r#"{"env":{"COMMON_FLAG":"1"}}"#,
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Claude,
+                source: crate::cli::tui::app::CommonSnippetViewSource::Global,
+            },
+        );
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        super::format_common_snippet(&mut ctx, AppType::Claude).expect("format common snippet");
+
+        let content = ctx.app.editor.as_ref().expect("editor remains open").text();
+        assert!(content.contains("\n  \"env\": {"));
+        assert!(matches!(
+            ctx.app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Success,
+                ..
+            })
+        ));
+        assert!(
+            ctx.data.config.common_snippet.trim().is_empty(),
+            "formatting should not persist the snippet before Ctrl+S"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn extract_common_snippet_updates_editor_buffer_without_saving() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+        form.name.set("Provider One");
+        form.claude_base_url.set("https://provider.example");
+        form.claude_api_key.set("sk-provider");
+        form.extra = json!({
+            "settingsConfig": {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://provider.example",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-provider",
+                    "COMMON_FLAG": "1"
+                }
+            }
+        });
+        fixture.app.form = Some(FormState::ProviderAdd(form));
+        fixture.app.open_editor(
+            "Common Snippet",
+            crate::cli::tui::app::EditorKind::Json,
+            "{}",
+            EditorSubmit::ConfigCommonSnippet {
+                app_type: AppType::Claude,
+                source: crate::cli::tui::app::CommonSnippetViewSource::ProviderForm,
+            },
+        );
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        super::extract_common_snippet_into_editor(&mut ctx, AppType::Claude)
+            .expect("extract common snippet into editor");
+
+        let content = ctx.app.editor.as_ref().expect("editor remains open").text();
+        assert!(content.contains("COMMON_FLAG"));
+        assert!(!content.contains("ANTHROPIC_BASE_URL"));
+        assert!(!content.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(
+            ctx.data.config.common_snippet.trim().is_empty(),
+            "extracting into the editor should not persist before Ctrl+S"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_prompt_create_persists_prompt_and_refreshes_selection() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        submit_prompt_create(
+            &mut ctx,
+            "prompt-one".to_string(),
+            "Prompt One".to_string(),
+            Some("Demo description".to_string()),
+            "hello".to_string(),
+        )
+        .expect("create prompt succeeds");
+
+        let refreshed = UiData::load(&AppType::Claude).expect("reload ui data");
+        assert!(
+            refreshed
+                .prompts
+                .rows
+                .iter()
+                .any(|row| row.id == "prompt-one"
+                    && row.prompt.name == "Prompt One"
+                    && row.prompt.description.as_deref() == Some("Demo description")),
+            "runtime create should persist the prompt"
+        );
+        assert!(matches!(
+            ctx.app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Success,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
     fn submit_provider_add_generates_id_when_name_is_valid() {
         let mut fixture = runtime_ctx(AppType::Claude);
 
@@ -918,11 +1448,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_add(
@@ -958,11 +1490,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_add(
@@ -1001,11 +1535,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_add(
@@ -1064,11 +1600,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_add(
@@ -1099,6 +1637,153 @@ mod tests {
         assert!(
             refreshed_row.provider.created_at.is_some(),
             "adding an OpenClaw provider through the add flow should persist a user-touched marker"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_provider_copy_after_settings_json_apply_keeps_duplicate_semantics() {
+        let mut fixture = runtime_ctx(AppType::OpenCode);
+
+        crate::opencode_config::set_provider(
+            "source",
+            json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "baseURL": "https://live.example/v1",
+                    "apiKey": "sk-live"
+                },
+                "models": {
+                    "main": { "name": "Main" }
+                }
+            }),
+        )
+        .expect("seed live opencode provider");
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenCode)
+                .expect("opencode manager");
+            manager.providers.insert(
+                "source".to_string(),
+                Provider::with_id(
+                    "source".to_string(),
+                    "Source Provider".to_string(),
+                    json!({
+                        "npm": "@ai-sdk/openai-compatible",
+                        "options": {
+                            "baseURL": "https://source.example/v1",
+                            "apiKey": "sk-source"
+                        },
+                        "models": {
+                            "main": { "name": "Main" }
+                        }
+                    }),
+                    None,
+                ),
+            );
+        }
+        state.save().expect("persist source provider");
+        fixture.data = UiData::load(&AppType::OpenCode).expect("reload opencode ui data");
+
+        let source_provider = fixture
+            .data
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "source")
+            .expect("source provider row should exist")
+            .provider
+            .clone();
+        let copy_form =
+            crate::cli::tui::form::ProviderAddFormState::copy_from_provider_with_common_snippet(
+                AppType::OpenCode,
+                &source_provider,
+                "",
+                &fixture.data.existing_provider_ids(),
+            );
+        fixture.app.form = Some(FormState::ProviderAdd(copy_form));
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        submit_provider_form_apply_json(
+            &mut ctx,
+            r#"{
+  "npm": "@ai-sdk/openai-compatible",
+  "options": {
+    "baseURL": "https://edited.example/v1",
+    "apiKey": "sk-source"
+  },
+  "models": {
+    "main": { "name": "Main" }
+  }
+}"#
+            .to_string(),
+        )
+        .expect("settings JSON apply should succeed");
+
+        let copy_payload = {
+            let FormState::ProviderAdd(form) = ctx
+                .app
+                .form
+                .as_ref()
+                .expect("provider copy form should remain open")
+            else {
+                panic!("expected provider copy form");
+            };
+            assert_eq!(form.copy_source_id.as_deref(), Some("source"));
+            serde_json::to_string_pretty(&form.to_provider_json_value())
+                .expect("serialize copied provider")
+        };
+
+        submit_provider_add(&mut ctx, copy_payload).expect("copy submit should succeed");
+
+        let copied = ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "source-copy")
+            .expect("copied provider should be saved with source copy id");
+        assert_eq!(
+            copied.provider.settings_config["options"]["baseURL"],
+            "https://edited.example/v1"
+        );
+        assert_eq!(
+            copied
+                .provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.live_config_managed),
+            Some(false),
+            "copy submit must keep additive duplicate addToLive=false semantics"
+        );
+
+        let live_providers =
+            crate::opencode_config::get_providers().expect("read opencode live providers");
+        assert!(live_providers.contains_key("source"));
+        assert!(
+            !live_providers.contains_key("source-copy"),
+            "copy submit after editing settings JSON must not write the duplicate into live config"
         );
     }
 
@@ -1150,11 +1835,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_edit(
@@ -1231,11 +1918,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_edit(
@@ -1328,11 +2017,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_edit(
@@ -1506,11 +2197,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_edit(
@@ -1634,11 +2327,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, submit, content)?;
@@ -1681,11 +2376,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, EditorSubmit::ConfigOpenClawTools, content)?;
@@ -1726,11 +2423,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, EditorSubmit::ConfigOpenClawTools, content)?;
@@ -1772,11 +2471,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, EditorSubmit::ConfigOpenClawAgents, content)?;
@@ -1817,11 +2518,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, EditorSubmit::ConfigOpenClawAgents, content)?;
@@ -2178,11 +2881,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         super::submit(&mut ctx, EditorSubmit::ConfigOpenClawAgents, content)
@@ -2231,11 +2936,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_form_apply_json(
@@ -2323,11 +3030,13 @@ mod tests {
             proxy_req_tx: None,
             proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
+            session_req_tx: None,
             webdav_req_tx: None,
             webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
             update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
         };
 
         submit_provider_form_apply_json(

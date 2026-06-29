@@ -185,6 +185,8 @@ impl Database {
         migrate_app_prompts(&config.prompts.claude.prompts, "claude")?;
         migrate_app_prompts(&config.prompts.codex.prompts, "codex")?;
         migrate_app_prompts(&config.prompts.gemini.prompts, "gemini")?;
+        migrate_app_prompts(&config.prompts.opencode.prompts, "opencode")?;
+        migrate_app_prompts(&config.prompts.openclaw.prompts, "openclaw")?;
 
         Ok(())
     }

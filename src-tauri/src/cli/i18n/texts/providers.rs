@@ -1,80 +1,4 @@
 use super::is_chinese;
-pub fn tui_codex_provider_switch_first_use_message(paths: &str) -> String {
-    if is_chinese() {
-        format!(
-            "⚠ 检测到已有 Codex 配置文件 ({paths})。\n切换供应商将覆盖此文件。\n建议先将当前配置导入为供应商。"
-        )
-    } else {
-        format!(
-            "WARNING: An existing Codex config file was found at {paths}.\nSwitching providers will overwrite this file.\nImport the current config as a provider first if you want to keep it."
-        )
-    }
-}
-
-pub fn tui_provider_switch_first_use_import_button() -> &'static str {
-    if is_chinese() {
-        "导入为供应商"
-    } else {
-        "Import As Provider"
-    }
-}
-
-pub fn tui_provider_switch_first_use_continue_button() -> &'static str {
-    if is_chinese() {
-        "继续切换"
-    } else {
-        "Continue Switch"
-    }
-}
-
-pub fn tui_provider_switch_first_use_cancel_button() -> &'static str {
-    if is_chinese() {
-        "取消"
-    } else {
-        "Cancel"
-    }
-}
-
-pub fn tui_provider_switch_shared_config_tip_title() -> &'static str {
-    if is_chinese() {
-        "💡 通用配置提示"
-    } else {
-        "Shared Config Tip"
-    }
-}
-
-pub fn tui_provider_switch_shared_config_tip_message() -> String {
-    if is_chinese() {
-        "如果有些配置（如 permissions、plugins）需要所有供应商共享，\n可在“通用配置”中设置，切换时会自动合并。".to_string()
-    } else {
-        "If some settings, such as permissions or plugins, should be shared by every provider,\nset them in Common Config and they will be merged automatically when switching.".to_string()
-    }
-}
-
-pub fn tui_codex_provider_switch_shared_config_tip_message() -> String {
-    if is_chinese() {
-        "如果有些 Codex 配置需要所有供应商共享，\n可在“通用配置”中设置，切换时会自动合并。"
-            .to_string()
-    } else {
-        "If some Codex settings should be shared by every provider,\nset them in Common Config and they will be merged automatically when switching.".to_string()
-    }
-}
-
-pub fn tui_provider_imported_live_config_name() -> &'static str {
-    if is_chinese() {
-        "已导入的当前配置"
-    } else {
-        "Imported Current Config"
-    }
-}
-
-pub fn tui_codex_imported_live_config_name() -> &'static str {
-    if is_chinese() {
-        "已导入的当前 Codex 配置"
-    } else {
-        "Imported Current Codex Config"
-    }
-}
 
 pub fn tui_claude_api_format_popup_title() -> &'static str {
     if is_chinese() {
@@ -140,6 +64,22 @@ pub fn tui_label_command() -> &'static str {
     }
 }
 
+pub fn tui_label_mcp_type() -> &'static str {
+    if is_chinese() {
+        "连接类型"
+    } else {
+        "Transport"
+    }
+}
+
+pub fn tui_label_url() -> &'static str {
+    if is_chinese() {
+        "URL"
+    } else {
+        "URL"
+    }
+}
+
 pub fn tui_label_args() -> &'static str {
     if is_chinese() {
         "参数"
@@ -171,6 +111,22 @@ pub fn tui_mcp_env_editor_hint() -> &'static str {
         "按 Enter 管理环境变量"
     } else {
         "Press Enter to manage env entries"
+    }
+}
+
+pub fn tui_mcp_type_editor_hint() -> &'static str {
+    if is_chinese() {
+        "按 Enter 选择连接类型"
+    } else {
+        "Press Enter to choose transport"
+    }
+}
+
+pub fn tui_mcp_type_title() -> &'static str {
+    if is_chinese() {
+        "选择 MCP 连接类型"
+    } else {
+        "Select MCP Transport"
     }
 }
 
@@ -214,6 +170,22 @@ pub fn tui_label_app_gemini() -> &'static str {
     }
 }
 
+pub fn tui_label_app_opencode() -> &'static str {
+    if is_chinese() {
+        "应用: OpenCode"
+    } else {
+        "App: OpenCode"
+    }
+}
+
+pub fn tui_label_app_hermes() -> &'static str {
+    if is_chinese() {
+        "应用: Hermes"
+    } else {
+        "App: Hermes"
+    }
+}
+
 pub fn tui_form_templates_title() -> &'static str {
     if is_chinese() {
         "模板"
@@ -243,6 +215,346 @@ pub fn tui_form_fields_title() -> &'static str {
         "字段"
     } else {
         "Fields"
+    }
+}
+
+pub fn tui_usage_query_title(provider: &str) -> String {
+    if provider.trim().is_empty() {
+        tui_usage_query_configure_title().to_string()
+    } else {
+        format!("{} - {provider}", tui_usage_query_configure_title())
+    }
+}
+
+pub fn tui_usage_query_configure_title() -> &'static str {
+    if is_chinese() {
+        "配置用量查询"
+    } else {
+        "Configure Usage Query"
+    }
+}
+
+pub fn tui_usage_query_notice_title() -> &'static str {
+    tui_usage_query_configure_title()
+}
+
+pub fn tui_usage_query_notice_message() -> &'static str {
+    if is_chinese() {
+        "用量查询需要配置专用的查询脚本或 API 参数，请确保您已从供应商处获取相关信息。\n\n如不确定如何配置，请先查阅供应商文档。"
+    } else {
+        "Usage query requires a custom script or API parameters. Please make sure you have obtained the necessary information from your provider.\n\nIf unsure how to configure, please consult your provider's documentation first."
+    }
+}
+
+pub fn tui_usage_query_enable() -> &'static str {
+    if is_chinese() {
+        "启用用量查询"
+    } else {
+        "Enable usage query"
+    }
+}
+
+pub fn tui_usage_query_template() -> &'static str {
+    if is_chinese() {
+        "预设模板"
+    } else {
+        "Preset template"
+    }
+}
+
+pub fn tui_usage_query_access_token() -> &'static str {
+    if is_chinese() {
+        "访问令牌（在个人安全设置里获取）"
+    } else {
+        "Access Token"
+    }
+}
+
+pub fn tui_usage_query_user_id() -> &'static str {
+    if is_chinese() {
+        "用户 ID"
+    } else {
+        "User ID"
+    }
+}
+
+pub fn tui_usage_query_timeout_seconds() -> &'static str {
+    if is_chinese() {
+        "超时时间（秒）"
+    } else {
+        "Timeout (seconds)"
+    }
+}
+
+pub fn tui_usage_query_auto_interval() -> &'static str {
+    if is_chinese() {
+        "自动查询间隔（分钟，0 表示不自动查询）"
+    } else {
+        "Auto query interval (minutes, 0 to disable)"
+    }
+}
+
+pub fn tui_usage_query_script() -> &'static str {
+    if is_chinese() {
+        "提取器代码"
+    } else {
+        "Extractor Code"
+    }
+}
+
+pub fn tui_usage_query_script_preview_title() -> &'static str {
+    if is_chinese() {
+        "提取器代码 | 返回对象需包含剩余额度等字段"
+    } else {
+        "Extractor code | Return object should include remaining quota fields"
+    }
+}
+
+pub fn tui_usage_query_script_help_title() -> &'static str {
+    if is_chinese() {
+        "脚本编写说明："
+    } else {
+        "Script writing instructions:"
+    }
+}
+
+pub fn tui_usage_query_copilot_auto_auth() -> &'static str {
+    if is_chinese() {
+        "自动使用 OAuth 认证，无需手动配置凭证"
+    } else {
+        "Auto OAuth authentication, no manual credentials needed"
+    }
+}
+
+pub fn tui_usage_query_token_plan_hint() -> &'static str {
+    if is_chinese() {
+        "自动使用供应商的 API Key 和 Base URL 查询 Token Plan 额度"
+    } else {
+        "Automatically uses the provider's API Key and Base URL to query Token Plan quota"
+    }
+}
+
+pub fn tui_usage_query_balance_hint() -> &'static str {
+    if is_chinese() {
+        "自动使用供应商的 API Key 查询账户余额"
+    } else {
+        "Automatically uses the provider's API Key to query account balance"
+    }
+}
+
+pub fn tui_usage_query_script_empty() -> &'static str {
+    if is_chinese() {
+        "脚本配置不能为空"
+    } else {
+        "Script configuration cannot be empty"
+    }
+}
+
+pub fn tui_usage_query_must_have_return() -> &'static str {
+    if is_chinese() {
+        "脚本必须包含 return 语句"
+    } else {
+        "Script must contain return statement"
+    }
+}
+
+pub fn tui_usage_query_coding_plan_provider() -> &'static str {
+    if is_chinese() {
+        "Coding Plan 供应商"
+    } else {
+        "Coding Plan Provider"
+    }
+}
+
+pub fn tui_usage_query_info() -> &'static str {
+    if is_chinese() {
+        "说明"
+    } else {
+        "Info"
+    }
+}
+
+pub fn tui_usage_query_custom_hint() -> &'static str {
+    if is_chinese() {
+        "支持变量: {{apiKey}}, {{baseUrl}} | extractor 函数接收 API 响应的 JSON 对象"
+    } else {
+        "Supported variables: {{apiKey}}, {{baseUrl}} | extractor function receives API response JSON object"
+    }
+}
+
+pub fn tui_usage_query_credentials_config() -> &'static str {
+    if is_chinese() {
+        "凭证配置"
+    } else {
+        "Credentials"
+    }
+}
+
+pub fn tui_usage_query_credentials_hint() -> &'static str {
+    if is_chinese() {
+        "留空则自动使用供应商配置"
+    } else {
+        "Leave empty to use provider config"
+    }
+}
+
+pub fn tui_usage_query_optional() -> &'static str {
+    if is_chinese() {
+        "可选"
+    } else {
+        "optional"
+    }
+}
+
+pub fn tui_usage_query_base_url() -> &'static str {
+    if is_chinese() {
+        "请求地址"
+    } else {
+        "Base URL"
+    }
+}
+
+pub fn tui_usage_query_api_key_placeholder() -> &'static str {
+    if is_chinese() {
+        "留空则使用供应商的 API Key"
+    } else {
+        "Leave empty to use provider's API Key"
+    }
+}
+
+pub fn tui_usage_query_base_url_placeholder() -> &'static str {
+    if is_chinese() {
+        "留空则使用供应商的请求地址"
+    } else {
+        "Leave empty to use provider's base URL"
+    }
+}
+
+pub fn tui_usage_query_access_token_placeholder() -> &'static str {
+    if is_chinese() {
+        "在'安全设置'里生成"
+    } else {
+        "Generate in 'Security Settings'"
+    }
+}
+
+pub fn tui_usage_query_user_id_placeholder() -> &'static str {
+    if is_chinese() {
+        "例如：114514"
+    } else {
+        "e.g., 114514"
+    }
+}
+
+pub fn tui_usage_query_config_format() -> &'static str {
+    if is_chinese() {
+        "配置格式："
+    } else {
+        "Configuration format:"
+    }
+}
+
+pub fn tui_usage_query_extractor_format() -> &'static str {
+    if is_chinese() {
+        "extractor 返回格式（所有字段均为可选）："
+    } else {
+        "Extractor return format (all fields optional):"
+    }
+}
+
+pub fn tui_usage_query_tips() -> &'static str {
+    if is_chinese() {
+        "💡 提示："
+    } else {
+        "💡 Tips:"
+    }
+}
+
+pub fn tui_usage_query_field_is_valid() -> &'static str {
+    if is_chinese() {
+        "• isValid: 布尔值，套餐是否有效"
+    } else {
+        "• isValid: Boolean, whether plan is valid"
+    }
+}
+
+pub fn tui_usage_query_field_invalid_message() -> &'static str {
+    if is_chinese() {
+        "• invalidMessage: 字符串，失效原因说明（当 isValid 为 false 时显示）"
+    } else {
+        "• invalidMessage: String, reason for expiration (shown when isValid is false)"
+    }
+}
+
+pub fn tui_usage_query_field_remaining() -> &'static str {
+    if is_chinese() {
+        "• remaining: 数字，剩余额度"
+    } else {
+        "• remaining: Number, remaining quota"
+    }
+}
+
+pub fn tui_usage_query_field_unit() -> &'static str {
+    if is_chinese() {
+        "• unit: 字符串，单位（如 \"USD\"）"
+    } else {
+        "• unit: String, unit (e.g., \"USD\")"
+    }
+}
+
+pub fn tui_usage_query_field_plan_name() -> &'static str {
+    if is_chinese() {
+        "• planName: 字符串，套餐名称"
+    } else {
+        "• planName: String, plan name"
+    }
+}
+
+pub fn tui_usage_query_field_total() -> &'static str {
+    if is_chinese() {
+        "• total: 数字，总额度"
+    } else {
+        "• total: Number, total quota"
+    }
+}
+
+pub fn tui_usage_query_field_used() -> &'static str {
+    if is_chinese() {
+        "• used: 数字，已用额度"
+    } else {
+        "• used: Number, used quota"
+    }
+}
+
+pub fn tui_usage_query_field_extra() -> &'static str {
+    if is_chinese() {
+        "• extra: 字符串，扩展字段，可自由补充需要展示的文本"
+    } else {
+        "• extra: String, custom display text"
+    }
+}
+
+pub fn tui_usage_query_tip1() -> &'static str {
+    if is_chinese() {
+        "• 变量 {{apiKey}} 和 {{baseUrl}} 会自动替换"
+    } else {
+        "• Variables {{apiKey}} and {{baseUrl}} are automatically replaced"
+    }
+}
+
+pub fn tui_usage_query_tip2() -> &'static str {
+    if is_chinese() {
+        "• extractor 函数在沙箱环境中执行，支持 ES2020+ 语法"
+    } else {
+        "• Extractor function runs in sandbox environment, supports ES2020+ syntax"
+    }
+}
+
+pub fn tui_usage_query_tip3() -> &'static str {
+    if is_chinese() {
+        "• 整个配置必须用 () 包裹，形成对象字面量表达式"
+    } else {
+        "• Entire config must be wrapped in () to form object literal expression"
     }
 }
 
@@ -450,6 +762,38 @@ pub fn tui_provider_add_title() -> &'static str {
     }
 }
 
+pub fn tui_provider_empty_title() -> &'static str {
+    if is_chinese() {
+        "还没有添加任何供应商"
+    } else {
+        "No providers have been added yet"
+    }
+}
+
+pub fn tui_provider_empty_subtitle() -> &'static str {
+    if is_chinese() {
+        "如果你已有配置，请点击\"导入当前配置\"，所有数据将安全保存在 default 供应商中"
+    } else {
+        "If you already have a config, use \"Import Current Config\". Everything will be safely stored in the default provider."
+    }
+}
+
+pub fn tui_key_import_current_config() -> &'static str {
+    if is_chinese() {
+        "导入当前配置"
+    } else {
+        "import current config"
+    }
+}
+
+pub fn tui_key_add_provider() -> &'static str {
+    if is_chinese() {
+        "添加供应商"
+    } else {
+        "add provider"
+    }
+}
+
 pub fn tui_codex_official_no_api_key_tip() -> &'static str {
     if is_chinese() {
         "官方无需填写 API Key，直接保存即可。"
@@ -476,9 +820,9 @@ pub fn tui_provider_edit_title(name: &str) -> String {
 
 pub fn tui_provider_detail_keys() -> &'static str {
     if is_chinese() {
-        "按键：s=切换  e=编辑  t=测速  c=健康检查"
+        "按键：Space=切换  e=编辑  t=测试"
     } else {
-        "Keys: s=switch  e=edit  t=speedtest  c=stream check"
+        "Keys: Space=switch  e=edit  t=test"
     }
 }
 
@@ -503,6 +847,14 @@ pub fn tui_key_speedtest() -> &'static str {
         "测速"
     } else {
         "speedtest"
+    }
+}
+
+pub fn tui_key_test() -> &'static str {
+    if is_chinese() {
+        "测试"
+    } else {
+        "test"
     }
 }
 
@@ -594,6 +946,14 @@ pub fn tui_key_import() -> &'static str {
     }
 }
 
+pub fn tui_key_failover() -> &'static str {
+    if is_chinese() {
+        "管理故障转移"
+    } else {
+        "manage failover"
+    }
+}
+
 pub fn tui_key_install() -> &'static str {
     if is_chinese() {
         "安装"
@@ -666,6 +1026,14 @@ pub fn tui_key_refresh() -> &'static str {
     }
 }
 
+pub fn tui_key_rename() -> &'static str {
+    if is_chinese() {
+        "重命名"
+    } else {
+        "rename"
+    }
+}
+
 pub fn tui_key_start_proxy() -> &'static str {
     if is_chinese() {
         "启动代理"
@@ -703,6 +1071,14 @@ pub fn tui_key_focus() -> &'static str {
         "切换窗口"
     } else {
         "next pane"
+    }
+}
+
+pub fn tui_key_pane() -> &'static str {
+    if is_chinese() {
+        "切换面板"
+    } else {
+        "switch panel"
     }
 }
 
@@ -751,6 +1127,22 @@ pub fn tui_key_apply() -> &'static str {
         "应用"
     } else {
         "apply"
+    }
+}
+
+pub fn tui_key_extract() -> &'static str {
+    if is_chinese() {
+        "提取"
+    } else {
+        "extract"
+    }
+}
+
+pub fn tui_key_format() -> &'static str {
+    if is_chinese() {
+        "格式化"
+    } else {
+        "format"
     }
 }
 
@@ -924,9 +1316,9 @@ pub fn tui_key_deactivate_active() -> &'static str {
 
 pub fn tui_provider_list_keys() -> &'static str {
     if is_chinese() {
-        "按键：a=新增  e=编辑  Enter=详情  s=切换  /=搜索"
+        "按键：a=新增  e=编辑  Enter=详情  Space=切换  /=搜索"
     } else {
-        "Keys: a=add  e=edit  Enter=details  s=switch  /=filter"
+        "Keys: a=add  e=edit  Enter=details  Space=switch  /=filter"
     }
 }
 

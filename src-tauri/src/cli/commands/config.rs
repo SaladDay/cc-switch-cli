@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::app_config::AppType;
 use crate::cli::commands::config_common;
+use crate::cli::commands::config_openclaw;
 use crate::cli::commands::config_webdav;
 use crate::cli::i18n::texts;
 use crate::cli::ui::{error, highlight, info, success, to_json};
@@ -52,6 +53,10 @@ pub enum ConfigCommand {
     #[command(subcommand)]
     Common(config_common::CommonConfigCommand),
 
+    /// Manage OpenClaw config, workspace, and daily memory
+    #[command(name = "openclaw", subcommand)]
+    OpenClaw(config_openclaw::OpenClawCommand),
+
     /// Manage WebDAV sync settings and operations
     #[command(name = "webdav", subcommand)]
     WebDav(config_webdav::WebDavCommand),
@@ -70,6 +75,7 @@ pub fn execute(cmd: ConfigCommand, app: Option<AppType>) -> Result<(), AppError>
         ConfigCommand::Validate => validate_config(),
         ConfigCommand::Reset => reset_config(),
         ConfigCommand::Common(cmd) => config_common::execute(cmd, app.unwrap_or(AppType::Claude)),
+        ConfigCommand::OpenClaw(cmd) => config_openclaw::execute(cmd),
         ConfigCommand::WebDav(cmd) => config_webdav::execute(cmd),
     }
 }
@@ -130,7 +136,7 @@ fn show_path() -> Result<(), AppError> {
     Ok(())
 }
 
-fn export_config(file: &PathBuf) -> Result<(), AppError> {
+fn export_config(file: &Path) -> Result<(), AppError> {
     println!(
         "{}",
         info(&format!("Exporting configuration to {}...", file.display()))
@@ -168,7 +174,7 @@ fn export_config(file: &PathBuf) -> Result<(), AppError> {
     Ok(())
 }
 
-fn import_config(file: &PathBuf) -> Result<(), AppError> {
+fn import_config(file: &Path) -> Result<(), AppError> {
     println!(
         "{}",
         info(&format!(

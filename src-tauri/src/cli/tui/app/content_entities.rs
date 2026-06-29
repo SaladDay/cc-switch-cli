@@ -1,6 +1,196 @@
 use super::*;
 
 impl App {
+    pub(crate) fn move_sessions_focus_left(&mut self) -> Action {
+        if self.focus == Focus::Nav {
+            return Action::None;
+        }
+
+        match self.sessions.pane {
+            SessionsPane::List => {
+                self.focus = Focus::Nav;
+            }
+            SessionsPane::Detail => {
+                self.sessions.pane = SessionsPane::List;
+            }
+        }
+        Action::None
+    }
+
+    pub(crate) fn move_sessions_focus_right(&mut self, data: &UiData) -> Action {
+        if self.focus == Focus::Nav {
+            self.focus = Focus::Content;
+            self.sessions.pane = SessionsPane::List;
+            return Action::None;
+        }
+
+        match self.sessions.pane {
+            SessionsPane::List => self.open_selected_session_detail(data),
+            SessionsPane::Detail => Action::None,
+        }
+    }
+
+    fn open_selected_session_detail(&mut self, data: &UiData) -> Action {
+        let visible = visible_sessions_for_state(
+            &self.filter,
+            &self.app_type,
+            &self.sessions.rows,
+            self.sessions.detail_key.as_deref(),
+            self.sessions.messages_loaded,
+            &self.sessions.messages,
+        );
+        let Some(session) = visible.get(self.sessions.selected_idx) else {
+            return Action::None;
+        };
+        let key = session_key(session);
+        let provider_id = session.provider_id.clone();
+        let source_path = session.source_path.clone();
+        self.sessions.open_detail(key.clone());
+        self.sessions.pane = SessionsPane::Detail;
+        self.clamp_selections(data);
+        match source_path {
+            Some(source_path) => Action::SessionMessagesLoad {
+                key,
+                provider_id,
+                source_path,
+            },
+            None => {
+                self.push_toast(
+                    texts::tui_sessions_toast_source_missing(),
+                    ToastKind::Warning,
+                );
+                Action::None
+            }
+        }
+    }
+
+    fn is_provider_read_only(&self, row: &super::data::ProviderRow) -> bool {
+        super::data::provider_is_read_only(&self.app_type, row)
+    }
+
+    fn can_delete_provider(&self, row: &super::data::ProviderRow) -> bool {
+        !self.is_provider_read_only(row) && (self.app_type.is_additive_mode() || !row.is_current)
+    }
+
+    fn show_provider_read_only_toast(&mut self) {
+        self.push_toast(
+            texts::tui_toast_provider_managed_by_hermes(),
+            ToastKind::Info,
+        );
+    }
+
+    fn open_provider_delete_confirm(&mut self, row: &super::data::ProviderRow) {
+        self.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_confirm_delete_provider_title().to_string(),
+            message: texts::tui_confirm_delete_provider_message(
+                &super::data::provider_display_name(&self.app_type, row),
+                &row.id,
+            ),
+            action: ConfirmAction::ProviderDelete { id: row.id.clone() },
+        });
+    }
+
+    fn open_provider_remove_confirm(&mut self, row: &super::data::ProviderRow) {
+        self.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_confirm_remove_provider_title().to_string(),
+            message: texts::tui_confirm_remove_provider_message(
+                &super::data::provider_display_name(&self.app_type, row),
+            ),
+            action: ConfirmAction::ProviderRemoveFromConfig { id: row.id.clone() },
+        });
+    }
+
+    fn open_provider_copy_confirm(&mut self, row: &super::data::ProviderRow) {
+        self.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_confirm_copy_provider_title().to_string(),
+            message: texts::tui_confirm_copy_provider_message(
+                &super::data::provider_display_name(&self.app_type, row),
+                &row.id,
+            ),
+            action: ConfirmAction::ProviderCopy { id: row.id.clone() },
+        });
+    }
+
+    fn provider_switch_action(&mut self, row: &super::data::ProviderRow) -> Action {
+        if self.app_type.is_additive_mode() {
+            if row.is_in_config {
+                if matches!(self.app_type, AppType::OpenClaw | AppType::Hermes)
+                    && row.is_default_model
+                {
+                    self.push_toast(
+                        texts::tui_toast_provider_cannot_remove_default_model(),
+                        ToastKind::Warning,
+                    );
+                    return Action::None;
+                }
+                self.open_provider_remove_confirm(row);
+                return Action::None;
+            }
+
+            return Action::ProviderSwitch { id: row.id.clone() };
+        }
+        if row.is_current {
+            self.push_toast(texts::tui_toast_provider_already_in_use(), ToastKind::Info);
+            return Action::None;
+        }
+        Action::ProviderSwitch { id: row.id.clone() }
+    }
+
+    pub(crate) fn provider_speedtest_action(&mut self, row: &super::data::ProviderRow) -> Action {
+        let Some(url) = row.api_url.clone() else {
+            self.push_toast(texts::tui_toast_provider_no_api_url(), ToastKind::Warning);
+            return Action::None;
+        };
+        self.overlay = Overlay::SpeedtestRunning { url: url.clone() };
+        Action::ProviderSpeedtest { url }
+    }
+
+    pub(crate) fn provider_stream_check_action(
+        &mut self,
+        row: &super::data::ProviderRow,
+    ) -> Action {
+        if !supports_provider_stream_check(&self.app_type) {
+            return Action::None;
+        }
+        self.overlay = Overlay::StreamCheckRunning {
+            provider_id: row.id.clone(),
+            provider_name: super::data::provider_display_name(&self.app_type, row),
+        };
+        Action::ProviderStreamCheck { id: row.id.clone() }
+    }
+
+    pub(crate) fn open_provider_test_menu(&mut self, row: &super::data::ProviderRow) {
+        self.overlay = Overlay::ProviderTestMenu {
+            provider_id: row.id.clone(),
+            selected: 0,
+        };
+    }
+
+    fn provider_set_default_action(&mut self, row: &super::data::ProviderRow) -> Action {
+        if !matches!(self.app_type, AppType::OpenClaw | AppType::Hermes) {
+            return Action::None;
+        }
+        if !row.is_in_config {
+            self.push_toast(
+                texts::tui_toast_provider_default_requires_live_config(),
+                ToastKind::Warning,
+            );
+            return Action::None;
+        }
+        let model_id = row.primary_model_id.clone().unwrap_or_default();
+        if matches!(self.app_type, AppType::OpenClaw) && model_id.is_empty() {
+            self.push_toast(
+                texts::tui_toast_provider_default_model_missing(),
+                ToastKind::Warning,
+            );
+            return Action::None;
+        }
+        Action::ProviderSetDefaultModel {
+            provider_id: row.id.clone(),
+            model_id,
+        }
+    }
+
     pub(crate) fn on_providers_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         let visible = visible_providers(&self.app_type, &self.filter, data);
         match key.code {
@@ -15,110 +205,72 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => {
+                if data.providers.rows.is_empty() {
+                    return Action::ProviderImportLiveConfig;
+                }
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
                 self.push_route_and_switch(Route::ProviderDetail { id: row.id.clone() })
             }
             KeyCode::Char('a') => {
-                self.open_provider_add_form();
+                self.open_provider_add_form(data);
+                Action::None
+            }
+            KeyCode::Char('c') => {
+                let Some(row) = visible.get(self.provider_idx) else {
+                    return Action::None;
+                };
+                self.open_provider_copy_confirm(row);
                 Action::None
             }
             KeyCode::Char('e') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                self.open_provider_edit_form(row);
+                if self.is_provider_read_only(row) {
+                    self.show_provider_read_only_toast();
+                    return Action::None;
+                }
+                self.open_provider_edit_form(row, data);
                 Action::None
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char('s') | KeyCode::Char(' ') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                if matches!(self.app_type, AppType::OpenCode) {
-                    if row.is_in_config {
-                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
-                    }
-
-                    return Action::ProviderSwitch { id: row.id.clone() };
-                }
-                if matches!(self.app_type, AppType::OpenClaw) {
-                    if row.is_in_config {
-                        if row.is_default_model {
-                            self.push_toast(
-                                texts::tui_toast_provider_cannot_remove_default_model(),
-                                ToastKind::Warning,
-                            );
-                            return Action::None;
-                        }
-                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
-                    }
-
-                    return Action::ProviderSwitch { id: row.id.clone() };
-                }
-                if row.is_current {
-                    self.push_toast(texts::tui_toast_provider_already_in_use(), ToastKind::Info);
-                    return Action::None;
-                }
-                Action::ProviderSwitch { id: row.id.clone() }
+                self.provider_switch_action(row)
             }
             KeyCode::Char('x') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                if !matches!(self.app_type, AppType::OpenClaw) {
-                    return Action::None;
-                }
-                if !row.is_in_config {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_requires_live_config(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                }
-                let Some(model_id) = row.primary_model_id.clone() else {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_model_missing(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                };
-                Action::ProviderSetDefaultModel {
-                    provider_id: row.id.clone(),
-                    model_id,
-                }
+                self.provider_set_default_action(row)
             }
             KeyCode::Char('d') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                if row.is_current {
+                if self.is_provider_read_only(row) {
+                    self.show_provider_read_only_toast();
+                    return Action::None;
+                }
+                if !self.can_delete_provider(row) {
                     self.push_toast(
                         texts::tui_toast_provider_cannot_delete_current(),
                         ToastKind::Warning,
                     );
                     return Action::None;
                 }
-                self.overlay = Overlay::Confirm(ConfirmOverlay {
-                    title: texts::tui_confirm_delete_provider_title().to_string(),
-                    message: texts::tui_confirm_delete_provider_message(
-                        &super::data::provider_display_name(&self.app_type, row),
-                        &row.id,
-                    ),
-                    action: ConfirmAction::ProviderDelete { id: row.id.clone() },
-                });
+                self.open_provider_delete_confirm(row);
                 Action::None
             }
             KeyCode::Char('t') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
-                let Some(url) = row.api_url.clone() else {
-                    self.push_toast(texts::tui_toast_provider_no_api_url(), ToastKind::Warning);
-                    return Action::None;
-                };
-                self.overlay = Overlay::SpeedtestRunning { url: url.clone() };
-                Action::ProviderSpeedtest { url }
+                self.open_provider_test_menu(row);
+                Action::None
             }
             KeyCode::Char('o') => {
                 let Some(row) = visible.get(self.provider_idx) else {
@@ -129,19 +281,22 @@ impl App {
                 }
                 Action::ProviderLaunchTemporary { id: row.id.clone() }
             }
-            KeyCode::Char('c') => {
-                if !supports_provider_stream_check(&self.app_type) {
+            KeyCode::Char('f') => {
+                if !supports_failover_controls(&self.app_type) {
                     return Action::None;
                 }
-                let Some(row) = visible.get(self.provider_idx) else {
-                    return Action::None;
-                };
-                self.overlay = Overlay::StreamCheckRunning {
-                    provider_id: row.id.clone(),
-                    provider_name: super::data::provider_display_name(&self.app_type, row),
-                };
-                Action::ProviderStreamCheck { id: row.id.clone() }
+                let selected = visible
+                    .get(self.provider_idx)
+                    .and_then(|row| {
+                        failover_queue_rows(data)
+                            .iter()
+                            .position(|provider_row| provider_row.id == row.id)
+                    })
+                    .unwrap_or(0);
+                self.overlay = Overlay::FailoverQueueManager { selected };
+                Action::None
             }
+            KeyCode::Char('<') | KeyCode::Char('>') => Action::None,
             KeyCode::Char('r') => {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
@@ -168,68 +323,19 @@ impl App {
 
         match key.code {
             KeyCode::Char('e') => {
-                self.open_provider_edit_form(row);
+                if self.is_provider_read_only(row) {
+                    self.show_provider_read_only_toast();
+                    return Action::None;
+                }
+                self.open_provider_edit_form(row, data);
                 Action::None
             }
             KeyCode::Enter => Action::None,
-            KeyCode::Char('s') => {
-                if matches!(self.app_type, AppType::OpenCode) {
-                    if row.is_in_config {
-                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
-                    }
-
-                    return Action::ProviderSwitch { id: row.id.clone() };
-                }
-                if matches!(self.app_type, AppType::OpenClaw) {
-                    if row.is_in_config {
-                        if row.is_default_model {
-                            self.push_toast(
-                                texts::tui_toast_provider_cannot_remove_default_model(),
-                                ToastKind::Warning,
-                            );
-                            return Action::None;
-                        }
-                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
-                    }
-
-                    return Action::ProviderSwitch { id: row.id.clone() };
-                }
-                if row.is_current {
-                    self.push_toast(texts::tui_toast_provider_already_in_use(), ToastKind::Info);
-                    return Action::None;
-                }
-                Action::ProviderSwitch { id: row.id.clone() }
-            }
-            KeyCode::Char('x') => {
-                if !matches!(self.app_type, AppType::OpenClaw) {
-                    return Action::None;
-                }
-                if !row.is_in_config {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_requires_live_config(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                }
-                let Some(model_id) = row.primary_model_id.clone() else {
-                    self.push_toast(
-                        texts::tui_toast_provider_default_model_missing(),
-                        ToastKind::Warning,
-                    );
-                    return Action::None;
-                };
-                Action::ProviderSetDefaultModel {
-                    provider_id: row.id.clone(),
-                    model_id,
-                }
-            }
+            KeyCode::Char('s') | KeyCode::Char(' ') => self.provider_switch_action(row),
+            KeyCode::Char('x') => self.provider_set_default_action(row),
             KeyCode::Char('t') => {
-                let Some(url) = row.api_url.clone() else {
-                    self.push_toast(texts::tui_toast_provider_no_api_url(), ToastKind::Warning);
-                    return Action::None;
-                };
-                self.overlay = Overlay::SpeedtestRunning { url: url.clone() };
-                Action::ProviderSpeedtest { url }
+                self.open_provider_test_menu(row);
+                Action::None
             }
             KeyCode::Char('o') => {
                 if !supports_temporary_provider_launch(&self.app_type) {
@@ -237,16 +343,18 @@ impl App {
                 }
                 Action::ProviderLaunchTemporary { id: row.id.clone() }
             }
-            KeyCode::Char('c') => {
-                if !supports_provider_stream_check(&self.app_type) {
+            KeyCode::Char('f') => {
+                if !supports_failover_controls(&self.app_type) {
                     return Action::None;
                 }
-                self.overlay = Overlay::StreamCheckRunning {
-                    provider_id: row.id.clone(),
-                    provider_name: super::data::provider_display_name(&self.app_type, row),
-                };
-                Action::ProviderStreamCheck { id: row.id.clone() }
+                let selected = failover_queue_rows(data)
+                    .iter()
+                    .position(|provider_row| provider_row.id == row.id)
+                    .unwrap_or(0);
+                self.overlay = Overlay::FailoverQueueManager { selected };
+                Action::None
             }
+            KeyCode::Char('<') | KeyCode::Char('>') => Action::None,
             KeyCode::Char('r') => {
                 if data::quota_target_for_provider(&self.app_type, row).is_none() {
                     self.push_toast(texts::tui_toast_quota_not_available(), ToastKind::Info);
@@ -282,7 +390,7 @@ impl App {
                 self.open_mcp_edit_form(row);
                 Action::None
             }
-            KeyCode::Char('x') => {
+            KeyCode::Char(' ') => {
                 let Some(row) = visible.get(self.mcp_idx) else {
                     return Action::None;
                 };
@@ -323,6 +431,10 @@ impl App {
     pub(crate) fn on_prompts_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         let visible = visible_prompts(&self.filter, data);
         match key.code {
+            KeyCode::Char('a') => {
+                self.open_prompt_create_form(data);
+                Action::None
+            }
             KeyCode::Up => {
                 self.prompt_idx = self.prompt_idx.saturating_sub(1);
                 Action::None
@@ -345,23 +457,14 @@ impl App {
                 });
                 Action::None
             }
-            KeyCode::Char('a') => {
+            KeyCode::Char(' ') => {
                 let Some(row) = visible.get(self.prompt_idx) else {
                     return Action::None;
                 };
-                Action::PromptActivate { id: row.id.clone() }
-            }
-            KeyCode::Char('x') => {
-                let active = data.prompts.rows.iter().find(|p| p.prompt.enabled);
-                let Some(active) = active else {
-                    self.push_toast(
-                        texts::tui_toast_prompt_no_active_to_deactivate(),
-                        ToastKind::Info,
-                    );
-                    return Action::None;
-                };
-                Action::PromptDeactivate {
-                    id: active.id.clone(),
+                if row.prompt.enabled {
+                    Action::PromptDeactivate { id: row.id.clone() }
+                } else {
+                    Action::PromptActivate { id: row.id.clone() }
                 }
             }
             KeyCode::Char('d') => {
@@ -386,17 +489,235 @@ impl App {
                 let Some(row) = visible.get(self.prompt_idx) else {
                     return Action::None;
                 };
-                self.open_editor(
-                    texts::tui_prompt_title(&row.prompt.name),
-                    EditorKind::Plain,
-                    row.prompt.content.clone(),
-                    EditorSubmit::PromptEdit { id: row.id.clone() },
-                );
+                self.filter.active = false;
+                self.editor = None;
+                self.overlay = Overlay::None;
+                self.form = Some(FormState::PromptMeta(PromptMetaFormState::from_prompt(
+                    &row.prompt,
+                )));
                 Action::None
             }
             _ => Action::None,
         }
     }
+
+    pub(crate) fn on_sessions_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        let visible = visible_sessions_for_state(
+            &self.filter,
+            &self.app_type,
+            &self.sessions.rows,
+            self.sessions.detail_key.as_deref(),
+            self.sessions.messages_loaded,
+            &self.sessions.messages,
+        );
+        match key.code {
+            KeyCode::Left => self.move_sessions_focus_left(),
+            KeyCode::Right => self.move_sessions_focus_right(data),
+            KeyCode::Up => {
+                match self.sessions.pane {
+                    SessionsPane::List => {
+                        self.sessions.selected_idx = self.sessions.selected_idx.saturating_sub(1);
+                    }
+                    SessionsPane::Detail => {
+                        let next_idx = {
+                            let messages = visible_session_messages(&self.sessions);
+                            if messages.is_empty() {
+                                Some(0)
+                            } else {
+                                let current = messages
+                                    .iter()
+                                    .position(|(index, _)| *index == self.sessions.message_idx)
+                                    .unwrap_or(0);
+                                Some(messages[current.saturating_sub(1)].0)
+                            }
+                        };
+                        if let Some(next_idx) = next_idx {
+                            self.sessions.message_idx = next_idx;
+                        }
+                    }
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                match self.sessions.pane {
+                    SessionsPane::List => {
+                        if !visible.is_empty() {
+                            self.sessions.selected_idx =
+                                (self.sessions.selected_idx + 1).min(visible.len() - 1);
+                        }
+                    }
+                    SessionsPane::Detail => {
+                        let next_idx = {
+                            let messages = visible_session_messages(&self.sessions);
+                            if messages.is_empty() {
+                                Some(0)
+                            } else {
+                                let current = messages
+                                    .iter()
+                                    .position(|(index, _)| *index == self.sessions.message_idx)
+                                    .unwrap_or(0);
+                                Some(messages[(current + 1).min(messages.len() - 1)].0)
+                            }
+                        };
+                        if let Some(next_idx) = next_idx {
+                            self.sessions.message_idx = next_idx;
+                        }
+                    }
+                }
+                Action::None
+            }
+            KeyCode::PageDown => {
+                if matches!(self.sessions.pane, SessionsPane::List) && !visible.is_empty() {
+                    let page = self.sessions_list_page_size();
+                    self.sessions.selected_idx =
+                        (self.sessions.selected_idx + page).min(visible.len() - 1);
+                }
+                Action::None
+            }
+            KeyCode::PageUp => {
+                if matches!(self.sessions.pane, SessionsPane::List) {
+                    let page = self.sessions_list_page_size();
+                    self.sessions.selected_idx = self.sessions.selected_idx.saturating_sub(page);
+                }
+                Action::None
+            }
+            KeyCode::Home => {
+                if matches!(self.sessions.pane, SessionsPane::List) {
+                    self.sessions.selected_idx = 0;
+                }
+                Action::None
+            }
+            KeyCode::End => {
+                if matches!(self.sessions.pane, SessionsPane::List) && !visible.is_empty() {
+                    self.sessions.selected_idx = visible.len() - 1;
+                }
+                Action::None
+            }
+            KeyCode::Enter => match self.sessions.pane {
+                SessionsPane::List => self.open_selected_session_detail(data),
+                SessionsPane::Detail => {
+                    let messages = visible_session_messages(&self.sessions);
+                    let message = messages
+                        .iter()
+                        .find(|(index, _)| *index == self.sessions.message_idx)
+                        .or_else(|| messages.first())
+                        .map(|(_, message)| *message);
+                    let Some(message) = message else {
+                        return Action::None;
+                    };
+                    self.overlay = Overlay::TextView(TextViewState {
+                        title: texts::tui_sessions_message_detail_title(&message.role),
+                        lines: message
+                            .content
+                            .lines()
+                            .map(|line| line.to_string())
+                            .collect(),
+                        scroll: 0,
+                        action: None,
+                    });
+                    Action::None
+                }
+            },
+            KeyCode::Char('R') => {
+                let Some(session) = self.selected_session_from_visible(&visible) else {
+                    return Action::None;
+                };
+                let Some(command) = session
+                    .resume_command
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                else {
+                    self.push_toast(
+                        texts::tui_sessions_toast_action_unavailable(),
+                        ToastKind::Info,
+                    );
+                    return Action::None;
+                };
+                Action::SessionResume {
+                    command,
+                    cwd: session.project_dir.clone(),
+                }
+            }
+            KeyCode::Char('d') => {
+                let Some(session) = self.selected_session_from_visible(&visible) else {
+                    return Action::None;
+                };
+                let Some(source_path) = session
+                    .source_path
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                else {
+                    self.push_toast(
+                        texts::tui_sessions_toast_source_missing(),
+                        ToastKind::Warning,
+                    );
+                    return Action::None;
+                };
+                let key = session_key(session);
+                self.overlay = Overlay::Confirm(ConfirmOverlay {
+                    title: texts::tui_sessions_delete_confirm_title().to_string(),
+                    message: texts::tui_sessions_delete_confirm_message(&session_title(session)),
+                    action: ConfirmAction::SessionDelete {
+                        key,
+                        provider_id: session.provider_id.clone(),
+                        session_id: session.session_id.clone(),
+                        source_path,
+                    },
+                });
+                Action::None
+            }
+            KeyCode::Char('r') => Action::SessionsRefresh,
+            _ => Action::None,
+        }
+    }
+
+    /// Approximate the session list viewport height for PageUp/PageDown, derived
+    /// from the last rendered terminal size minus the surrounding chrome.
+    fn sessions_list_page_size(&self) -> usize {
+        // Rows consumed around the list body: outer border (2) + key bar (1) +
+        // summary bar (3) + list border (2) + table header (1).
+        const SESSIONS_LIST_CHROME_ROWS: usize = 9;
+        (self.last_size.height as usize)
+            .saturating_sub(SESSIONS_LIST_CHROME_ROWS)
+            .max(1)
+    }
+
+    fn selected_session_from_visible<'a>(
+        &self,
+        visible: &'a [&'a crate::session_manager::SessionMeta],
+    ) -> Option<&'a crate::session_manager::SessionMeta> {
+        match self.sessions.pane {
+            SessionsPane::List => visible.get(self.sessions.selected_idx).copied(),
+            SessionsPane::Detail => self
+                .sessions
+                .detail_key
+                .as_deref()
+                .and_then(|key| {
+                    visible
+                        .iter()
+                        .copied()
+                        .find(|session| session_key(session) == key)
+                })
+                .or_else(|| visible.get(self.sessions.selected_idx).copied()),
+        }
+    }
+}
+
+fn session_title(session: &crate::session_manager::SessionMeta) -> String {
+    session
+        .title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            session.project_dir.as_deref().and_then(|path| {
+                std::path::Path::new(path.trim().trim_end_matches(['/', '\\']))
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_string)
+            })
+        })
+        .unwrap_or_else(|| session.session_id.chars().take(8).collect())
 }
 
 #[cfg(test)]

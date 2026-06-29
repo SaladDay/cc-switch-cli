@@ -1,5 +1,7 @@
 use super::super::theme;
 use super::super::*;
+use crate::cli::tui::form::{HermesModelField, ProviderAddFormState};
+use crate::cli::tui::text_edit::TextInput;
 
 pub(super) fn render_claude_model_picker_overlay(
     frame: &mut Frame<'_>,
@@ -38,6 +40,7 @@ pub(super) fn render_claude_model_picker_overlay(
         vec![
             ("↑↓", texts::tui_key_select()),
             ("Space", texts::tui_key_edit()),
+            ("a", texts::tui_key_fill_all()),
             ("Enter", texts::tui_key_fetch_model()),
             ("Esc", texts::tui_key_close()),
         ]
@@ -192,28 +195,320 @@ pub(super) fn render_claude_api_format_picker_overlay(
         width: chunks[1].width.saturating_sub(4),
         height: chunks[1].height.saturating_sub(2),
     };
-    let current = app
+    let (app_type, current) = app
         .form
         .as_ref()
         .and_then(|form| match form {
-            FormState::ProviderAdd(provider) => Some(provider.claude_api_format),
+            FormState::ProviderAdd(provider) => {
+                Some((provider.app_type.clone(), provider.claude_api_format))
+            }
             _ => None,
         })
-        .unwrap_or(crate::cli::tui::form::ClaudeApiFormat::Anthropic);
+        .unwrap_or_else(|| {
+            (
+                app.app_type.clone(),
+                crate::cli::tui::form::ClaudeApiFormat::Anthropic,
+            )
+        });
 
-    let items = crate::cli::tui::form::ClaudeApiFormat::ALL
-        .into_iter()
-        .map(|api_format| {
-            let marker = if api_format == current {
+    let choices = crate::cli::tui::form::ClaudeApiFormat::choices_for_app(&app_type);
+    let items = choices.iter().copied().map(|api_format| {
+        let marker = if api_format == current {
+            texts::tui_marker_active()
+        } else {
+            texts::tui_marker_inactive()
+        };
+        let label = if matches!(app_type, crate::app_config::AppType::Codex) {
+            texts::tui_codex_api_format_value(api_format.as_str())
+        } else {
+            texts::tui_claude_api_format_value(api_format.as_str())
+        };
+        ListItem::new(Line::from(Span::raw(format!("{marker}  {}", label))))
+    });
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = ListState::default();
+    state.select(Some(selected.min(choices.len().saturating_sub(1))));
+    frame.render_stateful_widget(list, body_area, &mut state);
+}
+
+pub(super) fn render_usage_query_template_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+) {
+    let area = centered_rect_fixed(42, 10, content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(texts::tui_usage_query_template());
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_close()),
+        ],
+    );
+
+    let body_area = Rect {
+        x: chunks[1].x.saturating_add(2),
+        y: chunks[1].y.saturating_add(1),
+        width: chunks[1].width.saturating_sub(4),
+        height: chunks[1].height.saturating_sub(2),
+    };
+
+    if let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() {
+        let current = provider.usage_query_template;
+        let options = provider.available_usage_query_templates();
+        let items = options.iter().map(|template| {
+            let marker = if *template == current {
                 texts::tui_marker_active()
             } else {
                 texts::tui_marker_inactive()
             };
             ListItem::new(Line::from(Span::raw(format!(
                 "{marker}  {}",
-                texts::tui_claude_api_format_value(api_format.as_str())
+                template.label()
             ))))
         });
+
+        let list = List::new(items)
+            .highlight_style(selection_style(theme))
+            .highlight_symbol(highlight_symbol(theme));
+
+        let mut state = ListState::default();
+        state.select(Some(selected.min(options.len().saturating_sub(1))));
+        frame.render_stateful_widget(list, body_area, &mut state);
+    }
+}
+
+pub(super) fn render_managed_account_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+    binding: bool,
+    selected_account_id: Option<&str>,
+) {
+    let height = app
+        .managed_auth_status
+        .as_ref()
+        .map(|status| status.accounts.len())
+        .unwrap_or(0)
+        .saturating_add(if binding { 6 } else { 5 })
+        .min(18) as u16;
+    let area = centered_rect_fixed(62, height.max(8), content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(texts::tui_label_chatgpt_account());
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_close()),
+        ],
+    );
+
+    let body_area = inset_top(chunks[1], 1);
+    let Some(status) = app.managed_auth_status.as_ref() else {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                texts::tui_managed_accounts_not_loaded(),
+                Style::default().fg(theme.dim),
+            ))
+            .alignment(Alignment::Center),
+            body_area,
+        );
+        return;
+    };
+
+    if status.accounts.is_empty() && !binding {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                texts::tui_managed_accounts_not_authenticated(),
+                Style::default().fg(theme.dim),
+            ))
+            .alignment(Alignment::Center),
+            body_area,
+        );
+        return;
+    }
+
+    let mut items = Vec::new();
+    if binding {
+        let marker = if selected_account_id.is_none() {
+            texts::tui_marker_active()
+        } else {
+            texts::tui_marker_inactive()
+        };
+        items.push(ListItem::new(Line::raw(format!(
+            "{marker}  {}",
+            texts::tui_managed_accounts_follow_default()
+        ))));
+    }
+
+    for account in &status.accounts {
+        let marker = if selected_account_id == Some(account.id.as_str()) {
+            texts::tui_marker_active()
+        } else {
+            texts::tui_marker_inactive()
+        };
+        let suffix = if account.is_default {
+            format!(" ({})", texts::tui_managed_accounts_default())
+        } else {
+            String::new()
+        };
+        items.push(ListItem::new(Line::raw(format!(
+            "{marker}  {}{suffix}",
+            account.login
+        ))));
+    }
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+    let mut state = ListState::default();
+    let row_count = status.accounts.len() + usize::from(binding);
+    state.select(Some(selected.min(row_count.saturating_sub(1))));
+    frame.render_stateful_widget(list, body_area, &mut state);
+}
+
+pub(super) fn render_managed_account_action_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    account_id: &str,
+    selected: usize,
+) {
+    let area = centered_rect_fixed(48, 8, content_area);
+    frame.render_widget(Clear, area);
+
+    let account_label = app
+        .managed_auth_status
+        .as_ref()
+        .and_then(|status| {
+            status
+                .accounts
+                .iter()
+                .find(|account| account.id == account_id)
+                .map(|account| account.login.as_str())
+        })
+        .unwrap_or(account_id);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(account_label);
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_close()),
+        ],
+    );
+
+    let items = [
+        texts::tui_key_set_default().to_string(),
+        texts::tui_key_delete().to_string(),
+    ]
+    .into_iter()
+    .map(|label| ListItem::new(Line::raw(label)));
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+    let mut state = ListState::default();
+    state.select(Some(selected.min(1)));
+    frame.render_stateful_widget(list, inset_top(chunks[1], 1), &mut state);
+}
+
+pub(super) fn render_provider_test_menu_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    _data: &UiData,
+    content_area: Rect,
+    theme: &theme::Theme,
+    _provider_id: &str,
+    selected: usize,
+) {
+    let area = centered_rect_fixed(50, 8, content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(texts::tui_provider_test_menu_title());
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_close()),
+        ],
+    );
+
+    let body_area = inset_top(chunks[1], 1);
+    let items = app::provider_test_menu_items(&app.app_type)
+        .into_iter()
+        .map(|item| ListItem::new(Line::raw(app::provider_test_menu_item_label(item))));
 
     let list = List::new(items)
         .highlight_style(selection_style(theme))
@@ -222,7 +517,7 @@ pub(super) fn render_claude_api_format_picker_overlay(
     let mut state = ListState::default();
     state.select(Some(
         selected.min(
-            crate::cli::tui::form::ClaudeApiFormat::ALL
+            app::provider_test_menu_items(&app.app_type)
                 .len()
                 .saturating_sub(1),
         ),
@@ -230,11 +525,231 @@ pub(super) fn render_claude_api_format_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+pub(super) fn render_hermes_models_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    editing: bool,
+) {
+    let area = centered_rect_fixed(86, 24, content_area);
+    frame.render_widget(Clear, area);
+
+    let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() else {
+        return;
+    };
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(texts::tui_hermes_models_title(provider.name.value.trim()));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(2),
+            Constraint::Length(3),
+        ])
+        .split(inner);
+
+    let key_items: Vec<(&str, &str)> = if editing {
+        vec![
+            ("←→/Home/End", texts::tui_key_move()),
+            ("Enter/Esc", texts::tui_key_exit_edit()),
+        ]
+    } else {
+        vec![
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_edit()),
+            ("f", texts::tui_key_fetch_model()),
+            ("a", texts::tui_key_add()),
+            ("d", texts::tui_key_delete()),
+            ("Esc", texts::tui_key_close()),
+        ]
+    };
+    render_key_bar_center(frame, chunks[0], theme, &key_items);
+
+    let fields = provider.hermes_model_fields();
+    if fields.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                texts::tui_hermes_models_no_models(),
+                Style::default().fg(theme.dim),
+            ))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+            inset_top(chunks[1], 1),
+        );
+    } else {
+        let rows_data = fields
+            .iter()
+            .map(|field| hermes_model_field_label_and_value(provider, *field))
+            .collect::<Vec<_>>();
+        let label_col_width = field_label_column_width(
+            rows_data
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .chain(std::iter::once(texts::tui_header_field())),
+            1,
+        );
+
+        let header = Row::new(vec![
+            Cell::from(cell_pad(texts::tui_header_field())),
+            Cell::from(texts::tui_header_value()),
+        ])
+        .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+        let mut rows = Vec::with_capacity(rows_data.len() + provider.hermes_models.len());
+        for (idx, (label, value)) in rows_data.iter().enumerate() {
+            if idx > 0 && idx % 3 == 0 {
+                rows.push(
+                    Row::new(vec![
+                        Cell::from(cell_pad(&"┄".repeat(40))),
+                        Cell::from("┄".repeat(200)),
+                    ])
+                    .style(Style::default().fg(theme.dim)),
+                );
+            }
+            rows.push(Row::new(vec![
+                Cell::from(cell_pad(label)),
+                Cell::from(value.clone()),
+            ]));
+        }
+        let table = Table::new(
+            rows,
+            [Constraint::Length(label_col_width), Constraint::Min(10)],
+        )
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .title(texts::tui_label_hermes_models()),
+        )
+        .row_highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+        let mut state = TableState::default();
+        state.select(Some(hermes_model_visual_row_index(
+            provider.hermes_models_field_idx.min(fields.len() - 1),
+        )));
+        frame.render_stateful_widget(table, chunks[1], &mut state);
+    }
+
+    let footer = if provider.hermes_models.is_empty() {
+        texts::tui_hermes_models_fetch_hint()
+    } else {
+        texts::tui_hermes_models_hint()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(footer, Style::default().fg(theme.dim)))
+            .wrap(Wrap { trim: true }),
+        chunks[2],
+    );
+
+    render_hermes_model_picker_input(frame, provider, chunks[3], theme, editing);
+}
+
+fn hermes_model_visual_row_index(field_idx: usize) -> usize {
+    field_idx + field_idx / 3
+}
+
+fn hermes_model_field_label_and_value(
+    provider: &ProviderAddFormState,
+    field: HermesModelField,
+) -> (String, String) {
+    match field {
+        HermesModelField::Id(index) => (
+            texts::tui_hermes_model_id_label(index + 1),
+            hermes_model_string(provider, index, "id"),
+        ),
+        HermesModelField::Name(index) => (
+            texts::tui_hermes_model_name_label(index + 1),
+            hermes_model_string(provider, index, "name"),
+        ),
+        HermesModelField::ContextLength(index) => (
+            texts::tui_hermes_model_context_length_label(index + 1),
+            hermes_model_string(provider, index, "context_length"),
+        ),
+    }
+}
+
+fn hermes_model_string(provider: &ProviderAddFormState, index: usize, key: &str) -> String {
+    provider
+        .hermes_models
+        .get(index)
+        .and_then(|model| model.get(key))
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.as_i64().map(|number| number.to_string()))
+                .or_else(|| value.as_u64().map(|number| number.to_string()))
+        })
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| texts::tui_na().to_string())
+}
+
+fn render_hermes_model_picker_input(
+    frame: &mut Frame<'_>,
+    provider: &ProviderAddFormState,
+    area: Rect,
+    theme: &theme::Theme,
+    editing: bool,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(if editing {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.dim)
+        })
+        .title(if editing {
+            texts::tui_form_editing_title()
+        } else {
+            texts::tui_form_input_title()
+        });
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+
+    if provider.selected_hermes_model_field().is_none() {
+        frame.render_widget(
+            Paragraph::new(Line::raw(texts::tui_hermes_models_add_hint()))
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+
+    let input = &provider.hermes_model_input;
+    let (visible, cursor_x) = visible_text_window(&input.value, input.cursor, inner.width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
+        inner,
+    );
+
+    if editing {
+        let x = inner.x + cursor_x.min(inner.width.saturating_sub(1));
+        frame.set_cursor_position((x, inner.y));
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "model picker renderer receives transient search state"
+)]
 pub(super) fn render_model_fetch_picker_overlay(
     frame: &mut Frame<'_>,
     content_area: Rect,
     theme: &theme::Theme,
-    input: &str,
+    input: &TextInput,
     query: &str,
     fetching: bool,
     models: &[String],
@@ -270,8 +785,8 @@ pub(super) fn render_model_fetch_picker_overlay(
     let input_inner = input_block.inner(chunks[0]);
 
     let (visible, cursor_x) =
-        visible_text_window(input, input.chars().count(), input_inner.width as usize);
-    let (input_text, input_style) = if input.is_empty() {
+        visible_text_window(&input.value, input.cursor, input_inner.width as usize);
+    let (input_text, input_style) = if input.value.is_empty() {
         (
             texts::tui_model_fetch_search_placeholder().to_string(),
             Style::default().fg(theme.dim),
@@ -501,6 +1016,134 @@ pub(super) fn render_openclaw_tools_profile_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+pub(super) fn render_failover_queue_manager_overlay(
+    frame: &mut Frame<'_>,
+    data: &UiData,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+) {
+    let area = centered_rect_fixed(OVERLAY_FIXED_LG.0, 16, content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(crate::t!("Failover Queue", "故障转移队列"));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("f", crate::t!("enable/disable", "启用/禁用")),
+            ("Space/Enter", texts::tui_key_toggle()),
+            ("</>/u/d", texts::tui_key_move()),
+            ("Esc", texts::tui_key_close()),
+        ],
+    );
+
+    let status = if data.proxy.auto_failover_enabled {
+        crate::t!("Automatic failover: enabled", "自动故障转移：已开启")
+    } else {
+        crate::t!("Automatic failover: disabled", "自动故障转移：已关闭")
+    };
+    frame.render_widget(
+        Paragraph::new(status)
+            .style(Style::default().fg(theme.dim))
+            .alignment(Alignment::Center),
+        chunks[1],
+    );
+
+    let body_area = inset_top(chunks[2], 1);
+    let rows = app::failover_queue_rows(data);
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(crate::t!("No providers configured.", "暂无提供商配置。"))
+                .style(Style::default().fg(theme.dim))
+                .alignment(Alignment::Center),
+            body_area,
+        );
+    } else {
+        let header = Row::new(vec![
+            Cell::from(""),
+            Cell::from(crate::t!("Queue", "队列")),
+            Cell::from(texts::header_name()),
+            Cell::from(texts::tui_header_api_url()),
+        ])
+        .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+
+        let table_rows = rows.iter().map(|row| {
+            let marker = if row.provider.in_failover_queue {
+                texts::tui_marker_active()
+            } else {
+                texts::tui_marker_inactive()
+            };
+            let queue = app::failover_queue_position(data, &row.id)
+                .map(|position| format!("#{position}"))
+                .unwrap_or_else(|| "-".to_string());
+            let api_url = row.api_url.as_deref().unwrap_or_else(|| texts::tui_na());
+
+            Row::new(vec![
+                Cell::from(marker),
+                Cell::from(queue),
+                Cell::from(row.provider.name.as_str()),
+                Cell::from(api_url.to_string()),
+            ])
+        });
+
+        let table = Table::new(
+            table_rows,
+            [
+                Constraint::Length(2),
+                Constraint::Length(8),
+                Constraint::Percentage(35),
+                Constraint::Percentage(65),
+            ],
+        )
+        .header(header)
+        .block(Block::default().borders(Borders::NONE))
+        .row_highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+        let mut state = TableState::default();
+        state.select(Some(selected.min(rows.len().saturating_sub(1))));
+        frame.render_stateful_widget(table, body_area, &mut state);
+    }
+
+    frame.render_widget(
+        Paragraph::new(if data.proxy.auto_failover_enabled {
+            crate::t!(
+                "Auto failover uses only checked providers, in queue order.",
+                "自动故障转移仅按队列顺序使用已勾选的提供商。"
+            )
+        } else {
+            crate::t!(
+                "Direct provider selection is used. Enable failover to route by queue priority.",
+                "当前使用直接供应商选择。开启故障转移后将按队列优先级路由。"
+            )
+        })
+        .style(Style::default().fg(theme.dim))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false }),
+        chunks[3],
+    );
+}
+
 pub(super) fn render_mcp_apps_picker_overlay(
     frame: &mut Frame<'_>,
     content_area: Rect,
@@ -516,13 +1159,66 @@ pub(super) fn render_mcp_apps_picker_overlay(
         texts::tui_mcp_apps_title(name),
         selected,
         apps,
+        "Space",
         &[
             crate::app_config::AppType::Claude,
             crate::app_config::AppType::Codex,
             crate::app_config::AppType::Gemini,
             crate::app_config::AppType::OpenCode,
+            crate::app_config::AppType::Hermes,
         ],
     );
+}
+
+pub(super) fn render_mcp_type_picker_overlay(
+    frame: &mut Frame<'_>,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+) {
+    let area = centered_rect_fixed(58, 8, content_area);
+    frame.render_widget(Clear, area);
+
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(texts::tui_mcp_type_title());
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_cancel()),
+        ],
+    );
+
+    let body_area = inset_top(chunks[1], 1);
+    let items = [
+        crate::cli::tui::form::McpTransport::Stdio,
+        crate::cli::tui::form::McpTransport::Http,
+        crate::cli::tui::form::McpTransport::Sse,
+    ]
+    .iter()
+    .map(|transport| ListItem::new(Line::raw(transport.label())));
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = ListState::default();
+    state.select(Some(selected.min(2)));
+    frame.render_stateful_widget(list, body_area, &mut state);
 }
 
 pub(super) fn render_visible_apps_picker_overlay(
@@ -539,11 +1235,13 @@ pub(super) fn render_visible_apps_picker_overlay(
         texts::tui_settings_visible_apps_title().to_string(),
         selected,
         apps,
+        "Space",
         &[
             crate::app_config::AppType::Claude,
             crate::app_config::AppType::Codex,
             crate::app_config::AppType::Gemini,
             crate::app_config::AppType::OpenCode,
+            crate::app_config::AppType::Hermes,
             crate::app_config::AppType::OpenClaw,
         ],
     );
@@ -564,11 +1262,13 @@ pub(super) fn render_skills_apps_picker_overlay(
         texts::tui_skill_apps_title(name),
         selected,
         apps,
+        "Space",
         &[
             crate::app_config::AppType::Claude,
             crate::app_config::AppType::Codex,
             crate::app_config::AppType::Gemini,
             crate::app_config::AppType::OpenCode,
+            crate::app_config::AppType::Hermes,
         ],
     );
 }
@@ -736,6 +1436,10 @@ pub(super) fn render_skills_sync_method_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "app picker renderer receives list state and display labels"
+)]
 fn render_apps_picker_overlay<A>(
     frame: &mut Frame<'_>,
     content_area: Rect,
@@ -743,6 +1447,7 @@ fn render_apps_picker_overlay<A>(
     title: String,
     selected: usize,
     apps: &A,
+    toggle_key_label: &'static str,
     app_types: &[crate::app_config::AppType],
 ) where
     A: AppToggleState,
@@ -768,7 +1473,7 @@ fn render_apps_picker_overlay<A>(
         chunks[0],
         theme,
         &[
-            ("x", texts::tui_key_toggle()),
+            (toggle_key_label, texts::tui_key_toggle()),
             ("Enter", texts::tui_key_apply()),
             ("Esc", texts::tui_key_cancel()),
         ],
@@ -781,7 +1486,6 @@ fn render_apps_picker_overlay<A>(
         } else {
             texts::tui_marker_inactive()
         };
-
         ListItem::new(Line::from(Span::raw(format!(
             "{marker}  {}",
             app_type.as_str()

@@ -20,16 +20,23 @@ pub(super) fn render_editor(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
-    let keys = vec![
+    let mut keys = vec![
         ("↑↓←→", texts::tui_key_move()),
         ("Ctrl+O", texts::tui_key_external_editor()),
         ("Ctrl+S", texts::tui_key_save()),
         ("Esc", texts::tui_key_close()),
     ];
+    if let super::app::EditorSubmit::ConfigCommonSnippet { source, .. } = &editor.submit {
+        keys.insert(2, ("F2", texts::tui_key_format()));
+        if matches!(source, super::app::CommonSnippetViewSource::ProviderForm) {
+            keys.insert(3, ("F4", texts::tui_key_extract()));
+        }
+    }
     render_key_bar(frame, chunks[0], theme, &keys);
 
     let field_title = match editor.kind {
         super::app::EditorKind::Json => texts::tui_editor_json_field_title(),
+        super::app::EditorKind::Toml => texts::tui_editor_toml_field_title(),
         super::app::EditorKind::Plain => texts::tui_editor_text_field_title(),
     };
     let field_border_style = Style::default()

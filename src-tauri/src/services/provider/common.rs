@@ -109,6 +109,7 @@ pub fn migrate_legacy_codex_config(cfg_text: &str, provider: &Provider) -> Optio
 /// When storing a provider snapshot, we remove keys that belong to the common
 /// config snippet so they don't get duplicated when the common snippet is
 /// merged back in during `write_codex_live`.
+#[cfg(test)]
 pub(super) fn strip_codex_common_config_from_full_text(
     config_text: &str,
     common_snippet: &str,
@@ -143,6 +144,7 @@ pub(super) fn strip_codex_common_config_from_full_text(
     Ok(doc.to_string())
 }
 
+#[allow(dead_code)]
 pub(super) fn merge_json_values(base: &mut Value, overlay: &Value) {
     match (base, overlay) {
         (Value::Object(base_map), Value::Object(overlay_map)) => {
@@ -161,6 +163,7 @@ pub(super) fn merge_json_values(base: &mut Value, overlay: &Value) {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn strip_common_values(target: &mut Value, common: &Value) {
     match (target, common) {
         (Value::Object(target_map), Value::Object(common_map)) => {

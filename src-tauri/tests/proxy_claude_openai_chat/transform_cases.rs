@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::helpers::{
     bind_test_listener, capture_openai_chat_upstream_body, handle_chat_completions,
-    handle_responses, provider_meta_from_json, UpstreamState,
+    handle_responses, provider_meta_from_json, set_claude_proxy_port_to_ephemeral, UpstreamState,
 };
 
 #[tokio::test]
@@ -37,7 +37,7 @@ async fn cache_openai_chat_uses_meta_prompt_cache_key_override() {
 }
 
 #[tokio::test]
-async fn cache_openai_chat_falls_back_to_provider_id() {
+async fn cache_openai_chat_omits_prompt_cache_key_without_explicit_override() {
     let upstream_body = capture_openai_chat_upstream_body(
         "provider-fallback-id",
         provider_meta_from_json(json!({
@@ -54,16 +54,11 @@ async fn cache_openai_chat_falls_back_to_provider_id() {
     )
     .await;
 
-    assert_eq!(
-        upstream_body
-            .get("prompt_cache_key")
-            .and_then(|value| value.as_str()),
-        Some("provider-fallback-id")
-    );
+    assert!(upstream_body.get("prompt_cache_key").is_none());
 }
 
 #[tokio::test]
-async fn cache_openai_chat_preserves_cache_control_metadata() {
+async fn cache_openai_chat_strips_cache_control_metadata() {
     let upstream_body = capture_openai_chat_upstream_body(
         "provider-fallback-id",
         provider_meta_from_json(json!({
@@ -95,29 +90,20 @@ async fn cache_openai_chat_preserves_cache_control_metadata() {
     )
     .await;
 
-    assert_eq!(
-        upstream_body
-            .pointer("/messages/0/cache_control/type")
-            .and_then(|value| value.as_str()),
-        Some("ephemeral")
+    assert!(
+        upstream_body.pointer("/messages/0/cache_control").is_none(),
+        "system message cache_control should be stripped"
     );
     assert_eq!(
         upstream_body
-            .pointer("/messages/1/content/0/cache_control/type")
-            .and_then(|value| value.as_str()),
-        Some("ephemeral")
+            .pointer("/messages/1/content")
+            .and_then(|v| v.as_str()),
+        Some("hello"),
+        "single text block should be simplified to plain string"
     );
-    assert_eq!(
-        upstream_body
-            .pointer("/messages/1/content/0/cache_control/ttl")
-            .and_then(|value| value.as_str()),
-        Some("5m")
-    );
-    assert_eq!(
-        upstream_body
-            .pointer("/tools/0/cache_control/type")
-            .and_then(|value| value.as_str()),
-        Some("ephemeral")
+    assert!(
+        upstream_body.pointer("/tools/0/cache_control").is_none(),
+        "tool cache_control should be stripped"
     );
 }
 
@@ -165,15 +151,15 @@ async fn proxy_claude_openai_chat_transforms_request_and_response() {
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -243,12 +229,9 @@ async fn proxy_claude_openai_chat_transforms_request_and_response() {
     );
     assert_eq!(
         upstream_state.anthropic_version.lock().await.as_deref(),
-        Some("2023-06-01")
+        None
     );
-    assert_eq!(
-        upstream_state.anthropic_beta.lock().await.as_deref(),
-        Some("claude-code-20250219,prompt-caching-2024-07-31")
-    );
+    assert_eq!(upstream_state.anthropic_beta.lock().await.as_deref(), None);
     assert_eq!(
         upstream_state.forwarded_for.lock().await.as_deref(),
         Some("203.0.113.9")
@@ -321,15 +304,15 @@ async fn proxy_claude_openai_responses_transforms_request_and_response() {
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -410,12 +393,9 @@ async fn proxy_claude_openai_responses_transforms_request_and_response() {
     );
     assert_eq!(
         upstream_state.anthropic_version.lock().await.as_deref(),
-        Some("2023-06-01")
+        None
     );
-    assert_eq!(
-        upstream_state.anthropic_beta.lock().await.as_deref(),
-        Some("claude-code-20250219,prompt-caching-2024-07-31")
-    );
+    assert_eq!(upstream_state.anthropic_beta.lock().await.as_deref(), None);
     assert_eq!(
         upstream_state.forwarded_for.lock().await.as_deref(),
         Some("203.0.113.10")

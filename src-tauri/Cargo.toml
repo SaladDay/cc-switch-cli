@@ -1,6 +1,6 @@
 [package]
 name = "cc-switch"
-version = "5.3.4"
+version = "5.8.6"
 description = "All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode & OpenClaw"
 authors = ["Jason Young", "saladday"]
 license = "MIT"
@@ -24,7 +24,7 @@ test-hooks = []
 
 [dependencies]
 # Core dependencies
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
@@ -56,14 +56,14 @@ toml_edit = "0.22"
 serde_yaml = "0.9"
 base64 = "0.22"
 indexmap = { version = "2", features = ["serde"] }
-rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks"] }
 rust_decimal = "1.33"
 json5 = "0.4"
 json-five = "0.3.1"
 
 # Network and async
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "net", "process", "io-util"] }
 futures = "0.3"
 async-stream = "0.3"
 bytes = "1.5"
@@ -79,6 +79,7 @@ sha2 = "0.10"
 minisign-verify = "0.2.4"
 semver = "1.0"
 flate2 = "1.0"
+brotli = "7"
 tar = "0.4"
 rquickjs = { version = "0.8", features = ["array-buffer", "classes"] }
 zip = "2.2"

@@ -14,7 +14,7 @@ use axum::{
     Router,
 };
 use cc_switch_lib::{
-    set_webdav_sync_settings, AppState as CcAppState, Provider, WebDavSyncService,
+    set_webdav_sync_settings, AppState as CcAppState, Database, Provider, WebDavSyncService,
     WebDavSyncSettings, WebDavSyncStatus,
 };
 use sha2::{Digest, Sha256};
@@ -26,52 +26,37 @@ use support::{ensure_test_home, lock_test_mutex, reset_test_fs};
 
 const DAV_ROOT: &str = "/dav";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProbeReadback {
-    Stored,
-    Missing,
-    Mismatch,
-    Oversized,
-    OversizedStreaming,
+async fn set_app_proxy_port(db: &Database, app_type: &str, port: u16) {
+    db.set_app_proxy_preferred_port(app_type, port)
+        .unwrap_or_else(|_| panic!("persist {app_type} app proxy port"));
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DeleteBehavior {
-    Success,
-    NotFound,
-    ServerError,
+async fn set_claude_proxy_free_port(state: &CcAppState) {
+    let mut config = state
+        .proxy_service
+        .get_config()
+        .await
+        .expect("load proxy config");
+    config.listen_port = 0;
+    state
+        .db
+        .update_proxy_config(config)
+        .await
+        .expect("persist proxy config");
+    set_app_proxy_port(&state.db, "claude", 0).await;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ServerConfig {
-    probe_readback: ProbeReadback,
-    manifest_readback: ProbeReadback,
     manifest_head_behavior: ManifestHeadBehavior,
     reject_dotfile_puts: bool,
-    delete_behavior: DeleteBehavior,
 }
 
 impl ServerConfig {
-    fn for_readback(readback: ProbeReadback) -> Self {
+    fn with_manifest_head(manifest_head_behavior: ManifestHeadBehavior) -> Self {
         Self {
-            probe_readback: readback,
-            manifest_readback: ProbeReadback::Stored,
-            manifest_head_behavior: ManifestHeadBehavior::Present,
-            reject_dotfile_puts: false,
-            delete_behavior: DeleteBehavior::Success,
-        }
-    }
-
-    fn for_manifest_readback(
-        manifest_readback: ProbeReadback,
-        manifest_head_behavior: ManifestHeadBehavior,
-    ) -> Self {
-        Self {
-            probe_readback: ProbeReadback::Stored,
-            manifest_readback,
             manifest_head_behavior,
             reject_dotfile_puts: false,
-            delete_behavior: DeleteBehavior::Success,
         }
     }
 }
@@ -91,7 +76,6 @@ struct ServerState {
     get_paths: Vec<String>,
     head_paths: Vec<String>,
     delete_paths: Vec<String>,
-    streamed_chunk_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +84,6 @@ struct ServerSnapshot {
     get_paths: Vec<String>,
     head_paths: Vec<String>,
     delete_paths: Vec<String>,
-    streamed_chunk_count: usize,
 }
 
 #[derive(Clone)]
@@ -117,8 +100,10 @@ struct TestWebDavServer {
 }
 
 impl TestWebDavServer {
-    fn start(readback: ProbeReadback) -> Self {
-        Self::start_with_config(ServerConfig::for_readback(readback))
+    fn start() -> Self {
+        Self::start_with_config(ServerConfig::with_manifest_head(
+            ManifestHeadBehavior::Present,
+        ))
     }
 
     fn start_with_config(config: ServerConfig) -> Self {
@@ -179,7 +164,6 @@ impl TestWebDavServer {
             get_paths: state.get_paths.clone(),
             head_paths: state.head_paths.clone(),
             delete_paths: state.delete_paths.clone(),
-            streamed_chunk_count: state.streamed_chunk_count,
         }
     }
 
@@ -262,34 +246,9 @@ async fn handle_webdav_request(State(state): State<AppState>, request: Request<B
         "GET" => {
             let mut inner = state.inner.lock().expect("lock GET state");
             inner.get_paths.push(path.clone());
-            match readback_for_path(&state.config, &path) {
-                ProbeReadback::Missing => StatusCode::NOT_FOUND.into_response(),
-                ProbeReadback::Mismatch => {
-                    (StatusCode::OK, b"mismatched-probe".to_vec()).into_response()
-                }
-                ProbeReadback::Oversized => (StatusCode::OK, vec![b'x'; 8192]).into_response(),
-                ProbeReadback::OversizedStreaming => {
-                    let inner = Arc::clone(&state.inner);
-                    let stream = async_stream::stream! {
-                        for _ in 0..8 {
-                            inner
-                                .lock()
-                                .expect("lock streamed GET state")
-                                .streamed_chunk_count += 1;
-                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(vec![b'y'; 1024]));
-                            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                        }
-                    };
-                    (
-                        [("content-type", "application/octet-stream")],
-                        Body::from_stream(stream),
-                    )
-                        .into_response()
-                }
-                ProbeReadback::Stored => match inner.files.get(&path).cloned() {
-                    Some(bytes) => (StatusCode::OK, bytes).into_response(),
-                    None => StatusCode::NOT_FOUND.into_response(),
-                },
+            match inner.files.get(&path).cloned() {
+                Some(bytes) => (StatusCode::OK, bytes).into_response(),
+                None => StatusCode::NOT_FOUND.into_response(),
             }
         }
         "HEAD" => {
@@ -313,11 +272,7 @@ async fn handle_webdav_request(State(state): State<AppState>, request: Request<B
             let mut inner = state.inner.lock().expect("lock DELETE state");
             inner.delete_paths.push(path.clone());
             inner.files.remove(&path);
-            match state.config.delete_behavior {
-                DeleteBehavior::Success => StatusCode::NO_CONTENT.into_response(),
-                DeleteBehavior::NotFound => StatusCode::NOT_FOUND.into_response(),
-                DeleteBehavior::ServerError => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            }
+            StatusCode::NO_CONTENT.into_response()
         }
         _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
     }
@@ -327,22 +282,6 @@ fn multi_status_response() -> Response {
     StatusCode::from_u16(207)
         .expect("build 207 Multi-Status")
         .into_response()
-}
-
-fn readback_for_path(config: &ServerConfig, path: &str) -> ProbeReadback {
-    if is_probe_path(path) {
-        config.probe_readback
-    } else if is_manifest_path(path) {
-        config.manifest_readback
-    } else {
-        ProbeReadback::Stored
-    }
-}
-
-fn is_probe_path(path: &str) -> bool {
-    path.rsplit('/')
-        .next()
-        .is_some_and(|name| name.starts_with("cc-switch-probe-"))
 }
 
 fn is_manifest_path(path: &str) -> bool {
@@ -360,11 +299,6 @@ fn sample_settings(base_url: &str) -> WebDavSyncSettings {
         auto_sync: false,
         status: WebDavSyncStatus::default(),
     }
-}
-
-fn find_free_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind free local port");
-    listener.local_addr().expect("read free local port").port()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -418,45 +352,6 @@ fn seed_claude_live() {
     .expect("write claude live");
 }
 
-fn assert_probe_round_trip(snapshot: &ServerSnapshot) {
-    assert_eq!(
-        snapshot.put_paths.len(),
-        1,
-        "expected exactly one probe PUT: {snapshot:?}"
-    );
-    assert_eq!(
-        snapshot.get_paths.len(),
-        1,
-        "expected exactly one probe GET: {snapshot:?}"
-    );
-    assert_eq!(
-        snapshot.delete_paths.len(),
-        1,
-        "expected exactly one best-effort probe DELETE: {snapshot:?}"
-    );
-
-    let probe_path = &snapshot.put_paths[0];
-    assert!(
-        probe_path.starts_with("/dav/sync-root/v2/db-v6/default-profile/"),
-        "unexpected probe path: {probe_path}"
-    );
-    assert!(
-        !probe_path
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| name.starts_with('.')),
-        "probe file should not be hidden: {probe_path}"
-    );
-    assert_eq!(
-        &snapshot.get_paths[0], probe_path,
-        "GET should read back the probe file"
-    );
-    assert_eq!(
-        &snapshot.delete_paths[0], probe_path,
-        "DELETE should clean up the probe file"
-    );
-}
-
 fn assert_upload_artifact_puts(snapshot: &ServerSnapshot) {
     assert_eq!(
         snapshot.put_paths,
@@ -470,233 +365,69 @@ fn assert_upload_artifact_puts(snapshot: &ServerSnapshot) {
 }
 
 #[test]
-fn check_connection_succeeds_after_round_trip_probe() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let server = TestWebDavServer::start(ProbeReadback::Stored);
-    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
-        .expect("save test WebDAV settings");
-
-    WebDavSyncService::check_connection().expect("round-trip probe should succeed");
-
-    let snapshot = server.snapshot();
-    assert_probe_round_trip(&snapshot);
-}
-
-#[test]
-fn check_connection_fails_when_probe_readback_is_missing() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let server = TestWebDavServer::start(ProbeReadback::Missing);
-    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
-        .expect("save test WebDAV settings");
-
-    let err = WebDavSyncService::check_connection()
-        .expect_err("missing probe readback should fail connection check");
-
-    let snapshot = server.snapshot();
-    assert_eq!(
-        snapshot.put_paths.len(),
-        1,
-        "probe write should happen before failure"
-    );
-    assert_eq!(
-        snapshot.get_paths.len(),
-        1,
-        "probe readback should be attempted"
-    );
-    assert_eq!(
-        snapshot.delete_paths.len(),
-        1,
-        "probe cleanup should be attempted"
-    );
-    assert!(
-        err.to_string().contains("probe") || err.to_string().contains("GET"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn check_connection_fails_when_probe_readback_mismatches() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let server = TestWebDavServer::start(ProbeReadback::Mismatch);
-    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
-        .expect("save test WebDAV settings");
-
-    let err = WebDavSyncService::check_connection()
-        .expect_err("mismatched probe readback should fail connection check");
-
-    let snapshot = server.snapshot();
-    assert_eq!(
-        snapshot.put_paths.len(),
-        1,
-        "probe write should happen before failure"
-    );
-    assert_eq!(
-        snapshot.get_paths.len(),
-        1,
-        "probe readback should be attempted"
-    );
-    assert_eq!(
-        snapshot.delete_paths.len(),
-        1,
-        "probe cleanup should be attempted"
-    );
-    assert!(
-        err.to_string().contains("probe") || err.to_string().contains("mismatch"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn check_connection_succeeds_when_server_rejects_hidden_probe_files() {
+fn check_connection_succeeds_without_round_trip_probe() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
 
     let server = TestWebDavServer::start_with_config(ServerConfig {
-        probe_readback: ProbeReadback::Stored,
-        manifest_readback: ProbeReadback::Stored,
         manifest_head_behavior: ManifestHeadBehavior::Present,
         reject_dotfile_puts: true,
-        delete_behavior: DeleteBehavior::Success,
     });
     set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
         .expect("save test WebDAV settings");
 
-    WebDavSyncService::check_connection()
-        .expect("non-hidden probe should succeed even when dotfiles are blocked");
-
-    let snapshot = server.snapshot();
-    assert_probe_round_trip(&snapshot);
-}
-
-#[test]
-fn check_connection_succeeds_when_probe_cleanup_delete_fails_after_successful_round_trip() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let server = TestWebDavServer::start_with_config(ServerConfig {
-        probe_readback: ProbeReadback::Stored,
-        manifest_readback: ProbeReadback::Stored,
-        manifest_head_behavior: ManifestHeadBehavior::Present,
-        reject_dotfile_puts: false,
-        delete_behavior: DeleteBehavior::ServerError,
-    });
-    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
-        .expect("save test WebDAV settings");
-
-    WebDavSyncService::check_connection()
-        .expect("probe cleanup delete failure should stay best-effort");
-
-    let snapshot = server.snapshot();
-    assert_probe_round_trip(&snapshot);
-    assert_eq!(
-        snapshot.delete_paths.len(),
-        1,
-        "cleanup should still be attempted"
-    );
-}
-
-#[test]
-fn check_connection_succeeds_when_probe_cleanup_delete_reports_missing_after_successful_round_trip()
-{
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let server = TestWebDavServer::start_with_config(ServerConfig {
-        probe_readback: ProbeReadback::Stored,
-        manifest_readback: ProbeReadback::Stored,
-        manifest_head_behavior: ManifestHeadBehavior::Present,
-        reject_dotfile_puts: false,
-        delete_behavior: DeleteBehavior::NotFound,
-    });
-    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
-        .expect("save test WebDAV settings");
-
-    WebDavSyncService::check_connection()
-        .expect("probe cleanup delete 404 should stay best-effort");
-
-    let snapshot = server.snapshot();
-    assert_probe_round_trip(&snapshot);
-    assert_eq!(
-        snapshot.delete_paths.len(),
-        1,
-        "cleanup should still be attempted"
-    );
-}
-
-#[test]
-fn check_connection_reports_probe_failure_even_when_cleanup_delete_fails() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let server = TestWebDavServer::start_with_config(ServerConfig {
-        probe_readback: ProbeReadback::Mismatch,
-        manifest_readback: ProbeReadback::Stored,
-        manifest_head_behavior: ManifestHeadBehavior::Present,
-        reject_dotfile_puts: false,
-        delete_behavior: DeleteBehavior::ServerError,
-    });
-    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
-        .expect("save test WebDAV settings");
-
-    let err = WebDavSyncService::check_connection()
-        .expect_err("probe mismatch should remain the main error");
+    WebDavSyncService::check_connection().expect("connection check should succeed");
 
     let snapshot = server.snapshot();
     assert_eq!(
-        snapshot.delete_paths.len(),
-        1,
-        "cleanup should still be attempted"
+        snapshot.put_paths,
+        Vec::<String>::new(),
+        "connection check should not write probe files: {snapshot:?}"
     );
-    assert!(
-        err.to_string().contains("probe") || err.to_string().contains("mismatch"),
-        "unexpected error: {err}"
+    assert_eq!(
+        snapshot.get_paths,
+        Vec::<String>::new(),
+        "connection check should not read back probe files: {snapshot:?}"
     );
-    assert!(
-        !err.to_string().contains("DELETE"),
-        "cleanup failure should not mask the probe error: {err}"
+    assert_eq!(
+        snapshot.delete_paths,
+        Vec::<String>::new(),
+        "connection check should not clean up probe files: {snapshot:?}"
     );
 }
 
 #[test]
-fn upload_succeeds_when_manifest_readback_matches() {
+fn upload_succeeds_without_manifest_readback() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
-        ProbeReadback::Stored,
+    let server = TestWebDavServer::start_with_config(ServerConfig::with_manifest_head(
         ManifestHeadBehavior::Missing,
     ));
     set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
         .expect("save test WebDAV settings");
 
-    let summary = WebDavSyncService::upload().expect("matching manifest readback should succeed");
+    let summary = WebDavSyncService::upload().expect("manifest PUT should decide upload success");
 
     assert_eq!(summary.decision, cc_switch_lib::SyncDecision::Upload);
     let snapshot = server.snapshot();
     assert_upload_artifact_puts(&snapshot);
     assert_eq!(
         snapshot.get_paths,
-        vec!["/dav/sync-root/v2/db-v6/default-profile/manifest.json".to_string()],
-        "upload should verify manifest bytes via GET"
+        Vec::<String>::new(),
+        "upload should not verify manifest bytes via GET"
     );
     assert_eq!(
         snapshot.head_paths,
         vec!["/dav/sync-root/v2/db-v6/default-profile/manifest.json".to_string()],
         "HEAD should remain best-effort metadata only"
+    );
+    assert_eq!(
+        snapshot.delete_paths,
+        Vec::<String>::new(),
+        "plain upload should not clean up legacy V1 remote data"
     );
 }
 
@@ -706,149 +437,38 @@ fn upload_succeeds_when_manifest_head_returns_server_error() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
-        ProbeReadback::Stored,
+    let server = TestWebDavServer::start_with_config(ServerConfig::with_manifest_head(
         ManifestHeadBehavior::ServerError,
     ));
     set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
         .expect("save test WebDAV settings");
 
-    let summary = WebDavSyncService::upload()
-        .expect("manifest HEAD errors should stay best-effort after matching GET readback");
+    let summary =
+        WebDavSyncService::upload().expect("manifest HEAD errors should stay best-effort");
 
     assert_eq!(summary.decision, cc_switch_lib::SyncDecision::Upload);
     let snapshot = server.snapshot();
     assert_upload_artifact_puts(&snapshot);
     assert_eq!(
         snapshot.get_paths,
-        vec!["/dav/sync-root/v2/db-v6/default-profile/manifest.json".to_string()],
-        "upload success should remain gated by manifest GET readback"
+        Vec::<String>::new(),
+        "upload success should not be gated by manifest GET readback"
     );
     assert_eq!(
         snapshot.head_paths,
         vec!["/dav/sync-root/v2/db-v6/default-profile/manifest.json".to_string()],
         "HEAD should still be attempted as best-effort metadata"
     );
-}
-
-#[test]
-fn upload_fails_when_manifest_readback_is_missing() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
-        ProbeReadback::Missing,
-        ManifestHeadBehavior::Present,
-    ));
-    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
-        .expect("save test WebDAV settings");
-
-    let err =
-        WebDavSyncService::upload().expect_err("missing manifest readback should fail upload");
-
-    let snapshot = server.snapshot();
-    assert_upload_artifact_puts(&snapshot);
     assert_eq!(
-        snapshot.get_paths,
-        vec!["/dav/sync-root/v2/db-v6/default-profile/manifest.json".to_string()],
-        "upload should attempt manifest readback before failing"
-    );
-    assert!(
-        snapshot.head_paths.is_empty(),
-        "HEAD should not decide success"
-    );
-    assert!(
-        err.to_string().contains("manifest") || err.to_string().contains("readback"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn upload_fails_when_manifest_readback_mismatches() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
-        ProbeReadback::Mismatch,
-        ManifestHeadBehavior::Present,
-    ));
-    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
-        .expect("save test WebDAV settings");
-
-    let err =
-        WebDavSyncService::upload().expect_err("mismatched manifest readback should fail upload");
-
-    let snapshot = server.snapshot();
-    assert_upload_artifact_puts(&snapshot);
-    assert_eq!(
-        snapshot.get_paths,
-        vec!["/dav/sync-root/v2/db-v6/default-profile/manifest.json".to_string()],
-        "upload should attempt manifest readback before failing"
-    );
-    assert!(
-        snapshot.head_paths.is_empty(),
-        "HEAD should not decide success"
-    );
-    assert!(
-        err.to_string().contains("manifest") || err.to_string().contains("mismatch"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn upload_fails_when_manifest_readback_exceeds_expected_size() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
-        ProbeReadback::Oversized,
-        ManifestHeadBehavior::Present,
-    ));
-    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
-        .expect("save test WebDAV settings");
-
-    let err =
-        WebDavSyncService::upload().expect_err("oversized manifest readback should fail upload");
-
-    assert!(
-        err.to_string().contains("大小限制") || err.to_string().contains("size limit"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn upload_fails_when_manifest_stream_readback_exceeds_expected_size() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
-        ProbeReadback::OversizedStreaming,
-        ManifestHeadBehavior::Present,
-    ));
-    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
-        .expect("save test WebDAV settings");
-
-    let err = WebDavSyncService::upload()
-        .expect_err("oversized streamed manifest readback should fail upload");
-
-    let snapshot = server.snapshot();
-    assert!(
-        snapshot.streamed_chunk_count < 8,
-        "bounded streaming readback should stop early: {snapshot:?}"
-    );
-    assert!(
-        err.to_string().contains("大小限制") || err.to_string().contains("size limit"),
-        "unexpected error: {err}"
+        snapshot.delete_paths,
+        Vec::<String>::new(),
+        "plain upload should not clean up legacy V1 remote data"
     );
 }
 
 #[test]
 fn server_rejects_put_when_parent_directory_is_missing() {
-    let server = TestWebDavServer::start(ProbeReadback::Stored);
+    let server = TestWebDavServer::start();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -876,8 +496,7 @@ fn webdav_download_rejects_when_proxy_running() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
-        ProbeReadback::Stored,
+    let server = TestWebDavServer::start_with_config(ServerConfig::with_manifest_head(
         ManifestHeadBehavior::Missing,
     ));
     set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
@@ -892,17 +511,7 @@ fn webdav_download_rejects_when_proxy_running() {
         .build()
         .expect("build test runtime");
     runtime.block_on(async {
-        let mut config = state
-            .proxy_service
-            .get_config()
-            .await
-            .expect("read proxy config");
-        config.listen_port = find_free_port();
-        state
-            .proxy_service
-            .update_config(&config)
-            .await
-            .expect("update proxy config");
+        set_claude_proxy_free_port(&state).await;
         state
             .proxy_service
             .start()
@@ -933,7 +542,7 @@ fn webdav_migrate_v1_to_v2_rejects_when_takeover_is_active() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let server = TestWebDavServer::start(ProbeReadback::Stored);
+    let server = TestWebDavServer::start();
     set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
         .expect("save test WebDAV settings");
 
@@ -984,17 +593,7 @@ fn webdav_migrate_v1_to_v2_rejects_when_takeover_is_active() {
     server.seed_file("/dav/sync-root/v1/default-profile/skills.zip", skills_zip);
 
     runtime.block_on(async {
-        let mut config = state
-            .proxy_service
-            .get_config()
-            .await
-            .expect("read proxy config");
-        config.listen_port = find_free_port();
-        state
-            .proxy_service
-            .update_config(&config)
-            .await
-            .expect("update proxy config");
+        set_claude_proxy_free_port(&state).await;
 
         state
             .proxy_service
@@ -1042,8 +641,7 @@ fn webdav_download_rejects_when_takeover_artifacts_exist_even_if_enabled_flag_is
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
-        ProbeReadback::Stored,
+    let server = TestWebDavServer::start_with_config(ServerConfig::with_manifest_head(
         ManifestHeadBehavior::Missing,
     ));
     set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
@@ -1059,17 +657,7 @@ fn webdav_download_rejects_when_takeover_artifacts_exist_even_if_enabled_flag_is
         .build()
         .expect("build test runtime");
     runtime.block_on(async {
-        let mut config = state
-            .proxy_service
-            .get_config()
-            .await
-            .expect("read proxy config");
-        config.listen_port = find_free_port();
-        state
-            .proxy_service
-            .update_config(&config)
-            .await
-            .expect("update proxy config");
+        set_claude_proxy_free_port(&state).await;
 
         state
             .proxy_service

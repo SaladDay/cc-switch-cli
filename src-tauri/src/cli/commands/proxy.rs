@@ -1,9 +1,17 @@
 use clap::Subcommand;
 
 use crate::app_config::AppType;
+use crate::cli::proxy_settings::{validate_proxy_listen_address, validate_proxy_listen_port};
 use crate::cli::ui::{highlight, info, success};
 use crate::error::AppError;
 use crate::{AppState, ProxyConfig};
+
+#[cfg(unix)]
+use crate::daemon::ipc::client as daemon_client;
+#[cfg(unix)]
+use crate::daemon::ipc::protocol::{Request as DaemonRequest, Response as DaemonResponse};
+#[cfg(unix)]
+use crate::daemon::supervisor::{DAEMON_SOCKET_ENV, SESSION_TOKEN_ENV};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ProxyCommand {
@@ -15,6 +23,17 @@ pub enum ProxyCommand {
 
     /// Disable the persisted proxy switch
     Disable,
+
+    /// Configure the selected app's proxy route
+    Config {
+        /// Set the global proxy listen address
+        #[arg(long)]
+        listen_address: Option<String>,
+
+        /// Set the selected app's daemon worker listen port
+        #[arg(long)]
+        listen_port: Option<u16>,
+    },
 
     /// Start the local proxy in the foreground for debugging
     Serve {
@@ -32,11 +51,16 @@ pub enum ProxyCommand {
     },
 }
 
-pub fn execute(cmd: ProxyCommand) -> Result<(), AppError> {
+pub fn execute(cmd: ProxyCommand, app: Option<AppType>) -> Result<(), AppError> {
+    let app_type = app.unwrap_or(AppType::Claude);
     match cmd {
         ProxyCommand::Show => show_proxy(),
-        ProxyCommand::Enable => set_proxy_enabled(true),
-        ProxyCommand::Disable => set_proxy_enabled(false),
+        ProxyCommand::Enable => set_proxy_enabled(app_type, true),
+        ProxyCommand::Disable => set_proxy_enabled(app_type, false),
+        ProxyCommand::Config {
+            listen_address,
+            listen_port,
+        } => configure_proxy(app_type, listen_address, listen_port),
         ProxyCommand::Serve {
             listen_address,
             listen_port,
@@ -59,32 +83,45 @@ fn create_runtime() -> Result<tokio::runtime::Runtime, AppError> {
 fn show_proxy() -> Result<(), AppError> {
     let state = get_state()?;
     let runtime = create_runtime()?;
-    let global = runtime.block_on(state.proxy_service.get_global_config())?;
     let config = runtime.block_on(state.proxy_service.get_config())?;
     let status = runtime.block_on(state.proxy_service.get_status());
+    let app_ports = load_proxy_app_ports(&state)?;
     let takeovers = runtime
         .block_on(state.proxy_service.get_takeover_status())
         .map_err(AppError::Message)?;
 
     println!("{}", highlight(crate::t!("Local Proxy", "本地代理")));
-    for line in build_proxy_overview_lines(&state, &global, &config, &status, &takeovers) {
+    for line in build_proxy_overview_lines(&state, &config, &status, &app_ports, &takeovers) {
         println!("{line}");
     }
 
     Ok(())
 }
 
-fn set_proxy_enabled(enabled: bool) -> Result<(), AppError> {
+fn set_proxy_enabled(app_type: AppType, enabled: bool) -> Result<(), AppError> {
+    if !matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
+        return Err(AppError::InvalidInput(format!(
+            "proxy takeover is not supported for {}",
+            app_type.as_str()
+        )));
+    }
     let state = get_state()?;
     let runtime = create_runtime()?;
-    let config = runtime.block_on(state.proxy_service.set_global_enabled(enabled))?;
+    runtime
+        .block_on(
+            state
+                .proxy_service
+                .set_managed_session_for_app(app_type.as_str(), enabled),
+        )
+        .map_err(AppError::Message)?;
 
     println!(
         "{}",
         success(&format!(
-            "{}: {}",
-            crate::t!("Proxy switch", "代理开关"),
-            if config.proxy_enabled {
+            "{} {}: {}",
+            crate::t!("Proxy route", "代理路由"),
+            app_type.as_str(),
+            if enabled {
                 crate::t!("enabled", "开启")
             } else {
                 crate::t!("disabled", "关闭")
@@ -92,6 +129,79 @@ fn set_proxy_enabled(enabled: bool) -> Result<(), AppError> {
         ))
     );
 
+    Ok(())
+}
+
+fn configure_proxy(
+    app_type: AppType,
+    listen_address: Option<String>,
+    listen_port: Option<u16>,
+) -> Result<(), AppError> {
+    if listen_address.is_none() && listen_port.is_none() {
+        return show_proxy();
+    }
+    let listen_address = listen_address.map(|address| address.trim().to_string());
+    if let Some(address) = &listen_address {
+        validate_proxy_listen_address(address)?;
+    }
+    if let Some(port) = listen_port {
+        validate_proxy_listen_port(port)?;
+    }
+    if listen_port.is_some()
+        && !matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+    {
+        return Err(AppError::InvalidInput(format!(
+            "proxy takeover is not supported for {}",
+            app_type.as_str()
+        )));
+    }
+    let state = get_state()?;
+    let runtime = create_runtime()?;
+    let status = runtime.block_on(state.proxy_service.get_status());
+    if listen_address.is_some() && status.running {
+        return Err(AppError::Message(
+            "stop the proxy before changing its listen address".to_string(),
+        ));
+    }
+    let app_running = status
+        .active_workers
+        .iter()
+        .any(|worker| worker.app_type == app_type.as_str());
+    if listen_port.is_some() && app_running {
+        return Err(AppError::Message(format!(
+            "stop the {} proxy route before changing its listen port",
+            app_type.as_str()
+        )));
+    }
+
+    if let Some(address) = listen_address {
+        let mut config = runtime.block_on(state.proxy_service.get_config())?;
+        config.listen_address = address.clone();
+        runtime.block_on(state.proxy_service.update_config(&config))?;
+        println!(
+            "{}",
+            success(&format!(
+                "{}: {}",
+                crate::t!("Proxy listen address", "代理监听地址"),
+                address
+            ))
+        );
+    }
+
+    if let Some(port) = listen_port {
+        state
+            .db
+            .set_app_proxy_preferred_port(app_type.as_str(), port)?;
+        println!(
+            "{}",
+            success(&format!(
+                "{} {}: {}",
+                crate::t!("Proxy listen port", "代理监听端口"),
+                app_type.as_str(),
+                port
+            ))
+        );
+    }
     Ok(())
 }
 
@@ -105,8 +215,17 @@ fn serve_proxy(
 
     runtime.block_on(async move {
         let service = state.proxy_service.clone();
+        if !takeovers.is_empty() {
+            let status = service.get_status().await;
+            if status.running && !status.active_workers.is_empty() {
+                return Err(AppError::Message(
+                    "cannot run foreground proxy takeover while a daemon-managed proxy session is active; disable daemon-managed proxy routes first"
+                        .to_string(),
+                ));
+            }
+        }
         let base_config = service.get_config().await?;
-        let effective_config = apply_overrides(&base_config, listen_address, listen_port);
+        let effective_config = apply_overrides(&base_config, listen_address, listen_port)?;
 
         let result = async {
             let server_info = service
@@ -114,16 +233,44 @@ fn serve_proxy(
                 .await
                 .map_err(AppError::Message)?;
 
+            let announced_to_daemon = {
+                #[cfg(unix)]
+                {
+                    match announce_to_daemon_if_managed(&server_info) {
+                        Ok(announced) => announced,
+                        Err(err) => {
+                            let _ = service.stop_with_restore().await;
+                            return Err(AppError::Message(err));
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            };
+
             if let Err(err) = apply_takeovers(&service, &takeovers).await {
                 let _ = service.stop_with_restore().await;
                 return Err(AppError::Message(err));
             }
 
-            if let Err(err) = service.publish_runtime_session_if_needed(&server_info) {
-                let _ = service.stop_with_restore().await;
-                return Err(AppError::Message(err));
+            if !announced_to_daemon {
+                if let Err(err) = service.publish_runtime_session_if_needed(&server_info) {
+                    let _ = service.stop_with_restore().await;
+                    return Err(AppError::Message(err));
+                }
             }
             crate::services::state_coordination::clear_restore_mutation_guard_bypass_env();
+            let session_sync_task =
+                crate::services::session_usage::spawn_periodic_session_usage_sync(
+                    state.db.clone(),
+                    "foreground-proxy",
+                );
+            let usage_maintenance_task = crate::database::Database::spawn_periodic_usage_maintenance(
+                state.db.clone(),
+                "foreground-proxy",
+            );
 
             println!("{}", highlight(crate::t!("Local Proxy Running", "本地代理已启动")));
             println!(
@@ -156,13 +303,9 @@ fn serve_proxy(
                     ))
                 );
             }
-            println!(
-                "{}",
-                info(crate::t!(
-                    "Manual takeover only. Automatic failover is disabled in this phase.",
-                    "仅支持手动接管；本阶段不包含自动故障转移。"
-                ))
-            );
+            for line in build_auto_failover_status_lines(&state) {
+                println!("{}", info(&line));
+            }
             println!(
                 "{}",
                 info(crate::t!(
@@ -174,6 +317,8 @@ fn serve_proxy(
             tokio::signal::ctrl_c()
                 .await
                 .map_err(|e| AppError::Message(format!("failed to listen for Ctrl-C: {e}")))?;
+            session_sync_task.abort();
+            usage_maintenance_task.abort();
 
             service
                 .stop_with_restore()
@@ -190,6 +335,35 @@ fn serve_proxy(
 
         result
     })
+}
+
+#[cfg(unix)]
+fn announce_to_daemon_if_managed(
+    info: &crate::proxy::types::ProxyServerInfo,
+) -> Result<bool, String> {
+    let Some(socket_os) = std::env::var_os(DAEMON_SOCKET_ENV) else {
+        return Ok(false);
+    };
+    let socket_path = std::path::PathBuf::from(socket_os);
+    let session_token = std::env::var(SESSION_TOKEN_ENV)
+        .map_err(|_| "missing CC_SWITCH_PROXY_SESSION_TOKEN env from daemon".to_string())?;
+    let request = DaemonRequest::WorkerHello {
+        pid: std::process::id(),
+        address: info.address.clone(),
+        port: info.port,
+        session_token,
+    };
+    let response = daemon_client::round_trip(&socket_path, &request)
+        .map_err(|err| format!("worker hello to daemon failed: {err}"))?;
+    match response {
+        DaemonResponse::Ok => Ok(true),
+        DaemonResponse::Error { message } => {
+            Err(format!("daemon rejected worker hello: {message}"))
+        }
+        other => Err(format!(
+            "daemon returned unexpected response to worker hello: {other:?}"
+        )),
+    }
 }
 
 async fn apply_takeovers(
@@ -217,7 +391,7 @@ fn apply_overrides(
     original: &ProxyConfig,
     listen_address: Option<String>,
     listen_port: Option<u16>,
-) -> ProxyConfig {
+) -> Result<ProxyConfig, AppError> {
     let mut config = original.clone();
     if let Some(address) = listen_address {
         config.listen_address = address;
@@ -225,14 +399,80 @@ fn apply_overrides(
     if let Some(port) = listen_port {
         config.listen_port = port;
     }
-    config
+    Ok(config)
+}
+
+fn load_proxy_app_ports(state: &AppState) -> Result<Vec<(AppType, u16)>, AppError> {
+    [AppType::Claude, AppType::Codex, AppType::Gemini]
+        .into_iter()
+        .map(|app| {
+            state
+                .db
+                .get_app_proxy_preferred_port(app.as_str())
+                .map(|port| (app, port))
+        })
+        .collect()
+}
+
+fn build_proxy_route_lines(
+    config: &ProxyConfig,
+    status: &crate::ProxyStatus,
+    app_ports: &[(AppType, u16)],
+    takeovers: &crate::proxy::types::ProxyTakeoverStatus,
+) -> Vec<String> {
+    [
+        (AppType::Claude, "Claude", takeovers.claude),
+        (AppType::Codex, "Codex", takeovers.codex),
+        (AppType::Gemini, "Gemini", takeovers.gemini),
+    ]
+    .into_iter()
+    .map(|(app, label, enabled)| {
+        let configured_port = app_configured_port(app_ports, &app).unwrap_or(config.listen_port);
+        let worker = status
+            .active_workers
+            .iter()
+            .find(|worker| worker.app_type == app.as_str());
+        let state = if enabled {
+            crate::t!("enabled", "开启")
+        } else {
+            crate::t!("disabled", "关闭")
+        };
+
+        match worker {
+            Some(worker) => format!(
+                "- {label}: {state}, {} {}, {} {}:{}{}",
+                crate::t!("configured", "配置"),
+                configured_port,
+                crate::t!("running", "运行"),
+                worker.address,
+                worker.port,
+                worker
+                    .pid
+                    .map(|pid| format!(" pid={pid}"))
+                    .unwrap_or_default()
+            ),
+            None => format!(
+                "- {label}: {state}, {} {}",
+                crate::t!("configured", "配置"),
+                configured_port
+            ),
+        }
+    })
+    .collect()
+}
+
+fn app_configured_port(app_ports: &[(AppType, u16)], app: &AppType) -> Option<u16> {
+    app_ports
+        .iter()
+        .find(|(candidate, _)| candidate == app)
+        .map(|(_, port)| *port)
 }
 
 fn build_proxy_overview_lines(
     state: &AppState,
-    global: &crate::proxy::types::GlobalProxyConfig,
     config: &ProxyConfig,
     status: &crate::ProxyStatus,
+    app_ports: &[(AppType, u16)],
     takeovers: &crate::proxy::types::ProxyTakeoverStatus,
 ) -> Vec<String> {
     let current_providers = AppType::all()
@@ -252,11 +492,7 @@ fn build_proxy_overview_lines(
     } else {
         config.listen_address.as_str()
     };
-    let listen_port = if status.running && status.port > 0 {
-        status.port
-    } else {
-        config.listen_port
-    };
+    let route_lines = build_proxy_route_lines(config, status, app_ports, takeovers);
 
     let mut lines = vec![
         format!(
@@ -269,23 +505,32 @@ fn build_proxy_overview_lines(
             }
         ),
         format!(
-            "{}: {}",
-            crate::t!("Enabled", "启用状态"),
-            if global.proxy_enabled {
-                crate::t!("enabled", "开启")
+            "{}: Claude={}, Codex={}, Gemini={}",
+            crate::t!("Active routes", "活动路由"),
+            if takeovers.claude {
+                crate::t!("on", "开启")
             } else {
-                crate::t!("disabled", "关闭")
+                crate::t!("off", "关闭")
+            },
+            if takeovers.codex {
+                crate::t!("on", "开启")
+            } else {
+                crate::t!("off", "关闭")
+            },
+            if takeovers.gemini {
+                crate::t!("on", "开启")
+            } else {
+                crate::t!("off", "关闭")
             }
         ),
         format!(
-            "{}: {}:{}",
-            crate::t!("Listen", "监听"),
-            listen_host,
-            listen_port
+            "{}: {}",
+            crate::t!("Listen address", "监听地址"),
+            listen_host
         ),
         crate::t!(
-            "Mode: manual takeover only (automatic failover disabled)",
-            "模式：仅支持手动接管（自动故障转移已禁用）"
+            "Mode: local proxy (manual takeover and automatic failover follow app settings)",
+            "模式：本地代理（手动接管和自动故障转移遵循各应用配置）"
         )
         .to_string(),
         format!(
@@ -313,34 +558,18 @@ fn build_proxy_overview_lines(
             config.non_streaming_timeout
         ),
         String::new(),
-        crate::t!("Takeovers:", "接管状态：").to_string(),
-        format!(
-            "- Claude: {}",
-            if takeovers.claude {
-                crate::t!("takeover on", "已接管")
-            } else {
-                crate::t!("takeover off", "未接管")
-            }
-        ),
-        format!(
-            "- Codex: {}",
-            if takeovers.codex {
-                crate::t!("takeover on", "已接管")
-            } else {
-                crate::t!("takeover off", "未接管")
-            }
-        ),
-        format!(
-            "- Gemini: {}",
-            if takeovers.gemini {
-                crate::t!("takeover on", "已接管")
-            } else {
-                crate::t!("takeover off", "未接管")
-            }
-        ),
+        crate::t!("Proxy app routes:", "代理应用路由：").to_string(),
+    ];
+    lines.extend(route_lines);
+    lines.extend([
+        String::new(),
+        crate::t!("Auto failover:", "自动故障转移：").to_string(),
+    ]);
+    lines.extend(build_auto_failover_status_lines(state));
+    lines.extend([
         String::new(),
         crate::t!("Current providers:", "当前供应商：").to_string(),
-    ];
+    ]);
     lines.extend(current_providers);
     lines.extend([
         String::new(),
@@ -356,7 +585,8 @@ fn build_proxy_overview_lines(
         .to_string(),
         format!(
             "- ANTHROPIC_BASE_URL=http://{}:{}",
-            listen_host, listen_port
+            listen_host,
+            app_configured_port(app_ports, &AppType::Claude).unwrap_or(config.listen_port)
         ),
         "- ANTHROPIC_AUTH_TOKEN=proxy-placeholder".to_string(),
         crate::t!(
@@ -366,8 +596,8 @@ fn build_proxy_overview_lines(
         .to_string(),
         String::new(),
         crate::t!(
-            "This is a foreground manual-takeover session. Automatic failover is intentionally not available.",
-            "这是前台手动接管会话；自动故障转移在当前阶段明确不提供。"
+            "Manual takeover is controlled with --takeover; automatic failover uses each app's proxy settings and failover queue.",
+            "手动接管通过 --takeover 控制；自动故障转移使用各应用的代理配置和故障转移队列。"
         )
         .to_string(),
         String::new(),
@@ -386,16 +616,64 @@ fn build_proxy_overview_lines(
     lines
 }
 
+fn build_auto_failover_status_lines(state: &AppState) -> Vec<String> {
+    [
+        (AppType::Claude, "Claude"),
+        (AppType::Codex, "Codex"),
+        (AppType::Gemini, "Gemini"),
+    ]
+    .into_iter()
+    .map(|(app, label)| {
+        let (_, auto_failover_enabled) = state.db.get_proxy_flags_sync(app.as_str());
+        format!(
+            "- {}: {}",
+            label,
+            if auto_failover_enabled {
+                crate::t!("auto failover on", "自动故障转移开启")
+            } else {
+                crate::t!("auto failover off", "自动故障转移关闭")
+            }
+        )
+    })
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, RwLock};
 
     use crate::{
-        proxy::types::{GlobalProxyConfig, ProxyStatus, ProxyTakeoverStatus},
+        proxy::types::{ActiveWorker, ProxyStatus, ProxyTakeoverStatus},
         Database, MultiAppConfig, ProxyService,
     };
 
-    use super::build_proxy_overview_lines;
+    use super::{apply_overrides, build_proxy_overview_lines, load_proxy_app_ports};
+    use crate::cli::proxy_settings::validate_proxy_listen_port;
+
+    #[test]
+    fn cli_proxy_listen_port_validation_rejects_reserved_ports() {
+        let error =
+            validate_proxy_listen_port(0).expect_err("port 0 should not be accepted from CLI");
+
+        assert!(error.to_string().contains("1024"));
+    }
+
+    #[test]
+    fn apply_overrides_allows_ephemeral_listen_port_for_foreground_serve() {
+        let config = crate::ProxyConfig::default();
+        let updated = apply_overrides(&config, None, Some(0))
+            .expect("foreground serve should allow an ephemeral port");
+
+        assert_eq!(updated.listen_port, 0);
+    }
+
+    #[test]
+    fn apply_overrides_accepts_user_listen_port_range() {
+        let config = crate::ProxyConfig::default();
+        let updated = apply_overrides(&config, None, Some(1024)).expect("1024 is allowed");
+
+        assert_eq!(updated.listen_port, 1024);
+    }
 
     #[test]
     fn proxy_overview_lines_include_runtime_status_and_takeover_state() {
@@ -403,19 +681,41 @@ mod tests {
         let state = crate::AppState {
             db: db.clone(),
             config: RwLock::new(MultiAppConfig::default()),
-            proxy_service: ProxyService::new(db),
+            proxy_service: ProxyService::new(db.clone()),
         };
-        let global = GlobalProxyConfig {
-            proxy_enabled: true,
-            listen_address: "127.0.0.1".to_string(),
+        let config = crate::ProxyConfig {
             listen_port: 15721,
-            enable_logging: true,
+            ..Default::default()
         };
-        let config = crate::ProxyConfig::default();
+        db.set_proxy_flags_sync("claude", true, false)
+            .expect("enable claude proxy route");
+        db.set_app_proxy_preferred_port("codex", 15722)
+            .expect("save codex preferred proxy port");
+        db.set_proxy_flags_sync("gemini", true, false)
+            .expect("enable gemini proxy route");
+        db.set_app_proxy_preferred_port("gemini", 15723)
+            .expect("save gemini preferred proxy port");
+        let app_ports = load_proxy_app_ports(&state).expect("load app proxy ports");
         let status = ProxyStatus {
             running: true,
             address: "127.0.0.1".to_string(),
             port: 24567,
+            active_workers: vec![
+                ActiveWorker {
+                    app_type: "claude".to_string(),
+                    address: "127.0.0.1".to_string(),
+                    port: 15721,
+                    pid: Some(1001),
+                    started_at: None,
+                },
+                ActiveWorker {
+                    app_type: "gemini".to_string(),
+                    address: "127.0.0.1".to_string(),
+                    port: 15723,
+                    pid: Some(1003),
+                    started_at: None,
+                },
+            ],
             ..Default::default()
         };
         let takeover = ProxyTakeoverStatus {
@@ -424,7 +724,7 @@ mod tests {
             gemini: true,
         };
 
-        let lines = build_proxy_overview_lines(&state, &global, &config, &status, &takeover);
+        let lines = build_proxy_overview_lines(&state, &config, &status, &app_ports, &takeover);
         let output = lines.join("\n");
 
         assert!(
@@ -432,16 +732,77 @@ mod tests {
             "proxy show output should include foreground runtime status"
         );
         assert!(
-            output.contains("127.0.0.1:24567"),
-            "proxy show output should prefer the active runtime listen address when the proxy is running"
+            output.contains("Listen address: 127.0.0.1")
+                || output.contains("监听地址: 127.0.0.1"),
+            "proxy show output should show the active runtime listen address separately from app ports"
         );
         assert!(
-            output.contains("Claude: takeover on") || output.contains("Claude: 已接管"),
-            "proxy show output should include Claude manual takeover state"
+            output.contains("Claude: enabled, configured 15721, running 127.0.0.1:15721 pid=1001")
+                || output.contains("Claude: 开启, 配置 15721, 运行 127.0.0.1:15721 pid=1001"),
+            "proxy show output should include Claude configured and runtime ports"
         );
         assert!(
-            output.contains("Gemini: takeover on") || output.contains("Gemini: 已接管"),
-            "proxy show output should include Gemini manual takeover state"
+            output.contains("Codex: disabled, configured 15722")
+                || output.contains("Codex: 关闭, 配置 15722"),
+            "proxy show output should include Codex configured port even when stopped"
+        );
+        assert!(
+            output.contains("Gemini: enabled, configured 15723, running 127.0.0.1:15723 pid=1003")
+                || output.contains("Gemini: 开启, 配置 15723, 运行 127.0.0.1:15723 pid=1003"),
+            "proxy show output should include Gemini configured and runtime ports"
+        );
+        assert!(
+            output.contains("Active routes: Claude=on, Codex=off, Gemini=on")
+                || output.contains("活动路由: Claude=开启, Codex=关闭, Gemini=开启"),
+            "proxy show output should summarize app-specific active routes"
+        );
+        assert!(
+            !output.contains("Listen: 127.0.0.1:24567")
+                && !output.contains("监听: 127.0.0.1:24567"),
+            "proxy show output should not collapse per-app ports into one listen line"
+        );
+        assert!(
+            !output.contains("Enabled:") && !output.contains("启用状态:"),
+            "proxy show output should not present proxy state as a single global enabled flag"
+        );
+    }
+
+    #[test]
+    fn proxy_overview_lines_report_configured_auto_failover_state() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let provider = crate::Provider::with_id(
+            "codex-p1".to_string(),
+            "Codex P1".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("save codex failover provider");
+        db.add_to_failover_queue("codex", &provider.id)
+            .expect("queue codex failover provider");
+        db.set_proxy_flags_sync("codex", true, true)
+            .expect("enable codex auto failover");
+        let state = crate::AppState {
+            db: db.clone(),
+            config: RwLock::new(MultiAppConfig::default()),
+            proxy_service: ProxyService::new(db.clone()),
+        };
+        let config = crate::ProxyConfig::default();
+        let status = ProxyStatus::default();
+        let takeover = ProxyTakeoverStatus::default();
+        let app_ports = load_proxy_app_ports(&state).expect("load app proxy ports");
+
+        let lines = build_proxy_overview_lines(&state, &config, &status, &app_ports, &takeover);
+        let output = lines.join("\n");
+
+        assert!(
+            output.contains("Codex: auto failover on")
+                || output.contains("Codex: 自动故障转移开启"),
+            "proxy show output should reflect app-specific auto failover settings"
+        );
+        assert!(
+            !output.contains("automatic failover disabled"),
+            "proxy show output should not hard-code automatic failover as disabled"
         );
     }
 }

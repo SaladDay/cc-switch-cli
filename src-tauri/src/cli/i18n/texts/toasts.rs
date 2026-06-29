@@ -55,6 +55,14 @@ pub fn tui_toast_command_empty() -> &'static str {
     }
 }
 
+pub fn tui_toast_url_empty() -> &'static str {
+    if is_chinese() {
+        "URL 为空。"
+    } else {
+        "URL is empty."
+    }
+}
+
 pub fn tui_toast_mcp_env_key_empty() -> &'static str {
     if is_chinese() {
         "环境变量 Key 不能为空。"
@@ -550,6 +558,38 @@ pub fn tui_toast_claude_plugin_sync_failed(err: &str) -> String {
     }
 }
 
+pub fn tui_toast_codex_unified_session_history_toggled(enabled: bool) -> String {
+    if is_chinese() {
+        if enabled {
+            "已启用统一 Codex 会话历史。".to_string()
+        } else {
+            "已关闭统一 Codex 会话历史。".to_string()
+        }
+    } else {
+        if enabled {
+            "Unified Codex session history enabled.".to_string()
+        } else {
+            "Unified Codex session history disabled.".to_string()
+        }
+    }
+}
+
+pub fn tui_toast_codex_unified_session_history_already(enabled: bool) -> String {
+    if is_chinese() {
+        if enabled {
+            "统一 Codex 会话历史已经开启。".to_string()
+        } else {
+            "统一 Codex 会话历史已经关闭。".to_string()
+        }
+    } else {
+        if enabled {
+            "Unified Codex session history is already enabled.".to_string()
+        } else {
+            "Unified Codex session history is already disabled.".to_string()
+        }
+    }
+}
+
 pub fn tui_toast_unmanaged_scanned(count: usize) -> String {
     if is_chinese() {
         format!("扫描完成：发现 {count} 个可导入技能。")
@@ -735,6 +775,22 @@ pub fn tui_toast_prompt_deleted() -> &'static str {
         "提示词已删除。"
     } else {
         "Prompt deleted."
+    }
+}
+
+pub fn tui_toast_prompt_created() -> &'static str {
+    if is_chinese() {
+        "提示词已创建。"
+    } else {
+        "Prompt created."
+    }
+}
+
+pub fn tui_toast_prompt_renamed() -> &'static str {
+    if is_chinese() {
+        "提示词已重命名。"
+    } else {
+        "Prompt renamed."
     }
 }
 

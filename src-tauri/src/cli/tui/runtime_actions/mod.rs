@@ -4,11 +4,11 @@ use crate::app_config::AppType;
 use crate::cli::i18n::{set_language, texts};
 use crate::error::AppError;
 
-use super::app::{Action, App, Focus, Overlay, ToastKind};
+use super::app::{Action, App, Focus, Overlay, TextViewState, ToastKind};
 use super::data::UiData;
 use super::runtime_systems::{
-    LocalEnvReq, ModelFetchReq, ProxyReq, RequestTracker, SkillsReq, StreamCheckReq, UpdateReq,
-    WebDavReq,
+    LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, RequestTracker, SessionReq, SkillsReq,
+    StreamCheckReq, UpdateReq, WebDavReq,
 };
 use super::terminal::TuiTerminal;
 
@@ -18,6 +18,7 @@ mod config;
 mod editor;
 mod helpers;
 mod mcp;
+mod pricing;
 mod prompts;
 mod providers;
 mod settings;
@@ -27,8 +28,8 @@ mod updates;
 pub(crate) use helpers::{app_display_name, queue_managed_proxy_action};
 #[cfg(test)]
 pub(crate) use helpers::{
-    import_mcp_for_current_app_with, open_proxy_help_overlay_with,
-    run_external_editor_for_current_editor,
+    import_mcp_from_supported_apps_with, open_proxy_help_overlay_with,
+    run_external_editor_for_current_editor, run_external_editor_for_prompt_form_content,
 };
 
 fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> super::route::Route {
@@ -37,13 +38,39 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             super::route::Route::Main
             | super::route::Route::Providers
             | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Usage
+            | super::route::Route::UsageLogs
+            | super::route::Route::UsageLogDetail { .. }
+            | super::route::Route::Pricing
+            | super::route::Route::Sessions
             | super::route::Route::ConfigOpenClawWorkspace
             | super::route::Route::ConfigOpenClawDailyMemory
             | super::route::Route::ConfigOpenClawEnv
             | super::route::Route::ConfigOpenClawTools
             | super::route::Route::ConfigOpenClawAgents
             | super::route::Route::Settings
-            | super::route::Route::SettingsProxy => route.clone(),
+            | super::route::Route::SettingsProxy
+            | super::route::Route::SettingsManagedAccounts => route.clone(),
+            _ => super::route::Route::Main,
+        },
+        AppType::Hermes => match route {
+            super::route::Route::Main
+            | super::route::Route::Providers
+            | super::route::Route::ProviderDetail { .. }
+            | super::route::Route::Usage
+            | super::route::Route::UsageLogs
+            | super::route::Route::UsageLogDetail { .. }
+            | super::route::Route::Pricing
+            | super::route::Route::Sessions
+            | super::route::Route::Mcp
+            | super::route::Route::HermesMemory
+            | super::route::Route::Skills
+            | super::route::Route::SkillsDiscover
+            | super::route::Route::SkillsRepos
+            | super::route::Route::SkillDetail { .. }
+            | super::route::Route::Settings
+            | super::route::Route::SettingsProxy
+            | super::route::Route::SettingsManagedAccounts => route.clone(),
             _ => super::route::Route::Main,
         },
         _ => match route {
@@ -52,12 +79,18 @@ fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> s
             | super::route::Route::ConfigOpenClawEnv
             | super::route::Route::ConfigOpenClawTools
             | super::route::Route::ConfigOpenClawAgents => super::route::Route::Config,
+            super::route::Route::HermesMemory => super::route::Route::Main,
             _ => route.clone(),
         },
     }
 }
 
-fn apply_preloaded_app_switch(app: &mut App, data: &mut UiData, next: AppType, next_data: UiData) {
+pub(crate) fn apply_preloaded_app_switch(
+    app: &mut App,
+    data: &mut UiData,
+    next: AppType,
+    next_data: UiData,
+) {
     app.clear_openclaw_daily_memory_search_state();
     app.app_type = next;
     let original_route = app.route.clone();
@@ -99,13 +132,19 @@ pub(super) struct RuntimeActionContext<'a> {
     proxy_req_tx: Option<&'a mpsc::Sender<ProxyReq>>,
     proxy_loading: &'a mut RequestTracker,
     local_env_req_tx: Option<&'a mpsc::Sender<LocalEnvReq>>,
+    session_req_tx: Option<&'a mpsc::Sender<SessionReq>>,
     webdav_req_tx: Option<&'a mpsc::Sender<WebDavReq>>,
     webdav_loading: &'a mut RequestTracker,
     update_req_tx: Option<&'a mpsc::Sender<UpdateReq>>,
     update_check: &'a mut RequestTracker,
     model_fetch_req_tx: Option<&'a mpsc::Sender<ModelFetchReq>>,
+    managed_auth_req_tx: Option<&'a mpsc::Sender<ManagedAuthReq>>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "TUI dispatcher receives independent worker channels and request trackers"
+)]
 pub(crate) fn handle_action(
     terminal: &mut TuiTerminal,
     app: &mut App,
@@ -116,11 +155,13 @@ pub(crate) fn handle_action(
     proxy_req_tx: Option<&mpsc::Sender<ProxyReq>>,
     proxy_loading: &mut RequestTracker,
     local_env_req_tx: Option<&mpsc::Sender<LocalEnvReq>>,
+    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
     webdav_req_tx: Option<&mpsc::Sender<WebDavReq>>,
     webdav_loading: &mut RequestTracker,
     update_req_tx: Option<&mpsc::Sender<UpdateReq>>,
     update_check: &mut RequestTracker,
     model_fetch_req_tx: Option<&mpsc::Sender<ModelFetchReq>>,
+    managed_auth_req_tx: Option<&mpsc::Sender<ManagedAuthReq>>,
     action: Action,
 ) -> Result<(), AppError> {
     let mut ctx = RuntimeActionContext {
@@ -133,22 +174,26 @@ pub(crate) fn handle_action(
         proxy_req_tx,
         proxy_loading,
         local_env_req_tx,
+        session_req_tx,
         webdav_req_tx,
         webdav_loading,
         update_req_tx,
         update_check,
         model_fetch_req_tx,
+        managed_auth_req_tx,
     };
 
     match action {
         Action::None => Ok(()),
         Action::ReloadData => {
             *ctx.data = UiData::load(&ctx.app.app_type)?;
+            ctx.app.maybe_prompt_import_candidate(ctx.data);
             Ok(())
         }
         Action::SetAppType(next) => {
             let next_data = UiData::load(&next)?;
             apply_preloaded_app_switch(ctx.app, ctx.data, next, next_data);
+            ctx.app.maybe_prompt_import_candidate(ctx.data);
             Ok(())
         }
         Action::LocalEnvRefresh => {
@@ -171,8 +216,136 @@ pub(crate) fn handle_action(
             }
             Ok(())
         }
+        Action::SessionsRefresh => {
+            let Some(tx) = ctx.session_req_tx else {
+                ctx.app.sessions.loading = false;
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
+                    ToastKind::Warning,
+                );
+                return Ok(());
+            };
+            let provider_id = ctx.app.app_type.as_str().to_string();
+            let request_id = ctx.app.sessions.start_scan(provider_id.clone());
+            if let Err(err) = tx.send(SessionReq::Refresh {
+                request_id,
+                provider_id,
+            }) {
+                ctx.app.sessions.fail_scan(request_id, err.to_string());
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_refresh_failed(&err.to_string()),
+                    ToastKind::Warning,
+                );
+            }
+            Ok(())
+        }
+        Action::SessionResume { command, cwd } => {
+            let preferred_terminal = crate::settings::get_preferred_terminal();
+            let target = session_terminal_target(preferred_terminal.as_deref());
+            let launch_result = ctx.terminal.with_terminal_restored(|| {
+                crate::session_manager::terminal::launch_terminal(
+                    &target,
+                    &command,
+                    cwd.as_deref(),
+                    None,
+                )
+                .map_err(AppError::Message)
+            });
+            match launch_result {
+                Ok(()) => {
+                    ctx.app.push_toast(
+                        texts::tui_sessions_toast_terminal_launched(),
+                        ToastKind::Success,
+                    );
+                }
+                Err(err) => {
+                    ctx.app.overlay = Overlay::TextView(TextViewState {
+                        title: texts::tui_sessions_resume_command().to_string(),
+                        lines: command.lines().map(|line| line.to_string()).collect(),
+                        scroll: 0,
+                        action: None,
+                    });
+                    ctx.app.push_toast(
+                        texts::tui_sessions_toast_resume_fallback(&err.to_string()),
+                        ToastKind::Warning,
+                    );
+                }
+            }
+            Ok(())
+        }
+        Action::SessionDelete {
+            key,
+            provider_id,
+            session_id,
+            source_path,
+        } => {
+            let Some(tx) = ctx.session_req_tx else {
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
+                    ToastKind::Warning,
+                );
+                return Ok(());
+            };
+            let request_id = ctx.app.sessions.start_delete();
+            if let Err(err) = tx.send(SessionReq::Delete {
+                request_id,
+                key: key.clone(),
+                provider_id,
+                session_id,
+                source_path,
+            }) {
+                ctx.app.sessions.fail_delete(request_id);
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_delete_failed(&err.to_string()),
+                    ToastKind::Warning,
+                );
+            }
+            Ok(())
+        }
+        Action::SessionMessagesLoad {
+            key,
+            provider_id,
+            source_path,
+        } => {
+            let Some(tx) = ctx.session_req_tx else {
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
+                    ToastKind::Warning,
+                );
+                return Ok(());
+            };
+            let request_id = ctx.app.sessions.start_message_load(key.clone());
+            if let Err(err) = tx.send(SessionReq::LoadMessages {
+                request_id,
+                key: key.clone(),
+                provider_id,
+                source_path,
+            }) {
+                ctx.app
+                    .sessions
+                    .fail_message_load(request_id, &key, err.to_string());
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_messages_failed(&err.to_string()),
+                    ToastKind::Warning,
+                );
+            }
+            Ok(())
+        }
         Action::SwitchRoute(route) => {
             ctx.app.route = route;
+            ctx.app.maybe_prompt_import_candidate(ctx.data);
+            if matches!(ctx.app.route, super::route::Route::SkillsDiscover)
+                && ctx.app.skills_discover_results.is_empty()
+                && !ctx.app.skills_discover_loading
+                && matches!(
+                    ctx.app.skills_discover_source,
+                    super::app::SkillsDiscoverSource::Repos
+                )
+            {
+                let query = ctx.app.skills_discover_query.clone();
+                let source = ctx.app.skills_discover_source;
+                skills::discover(&mut ctx, query, source, false)?;
+            }
             Ok(())
         }
         Action::Quit => {
@@ -185,7 +358,11 @@ pub(crate) fn handle_action(
         Action::SkillsUninstall { directory } => skills::uninstall(&mut ctx, directory),
         Action::SkillsSync { app: scope } => skills::sync(&mut ctx, scope),
         Action::SkillsSetSyncMethod { method } => skills::set_sync_method(&mut ctx, method),
-        Action::SkillsDiscover { query } => skills::discover(&mut ctx, query),
+        Action::SkillsDiscover {
+            query,
+            source,
+            force,
+        } => skills::discover(&mut ctx, query, source, force),
         Action::SkillsRepoAdd { spec } => skills::repo_add(&mut ctx, spec),
         Action::SkillsRepoRemove { owner, name } => skills::repo_remove(&mut ctx, owner, name),
         Action::SkillsRepoToggleEnabled {
@@ -195,14 +372,18 @@ pub(crate) fn handle_action(
         } => skills::repo_toggle_enabled(&mut ctx, owner, name, enabled),
         Action::SkillsOpenImport => skills::open_import(&mut ctx),
         Action::SkillsScanUnmanaged => skills::scan_unmanaged(&mut ctx),
-        Action::SkillsImportFromApps { directories } => {
-            skills::import_from_apps(&mut ctx, directories)
-        }
+        Action::SkillsImportFromApps { imports } => skills::import_from_apps(&mut ctx, imports),
         Action::EditorDiscard => {
             ctx.app.editor = None;
             Ok(())
         }
         Action::EditorOpenExternal => editor::open_external(&mut ctx),
+        Action::EditorFormatCommonSnippet { app_type } => {
+            editor::format_common_snippet(&mut ctx, app_type)
+        }
+        Action::EditorExtractCommonSnippet { app_type } => {
+            editor::extract_common_snippet_into_editor(&mut ctx, app_type)
+        }
         Action::EditorSubmit { submit, content } => editor::submit(&mut ctx, submit, content),
         Action::ProviderSwitch { id } => providers::switch(&mut ctx, id),
         Action::ProviderRemoveFromConfig { id } => providers::remove_from_config(&mut ctx, id),
@@ -210,7 +391,6 @@ pub(crate) fn handle_action(
             provider_id,
             model_id,
         } => providers::set_default_model(&mut ctx, provider_id, model_id),
-        Action::ProviderSwitchForce { id } => providers::switch_force(&mut ctx, id),
         Action::ProviderImportLiveConfig => providers::import_live_config(&mut ctx),
         Action::ProviderDelete { id } => providers::delete(&mut ctx, id),
         Action::ProviderSpeedtest { url } => providers::speedtest(&mut ctx, url),
@@ -220,20 +400,55 @@ pub(crate) fn handle_action(
             _ => Ok(()),
         },
         Action::ProviderStreamCheck { id } => providers::stream_check(&mut ctx, id),
+        Action::ProviderSetFailoverQueue { id, enabled } => {
+            providers::set_failover_queue(&mut ctx, id, enabled)
+        }
+        Action::ProviderMoveFailoverQueue { id, direction } => {
+            providers::move_failover_queue(&mut ctx, id, direction)
+        }
         Action::ProviderQuotaRefresh { .. } => Ok(()),
         Action::ProviderModelFetch {
             base_url,
             api_key,
+            codex_oauth,
+            codex_oauth_account_id,
             field,
             claude_idx,
-        } => providers::model_fetch(&mut ctx, base_url, api_key, field, claude_idx),
+        } => providers::model_fetch(
+            &mut ctx,
+            base_url,
+            api_key,
+            codex_oauth,
+            codex_oauth_account_id,
+            field,
+            claude_idx,
+        ),
+        Action::UsageCustomRange { .. } => Ok(()),
+        Action::PricingDelete { model_id } => pricing::delete(&mut ctx, model_id),
         Action::McpToggle { id, enabled } => mcp::toggle(&mut ctx, id, enabled),
         Action::McpSetApps { id, apps } => mcp::set_apps(&mut ctx, id, apps),
         Action::McpDelete { id } => mcp::delete(&mut ctx, id),
-        Action::McpImport => mcp::import_current_app(&mut ctx),
+        Action::McpImport => mcp::import_supported_apps(&mut ctx),
         Action::PromptActivate { id } => prompts::activate(&mut ctx, id),
         Action::PromptDeactivate { id } => prompts::deactivate(&mut ctx, id),
+        Action::PromptUpdateMetadata {
+            old_id,
+            new_id,
+            name,
+            description,
+        } => prompts::update_metadata(&mut ctx, old_id, new_id, name, description),
+        Action::PromptSave {
+            old_id,
+            new_id,
+            name,
+            description,
+            content,
+        } => prompts::save(&mut ctx, old_id, new_id, name, description, content),
         Action::PromptDelete { id } => prompts::delete(&mut ctx, id),
+        Action::PromptFormOpenExternal => prompts::open_form_external(&mut ctx),
+        Action::PromptOpenImportCandidate { filename, content } => {
+            prompts::open_import_candidate(&mut ctx, filename, content)
+        }
         Action::ConfigExport { path } => config::export(&mut ctx, path),
         Action::ConfigShowFull => config::show_full(&mut ctx),
         Action::ConfigImport { path } => config::import(&mut ctx, path),
@@ -241,11 +456,15 @@ pub(crate) fn handle_action(
         Action::ConfigRestoreBackup { id } => config::restore_backup(&mut ctx, id),
         Action::ConfigValidate => config::validate(&mut ctx),
         Action::ConfigOpenProxyHelp => config::open_proxy_help(&mut ctx),
-        Action::ConfigCommonSnippetClear { app_type } => {
-            config::clear_common_snippet(&mut ctx, app_type)
+        Action::ConfirmCommonConfigNotice => {
+            ctx.app.common_config_notice_confirmed = true;
+            crate::settings::set_common_config_confirmed(true)?;
+            Ok(())
         }
-        Action::ConfigCommonSnippetApply { app_type } => {
-            config::apply_common_snippet(&mut ctx, app_type)
+        Action::ConfirmUsageQueryNotice => {
+            ctx.app.usage_query_notice_confirmed = true;
+            crate::settings::set_usage_confirmed(true)?;
+            Ok(())
         }
         Action::ConfigWebDavCheckConnection => config::webdav_check_connection(&mut ctx),
         Action::ConfigWebDavUpload => config::webdav_upload(&mut ctx),
@@ -270,6 +489,11 @@ pub(crate) fn handle_action(
         Action::OpenClawOpenDirectory { subdir } => {
             config::open_openclaw_directory(&mut ctx, subdir)
         }
+        Action::HermesMemoryOpen { kind } => config::open_hermes_memory(&mut ctx, kind),
+        Action::HermesMemorySetEnabled { kind, enabled } => {
+            config::set_hermes_memory_enabled(&mut ctx, kind, enabled)
+        }
+        Action::HermesOpenMemoryDirectory => config::open_hermes_memory_directory(&mut ctx),
         Action::ConfigReset => config::reset(&mut ctx),
         Action::SetSkipClaudeOnboarding { enabled } => {
             crate::settings::set_skip_claude_onboarding(enabled)?;
@@ -293,15 +517,21 @@ pub(crate) fn handle_action(
             );
             Ok(())
         }
+        Action::SetCodexUnifiedSessionHistory { enabled } => {
+            settings::set_codex_unified_session_history(&mut ctx, enabled)
+        }
         Action::SetProxyEnabled { enabled } => settings::set_proxy_enabled(&mut ctx, enabled),
         Action::SetProxyListenAddress { address } => {
             settings::set_proxy_listen_address(&mut ctx, address)
         }
         Action::SetProxyListenPort { port } => settings::set_proxy_listen_port(&mut ctx, port),
-        Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
-        Action::SetProxyTakeover { app_type, enabled } => {
-            settings::set_proxy_takeover(&mut ctx, app_type, enabled)
+        Action::SetProxyAutoFailover { app_type, enabled } => {
+            settings::set_proxy_auto_failover(&mut ctx, app_type, enabled)
         }
+        Action::EnableProxyAndAutoFailover { app_type } => {
+            settings::enable_proxy_and_auto_failover(&mut ctx, app_type)
+        }
+        Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
         Action::SetManagedProxyForCurrentApp { app_type, enabled } => queue_managed_proxy_action(
             ctx.app,
             ctx.proxy_req_tx,
@@ -315,7 +545,28 @@ pub(crate) fn handle_action(
                 .push_toast(texts::language_changed(), ToastKind::Success);
             Ok(())
         }
+        Action::SetVisibleAppsMode { mode } => settings::set_visible_apps_mode(&mut ctx, mode),
         Action::SetVisibleApps { apps } => settings::set_visible_apps(&mut ctx, apps),
+        Action::ConfirmVisibleAppsAutoDetection { use_auto } => {
+            settings::confirm_visible_apps_auto_detection(&mut ctx, use_auto)
+        }
+        Action::SwitchVisibleAppsToManual { apps, selected } => {
+            settings::switch_visible_apps_to_manual(&mut ctx, apps, selected)
+        }
+        Action::ManagedAuthRefresh { auth_provider } => {
+            settings::managed_auth_refresh(&mut ctx, auth_provider)
+        }
+        Action::ManagedAuthStartLogin { auth_provider } => {
+            settings::managed_auth_start_login(&mut ctx, auth_provider)
+        }
+        Action::ManagedAuthSetDefault {
+            auth_provider,
+            account_id,
+        } => settings::managed_auth_set_default(&mut ctx, auth_provider, account_id),
+        Action::ManagedAuthRemove {
+            auth_provider,
+            account_id,
+        } => settings::managed_auth_remove(&mut ctx, auth_provider, account_id),
         Action::CheckUpdate => updates::check(&mut ctx),
         Action::ConfirmUpdate => updates::confirm(&mut ctx),
         Action::CancelUpdate => {
@@ -326,6 +577,17 @@ pub(crate) fn handle_action(
             ctx.update_check.cancel();
             Ok(())
         }
+    }
+}
+
+fn session_terminal_target(preferred_terminal: Option<&str>) -> String {
+    match preferred_terminal
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some("iterm2") => "iterm".to_string(),
+        Some(target) => target.to_string(),
+        None => "terminal".to_string(),
     }
 }
 
@@ -348,6 +610,7 @@ mod tests {
         _lock: TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
+        old_config_dir: Option<OsString>,
     }
 
     impl EnvGuard {
@@ -355,14 +618,17 @@ mod tests {
             let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
                 _lock: lock,
                 old_home,
                 old_userprofile,
+                old_config_dir,
             }
         }
     }
@@ -376,6 +642,10 @@ mod tests {
             match &self.old_userprofile {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
+            }
+            match &self.old_config_dir {
+                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
             }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
@@ -399,12 +669,22 @@ mod tests {
             &mut proxy_loading,
             None,
             None,
+            None,
             &mut webdav_loading,
             None,
             &mut update_check,
             None,
+            None,
             action,
         )
+    }
+
+    #[test]
+    fn session_terminal_target_matches_upstream_setting_names() {
+        assert_eq!(session_terminal_target(None), "terminal");
+        assert_eq!(session_terminal_target(Some("")), "terminal");
+        assert_eq!(session_terminal_target(Some("iterm2")), "iterm");
+        assert_eq!(session_terminal_target(Some("ghostty")), "ghostty");
     }
 
     fn write_invalid_legacy_config(home: &Path) {
@@ -412,6 +692,47 @@ mod tests {
         fs::create_dir_all(&config_dir).expect("create config dir");
         fs::write(config_dir.join("config.json"), "{ not valid json }")
             .expect("write invalid legacy config");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn confirm_common_config_notice_persists_setting() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        assert!(!crate::settings::get_common_config_confirmed());
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.common_config_notice_confirmed = false;
+        let mut data = UiData::default();
+
+        run_action(&mut app, &mut data, Action::ConfirmCommonConfigNotice)
+            .expect("confirm common config notice");
+
+        assert!(app.common_config_notice_confirmed);
+        assert!(crate::settings::get_common_config_confirmed());
+        assert_eq!(
+            crate::settings::get_settings().common_config_confirmed,
+            Some(true)
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn confirm_usage_query_notice_persists_setting() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        assert!(!crate::settings::get_usage_confirmed());
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.usage_query_notice_confirmed = false;
+        let mut data = UiData::default();
+
+        run_action(&mut app, &mut data, Action::ConfirmUsageQueryNotice)
+            .expect("confirm usage query notice");
+
+        assert!(app.usage_query_notice_confirmed);
+        assert!(crate::settings::get_usage_confirmed());
+        assert_eq!(crate::settings::get_settings().usage_confirmed, Some(true));
     }
 
     #[test]
@@ -424,7 +745,7 @@ mod tests {
         app.route = Route::ConfigOpenClawTools;
         app.route_stack.push(Route::Config);
         app.filter.active = true;
-        app.filter.buffer = "focus".to_string();
+        app.filter.input.set("focus".to_string());
         app.openclaw_daily_memory_search_query = "focus".to_string();
         app.daily_memory_idx = 1;
         app.openclaw_daily_memory_search_results =
@@ -452,9 +773,11 @@ mod tests {
             &mut proxy_loading,
             None,
             None,
+            None,
             &mut webdav_loading,
             None,
             &mut update_check,
+            None,
             None,
             Action::SetAppType(AppType::Claude),
         )
@@ -467,7 +790,7 @@ mod tests {
             "route stack should be normalized too so Back does not land on a duplicate config route"
         );
         assert!(!app.filter.active);
-        assert!(app.filter.buffer.is_empty());
+        assert!(app.filter.input.value.is_empty());
         assert!(app.openclaw_daily_memory_search_query.is_empty());
         assert!(app.openclaw_daily_memory_search_results.is_empty());
         assert_eq!(app.daily_memory_idx, 0);
@@ -505,6 +828,7 @@ mod tests {
             codex: true,
             gemini: true,
             opencode: true,
+            hermes: false,
             openclaw: true,
         })
         .expect("save initial visible apps");
@@ -514,13 +838,14 @@ mod tests {
             codex: false,
             gemini: false,
             opencode: false,
+            hermes: false,
             openclaw: false,
         };
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ConfigOpenClawTools;
         app.route_stack.push(Route::Config);
         app.filter.active = true;
-        app.filter.buffer = "focus".to_string();
+        app.filter.input.set("focus".to_string());
         app.openclaw_daily_memory_search_query = "focus".to_string();
         app.daily_memory_idx = 1;
         app.openclaw_daily_memory_search_results =
@@ -557,7 +882,7 @@ mod tests {
             "route stack should normalize the same way as SetAppType"
         );
         assert!(!app.filter.active);
-        assert!(app.filter.buffer.is_empty());
+        assert!(app.filter.input.value.is_empty());
         assert!(app.openclaw_daily_memory_search_query.is_empty());
         assert!(app.openclaw_daily_memory_search_results.is_empty());
         assert_eq!(app.daily_memory_idx, 0);
@@ -573,6 +898,7 @@ mod tests {
             codex: true,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: true,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
@@ -594,6 +920,7 @@ mod tests {
                     codex: false,
                     gemini: false,
                     opencode: false,
+                    hermes: false,
                     openclaw: false,
                 },
             },
@@ -621,6 +948,7 @@ mod tests {
             codex: true,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: true,
         })
         .expect("save initial visible apps");
@@ -631,6 +959,7 @@ mod tests {
             codex: false,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: false,
         };
         let mut app = App::new(Some(AppType::Claude));
@@ -667,6 +996,7 @@ mod tests {
             codex: true,
             gemini: false,
             opencode: true,
+            hermes: false,
             openclaw: true,
         };
         crate::settings::set_visible_apps(initial_visible_apps.clone())
@@ -685,6 +1015,7 @@ mod tests {
                     codex: false,
                     gemini: false,
                     opencode: false,
+                    hermes: false,
                     openclaw: false,
                 },
             },
@@ -699,6 +1030,130 @@ mod tests {
             Some(toast)
                 if toast.kind == super::super::app::ToastKind::Warning
                     && toast.message == texts::tui_toast_visible_apps_zero_selection_warning()
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn switch_visible_apps_to_manual_persists_mode_and_apps() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let mut settings = crate::settings::get_settings();
+        settings.visible_apps = crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: false,
+            opencode: false,
+            hermes: false,
+            openclaw: false,
+        };
+        settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
+        settings.visible_apps_settings.auto_prompt_decided = true;
+        crate::settings::update_settings(settings).expect("save settings");
+
+        let next_visible_apps = crate::settings::VisibleApps {
+            claude: true,
+            codex: false,
+            gemini: false,
+            opencode: false,
+            hermes: false,
+            openclaw: false,
+        };
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::default();
+
+        run_action(
+            &mut app,
+            &mut data,
+            Action::SwitchVisibleAppsToManual {
+                apps: next_visible_apps.clone(),
+                selected: 1,
+            },
+        )
+        .expect("switch to manual");
+
+        let settings = crate::settings::get_settings();
+        assert_eq!(
+            settings.visible_apps_settings.mode,
+            crate::settings::VisibleAppsMode::Manual
+        );
+        assert!(settings.visible_apps_settings.auto_prompt_decided);
+        assert_eq!(settings.visible_apps, next_visible_apps);
+        assert!(matches!(
+            &app.overlay,
+            Overlay::VisibleAppsPicker { selected, apps }
+                if *selected == 1 && apps == &next_visible_apps
+        ));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == super::super::app::ToastKind::Success
+                    && toast.message == texts::tui_toast_visible_apps_saved()
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn switch_visible_apps_to_manual_keeps_state_when_replacement_preload_fails() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let initial_visible_apps = crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: false,
+            opencode: false,
+            hermes: false,
+            openclaw: true,
+        };
+        let mut settings = crate::settings::get_settings();
+        settings.visible_apps = initial_visible_apps.clone();
+        settings.visible_apps_settings.mode = crate::settings::VisibleAppsMode::Auto;
+        settings.visible_apps_settings.auto_prompt_decided = true;
+        crate::settings::update_settings(settings).expect("save settings");
+        write_invalid_legacy_config(temp_home.path());
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.route_stack.push(Route::Config);
+        app.overlay = Overlay::None;
+        let mut data = UiData::default();
+        data.providers.current_id = "before".to_string();
+
+        let err = run_action(
+            &mut app,
+            &mut data,
+            Action::SwitchVisibleAppsToManual {
+                apps: crate::settings::VisibleApps {
+                    claude: true,
+                    codex: false,
+                    gemini: false,
+                    opencode: false,
+                    hermes: false,
+                    openclaw: false,
+                },
+                selected: 5,
+            },
+        )
+        .expect_err("replacement preload should fail");
+
+        assert!(
+            !err.to_string().is_empty(),
+            "error should explain the preload failure"
+        );
+        let settings = crate::settings::get_settings();
+        assert_eq!(settings.visible_apps, initial_visible_apps);
+        assert_eq!(
+            settings.visible_apps_settings.mode,
+            crate::settings::VisibleAppsMode::Auto
+        );
+        assert_eq!(app.app_type, AppType::OpenClaw);
+        assert_eq!(app.route, Route::ConfigOpenClawAgents);
+        assert_eq!(app.route_stack, vec![Route::Config]);
+        assert_eq!(data.providers.current_id, "before");
+        assert!(matches!(
+            &app.overlay,
+            Overlay::VisibleAppsPicker { selected, apps }
+                if *selected == 5 && apps == &initial_visible_apps
         ));
     }
 

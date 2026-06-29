@@ -150,22 +150,7 @@ impl App {
                         McpEnvEditorField::Key => &mut editor.key,
                         McpEnvEditorField::Value => &mut editor.value,
                     };
-                    match key.code {
-                        KeyCode::Left => input.move_left(),
-                        KeyCode::Right => input.move_right(),
-                        KeyCode::Home => input.move_home(),
-                        KeyCode::End => input.move_end(),
-                        KeyCode::Backspace => {
-                            input.backspace();
-                        }
-                        KeyCode::Delete => {
-                            input.delete();
-                        }
-                        KeyCode::Char(c) if !c.is_control() => {
-                            input.insert_char(c);
-                        }
-                        _ => {}
-                    }
+                    let _ = input.apply_key(key);
                 }
                 Some(Action::None)
             }

@@ -7,11 +7,19 @@ pub fn tui_settings_proxy_restart_hint() -> &'static str {
     }
 }
 
-pub fn tui_settings_proxy_stop_before_edit_hint() -> &'static str {
+pub fn tui_settings_proxy_stop_before_edit_hint(current_app_has_active_worker: bool) -> &'static str {
     if is_chinese() {
-        "请先停止本地代理，再修改监听地址或端口"
+        if current_app_has_active_worker {
+            "修改监听地址：需先停止本地代理。修改监听端口：需先停止当前应用的代理路由。改完后重新启动路由生效。"
+        } else {
+            "修改监听地址：需先停止本地代理。监听端口可以修改。改完后重新启动路由生效。"
+        }
     } else {
-        "Stop the local proxy before editing listen address or port"
+        if current_app_has_active_worker {
+            "Listen address: stop the proxy to edit. Listen port: stop this app's route to edit. Restart routing after changes."
+        } else {
+            "Listen address: stop the proxy to edit. Listen port can be edited. Restart routing after changes."
+        }
     }
 }
 
@@ -47,11 +55,19 @@ pub fn tui_toast_proxy_settings_restart_required() -> &'static str {
     }
 }
 
-pub fn tui_toast_proxy_settings_stop_before_edit() -> &'static str {
+pub fn tui_toast_proxy_settings_stop_proxy_before_edit_address() -> &'static str {
     if is_chinese() {
-        "本地代理正在运行。请先停止代理，再修改监听地址或端口。"
+        "本地代理正在运行。请先停止代理，再修改监听地址。"
     } else {
-        "The local proxy is running. Stop it before editing listen address or port."
+        "The local proxy is running. Stop it before editing listen address."
+    }
+}
+
+pub fn tui_toast_proxy_settings_stop_app_route_before_edit_port() -> &'static str {
+    if is_chinese() {
+        "当前应用正在使用代理。请先停止当前应用的代理路由，再修改监听端口。"
+    } else {
+        "This app is using the proxy. Stop this app's proxy route before editing listen port."
     }
 }
 
@@ -149,9 +165,65 @@ pub fn tui_skills_discover_query_empty() -> &'static str {
 
 pub fn tui_skills_discover_hint() -> &'static str {
     if is_chinese() {
-        "按 f 搜索仓库里的技能，按 r 管理技能仓库。"
+        "按 Tab 切换仓库/skills.sh，按 f 搜索，按 r 管理技能仓库。"
     } else {
-        "Press f to search skills from enabled repositories, or r to manage repositories."
+        "Press Tab to switch repositories/skills.sh, f to search, or r to manage repositories."
+    }
+}
+
+pub fn tui_skills_discover_empty() -> &'static str {
+    if is_chinese() {
+        "暂无结果"
+    } else {
+        "No results"
+    }
+}
+
+pub fn tui_skills_skillssh_search_prompt() -> &'static str {
+    if is_chinese() {
+        "搜索 skills.sh（至少 2 个字符）..."
+    } else {
+        "Search skills.sh (at least 2 characters)..."
+    }
+}
+
+pub fn tui_skills_source_repos() -> &'static str {
+    if is_chinese() {
+        "仓库"
+    } else {
+        "Repos"
+    }
+}
+
+pub fn tui_skills_source_marketplace() -> &'static str {
+    if is_chinese() {
+        "skills.sh"
+    } else {
+        "skills.sh"
+    }
+}
+
+pub fn tui_skills_source_switch_hint() -> &'static str {
+    if is_chinese() {
+        "Tab 切换来源"
+    } else {
+        "Tab to switch source"
+    }
+}
+
+pub fn tui_key_source() -> &'static str {
+    if is_chinese() {
+        "来源"
+    } else {
+        "Source"
+    }
+}
+
+pub fn tui_key_repo_manager() -> &'static str {
+    if is_chinese() {
+        "仓库管理"
+    } else {
+        "Manage repos"
     }
 }
 
@@ -315,14 +387,15 @@ pub fn tui_skills_installed_counts(
     codex: usize,
     gemini: usize,
     opencode: usize,
+    hermes: usize,
 ) -> String {
     if is_chinese() {
         format!(
-            "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+            "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
         )
     } else {
         format!(
-            "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+            "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
         )
     }
 }
@@ -332,14 +405,15 @@ pub fn tui_mcp_server_counts(
     codex: usize,
     gemini: usize,
     opencode: usize,
+    hermes: usize,
 ) -> String {
     if is_chinese() {
         format!(
-            "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+            "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
         )
     } else {
         format!(
-            "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+            "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
         )
     }
 }
@@ -381,6 +455,22 @@ pub fn tui_skills_empty_hint() -> &'static str {
         "暂无已安装技能。按 f 发现新技能，或按 i 导入已有技能。"
     } else {
         "No installed skills. Press f to discover skills, or i to import existing skills."
+    }
+}
+
+pub fn tui_prompt_no_active_summary() -> &'static str {
+    if is_chinese() {
+        "未激活"
+    } else {
+        "no active prompt"
+    }
+}
+
+pub fn tui_prompts_summary(count: usize, active: &str) -> String {
+    if is_chinese() {
+        format!("{count} 个提示词 · 当前: {active}")
+    } else {
+        format!("{count} prompts · active: {active}")
     }
 }
 
@@ -429,6 +519,14 @@ pub fn tui_config_item_common_snippet() -> &'static str {
         "通用配置片段"
     } else {
         "Common Config Snippet"
+    }
+}
+
+pub fn tui_config_item_usage_query() -> &'static str {
+    if is_chinese() {
+        "用量查询"
+    } else {
+        "Usage Query"
     }
 }
 
@@ -680,6 +778,14 @@ pub fn tui_toast_provider_cannot_delete_current() -> &'static str {
     }
 }
 
+pub fn tui_toast_provider_managed_by_hermes() -> &'static str {
+    if is_chinese() {
+        "该供应商由 Hermes 管理，请在 Hermes Web UI 中编辑。"
+    } else {
+        "This provider is managed by Hermes. Edit it in the Hermes Web UI."
+    }
+}
+
 pub fn tui_confirm_delete_provider_title() -> &'static str {
     if is_chinese() {
         "删除供应商"
@@ -792,6 +898,46 @@ pub fn tui_prompt_title(name: &str) -> String {
     }
 }
 
+pub fn tui_prompt_rename_title() -> &'static str {
+    if is_chinese() {
+        "编辑提示词"
+    } else {
+        "Edit Prompt"
+    }
+}
+
+pub fn tui_prompt_create_title() -> &'static str {
+    if is_chinese() {
+        "创建提示词"
+    } else {
+        "Create Prompt"
+    }
+}
+
+pub fn tui_prompt_create_prompt() -> &'static str {
+    if is_chinese() {
+        "输入提示词名称："
+    } else {
+        "Enter a prompt name:"
+    }
+}
+
+pub fn tui_prompt_rename_prompt() -> &'static str {
+    if is_chinese() {
+        "输入新的提示词名称："
+    } else {
+        "Enter a new prompt name:"
+    }
+}
+
+pub fn tui_label_prompt_metadata() -> &'static str {
+    if is_chinese() {
+        "提示词元信息"
+    } else {
+        "Prompt Metadata"
+    }
+}
+
 pub fn tui_toast_prompt_no_active_to_deactivate() -> &'static str {
     if is_chinese() {
         "没有可停用的活动提示词。"
@@ -824,6 +970,48 @@ pub fn tui_confirm_delete_prompt_message(name: &str, id: &str) -> String {
     }
 }
 
+pub fn tui_confirm_import_prompt_title() -> &'static str {
+    if is_chinese() {
+        "导入现有提示词"
+    } else {
+        "Import Existing Prompt"
+    }
+}
+
+pub fn tui_confirm_import_prompt_message(filename: &str) -> String {
+    if is_chinese() {
+        format!("当前提示词列表为空，检测到已有 {filename}。是否把它作为新提示词打开编辑？")
+    } else {
+        format!(
+            "The prompt list is empty and {filename} already exists. Open it as a new editable prompt?"
+        )
+    }
+}
+
+pub fn tui_prompt_default_name() -> &'static str {
+    if is_chinese() {
+        "默认提示词"
+    } else {
+        "Default Prompt"
+    }
+}
+
+pub fn tui_prompt_imported_description(filename: &str) -> String {
+    if is_chinese() {
+        format!("从现有 {filename} 预填")
+    } else {
+        format!("Prefilled from existing {filename}")
+    }
+}
+
+pub fn tui_toast_prompt_import_candidate_missing() -> &'static str {
+    if is_chinese() {
+        "没有可导入的现有提示词文件。"
+    } else {
+        "No existing prompt file is available to import."
+    }
+}
+
 pub fn tui_toast_prompt_edit_not_implemented() -> &'static str {
     if is_chinese() {
         "提示词编辑尚未实现。"
@@ -837,6 +1025,14 @@ pub fn tui_toast_prompt_edit_finished() -> &'static str {
         "提示词编辑完成"
     } else {
         "Prompt edit finished"
+    }
+}
+
+pub fn tui_toast_prompt_name_empty() -> &'static str {
+    if is_chinese() {
+        "提示词名称不能为空。"
+    } else {
+        "Prompt name cannot be empty."
     }
 }
 

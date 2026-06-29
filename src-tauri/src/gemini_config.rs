@@ -384,6 +384,7 @@ pub fn write_generic_settings() -> Result<(), AppError> {
     since = "4.1.1",
     note = "PackyCode is now treated as a generic API key provider. Use write_generic_settings() instead."
 )]
+#[allow(dead_code)]
 pub fn write_packycode_settings() -> Result<(), AppError> {
     write_generic_settings()
 }

@@ -17,6 +17,57 @@ pub struct FailoverQueueItem {
 }
 
 impl Database {
+    fn reject_emptying_active_failover_queue(
+        conn: &rusqlite::Connection,
+        app_type: &str,
+        provider_id: Option<&str>,
+    ) -> Result<(), AppError> {
+        let auto_failover_enabled: bool = conn
+            .query_row(
+                "SELECT auto_failover_enabled FROM proxy_config WHERE app_type = ?1",
+                [app_type],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !auto_failover_enabled {
+            return Ok(());
+        }
+
+        let queued_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM providers
+                 WHERE app_type = ?1 AND in_failover_queue = 1",
+                [app_type],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let removes_queued_provider = if let Some(provider_id) = provider_id {
+            conn.query_row(
+                "SELECT in_failover_queue FROM providers WHERE id = ?1 AND app_type = ?2",
+                rusqlite::params![provider_id, app_type],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+        } else {
+            queued_count > 0
+        };
+
+        let would_empty_queue = if provider_id.is_some() {
+            queued_count <= 1
+        } else {
+            queued_count > 0
+        };
+
+        if removes_queued_provider && would_empty_queue {
+            return Err(AppError::InvalidInput(
+                "At least one provider must remain in the failover queue while proxy failover is active.".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// 获取故障转移队列（按 sort_index 排序）
     pub fn get_failover_queue(&self, app_type: &str) -> Result<Vec<FailoverQueueItem>, AppError> {
         let conn = lock_conn!(self.conn);
@@ -77,6 +128,7 @@ impl Database {
         provider_id: &str,
     ) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
+        Self::reject_emptying_active_failover_queue(&conn, app_type, Some(provider_id))?;
 
         // 1. 从队列中移除
         conn.execute(
@@ -100,6 +152,7 @@ impl Database {
     /// 清空故障转移队列
     pub fn clear_failover_queue(&self, app_type: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
+        Self::reject_emptying_active_failover_queue(&conn, app_type, None)?;
 
         conn.execute(
             "UPDATE providers SET in_failover_queue = 0 WHERE app_type = ?1",
@@ -142,5 +195,68 @@ impl Database {
             .collect();
 
         Ok(available)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn provider(id: &str) -> Provider {
+        Provider::with_id(
+            id.to_string(),
+            id.to_string(),
+            json!({"env": {"BASE_URL": "https://example.com"}}),
+            None,
+        )
+    }
+
+    fn queue_provider(db: &Database, app_type: &str, id: &str) -> Result<(), AppError> {
+        db.save_provider(app_type, &provider(id))?;
+        db.add_to_failover_queue(app_type, id)
+    }
+
+    #[test]
+    fn remove_rejects_last_queue_entry_when_auto_failover_enabled() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        queue_provider(&db, "claude", "p1")?;
+        db.set_proxy_flags_sync("claude", true, true)?;
+
+        let err = db.remove_from_failover_queue("claude", "p1").unwrap_err();
+
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        assert!(db.is_in_failover_queue("claude", "p1")?);
+        Ok(())
+    }
+
+    #[test]
+    fn clear_rejects_non_empty_queue_when_auto_failover_enabled() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        queue_provider(&db, "claude", "p1")?;
+        queue_provider(&db, "claude", "p2")?;
+        db.set_proxy_flags_sync("claude", true, true)?;
+
+        let err = db.clear_failover_queue("claude").unwrap_err();
+
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        assert_eq!(db.get_failover_queue("claude")?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_allows_one_of_multiple_queue_entries_when_auto_failover_enabled(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        queue_provider(&db, "claude", "p1")?;
+        queue_provider(&db, "claude", "p2")?;
+        db.set_proxy_flags_sync("claude", true, true)?;
+
+        db.remove_from_failover_queue("claude", "p1")?;
+
+        assert!(!db.is_in_failover_queue("claude", "p1")?);
+        assert!(db.is_in_failover_queue("claude", "p2")?);
+        assert_eq!(db.get_proxy_flags_sync("claude"), (true, true));
+        Ok(())
     }
 }

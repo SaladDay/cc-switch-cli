@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use crate::helpers::{
     bind_test_listener, handle_slow_streaming_chat, handle_streaming_chat, read_proxy_status,
-    record_upstream_request, wait_for_proxy_status, UpstreamState,
+    record_upstream_request, set_claude_proxy_port_to_ephemeral, wait_for_proxy_status,
+    UpstreamState,
 };
 
 async fn handle_streaming_tool_calls_interleaved(
@@ -33,7 +34,7 @@ async fn handle_streaming_tool_calls_interleaved(
             b"data: {\"id\":\"chatcmpl-tool\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n\n",
         ));
         yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(
-            b"data: {\"id\":\"chatcmpl-tool\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4}}\n\n",
+            b"data: {\"id\":\"chatcmpl-tool\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
         ));
         yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
     };
@@ -162,15 +163,15 @@ async fn stream_openai_chat_transforms_sse_and_maps_model() {
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -298,15 +299,15 @@ async fn stream_openai_chat_buffered_json_fallback_marks_request_success() {
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -438,15 +439,15 @@ async fn stream_openai_chat_tool_calls_interleaved_transform_to_stable_anthropic
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -482,6 +483,7 @@ async fn stream_openai_chat_tool_calls_interleaved_transform_to_stable_anthropic
         std::collections::HashMap::new();
     for event in &events {
         if event["type"] == "content_block_start" && event["content_block"]["type"] == "tool_use" {
+            assert_eq!(event.pointer("/content_block/input"), Some(&json!({})));
             if let (Some(call_id), Some(index)) = (
                 event.pointer("/content_block/id").and_then(|v| v.as_str()),
                 event.get("index").and_then(|v| v.as_u64()),
@@ -523,9 +525,13 @@ async fn stream_openai_chat_tool_calls_interleaved_transform_to_stable_anthropic
 
     assert_eq!(second_idx, *tool_index_by_call.get("call_1").unwrap());
     assert_eq!(first_idx, *tool_index_by_call.get("call_0").unwrap());
-    assert!(events.iter().any(|event| {
-        event["type"] == "message_delta" && event["delta"]["stop_reason"] == "tool_use"
-    }));
+    let message_delta = events
+        .iter()
+        .find(|event| event["type"] == "message_delta")
+        .expect("message_delta event");
+    assert_eq!(message_delta["delta"]["stop_reason"], "tool_use");
+    assert!(message_delta["usage"].is_object());
+    assert_eq!(message_delta["usage"]["output_tokens"], 0);
 
     service.stop().await.expect("stop proxy service");
     upstream_handle.abort();
@@ -575,15 +581,15 @@ async fn proxy_claude_openai_responses_streaming_transforms_sse() {
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -707,19 +713,21 @@ async fn proxy_claude_streaming_bypasses_first_byte_timeout_when_failover_disabl
     claude_proxy.auto_failover_enabled = false;
     claude_proxy.max_retries = 0;
     claude_proxy.streaming_first_byte_timeout = 1;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(claude_proxy)
         .await
         .expect("update claude proxy config");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(

@@ -9,9 +9,9 @@ release/
 .env.local
 *.tsbuildinfo
 .npmrc
-CLAUDE.md
 AGENT.md
 AGENTS.md
+!/AGENTS.md
 plan.md
 GEMINI.md
 *.claude
@@ -27,9 +27,12 @@ skill.md
 scripts/*
 !scripts/generate_latest_json.py
 !scripts/windows-start-qa.ps1
+!scripts/benchmark_cc_switch.py
+!scripts/check_benchmark_thresholds.py
 
 .agent/
 .agents/
+/.agents/skills/review-pr/
 .worktrees/
 docs/superpowers/
 .omx/

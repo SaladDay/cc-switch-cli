@@ -1,6 +1,73 @@
 use super::*;
+use std::fs;
+use std::path::Path;
 
 impl ProviderService {
+    pub(crate) fn capture_codex_temp_launch_snapshot(
+        state: &AppState,
+        provider_id: &str,
+        codex_home: &Path,
+    ) -> Result<(), AppError> {
+        let (provider, common_snippet) = {
+            let guard = state.config.read().map_err(AppError::from)?;
+            let provider = guard
+                .get_manager(&AppType::Codex)
+                .and_then(|manager| manager.providers.get(provider_id))
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::localized(
+                        "provider.not_found",
+                        format!("供应商不存在: {provider_id}"),
+                        format!("Provider not found: {provider_id}"),
+                    )
+                })?;
+            (provider, guard.common_config_snippets.codex.clone())
+        };
+
+        let config_path = codex_home.join("config.toml");
+        let cfg_text = if config_path.exists() {
+            fs::read_to_string(&config_path).map_err(|err| AppError::io(&config_path, err))?
+        } else {
+            provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        crate::codex_config::validate_config_toml(&cfg_text)?;
+        let cfg_text_for_storage = Self::strip_codex_mcp_servers_from_snapshot_config(&cfg_text)?;
+
+        let auth_path = codex_home.join("auth.json");
+        let auth = if auth_path.exists() {
+            read_json_file::<Value>(&auth_path)?
+        } else {
+            Value::Object(serde_json::Map::new())
+        };
+
+        let mut raw_settings = serde_json::Map::new();
+        raw_settings.insert("auth".to_string(), auth);
+        raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
+
+        let settings_to_store = Self::normalize_settings_config_for_storage(
+            &AppType::Codex,
+            &provider,
+            Value::Object(raw_settings),
+            common_snippet.as_deref(),
+        )?;
+
+        {
+            let mut guard = state.config.write().map_err(AppError::from)?;
+            if let Some(manager) = guard.get_manager_mut(&AppType::Codex) {
+                if let Some(target) = manager.providers.get_mut(provider_id) {
+                    target.settings_config = settings_to_store;
+                }
+            }
+        }
+
+        state.save()
+    }
+
     pub(super) fn extract_codex_common_config_from_config_toml(
         config_toml: &str,
     ) -> Result<String, AppError> {
@@ -19,13 +86,35 @@ impl ProviderService {
         root.remove("model_provider");
         // Legacy/alt formats might use a top-level base_url.
         root.remove("base_url");
+        // Profiles can carry provider-specific model_provider overrides. Keep
+        // unrelated profile settings in the common config snippet.
+        root.remove("profile");
         // Remove entire model_providers table (provider-specific configuration)
         root.remove("model_providers");
-        // Codex writes trust decisions for local workspaces at runtime. These
-        // must stay with the provider snapshot being backfilled, not become
-        // common config that is merged into every provider.
-        root.remove("projects");
-        root.remove("trusted_workspaces");
+
+        if let Some(profiles) = root
+            .get_mut("profiles")
+            .and_then(|item| item.as_table_like_mut())
+        {
+            let profile_keys: Vec<String> =
+                profiles.iter().map(|(key, _)| key.to_string()).collect();
+            for profile_key in profile_keys {
+                let Some(profile) = profiles
+                    .get_mut(&profile_key)
+                    .and_then(|item| item.as_table_like_mut())
+                else {
+                    continue;
+                };
+                profile.remove("model");
+                profile.remove("model_provider");
+                if profile.is_empty() {
+                    profiles.remove(&profile_key);
+                }
+            }
+            if profiles.is_empty() {
+                root.remove("profiles");
+            }
+        }
 
         // Clean up multiple empty lines (keep at most one blank line).
         let mut cleaned = String::new();
@@ -66,11 +155,7 @@ impl ProviderService {
         }
 
         config.common_config_snippets.codex = Some(extracted.clone());
-        Self::normalize_existing_provider_snapshots_for_storage_best_effort(
-            config,
-            &AppType::Codex,
-            Some(extracted.as_str()),
-        );
+        Self::migrate_codex_common_config_snippet(config, None, extracted.as_str())?;
         Ok(())
     }
 
@@ -100,6 +185,7 @@ impl ProviderService {
         Ok(doc.to_string())
     }
 
+    #[allow(dead_code)]
     pub(super) fn merge_toml_tables(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
         for (key, src_item) in src.iter() {
             match (dst.get_mut(key), src_item.as_table()) {
@@ -120,6 +206,7 @@ impl ProviderService {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn strip_toml_tables(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
         let mut keys_to_remove = Vec::new();
 
@@ -148,6 +235,7 @@ impl ProviderService {
         }
     }
 
+    #[cfg(test)]
     fn toml_items_equal(left: &toml_edit::Item, right: &toml_edit::Item) -> bool {
         match (left.as_value(), right.as_value()) {
             (Some(left_value), Some(right_value)) => {
@@ -157,11 +245,23 @@ impl ProviderService {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn strip_common_codex_config_from_provider(
         provider: &mut Provider,
         common_config_snippet: Option<&str>,
     ) -> Result<(), AppError> {
         common_config::normalize_provider_common_config_for_storage(
+            &AppType::Codex,
+            provider,
+            common_config_snippet,
+        )
+    }
+
+    fn migrate_common_codex_config_from_provider(
+        provider: &mut Provider,
+        common_config_snippet: Option<&str>,
+    ) -> Result<(), AppError> {
+        common_config::migrate_provider_subset_usage_for_storage(
             &AppType::Codex,
             provider,
             common_config_snippet,
@@ -191,7 +291,7 @@ impl ProviderService {
             };
 
             for provider in manager.providers.values_mut() {
-                Self::strip_common_codex_config_from_provider(provider, Some(old_snippet))?;
+                Self::migrate_common_codex_config_from_provider(provider, Some(old_snippet))?;
             }
 
             return Ok(());
@@ -202,7 +302,7 @@ impl ProviderService {
         };
 
         if let Some(current_provider) = manager.providers.get_mut(&current_provider_id) {
-            Self::strip_common_codex_config_from_provider(current_provider, Some(old_snippet))?;
+            Self::migrate_common_codex_config_from_provider(current_provider, Some(old_snippet))?;
         }
 
         for (provider_id, provider) in manager.providers.iter_mut() {
@@ -211,7 +311,7 @@ impl ProviderService {
             }
 
             if let Err(err) =
-                Self::strip_common_codex_config_from_provider(provider, Some(old_snippet))
+                Self::migrate_common_codex_config_from_provider(provider, Some(old_snippet))
             {
                 log::warn!(
                     "skip migrating Codex non-current provider snapshot '{provider_id}' from stored common config snippet: {err}"
@@ -283,7 +383,8 @@ impl ProviderService {
             current_provider.settings_config.get("auth").cloned()
         };
 
-        let settings_config = if config_path.exists() {
+        let mut snapshot_provider = current_provider.clone();
+        if config_path.exists() {
             let text =
                 std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
             Self::maybe_update_codex_common_config_snippet(config, &text)?;
@@ -293,23 +394,22 @@ impl ProviderService {
                 raw_settings.insert("auth".to_string(), auth);
             }
             raw_settings.insert("config".to_string(), Value::String(text));
-            Self::normalize_settings_config_for_storage(
+            snapshot_provider.settings_config = Value::Object(raw_settings);
+            snapshot_provider = Self::migrate_provider_snapshot_for_storage(
                 &AppType::Codex,
-                &current_provider,
-                Value::Object(raw_settings),
+                &snapshot_provider,
                 config.common_config_snippets.codex.as_deref(),
-            )?
+            )?;
         } else {
             let mut raw_settings = serde_json::Map::new();
             if let Some(auth) = auth.clone() {
                 raw_settings.insert("auth".to_string(), auth);
             }
-            Value::Object(raw_settings)
+            snapshot_provider.settings_config = Value::Object(raw_settings);
         };
-
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             if let Some(current) = manager.providers.get_mut(current_id) {
-                current.settings_config = settings_config;
+                *current = snapshot_provider;
             }
         }
 
@@ -321,13 +421,30 @@ impl ProviderService {
     /// Aligned with upstream: the stored `settings_config.config` is the full config.toml text.
     /// We write it directly to `~/.codex/config.toml`, optionally merging the common config snippet.
     /// Auth is handled separately via auth.json.
-    pub(super) fn write_codex_live(
+    pub(crate) fn write_codex_live_force(
         provider: &Provider,
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
-        if !crate::sync_policy::should_sync_live(&AppType::Codex) {
-            return Ok(());
+        let prepared = Self::prepare_codex_live_write(
+            provider,
+            common_config_snippet,
+            None,
+            apply_common_config,
+            true,
+        )?;
+        Self::apply_codex_live_write(&prepared)
+    }
+
+    pub(super) fn prepare_codex_live_write(
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        _previous_common_config_snippet: Option<&str>,
+        apply_common_config: bool,
+        force_sync: bool,
+    ) -> Result<PreparedLiveWrite, AppError> {
+        if !force_sync && !crate::sync_policy::should_sync_live(&AppType::Codex) {
+            return Ok(PreparedLiveWrite::Noop);
         }
 
         let effective = Self::build_effective_live_snapshot(
@@ -343,7 +460,6 @@ impl ProviderService {
         let auth = settings
             .get("auth")
             .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
-
         let cfg_text = settings
             .get("config")
             .and_then(Value::as_str)
@@ -351,20 +467,74 @@ impl ProviderService {
                 AppError::Config("Codex 供应商配置缺少 'config' 字段或不是字符串".to_string())
             })?;
 
-        // Validate TOML before writing
-        if !cfg_text.trim().is_empty() {
-            crate::codex_config::validate_config_toml(cfg_text)?;
-        }
+        let prepared_config =
+            crate::codex_config::prepare_codex_config_text_with_model_catalog_payload(
+                &provider.settings_config,
+                cfg_text,
+            )?;
+        let category = Self::codex_live_write_category(provider);
+        // Mirror upstream write_codex_live_for_provider: official providers with
+        // login material write auth.json; third-party providers write auth.json
+        // unless preserve_codex_official_auth_on_switch is set (then auth.json is
+        // preserved and the API key rides in config.toml's bearer token).
+        let should_write_auth = category == Some("official")
+            || (!force_sync && !crate::settings::preserve_codex_official_auth_on_switch());
 
-        // Write config.toml
-        let config_path = get_codex_config_path();
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-        }
-        crate::config::write_text_file(&config_path, cfg_text)?;
+        // config.toml is a clean OVERWRITE with the provider's effective config.
+        // When auth.json is preserved (third-party + preserve flag) the API key
+        // is injected into config.toml as an experimental_bearer_token instead.
+        let config_text = if should_write_auth {
+            prepared_config.config_text.clone()
+        } else {
+            crate::codex_config::prepare_codex_provider_live_config(
+                auth,
+                &prepared_config.config_text,
+            )?
+        };
 
-        let auth_path = get_codex_auth_path();
-        write_json_file(&auth_path, auth)?;
+        // auth.json follows Preserve/Write/Delete (no merge): a switch always
+        // prefers the incoming provider's auth, but never clobbers a preserved
+        // ChatGPT OAuth cache when auth is preserved. An empty/null incoming auth
+        // removes the stale live auth.json rather than writing an empty file.
+        let auth = if should_write_auth {
+            if auth.is_null() || auth.as_object().is_some_and(serde_json::Map::is_empty) {
+                PreparedCodexAuthWrite::Delete
+            } else {
+                PreparedCodexAuthWrite::Write(auth.clone())
+            }
+        } else {
+            PreparedCodexAuthWrite::Preserve
+        };
+
+        Ok(PreparedLiveWrite::Codex {
+            auth,
+            config: crate::codex_config::PreparedCodexConfigText {
+                config_text,
+                model_catalog: prepared_config.model_catalog,
+            },
+        })
+    }
+
+    pub(super) fn apply_codex_live_write(prepared: &PreparedLiveWrite) -> Result<(), AppError> {
+        let PreparedLiveWrite::Codex { auth, config } = prepared else {
+            return Ok(());
+        };
+
+        crate::codex_config::write_prepared_codex_model_catalog(config)?;
+        match auth {
+            PreparedCodexAuthWrite::Preserve => {
+                crate::codex_config::write_codex_live_config_atomic(Some(&config.config_text))?
+            }
+            PreparedCodexAuthWrite::Write(auth) => {
+                crate::codex_config::write_codex_live_atomic(auth, Some(&config.config_text))?
+            }
+            PreparedCodexAuthWrite::Delete => {
+                crate::codex_config::write_codex_live_atomic_optional_auth(
+                    None,
+                    Some(&config.config_text),
+                )?
+            }
+        }
 
         Ok(())
     }

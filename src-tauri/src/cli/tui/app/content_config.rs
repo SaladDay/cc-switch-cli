@@ -1,5 +1,7 @@
 use super::*;
 
+pub(crate) const HERMES_MEMORY_ROW_COUNT: usize = 2;
+
 impl App {
     fn open_openclaw_editor<T: serde::Serialize>(
         &mut self,
@@ -19,7 +21,7 @@ impl App {
         self.overlay = Overlay::TextInput(TextInputState {
             title: texts::tui_openclaw_daily_memory_create_title().to_string(),
             prompt: texts::tui_openclaw_daily_memory_create_prompt().to_string(),
-            buffer: initial,
+            input: TextInput::new(initial),
             submit: TextSubmit::OpenClawDailyMemoryFilename,
             secret: false,
         });
@@ -47,9 +49,12 @@ impl App {
                     return Action::None;
                 };
                 if matches!(item, ConfigItem::CommonSnippet) {
-                    self.overlay = Overlay::CommonSnippetPicker {
-                        selected: snippet_picker_index_for_app_type(&self.app_type),
-                    };
+                    self.open_common_snippet_editor(
+                        self.app_type.clone(),
+                        data,
+                        None,
+                        CommonSnippetViewSource::Global,
+                    );
                 }
                 Action::None
             }
@@ -79,7 +84,7 @@ impl App {
                         self.overlay = Overlay::TextInput(TextInputState {
                             title: texts::tui_config_export_title().to_string(),
                             prompt: texts::tui_config_export_prompt().to_string(),
-                            buffer: texts::tui_default_config_export_path().to_string(),
+                            input: TextInput::new(texts::tui_default_config_export_path()),
                             submit: TextSubmit::ConfigExport,
                             secret: false,
                         });
@@ -89,7 +94,7 @@ impl App {
                         self.overlay = Overlay::TextInput(TextInputState {
                             title: texts::tui_config_import_title().to_string(),
                             prompt: texts::tui_config_import_prompt().to_string(),
-                            buffer: texts::tui_default_config_export_path().to_string(),
+                            input: TextInput::new(texts::tui_default_config_export_path()),
                             submit: TextSubmit::ConfigImport,
                             secret: false,
                         });
@@ -99,7 +104,7 @@ impl App {
                         self.overlay = Overlay::TextInput(TextInputState {
                             title: texts::tui_config_backup_title().to_string(),
                             prompt: texts::tui_config_backup_prompt().to_string(),
-                            buffer: String::new(),
+                            input: TextInput::new(""),
                             submit: TextSubmit::ConfigBackupName,
                             secret: false,
                         });
@@ -115,9 +120,12 @@ impl App {
                     }
                     ConfigItem::Validate => Action::ConfigValidate,
                     ConfigItem::CommonSnippet => {
-                        self.overlay = Overlay::CommonSnippetPicker {
-                            selected: snippet_picker_index_for_app_type(&self.app_type),
-                        };
+                        self.open_common_snippet_editor(
+                            self.app_type.clone(),
+                            data,
+                            None,
+                            CommonSnippetViewSource::Global,
+                        );
                         Action::None
                     }
                     ConfigItem::Proxy => Action::ConfigOpenProxyHelp,
@@ -226,6 +234,28 @@ impl App {
         }
     }
 
+    pub(crate) fn on_hermes_memory_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        let selected = hermes_memory_kind_for_index(self.hermes_memory_idx);
+        match key.code {
+            KeyCode::Up => {
+                self.hermes_memory_idx = self.hermes_memory_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                self.hermes_memory_idx =
+                    (self.hermes_memory_idx + 1).min(HERMES_MEMORY_ROW_COUNT - 1);
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char('e') => Action::HermesMemoryOpen { kind: selected },
+            KeyCode::Char(' ') | KeyCode::Char('x') => Action::HermesMemorySetEnabled {
+                kind: selected,
+                enabled: !data.config.hermes_memory.enabled(selected),
+            },
+            KeyCode::Char('o') => Action::HermesOpenMemoryDirectory,
+            _ => Action::None,
+        }
+    }
+
     pub(crate) fn on_config_openclaw_env_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         match key.code {
             KeyCode::Enter | KeyCode::Char('e') => {
@@ -312,7 +342,7 @@ impl App {
         self.overlay = Overlay::TextInput(TextInputState {
             title: title.to_string(),
             prompt: texts::tui_openclaw_tools_pattern_placeholder().to_string(),
-            buffer: initial,
+            input: TextInput::new(initial),
             submit: TextSubmit::OpenClawToolsRule { section, row },
             secret: false,
         });
@@ -482,7 +512,7 @@ impl App {
         self.overlay = Overlay::TextInput(TextInputState {
             title: title.to_string(),
             prompt: title.to_string(),
-            buffer,
+            input: TextInput::new(buffer),
             submit: TextSubmit::OpenClawAgentsRuntimeField { field },
             secret: false,
         });
@@ -514,7 +544,7 @@ impl App {
                         })
                     } else {
                         let options = form.available_fallback_options(&model_options);
-                        (!options.is_empty()).then(|| (row, 0, options))
+                        (!options.is_empty()).then_some((row, 0, options))
                     }
                 }
                 OpenClawAgentsSection::Runtime => None,
@@ -664,7 +694,7 @@ impl App {
                         self.overlay = Overlay::TextInput(TextInputState {
                             title: texts::tui_webdav_jianguoyun_setup_title().to_string(),
                             prompt: texts::tui_webdav_jianguoyun_username_prompt().to_string(),
-                            buffer: String::new(),
+                            input: TextInput::new(""),
                             submit: TextSubmit::WebDavJianguoyunUsername,
                             secret: false,
                         });
@@ -695,6 +725,18 @@ impl App {
                     };
                     Action::SetLanguage(next)
                 }
+                Some(SettingsItem::VisibleAppsMode) => {
+                    let current = crate::settings::get_visible_apps_settings().mode;
+                    let next = match current {
+                        crate::settings::VisibleAppsMode::Auto => {
+                            crate::settings::VisibleAppsMode::Manual
+                        }
+                        crate::settings::VisibleAppsMode::Manual => {
+                            crate::settings::VisibleAppsMode::Auto
+                        }
+                    };
+                    Action::SetVisibleAppsMode { mode: next }
+                }
                 Some(SettingsItem::VisibleApps) => {
                     self.overlay = Overlay::VisibleAppsPicker {
                         selected: app_type_picker_index(&self.app_type),
@@ -709,11 +751,20 @@ impl App {
                     self.overlay = Overlay::TextInput(TextInputState {
                         title: texts::tui_settings_openclaw_config_dir_label().to_string(),
                         prompt: texts::tui_settings_openclaw_config_dir_prompt().to_string(),
-                        buffer,
+                        input: TextInput::new(buffer),
                         submit: TextSubmit::SettingsOpenClawConfigDir,
                         secret: false,
                     });
                     Action::None
+                }
+                Some(SettingsItem::ManagedAccounts) => {
+                    let action = self.push_route_and_switch(Route::SettingsManagedAccounts);
+                    if self.managed_auth_status.is_none() {
+                        return Action::ManagedAuthRefresh {
+                            auth_provider: "codex_oauth".to_string(),
+                        };
+                    }
+                    action
                 }
                 Some(SettingsItem::SkipClaudeOnboarding) => {
                     let current = crate::settings::get_skip_claude_onboarding();
@@ -748,11 +799,75 @@ impl App {
                     });
                     Action::None
                 }
+                Some(SettingsItem::CodexUnifiedSessionHistory) => {
+                    let current = crate::settings::unify_codex_session_history();
+                    let next = !current;
+
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_confirm_title().to_string(),
+                        message: texts::codex_unified_session_history_confirm(next),
+                        action: ConfirmAction::SettingsSetCodexUnifiedSessionHistory {
+                            enabled: next,
+                        },
+                    });
+                    Action::None
+                }
                 Some(SettingsItem::Proxy) => self.push_route_and_switch(Route::SettingsProxy),
                 Some(SettingsItem::CheckForUpdates) => Action::CheckUpdate,
                 None => Action::None,
             },
             _ => Action::None,
+        }
+    }
+
+    pub(crate) fn request_auto_failover_toggle(&mut self, data: &UiData) -> Action {
+        if !supports_failover_controls(&self.app_type) {
+            return Action::None;
+        }
+
+        let enabled = !data.proxy.auto_failover_enabled;
+        if !enabled {
+            return Action::SetProxyAutoFailover {
+                app_type: self.app_type.clone(),
+                enabled,
+            };
+        }
+
+        let queue_empty = !data
+            .providers
+            .rows
+            .iter()
+            .any(|row| row.provider.in_failover_queue);
+        if queue_empty {
+            self.push_toast(
+                crate::cli::failover_policy::auto_failover_queue_empty_message(),
+                ToastKind::Warning,
+            );
+            return Action::None;
+        }
+
+        if data
+            .proxy
+            .routes_current_app_through_proxy(&self.app_type)
+            .is_some_and(|active| !active)
+        {
+            self.overlay = Overlay::Confirm(ConfirmOverlay {
+                title: texts::tui_confirm_title().to_string(),
+                message: crate::t!(
+                    "Automatic failover requires proxy routing for this app. Enable proxy takeover for the app first?",
+                    "故障转移需要当前应用走代理才能生效。是否同时开启当前应用代理并启用故障转移？"
+                )
+                .to_string(),
+                action: ConfirmAction::ProxyEnableAndAutoFailover {
+                    app_type: self.app_type.clone(),
+                },
+            });
+            return Action::None;
+        }
+
+        Action::SetProxyAutoFailover {
+            app_type: self.app_type.clone(),
+            enabled,
         }
     }
 
@@ -767,42 +882,142 @@ impl App {
                 self.settings_proxy_idx = (self.settings_proxy_idx + 1).min(items_len - 1);
                 Action::None
             }
-            KeyCode::Enter => {
-                if data.proxy.running {
-                    self.push_toast(
-                        texts::tui_toast_proxy_settings_stop_before_edit(),
-                        ToastKind::Info,
-                    );
-                    return Action::None;
+            KeyCode::Enter => match LocalProxySettingsItem::ALL.get(self.settings_proxy_idx) {
+                Some(LocalProxySettingsItem::AutoFailover) => {
+                    self.request_auto_failover_toggle(data)
                 }
-
-                match LocalProxySettingsItem::ALL.get(self.settings_proxy_idx) {
-                    Some(LocalProxySettingsItem::ListenAddress) => {
-                        self.overlay = Overlay::TextInput(TextInputState {
-                            title: texts::tui_settings_proxy_title().to_string(),
-                            prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
-                            buffer: data.proxy.configured_listen_address.clone(),
-                            submit: TextSubmit::SettingsProxyListenAddress,
-                            secret: false,
-                        });
-                        Action::None
+                Some(LocalProxySettingsItem::ListenAddress) => {
+                    if data.proxy.running {
+                        self.push_toast(
+                            texts::tui_toast_proxy_settings_stop_proxy_before_edit_address(),
+                            ToastKind::Info,
+                        );
+                        return Action::None;
                     }
-                    Some(LocalProxySettingsItem::ListenPort) => {
-                        self.overlay = Overlay::TextInput(TextInputState {
-                            title: texts::tui_settings_proxy_title().to_string(),
-                            prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
-                            buffer: data.proxy.configured_listen_port.to_string(),
-                            submit: TextSubmit::SettingsProxyListenPort,
-                            secret: false,
-                        });
-                        Action::None
-                    }
-                    None => Action::None,
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_settings_proxy_title().to_string(),
+                        prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
+                        input: TextInput::new(data.proxy.configured_listen_address.clone()),
+                        submit: TextSubmit::SettingsProxyListenAddress,
+                        secret: false,
+                    });
+                    Action::None
                 }
-            }
+                Some(LocalProxySettingsItem::ListenPort) => {
+                    if data.proxy.has_active_worker_for(&self.app_type) {
+                        self.push_toast(
+                            texts::tui_toast_proxy_settings_stop_app_route_before_edit_port(),
+                            ToastKind::Info,
+                        );
+                        return Action::None;
+                    }
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_settings_proxy_title().to_string(),
+                        prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
+                        input: TextInput::new(data.proxy.configured_listen_port.to_string()),
+                        submit: TextSubmit::SettingsProxyListenPort,
+                        secret: false,
+                    });
+                    Action::None
+                }
+                None => Action::None,
+            },
             _ => Action::None,
         }
     }
+
+    pub(crate) fn on_settings_managed_accounts_key(
+        &mut self,
+        key: KeyEvent,
+        _data: &UiData,
+    ) -> Action {
+        let account_count = self.managed_auth_account_count();
+        match key.code {
+            KeyCode::Up => {
+                self.settings_managed_accounts_idx =
+                    self.settings_managed_accounts_idx.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                self.settings_managed_accounts_idx =
+                    (self.settings_managed_accounts_idx + 1).min(account_count.saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Char('a') => self.start_managed_account_login(),
+            KeyCode::Char('r') => Action::ManagedAuthRefresh {
+                auth_provider: "codex_oauth".to_string(),
+            },
+            KeyCode::Char(' ') => self.switch_selected_managed_account(),
+            KeyCode::Enter => self.activate_managed_account_row(),
+            _ => Action::None,
+        }
+    }
+
+    fn managed_auth_account_count(&self) -> usize {
+        self.managed_auth_status
+            .as_ref()
+            .map(|status| status.accounts.len())
+            .unwrap_or(0)
+    }
+
+    fn selected_managed_account(&self) -> Option<&crate::services::ManagedAuthAccount> {
+        let status = self.managed_auth_status.as_ref()?;
+        status.accounts.get(
+            self.settings_managed_accounts_idx
+                .min(status.accounts.len().saturating_sub(1)),
+        )
+    }
+
+    fn start_managed_account_login(&mut self) -> Action {
+        if self.managed_auth_loading || self.managed_auth_login.is_some() {
+            return Action::None;
+        }
+
+        Action::ManagedAuthStartLogin {
+            auth_provider: "codex_oauth".to_string(),
+        }
+    }
+
+    fn switch_selected_managed_account(&mut self) -> Action {
+        if self.managed_auth_loading || self.managed_auth_login.is_some() {
+            return Action::None;
+        }
+
+        let Some(account) = self.selected_managed_account() else {
+            return Action::None;
+        };
+
+        Action::ManagedAuthSetDefault {
+            auth_provider: "codex_oauth".to_string(),
+            account_id: account.id.clone(),
+        }
+    }
+
+    fn activate_managed_account_row(&mut self) -> Action {
+        if self.managed_auth_loading || self.managed_auth_login.is_some() {
+            return Action::None;
+        }
+
+        if self.managed_auth_status.is_none() {
+            return Action::ManagedAuthRefresh {
+                auth_provider: "codex_oauth".to_string(),
+            };
+        }
+
+        if let Some(account) = self.selected_managed_account() {
+            self.overlay = Overlay::ManagedAccountActionPicker {
+                auth_provider: "codex_oauth".to_string(),
+                account_id: account.id.clone(),
+                selected: 0,
+            };
+            return Action::None;
+        }
+
+        Action::ManagedAuthStartLogin {
+            auth_provider: "codex_oauth".to_string(),
+        }
+    }
+
     pub fn open_editor(
         &mut self,
         title: impl Into<String>,
@@ -828,25 +1043,6 @@ impl App {
         }
     }
 
-    pub(crate) fn open_common_snippet_view(&mut self, app_type: AppType, data: &UiData) {
-        let snippet = self.common_snippet_text_for(&app_type, data);
-        let snippet = if snippet.trim().is_empty() {
-            texts::tui_default_common_snippet_for_app(app_type.as_str()).to_string()
-        } else {
-            snippet
-        };
-
-        self.overlay = Overlay::CommonSnippetView {
-            app_type: app_type.clone(),
-            view: TextViewState {
-                title: texts::tui_common_snippet_title(app_type.as_str()),
-                lines: snippet.lines().map(|s| s.to_string()).collect(),
-                scroll: 0,
-                action: None,
-            },
-        };
-    }
-
     pub(crate) fn open_proxy_help_view(
         &mut self,
         data: &UiData,
@@ -863,32 +1059,25 @@ impl App {
         } else {
             crate::t!("stopped", "未运行")
         };
-        let current_takeover = data.proxy.takeover_enabled_for(&self.app_type);
-        let current_app_routed = data.proxy.routes_current_app_through_proxy(&self.app_type);
-        let proxy_action_available = current_app_routed.is_some_and(|current_app_routed| {
-            !data.proxy.running || data.proxy.managed_runtime || current_app_routed
+        let current_route = data.proxy.routes_current_app_through_proxy(&self.app_type);
+        let proxy_action_available = current_route.is_some_and(|current_route| {
+            !data.proxy.running || data.proxy.managed_runtime || current_route
         });
-        let takeover_state = match current_takeover {
-            Some(true) => crate::t!("active", "已接管"),
-            Some(false) => crate::t!("inactive", "未接管"),
+        let route_state = match current_route {
+            Some(true) => crate::t!("enabled", "开启"),
+            Some(false) => crate::t!("disabled", "关闭"),
             None => crate::t!("not supported", "不支持"),
         };
-        let toggle_action = match current_app_routed {
-            Some(true) if proxy_action_available => Some(TextViewAction::ProxyToggleTakeover {
-                app_type: self.app_type.clone(),
-                enabled: false,
-            }),
-            Some(false) if proxy_action_available => Some(TextViewAction::ProxyToggleTakeover {
-                app_type: self.app_type.clone(),
-                enabled: true,
-            }),
-            _ => None,
+        let toggle_action = if current_route.is_some() && proxy_action_available {
+            Some(TextViewAction::ProxyToggleManagedRoute)
+        } else {
+            None
         };
 
         let mut lines = vec![
             crate::t!(
-                "Manual takeover status for the foreground proxy.",
-                "前台代理的手动接管状态。"
+                "Managed proxy routing for the current app.",
+                "当前应用的托管代理路由状态。"
             )
             .to_string(),
             String::new(),
@@ -902,19 +1091,15 @@ impl App {
                 crate::t!("Current provider", "当前供应商"),
                 current_provider
             ),
+            format!("{}: {}", crate::t!("Runtime", "运行态"), runtime_state),
             format!(
                 "{}: {}",
-                crate::t!("Foreground runtime", "前台运行态"),
-                runtime_state
-            ),
-            format!(
-                "{}: {}",
-                crate::t!("Current app takeover", "当前应用接管"),
-                takeover_state
+                crate::t!("Current app route", "当前应用路由"),
+                route_state
             ),
             crate::t!(
-                "Manual takeover only. Automatic failover is disabled.",
-                "仅支持手动接管，不提供自动故障转移。"
+                "Proxy routes are started and stopped by the cc-switch daemon.",
+                "代理路由由 cc-switch daemon 启停。"
             )
             .to_string(),
         ];
@@ -938,17 +1123,23 @@ impl App {
                 ),
             ]);
         } else {
-            lines.push(
-                crate::t!(
-                    "Proxy configuration is unavailable.",
-                    "代理配置暂时不可用。"
-                )
-                .to_string(),
-            );
+            let current_app_has_active_worker = data.proxy.has_active_worker_for(&self.app_type);
+            let port_edit_hint =
+                texts::tui_settings_proxy_stop_before_edit_hint(current_app_has_active_worker)
+                    .to_string();
+            lines.extend([
+                format!(
+                    "{}: {}:{}",
+                    crate::t!("Listen", "监听"),
+                    data.proxy.configured_listen_address,
+                    data.proxy.configured_listen_port
+                ),
+                port_edit_hint,
+            ]);
         }
 
         lines.push(String::new());
-        lines.push(match current_app_routed {
+        lines.push(match current_route {
             Some(true) => crate::t!(
                 "Press T to restore the current app to its live config.",
                 "按 T 恢复当前应用的 live 配置。"
@@ -968,8 +1159,8 @@ impl App {
             )
             .to_string(),
             None => crate::t!(
-                "This app does not support proxy takeover in the TUI.",
-                "这个应用暂不支持在 TUI 中进行代理接管。"
+                "This app does not support managed proxy routing in the TUI.",
+                "这个应用暂不支持在 TUI 中使用托管代理路由。"
             )
             .to_string(),
         });
@@ -1018,6 +1209,7 @@ impl App {
         app_type: AppType,
         data: &UiData,
         initial_override: Option<String>,
+        source: CommonSnippetViewSource,
     ) {
         let snippet = initial_override.unwrap_or_else(|| {
             let snippet = self.common_snippet_text_for(&app_type, data);
@@ -1029,7 +1221,7 @@ impl App {
         });
 
         let kind = if matches!(app_type, AppType::Codex) {
-            EditorKind::Plain
+            EditorKind::Toml
         } else {
             EditorKind::Json
         };
@@ -1038,29 +1230,75 @@ impl App {
             texts::tui_common_snippet_title(app_type.as_str()),
             kind,
             snippet,
-            EditorSubmit::ConfigCommonSnippet { app_type },
+            EditorSubmit::ConfigCommonSnippet { app_type, source },
         );
     }
 
-    pub(crate) fn open_provider_add_form(&mut self) {
-        self.filter.active = false;
-        self.overlay = Overlay::None;
-        self.focus = Focus::Content;
-        self.editor = None;
-        self.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
-            self.app_type.clone(),
-        )));
+    fn maybe_show_common_config_notice(&mut self) {
+        if self.common_config_notice_confirmed
+            || !ProviderAddFormState::supports_common_config(&self.app_type)
+        {
+            return;
+        }
+
+        self.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_common_config_notice_title().to_string(),
+            message: texts::tui_common_config_notice_message(self.app_type.as_str()),
+            action: ConfirmAction::CommonConfigNotice,
+        });
     }
 
-    pub(crate) fn open_provider_edit_form(&mut self, row: &super::data::ProviderRow) {
+    pub(crate) fn open_provider_add_form(&mut self, data: &UiData) {
         self.filter.active = false;
         self.overlay = Overlay::None;
         self.focus = Focus::Content;
         self.editor = None;
-        self.form = Some(FormState::ProviderAdd(ProviderAddFormState::from_provider(
-            self.app_type.clone(),
-            &row.provider,
-        )));
+        self.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::new_with_common_snippet(
+                self.app_type.clone(),
+                &data.config.common_snippet,
+            ),
+        ));
+        self.maybe_show_common_config_notice();
+    }
+
+    pub(crate) fn open_provider_edit_form(
+        &mut self,
+        row: &super::data::ProviderRow,
+        data: &UiData,
+    ) {
+        self.filter.active = false;
+        self.overlay = Overlay::None;
+        self.focus = Focus::Content;
+        self.editor = None;
+        self.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::from_provider_with_common_snippet(
+                self.app_type.clone(),
+                &row.provider,
+                &data.config.common_snippet,
+            ),
+        ));
+        self.maybe_show_common_config_notice();
+    }
+
+    pub(crate) fn open_provider_copy_form(
+        &mut self,
+        row: &super::data::ProviderRow,
+        data: &UiData,
+    ) {
+        self.filter.active = false;
+        self.overlay = Overlay::None;
+        self.focus = Focus::Content;
+        self.editor = None;
+        self.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::copy_from_provider_with_common_snippet(
+                self.app_type.clone(),
+                &row.provider,
+                &data.config.common_snippet,
+                &data.existing_provider_ids(),
+            ),
+        ));
+        self.maybe_show_common_config_notice();
     }
 
     pub(crate) fn open_mcp_add_form(&mut self) {
@@ -1080,5 +1318,28 @@ impl App {
         self.focus = Focus::Content;
         self.editor = None;
         self.form = Some(FormState::McpAdd(McpAddFormState::from_server(&row.server)));
+    }
+
+    pub(crate) fn open_prompt_create_form(&mut self, data: &UiData) {
+        self.filter.active = false;
+        self.editor = None;
+        self.overlay = Overlay::None;
+        let name = format!("Prompt {}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
+        let existing_ids = data
+            .prompts
+            .rows
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
+        let id = crate::services::PromptService::generate_prompt_id(&name, &existing_ids);
+        self.form = Some(FormState::PromptMeta(PromptMetaFormState::new(id, name)));
+        self.focus = Focus::Content;
+    }
+}
+
+pub(crate) fn hermes_memory_kind_for_index(index: usize) -> crate::hermes_config::MemoryKind {
+    match index.min(HERMES_MEMORY_ROW_COUNT - 1) {
+        1 => crate::hermes_config::MemoryKind::User,
+        _ => crate::hermes_config::MemoryKind::Memory,
     }
 }

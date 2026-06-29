@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
     body::{to_bytes, Body},
@@ -15,51 +15,14 @@ use crate::{
     app_config::AppType,
     database::Database,
     provider::Provider,
-    proxy::{provider_router::ProviderRouter, types::ProxyConfig},
+    proxy::{
+        provider_router::ProviderRouter, providers::gemini_shadow::GeminiShadowStore,
+        types::ProxyConfig,
+    },
+    test_support::TestEnvGuard,
 };
 
 use super::*;
-
-struct TempHome {
-    #[allow(dead_code)]
-    dir: TempDir,
-    original_home: Option<String>,
-    original_userprofile: Option<String>,
-}
-
-impl TempHome {
-    fn new() -> Self {
-        let dir = TempDir::new().expect("create temp home");
-        let original_home = env::var("HOME").ok();
-        let original_userprofile = env::var("USERPROFILE").ok();
-
-        env::set_var("HOME", dir.path());
-        env::set_var("USERPROFILE", dir.path());
-        crate::settings::reload_test_settings();
-
-        Self {
-            dir,
-            original_home,
-            original_userprofile,
-        }
-    }
-}
-
-impl Drop for TempHome {
-    fn drop(&mut self) {
-        match &self.original_home {
-            Some(value) => env::set_var("HOME", value),
-            None => env::remove_var("HOME"),
-        }
-
-        match &self.original_userprofile {
-            Some(value) => env::set_var("USERPROFILE", value),
-            None => env::remove_var("USERPROFILE"),
-        }
-
-        crate::settings::reload_test_settings();
-    }
-}
 
 fn test_provider_with_settings(
     id: &str,
@@ -90,6 +53,8 @@ fn test_state_with_db(db: Arc<Database>) -> ProxyServerState {
         start_time: Arc::new(RwLock::new(None)),
         current_providers: Arc::new(RwLock::new(HashMap::new())),
         provider_router: Arc::new(ProviderRouter::new(db)),
+        codex_chat_history: Arc::new(Default::default()),
+        gemini_shadow: Arc::new(GeminiShadowStore::default()),
     }
 }
 
@@ -250,9 +215,10 @@ async fn buffered_success_streaming_responses_do_not_record_termination_error() 
 }
 
 #[tokio::test]
-#[serial]
+#[serial(home_settings)]
 async fn streaming_success_syncs_failover_state_after_body_drains() {
-    let _home = TempHome::new();
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
     let db = Arc::new(Database::memory().expect("memory db"));
     let current = test_provider_with_settings(
         "claude-current",
@@ -345,6 +311,20 @@ async fn streaming_success_syncs_failover_state_after_body_drains() {
         serde_json::from_str(&backup.original_config).expect("parse live backup");
     assert_eq!(
         backup_snapshot
+            .get("base_url")
+            .and_then(serde_json::Value::as_str),
+        Some("https://current.example")
+    );
+
+    let snapshot = db
+        .get_failover_live_snapshot("claude", "claude-failover")
+        .await
+        .expect("read failover snapshot")
+        .expect("failover snapshot should exist");
+    let snapshot_value: serde_json::Value =
+        serde_json::from_str(&snapshot.config_json).expect("parse failover snapshot");
+    assert_eq!(
+        snapshot_value
             .get("base_url")
             .and_then(serde_json::Value::as_str),
         Some("https://failover.example")

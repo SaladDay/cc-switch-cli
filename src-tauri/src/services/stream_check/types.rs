@@ -9,39 +9,44 @@ pub enum HealthStatus {
     Failed,
 }
 
-/// 流式检查配置
+/// 连通性检查配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamCheckConfig {
+    /// 单次探测超时（秒）
+    #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// 超时类失败的最大重试次数
+    #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// 降级阈值（毫秒）：可达但 TTFB 超过该值判定为较慢
+    #[serde(default = "default_degraded_threshold_ms")]
     pub degraded_threshold_ms: u64,
-    pub claude_model: String,
-    pub codex_model: String,
-    pub gemini_model: String,
-    #[serde(default = "default_test_prompt")]
-    pub test_prompt: String,
 }
 
-fn default_test_prompt() -> String {
-    "Who are you?".to_string()
+fn default_timeout_secs() -> u64 {
+    8
+}
+
+fn default_max_retries() -> u32 {
+    1
+}
+
+fn default_degraded_threshold_ms() -> u64 {
+    6000
 }
 
 impl Default for StreamCheckConfig {
     fn default() -> Self {
         Self {
-            timeout_secs: 45,
-            max_retries: 2,
-            degraded_threshold_ms: 6000,
-            claude_model: "claude-haiku-4-5-20251001".to_string(),
-            codex_model: "gpt-5.1-codex@low".to_string(),
-            gemini_model: "gemini-3-pro-preview".to_string(),
-            test_prompt: default_test_prompt(),
+            timeout_secs: default_timeout_secs(),
+            max_retries: default_max_retries(),
+            degraded_threshold_ms: default_degraded_threshold_ms(),
         }
     }
 }
 
-/// 流式检查结果
+/// 连通性检查结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamCheckResult {
@@ -50,41 +55,11 @@ pub struct StreamCheckResult {
     pub message: String,
     pub response_time_ms: Option<u64>,
     pub http_status: Option<u16>,
+    /// 保留字段以兼容 stream_check_logs 表结构；连通性检查恒为空串。
     pub model_used: String,
     pub tested_at: i64,
     pub retry_count: u32,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct AuthInfo {
-    pub(crate) api_key: String,
-    pub(crate) strategy: AuthStrategy,
-    pub(crate) access_token: Option<String>,
-}
-
-impl AuthInfo {
-    pub(crate) fn new(api_key: String, strategy: AuthStrategy) -> Self {
-        Self {
-            api_key,
-            strategy,
-            access_token: None,
-        }
-    }
-
-    pub(crate) fn with_access_token(api_key: String, access_token: String) -> Self {
-        Self {
-            api_key,
-            strategy: AuthStrategy::GoogleOAuth,
-            access_token: Some(access_token),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AuthStrategy {
-    Anthropic,
-    ClaudeAuth,
-    Bearer,
-    Google,
-    GoogleOAuth,
+    /// 细粒度错误分类；连通性检查不再细分，恒为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_category: Option<String>,
 }

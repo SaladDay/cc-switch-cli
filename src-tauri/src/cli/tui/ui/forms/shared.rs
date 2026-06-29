@@ -1,4 +1,5 @@
 use super::super::*;
+use std::collections::BTreeSet;
 
 pub(crate) fn focus_block_style(active: bool, theme: &super::theme::Theme) -> Style {
     if active {
@@ -39,13 +40,20 @@ pub(crate) fn add_form_key_items(
                     }
                     Some(
                         ProviderAddField::ClaudeModelConfig
+                        | ProviderAddField::CodexOAuthAccount
+                        | ProviderAddField::CodexLocalRouting
                         | ProviderAddField::CommonSnippet
-                        | ProviderAddField::OpenClawModels,
+                        | ProviderAddField::UsageQuery
+                        | ProviderAddField::OpenClawModels
+                        | ProviderAddField::HermesModels,
                     ) => texts::tui_key_open(),
                     Some(
                         ProviderAddField::GeminiAuthType
+                        | ProviderAddField::ClaudeHideAttribution
+                        | ProviderAddField::CodexFastMode
                         | ProviderAddField::OpenClawApiProtocol
-                        | ProviderAddField::OpenClawUserAgent,
+                        | ProviderAddField::OpenClawUserAgent
+                        | ProviderAddField::HermesApiMode,
                     ) => texts::tui_key_toggle(),
                     _ => texts::tui_key_edit_mode(),
                 };
@@ -62,6 +70,101 @@ pub(crate) fn add_form_key_items(
                 ("↑↓", texts::tui_key_scroll()),
             ]);
         }
+        FormFocus::Content => {}
+    }
+
+    keys
+}
+
+pub(crate) fn codex_local_routing_form_key_items(
+    selected_field: Option<super::form::CodexLocalRoutingField>,
+) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![
+        ("Ctrl+S", texts::tui_key_save()),
+        ("Esc", texts::tui_key_no()),
+        ("↑↓", texts::tui_key_select()),
+    ];
+
+    let enter_action = match selected_field {
+        Some(super::form::CodexLocalRoutingField::ModelCatalog) => texts::tui_key_open(),
+        Some(
+            super::form::CodexLocalRoutingField::Enabled
+            | super::form::CodexLocalRoutingField::SupportsThinking
+            | super::form::CodexLocalRoutingField::SupportsEffort,
+        ) => texts::tui_key_toggle(),
+        None => texts::tui_key_toggle(),
+    };
+    keys.push(("Enter", enter_action));
+    keys
+}
+
+pub(crate) fn codex_model_catalog_form_key_items(
+    has_rows: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![
+        ("Ctrl+S", texts::tui_key_save()),
+        ("Esc", texts::tui_key_no()),
+        ("f", texts::tui_key_fetch_model()),
+        ("+", texts::tui_key_add()),
+    ];
+    if has_rows {
+        keys.extend([
+            ("↑↓", texts::tui_key_select()),
+            ("←→", texts::tui_key_select()),
+            ("Enter", texts::tui_key_edit()),
+            ("Del", texts::tui_key_delete()),
+        ]);
+    }
+    keys
+}
+
+pub(crate) fn usage_query_form_key_items(
+    focus: FormFocus,
+    editing: bool,
+    selected_field: Option<super::form::UsageQueryField>,
+    extractor_available: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![
+        ("Ctrl+S", texts::tui_key_save()),
+        ("Esc", texts::tui_key_no()),
+    ];
+    if extractor_available {
+        keys.insert(0, ("Tab", texts::tui_key_focus()));
+    }
+
+    match focus {
+        FormFocus::Fields => {
+            keys.push(("↑↓", texts::tui_key_select()));
+            if editing {
+                keys.extend([
+                    ("←→", texts::tui_key_move()),
+                    ("Enter", texts::tui_key_exit_edit()),
+                ]);
+            } else {
+                let enter_action = match selected_field {
+                    Some(
+                        super::form::UsageQueryField::Enabled
+                        | super::form::UsageQueryField::Template
+                        | super::form::UsageQueryField::CodingPlanProvider,
+                    ) => texts::tui_key_toggle(),
+                    Some(super::form::UsageQueryField::Script) => texts::tui_key_open(),
+                    Some(_) => texts::tui_key_edit_mode(),
+                    None => texts::tui_key_edit_mode(),
+                };
+                keys.push(("Enter", enter_action));
+            }
+        }
+        FormFocus::JsonPreview => {
+            if extractor_available {
+                keys.push(("Enter", texts::tui_key_open()));
+            }
+        }
+        FormFocus::Content => {
+            if extractor_available {
+                keys.push(("Enter", texts::tui_key_view()));
+            }
+        }
+        FormFocus::Templates => {}
     }
 
     keys
@@ -146,6 +249,26 @@ pub(crate) fn render_form_json_preview(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
+    render_form_json_preview_with_highlights(
+        frame,
+        json_text,
+        scroll,
+        active,
+        area,
+        theme,
+        &BTreeSet::new(),
+    );
+}
+
+pub(crate) fn render_form_json_preview_with_highlights(
+    frame: &mut Frame<'_>,
+    json_text: &str,
+    scroll: usize,
+    active: bool,
+    area: Rect,
+    theme: &super::theme::Theme,
+    highlighted_lines: &BTreeSet<usize>,
+) {
     let json_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -154,9 +277,26 @@ pub(crate) fn render_form_json_preview(
     frame.render_widget(json_block.clone(), area);
     let json_inner = json_block.inner(area);
 
+    let highlight_style = Style::default().bg(theme.surface);
     let lines = json_text
         .lines()
-        .map(|s| Line::raw(s.to_string()))
+        .enumerate()
+        .map(|(idx, s)| {
+            if highlighted_lines.contains(&idx) {
+                match s.find(|ch: char| !ch.is_whitespace()) {
+                    Some(start) => {
+                        let (indent, content) = s.split_at(start);
+                        Line::from(vec![
+                            Span::raw(indent.to_string()),
+                            Span::styled(content.to_string(), highlight_style),
+                        ])
+                    }
+                    None => Line::raw(s.to_string()),
+                }
+            } else {
+                Line::raw(s.to_string())
+            }
+        })
         .collect::<Vec<_>>();
 
     let height = json_inner.height as usize;
@@ -222,5 +362,6 @@ pub(crate) fn render_add_form(
             render_provider_add_form(frame, app, data, provider, area, theme)
         }
         FormState::McpAdd(mcp) => render_mcp_add_form(frame, app, mcp, area, theme),
+        FormState::PromptMeta(prompt) => render_prompt_meta_form(frame, app, prompt, area, theme),
     }
 }

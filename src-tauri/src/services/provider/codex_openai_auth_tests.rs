@@ -1,56 +1,14 @@
 use super::*;
 use serial_test::serial;
-use std::ffi::OsString;
-use std::path::Path;
 use tempfile::TempDir;
 
-use crate::test_support::{
-    lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
-};
-
-struct EnvGuard {
-    _lock: TestHomeSettingsLock,
-    old_home: Option<OsString>,
-    old_userprofile: Option<OsString>,
-}
-
-impl EnvGuard {
-    fn set_home(home: &Path) -> Self {
-        let lock = lock_test_home_and_settings();
-        let old_home = std::env::var_os("HOME");
-        let old_userprofile = std::env::var_os("USERPROFILE");
-        std::env::set_var("HOME", home);
-        std::env::set_var("USERPROFILE", home);
-        set_test_home_override(Some(home));
-        crate::settings::reload_test_settings();
-        Self {
-            _lock: lock,
-            old_home,
-            old_userprofile,
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match &self.old_userprofile {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        set_test_home_override(self.old_home.as_deref().map(Path::new));
-        crate::settings::reload_test_settings();
-    }
-}
+use crate::test_support::TestEnvGuard;
 
 #[test]
 #[serial]
 fn switch_codex_provider_writes_stored_config_directly() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -97,7 +55,7 @@ fn switch_codex_provider_writes_stored_config_directly() {
 #[serial]
 fn switch_codex_provider_migrates_legacy_flat_config() {
     let temp_home = TempDir::new().expect("create temp home");
-    let _env = EnvGuard::set_home(temp_home.path());
+    let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
@@ -154,6 +112,86 @@ fn switch_codex_provider_migrates_legacy_flat_config() {
     assert!(
         config_text.contains("wire_api = \"responses\""),
         "config.toml should preserve wire_api after migration: {config_text}"
+    );
+}
+
+#[test]
+#[serial]
+fn switch_codex_overwrites_config_toml_respecting_auth_mode() {
+    use crate::settings::{update_settings, AppSettings};
+
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+
+    // With preserve-on-switch enabled, switching to a third-party provider must
+    // NOT clobber an existing ChatGPT OAuth auth.json; the API key rides in
+    // config.toml instead, while config.toml is still a clean overwrite.
+    let previous_settings = crate::settings::get_settings();
+    update_settings(AppSettings {
+        preserve_codex_official_auth_on_switch: true,
+        ..AppSettings::default()
+    })
+    .expect("enable preserve-on-switch");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.providers.insert(
+            "thirdparty".to_string(),
+            Provider::with_id(
+                "thirdparty".to_string(),
+                "Third Party".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-thirdparty" },
+                    "config": "model_provider = \"custom\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.custom]\nbase_url = \"https://api.custom.example/v1\"\nwire_api = \"responses\"\n"
+                }),
+                Some("custom".to_string()),
+            ),
+        );
+    }
+
+    // Seed an existing ChatGPT OAuth login cache in auth.json.
+    crate::config::write_json_file(
+        &get_codex_auth_path(),
+        &json!({
+            "tokens": { "access_token": "oauth-access-token" },
+            "OPENAI_API_KEY": null
+        }),
+    )
+    .expect("seed live auth.json with OAuth cache");
+
+    let state = state_from_config(config);
+    let result = ProviderService::switch(&state, AppType::Codex, "thirdparty");
+
+    // Restore global settings before asserting so other serial tests are clean.
+    update_settings(previous_settings).expect("restore settings");
+    result.expect("switch should succeed");
+
+    // config.toml is overwritten with the provider's config + the API key as a
+    // bearer token (no auth.json write for third-party while preserving).
+    let config_text =
+        std::fs::read_to_string(get_codex_config_path()).expect("read codex config.toml");
+    assert!(
+        config_text.contains("base_url = \"https://api.custom.example/v1\""),
+        "config.toml should be overwritten with the third-party provider config: {config_text}"
+    );
+    assert!(
+        config_text.contains("experimental_bearer_token"),
+        "third-party API key should ride in config.toml as a bearer token: {config_text}"
+    );
+
+    // The ChatGPT OAuth login cache in auth.json must be preserved untouched.
+    let auth: Value = crate::config::read_json_file(&get_codex_auth_path())
+        .expect("auth.json should still exist");
+    assert_eq!(
+        auth.pointer("/tokens/access_token").and_then(Value::as_str),
+        Some("oauth-access-token"),
+        "preserve-on-switch must not clobber the OAuth auth.json"
     );
 }
 

@@ -1,9 +1,184 @@
 use super::*;
 use axum::{response::Redirect, routing::get, Router};
 use minisign::KeyPair;
+use serial_test::serial;
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use tokio::net::TcpListener;
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn force_homebrew_install_for_test() -> EnvVarGuard {
+    let exe = std::env::current_exe().expect("current test executable should resolve");
+    let prefix = exe
+        .parent()
+        .expect("executable must have a parent directory");
+    EnvVarGuard::set("HOMEBREW_PREFIX", prefix.as_os_str())
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+#[serial(homebrew_update)]
+async fn cli_explicit_update_exits_early_for_homebrew_install() {
+    let _homebrew = force_homebrew_install_for_test();
+
+    execute_async(UpdateCommand {
+        version: Some("v999.0.0".to_string()),
+        check: false,
+        json: false,
+    })
+    .await
+    .expect("homebrew-managed explicit CLI update should exit without querying releases");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn cli_default_homebrew_update_is_not_blocked_before_checking_latest() {
+    assert!(!should_block_homebrew_before_update_check(true, false));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn cli_explicit_homebrew_update_is_blocked_before_release_lookup() {
+    assert!(should_block_homebrew_before_update_check(true, true));
+}
+
+#[cfg(not(windows))]
+#[test]
+#[serial(homebrew_update)]
+fn tui_update_check_marks_homebrew_package_manager_update() {
+    let _homebrew = force_homebrew_install_for_test();
+
+    let info = build_update_check_info(
+        env!("CARGO_PKG_VERSION"),
+        "v999.0.0".to_string(),
+        is_homebrew_install(),
+    );
+
+    assert_eq!(info.target_tag, "v999.0.0");
+    assert!(!info.is_already_latest);
+    assert!(info.is_homebrew_managed);
+}
+
+#[tokio::test]
+#[serial(homebrew_update)]
+async fn check_for_update_from_repo_uses_supplied_repo_url() {
+    let _homebrew = EnvVarGuard::remove("HOMEBREW_PREFIX");
+    let (repo_url, server) = spawn_update_manifest_server("v999.0.0").await;
+
+    let info = check_for_update_from_repo(&repo_url)
+        .await
+        .expect("update check should use supplied repo url");
+
+    assert_eq!(info.current_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.target_tag, "v999.0.0");
+    assert!(!info.is_already_latest);
+    assert!(!info.is_downgrade);
+    assert!(!info.is_homebrew_managed);
+
+    server.abort();
+}
+
+#[test]
+fn non_homebrew_update_check_marks_newer_version_as_regular_update() {
+    let info = build_update_check_info(env!("CARGO_PKG_VERSION"), "v999.0.0".to_string(), false);
+
+    assert_eq!(info.target_tag, "v999.0.0");
+    assert!(!info.is_already_latest);
+    assert!(!info.is_downgrade);
+    assert!(!info.is_homebrew_managed);
+}
+
+#[test]
+fn update_check_info_json_uses_cli_field_names() {
+    let info = build_update_check_info("1.2.3", "v1.2.4".to_string(), false);
+    let value = serde_json::to_value(&info).expect("serialize update check info");
+
+    assert_eq!(value["currentVersion"], "1.2.3");
+    assert_eq!(value["targetTag"], "v1.2.4");
+    assert_eq!(value["isAlreadyLatest"], false);
+    assert_eq!(value["isDowngrade"], false);
+    assert_eq!(value["isHomebrewManaged"], false);
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+#[serial(homebrew_update)]
+async fn check_for_update_from_repo_marks_homebrew_managed_install() {
+    let _homebrew = force_homebrew_install_for_test();
+    let (repo_url, server) = spawn_update_manifest_server("v999.0.1").await;
+
+    let info = check_for_update_from_repo(&repo_url)
+        .await
+        .expect("homebrew-managed check should still query supplied repo url");
+
+    assert_eq!(info.current_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.target_tag, "v999.0.1");
+    assert!(!info.is_already_latest);
+    assert!(info.is_homebrew_managed);
+
+    server.abort();
+}
+
+async fn spawn_update_manifest_server(
+    version: &'static str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let platform_key = current_platform_key().expect("platform key should resolve");
+    let manifest = serde_json::json!({
+        "version": version,
+        "platforms": {
+            platform_key: {
+                "url": "https://example.com/cc-switch.tar.gz",
+                "signature": "fake-signature"
+            }
+        }
+    });
+    let app = Router::new().route(
+        "/team/cc-switch-cli/releases/latest/download/latest.json",
+        get(move || {
+            let manifest = manifest.clone();
+            async move { axum::Json(manifest) }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let addr = listener.local_addr().expect("local addr should resolve");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("server should run");
+    });
+
+    let repo_url = format!("http://{addr}/team/cc-switch-cli");
+    (repo_url, server)
+}
 
 #[test]
 fn normalize_tag_adds_prefix_when_missing() {
@@ -280,8 +455,8 @@ fn validate_download_size_limit_rejects_oversized_asset() {
 fn select_manifest_asset_prefers_linux_glibc_variant_when_overridden() {
     let manifest = UpdateManifest {
         version: "v4.6.3".to_string(),
-        notes: None,
-        pub_date: None,
+        _notes: None,
+        _pub_date: None,
         platforms: BTreeMap::from([(
             "linux-x86_64".to_string(),
             UpdatePlatformEntry {
@@ -312,8 +487,8 @@ fn select_manifest_asset_prefers_linux_glibc_variant_when_overridden() {
 fn select_manifest_asset_accepts_glibc_primary_entry_without_variant() {
     let manifest = UpdateManifest {
         version: "v4.6.3".to_string(),
-        notes: None,
-        pub_date: None,
+        _notes: None,
+        _pub_date: None,
         platforms: BTreeMap::from([(
             "linux-x86_64".to_string(),
             UpdatePlatformEntry {
@@ -334,8 +509,8 @@ fn select_manifest_asset_accepts_glibc_primary_entry_without_variant() {
 fn manifest_linux_asset_candidates_keep_musl_strict_when_forced() {
     let manifest = UpdateManifest {
         version: "v4.6.3".to_string(),
-        notes: None,
-        pub_date: None,
+        _notes: None,
+        _pub_date: None,
         platforms: BTreeMap::from([(
             "linux-x86_64".to_string(),
             UpdatePlatformEntry {

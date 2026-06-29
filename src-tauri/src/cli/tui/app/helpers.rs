@@ -1,7 +1,8 @@
 use super::*;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
+use chrono::{Local, TimeZone};
 use serde_json::Value;
 
 pub(crate) enum OpenClawDailyMemoryListItem<'a> {
@@ -114,43 +115,24 @@ impl OpenClawAgentsFormState {
     pub(crate) fn from_snapshot(
         defaults: Option<&crate::openclaw_config::OpenClawAgentsDefaults>,
     ) -> Self {
-        let defaults = defaults.cloned().unwrap_or_default();
-        let model = defaults
-            .model
-            .unwrap_or(crate::openclaw_config::OpenClawDefaultModel {
-                primary: String::new(),
-                fallbacks: Vec::new(),
-                extra: HashMap::new(),
-            });
-        let mut defaults_extra = defaults.extra;
-        let timeout_seconds_seed = defaults_extra.remove("timeoutSeconds");
-        let legacy_timeout = defaults_extra.remove("timeout");
-        let has_legacy_timeout = legacy_timeout.is_some();
-        let context_tokens_seed = defaults_extra.remove("contextTokens");
-        let max_concurrent_seed = defaults_extra.remove("maxConcurrent");
-
-        let workspace = string_value(defaults_extra.remove("workspace"));
-        let timeout = legacy_timeout
-            .clone()
-            .map(|value| string_value(Some(value)))
-            .unwrap_or_else(|| numeric_value(timeout_seconds_seed.clone()));
-        let context_tokens = numeric_value(context_tokens_seed.clone());
-        let max_concurrent = numeric_value(max_concurrent_seed.clone());
+        let form = crate::cli::openclaw_form_normalization::OpenClawAgentsFormLike::from_snapshot(
+            defaults,
+        );
 
         Self {
-            primary_model: model.primary,
-            fallbacks: model.fallbacks,
-            workspace,
-            timeout,
-            timeout_seconds_seed,
-            context_tokens,
-            context_tokens_seed,
-            max_concurrent,
-            max_concurrent_seed,
-            model_catalog: defaults.models,
-            defaults_extra,
-            model_extra: model.extra,
-            has_legacy_timeout,
+            primary_model: form.primary_model,
+            fallbacks: form.fallbacks,
+            workspace: form.workspace,
+            timeout: form.timeout,
+            timeout_seconds_seed: form.timeout_seconds_seed,
+            context_tokens: form.context_tokens,
+            context_tokens_seed: form.context_tokens_seed,
+            max_concurrent: form.max_concurrent,
+            max_concurrent_seed: form.max_concurrent_seed,
+            model_catalog: form.model_catalog,
+            defaults_extra: form.defaults_extra,
+            model_extra: form.model_extra,
+            has_legacy_timeout: form.has_legacy_timeout,
             section: OpenClawAgentsSection::PrimaryModel,
             row: 0,
         }
@@ -333,50 +315,7 @@ impl OpenClawAgentsFormState {
     }
 
     pub(crate) fn to_config(&self) -> crate::openclaw_config::OpenClawAgentsDefaults {
-        let mut extra = self.defaults_extra.clone();
-        update_string_field(&mut extra, "workspace", &self.workspace);
-        update_timeout_seconds_field(
-            &mut extra,
-            &self.timeout,
-            self.has_legacy_timeout,
-            self.timeout_seconds_seed.as_ref(),
-        );
-        extra.remove("timeout");
-        update_number_field(
-            &mut extra,
-            "contextTokens",
-            &self.context_tokens,
-            self.context_tokens_seed.as_ref(),
-        );
-        update_number_field(
-            &mut extra,
-            "maxConcurrent",
-            &self.max_concurrent,
-            self.max_concurrent_seed.as_ref(),
-        );
-
-        let fallbacks = self
-            .fallbacks
-            .iter()
-            .filter_map(|value| {
-                let trimmed = value.trim();
-                (!trimmed.is_empty()).then(|| trimmed.to_string())
-            })
-            .collect::<Vec<_>>();
-        let primary_model = self.primary_model.trim().to_string();
-        let model =
-            (!primary_model.is_empty() || !fallbacks.is_empty() || !self.model_extra.is_empty())
-                .then(|| crate::openclaw_config::OpenClawDefaultModel {
-                    primary: primary_model,
-                    fallbacks,
-                    extra: self.model_extra.clone(),
-                });
-
-        crate::openclaw_config::OpenClawAgentsDefaults {
-            model,
-            models: self.model_catalog.clone(),
-            extra,
-        }
+        self.to_form_like().to_config()
     }
 
     fn rows_in_section(&self, section: OpenClawAgentsSection) -> usize {
@@ -388,27 +327,52 @@ impl OpenClawAgentsFormState {
     }
 
     pub(crate) fn has_unmigratable_legacy_timeout(&self) -> bool {
-        self.has_legacy_timeout
-            && !self.timeout.trim().is_empty()
-            && parse_number(self.timeout.trim()).is_none()
+        self.to_form_like().has_unmigratable_legacy_timeout()
     }
 
     pub(crate) fn preserved_timeout_seconds(&self) -> Option<&Value> {
-        preserved_non_string_runtime_seed(&self.timeout, self.timeout_seconds_seed.as_ref())
+        crate::cli::openclaw_form_normalization::preserved_non_string_runtime_seed(
+            &self.timeout,
+            self.timeout_seconds_seed.as_ref(),
+        )
     }
 
     pub(crate) fn preserved_context_tokens(&self) -> Option<&Value> {
-        preserved_non_string_runtime_seed(&self.context_tokens, self.context_tokens_seed.as_ref())
+        crate::cli::openclaw_form_normalization::preserved_non_string_runtime_seed(
+            &self.context_tokens,
+            self.context_tokens_seed.as_ref(),
+        )
     }
 
     pub(crate) fn preserved_max_concurrent(&self) -> Option<&Value> {
-        preserved_non_string_runtime_seed(&self.max_concurrent, self.max_concurrent_seed.as_ref())
+        crate::cli::openclaw_form_normalization::preserved_non_string_runtime_seed(
+            &self.max_concurrent,
+            self.max_concurrent_seed.as_ref(),
+        )
     }
 
     pub(crate) fn has_preserved_non_string_runtime_values(&self) -> bool {
         self.preserved_timeout_seconds().is_some()
             || self.preserved_context_tokens().is_some()
             || self.preserved_max_concurrent().is_some()
+    }
+
+    fn to_form_like(&self) -> crate::cli::openclaw_form_normalization::OpenClawAgentsFormLike {
+        crate::cli::openclaw_form_normalization::OpenClawAgentsFormLike {
+            primary_model: self.primary_model.clone(),
+            fallbacks: self.fallbacks.clone(),
+            workspace: self.workspace.clone(),
+            timeout: self.timeout.clone(),
+            timeout_seconds_seed: self.timeout_seconds_seed.clone(),
+            context_tokens: self.context_tokens.clone(),
+            context_tokens_seed: self.context_tokens_seed.clone(),
+            max_concurrent: self.max_concurrent.clone(),
+            max_concurrent_seed: self.max_concurrent_seed.clone(),
+            model_catalog: self.model_catalog.clone(),
+            defaults_extra: self.defaults_extra.clone(),
+            model_extra: self.model_extra.clone(),
+            has_legacy_timeout: self.has_legacy_timeout,
+        }
     }
 
     fn clamp_section(&self, section: OpenClawAgentsSection) -> OpenClawAgentsSection {
@@ -666,126 +630,6 @@ fn model_picker_selection(current: &str, options: &[OpenClawModelOption]) -> usi
         .unwrap_or(OPENCLAW_AGENTS_MODEL_PICKER_NONE)
 }
 
-fn string_value(value: Option<Value>) -> String {
-    match value {
-        Some(Value::String(value)) => value,
-        Some(Value::Number(value)) => value.to_string(),
-        Some(Value::Bool(value)) => value.to_string(),
-        Some(other) => other.to_string(),
-        None => String::new(),
-    }
-}
-
-fn numeric_value(value: Option<Value>) -> String {
-    match value {
-        Some(Value::Number(value)) => value.to_string(),
-        Some(Value::String(value)) => value,
-        _ => String::new(),
-    }
-}
-
-fn update_string_field(extra: &mut HashMap<String, Value>, key: &str, value: &str) {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        extra.remove(key);
-    } else {
-        extra.insert(key.to_string(), Value::String(trimmed.to_string()));
-    }
-}
-
-fn update_number_field(
-    extra: &mut HashMap<String, Value>,
-    key: &str,
-    value: &str,
-    seed: Option<&Value>,
-) {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        if should_preserve_non_string_numeric_seed(seed) {
-            extra.insert(key.to_string(), seed.cloned().expect("seed exists"));
-            return;
-        }
-        extra.remove(key);
-        return;
-    }
-
-    let parsed = parse_number(trimmed);
-
-    if let Some(number) = parsed {
-        extra.insert(key.to_string(), Value::Number(number));
-    } else {
-        extra.insert(key.to_string(), Value::String(trimmed.to_string()));
-    }
-}
-
-fn update_timeout_seconds_field(
-    extra: &mut HashMap<String, Value>,
-    value: &str,
-    has_legacy_timeout: bool,
-    timeout_seconds_seed: Option<&Value>,
-) {
-    let trimmed = value.trim();
-    if let Some(number) = parse_number(trimmed) {
-        extra.insert("timeoutSeconds".to_string(), Value::Number(number));
-        return;
-    }
-
-    if trimmed.is_empty() && has_legacy_timeout {
-        if let Some(seed) = timeout_seconds_seed {
-            extra.insert("timeoutSeconds".to_string(), seed.clone());
-            return;
-        }
-    }
-
-    if trimmed.is_empty() {
-        if should_preserve_non_string_numeric_seed(timeout_seconds_seed) {
-            extra.insert(
-                "timeoutSeconds".to_string(),
-                timeout_seconds_seed.cloned().expect("seed exists"),
-            );
-            return;
-        }
-        extra.remove("timeoutSeconds");
-    } else {
-        extra.insert(
-            "timeoutSeconds".to_string(),
-            Value::String(trimmed.to_string()),
-        );
-    }
-}
-
-fn parse_number(value: &str) -> Option<serde_json::Number> {
-    value
-        .parse::<i64>()
-        .ok()
-        .map(serde_json::Number::from)
-        .or_else(|| value.parse::<u64>().ok().map(serde_json::Number::from))
-        .or_else(|| {
-            value
-                .parse::<f64>()
-                .ok()
-                .and_then(serde_json::Number::from_f64)
-        })
-}
-
-fn should_preserve_non_string_numeric_seed(seed: Option<&Value>) -> bool {
-    matches!(
-        seed,
-        Some(Value::Bool(_) | Value::Null | Value::Array(_) | Value::Object(_))
-    )
-}
-
-fn preserved_non_string_runtime_seed<'a>(
-    value: &str,
-    seed: Option<&'a Value>,
-) -> Option<&'a Value> {
-    if value.trim().is_empty() && should_preserve_non_string_numeric_seed(seed) {
-        seed
-    } else {
-        None
-    }
-}
-
 fn openclaw_tools_warning_matches_path(
     data: &UiData,
     warning: &crate::openclaw_config::OpenClawHealthWarning,
@@ -880,6 +724,7 @@ impl<'a> OpenClawDailyMemoryListItem<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn preview(&self) -> &str {
         match self {
             Self::File(row) => &row.preview,
@@ -893,8 +738,14 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
         route,
         Route::Providers
             | Route::ProviderDetail { .. }
+            | Route::Usage
+            | Route::UsageLogs
+            | Route::UsageLogDetail { .. }
+            | Route::Pricing
+            | Route::Sessions
             | Route::Mcp
             | Route::Prompts
+            | Route::HermesMemory
             | Route::Config
             | Route::ConfigOpenClawWorkspace
             | Route::ConfigOpenClawDailyMemory
@@ -908,7 +759,200 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
             | Route::SkillDetail { .. }
             | Route::Settings
             | Route::SettingsProxy
+            | Route::SettingsManagedAccounts
     )
+}
+
+pub(crate) fn session_key(session: &crate::session_manager::SessionMeta) -> String {
+    format!(
+        "{}:{}:{}",
+        session.provider_id,
+        session.session_id,
+        session.source_path.as_deref().unwrap_or_default()
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn visible_sessions<'a>(
+    filter: &FilterState,
+    app_type: &AppType,
+    rows: &'a [crate::session_manager::SessionMeta],
+) -> Vec<&'a crate::session_manager::SessionMeta> {
+    let query = filter.query_lower();
+    let provider_id = app_type.as_str();
+    rows.iter()
+        .filter(|row| row.provider_id == provider_id)
+        .filter(|row| match &query {
+            None => true,
+            Some(q) => session_matches_filter(row, q),
+        })
+        .collect()
+}
+
+pub(crate) fn visible_sessions_for_state<'a>(
+    filter: &FilterState,
+    app_type: &AppType,
+    rows: &'a [crate::session_manager::SessionMeta],
+    detail_key: Option<&str>,
+    messages_loaded: bool,
+    messages: &[crate::session_manager::SessionMessage],
+) -> Vec<&'a crate::session_manager::SessionMeta> {
+    let query = filter.query_lower();
+    let provider_id = app_type.as_str();
+    let message_match_key = query.as_deref().and_then(|_| {
+        loaded_detail_message_match_key(filter, detail_key, messages_loaded, messages)
+    });
+
+    rows.iter()
+        .filter(|row| row.provider_id == provider_id)
+        .filter(|row| match &query {
+            None => true,
+            Some(q) => {
+                session_matches_filter(row, q)
+                    || message_match_key
+                        .as_deref()
+                        .is_some_and(|key| session_key(row) == key)
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn visible_session_messages(
+    sessions: &SessionsState,
+) -> Vec<(usize, &crate::session_manager::SessionMessage)> {
+    let query = sessions.message_query_lower();
+    sessions
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| match &query {
+            None => true,
+            Some(query) => session_message_matches_message_filter(message, query),
+        })
+        .collect()
+}
+
+pub(crate) fn clamp_session_message_selection(sessions: &mut SessionsState) {
+    let selected = {
+        let visible = visible_session_messages(sessions);
+        if visible.is_empty() {
+            Some(0)
+        } else if visible
+            .iter()
+            .any(|(index, _)| *index == sessions.message_idx)
+        {
+            None
+        } else {
+            Some(visible[0].0)
+        }
+    };
+    if let Some(selected) = selected {
+        sessions.message_idx = selected;
+    }
+}
+
+fn loaded_detail_message_match_key(
+    filter: &FilterState,
+    detail_key: Option<&str>,
+    messages_loaded: bool,
+    messages: &[crate::session_manager::SessionMessage],
+) -> Option<String> {
+    let key = detail_key?;
+    if !messages_loaded || messages.is_empty() {
+        return None;
+    }
+    let query = filter.query_lower()?;
+    messages
+        .iter()
+        .any(|message| session_message_matches_filter(message, &query))
+        .then(|| key.to_string())
+}
+
+fn session_matches_filter(session: &crate::session_manager::SessionMeta, query: &str) -> bool {
+    filter_text_matches(&session.provider_id, query)
+        || filter_text_matches(&session.session_id, query)
+        || filter_option_text_matches(session.title.as_deref(), query)
+        || filter_option_text_matches(session.summary.as_deref(), query)
+        || filter_option_path_matches(session.project_dir.as_deref(), query)
+        || filter_option_path_matches(session.source_path.as_deref(), query)
+        || filter_option_text_matches(session.resume_command.as_deref(), query)
+        || filter_timestamp_matches(session.last_active_at.or(session.created_at), query)
+}
+
+fn session_message_matches_filter(
+    message: &crate::session_manager::SessionMessage,
+    query: &str,
+) -> bool {
+    filter_text_matches(&message.role, query)
+        || filter_text_matches(
+            &crate::cli::i18n::texts::tui_sessions_role_label(&message.role),
+            query,
+        )
+        || filter_text_matches(&message.content, query)
+        || filter_timestamp_matches(message.ts, query)
+}
+
+fn session_message_matches_message_filter(
+    message: &crate::session_manager::SessionMessage,
+    query: &str,
+) -> bool {
+    if let Some(role) = session_message_role_query(query) {
+        return message.role.eq_ignore_ascii_case(role);
+    }
+
+    session_message_matches_filter(message, query)
+}
+
+fn session_message_role_query(query: &str) -> Option<&'static str> {
+    match query.trim() {
+        "user" | "用户" => Some("user"),
+        "assistant" | "ai" | "助手" => Some("assistant"),
+        "system" | "系统" => Some("system"),
+        "tool" | "工具" => Some("tool"),
+        "developer" | "开发者" => Some("developer"),
+        _ => None,
+    }
+}
+
+fn filter_option_text_matches(value: Option<&str>, query: &str) -> bool {
+    value.is_some_and(|value| filter_text_matches(value, query))
+}
+
+fn filter_option_path_matches(value: Option<&str>, query: &str) -> bool {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return false;
+    };
+    filter_text_matches(value, query) || filter_text_matches(&path_basename(value), query)
+}
+
+fn filter_text_matches(value: &str, query: &str) -> bool {
+    value.to_lowercase().contains(query)
+}
+
+fn filter_timestamp_matches(timestamp_ms: Option<i64>, query: &str) -> bool {
+    if !query.chars().any(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    let Some(timestamp_ms) = timestamp_ms else {
+        return false;
+    };
+    let Some(datetime) = Local.timestamp_millis_opt(timestamp_ms).single() else {
+        return false;
+    };
+    let slash_date = datetime.format("%Y/%m/%d").to_string();
+    slash_date.contains(query) || datetime.format("%Y-%m-%d").to_string().contains(query)
+}
+
+fn path_basename(path: &str) -> String {
+    let trimmed = path.trim().trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    Path::new(trimmed)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 pub(crate) fn route_default_focus(route: &Route) -> Focus {
@@ -940,8 +984,55 @@ pub(crate) fn visible_providers<'a>(
         .collect()
 }
 
+pub(crate) fn failover_queue_rows(data: &UiData) -> Vec<&super::data::ProviderRow> {
+    let mut rows = data.providers.rows.iter().collect::<Vec<_>>();
+    rows.sort_by(
+        |a, b| match (a.provider.in_failover_queue, b.provider.in_failover_queue) {
+            (true, true) => match (a.provider.sort_index, b.provider.sort_index) {
+                (Some(a_idx), Some(b_idx)) => a_idx.cmp(&b_idx).then_with(|| a.id.cmp(&b.id)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.id.cmp(&b.id),
+            },
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => a.id.cmp(&b.id),
+        },
+    );
+    rows
+}
+
+pub(crate) fn failover_queue_position(data: &UiData, provider_id: &str) -> Option<usize> {
+    failover_queue_rows(data)
+        .into_iter()
+        .filter(|row| row.provider.in_failover_queue)
+        .position(|row| row.id == provider_id)
+        .map(|idx| idx + 1)
+}
+
 pub(crate) fn supports_provider_stream_check(app_type: &AppType) -> bool {
     !matches!(app_type, AppType::OpenClaw)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderTestMenuItem {
+    Speedtest,
+    StreamCheck,
+}
+
+pub(crate) fn provider_test_menu_items(app_type: &AppType) -> Vec<ProviderTestMenuItem> {
+    let mut items = vec![ProviderTestMenuItem::Speedtest];
+    if supports_provider_stream_check(app_type) {
+        items.push(ProviderTestMenuItem::StreamCheck);
+    }
+    items
+}
+
+pub(crate) fn provider_test_menu_item_label(item: ProviderTestMenuItem) -> &'static str {
+    match item {
+        ProviderTestMenuItem::Speedtest => texts::tui_key_speedtest(),
+        ProviderTestMenuItem::StreamCheck => texts::tui_key_stream_check(),
+    }
 }
 
 pub(crate) fn visible_mcp<'a>(
@@ -956,6 +1047,23 @@ pub(crate) fn visible_mcp<'a>(
             None => true,
             Some(q) => {
                 row.server.name.to_lowercase().contains(q) || row.id.to_lowercase().contains(q)
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn visible_pricing_rows<'a>(
+    filter: &FilterState,
+    data: &'a UiData,
+) -> Vec<&'a super::data::ModelPricingRow> {
+    let query = filter.query_lower();
+    data.pricing
+        .rows
+        .iter()
+        .filter(|row| match &query {
+            None => true,
+            Some(q) => {
+                filter_text_matches(&row.model_id, q) || filter_text_matches(&row.display_name, q)
             }
         })
         .collect()
@@ -1077,6 +1185,7 @@ pub(crate) fn openclaw_workspace_entry_count() -> usize {
     OpenClawWorkspaceRow::all().len()
 }
 
+#[cfg(test)]
 pub(crate) fn openclaw_workspace_rows() -> Vec<OpenClawWorkspaceRow> {
     OpenClawWorkspaceRow::all()
 }
@@ -1138,12 +1247,13 @@ pub(crate) fn app_type_picker_index(app_type: &AppType) -> usize {
         AppType::Codex => 1,
         AppType::Gemini => 2,
         AppType::OpenCode => 3,
-        AppType::OpenClaw => 4,
+        AppType::Hermes => 4,
+        AppType::OpenClaw => 5,
     }
 }
 
 pub(crate) fn four_app_picker_index(app_type: &AppType) -> usize {
-    app_type_picker_index(app_type).min(3)
+    app_type_picker_index(app_type).min(4)
 }
 
 pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
@@ -1151,11 +1261,13 @@ pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
         1 => AppType::Codex,
         2 => AppType::Gemini,
         3 => AppType::OpenCode,
-        4 => AppType::OpenClaw,
+        4 => AppType::Hermes,
+        5 => AppType::OpenClaw,
         _ => AppType::Claude,
     }
 }
 
+#[cfg(test)]
 pub(crate) fn snippet_picker_index_for_app_type(app_type: &AppType) -> usize {
     app_type_picker_index(app_type)
 }
@@ -1164,6 +1276,8 @@ pub(crate) fn snippet_picker_app_type(index: usize) -> AppType {
     app_type_for_picker_index(index)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn sync_method_picker_index(method: SyncMethod) -> usize {
     match method {
         SyncMethod::Auto => 0,

@@ -9,8 +9,6 @@ use crate::provider::{Provider, ProviderMeta};
 use super::ProviderService;
 
 const MIGRATION_MARKER: &str = "common_config_upstream_semantics_migrated_v1";
-const CODEX_RUNTIME_KEYS: &[&str] = &["projects", "trusted_workspaces"];
-const CODEX_IDENTITY_KEYS: &[&str] = &["model", "model_provider", "model_providers"];
 
 fn json_is_subset(target: &Value, source: &Value) -> bool {
     match source {
@@ -286,7 +284,7 @@ fn parse_json_object_snippet(
             format!("Gemini 通用配置片段不是有效的 JSON：{e}"),
             format!("Gemini common config snippet is not valid JSON: {e}"),
         ),
-        AppType::OpenCode | AppType::OpenClaw => AppError::localized(
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => AppError::localized(
             "common_config.opencode.invalid_json",
             format!("OpenCode 通用配置片段不是有效的 JSON：{e}"),
             format!("OpenCode common config snippet is not valid JSON: {e}"),
@@ -306,7 +304,7 @@ fn parse_json_object_snippet(
                 "Gemini 通用配置片段必须是 JSON 对象",
                 "Gemini common config snippet must be a JSON object",
             ),
-            AppType::OpenCode | AppType::OpenClaw => AppError::localized(
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => AppError::localized(
                 "common_config.opencode.not_object",
                 "OpenCode 通用配置片段必须是 JSON 对象",
                 "OpenCode common config snippet must be a JSON object",
@@ -329,43 +327,6 @@ fn parse_codex_snippet(snippet: &str) -> Result<DocumentMut, AppError> {
         .map_err(|e| AppError::Config(format!("Common config TOML parse error: {e}")))
 }
 
-fn remove_codex_keys(doc: &mut DocumentMut, keys: &[&str]) -> bool {
-    let mut removed = false;
-    for key in keys {
-        removed |= doc.as_table_mut().remove(key).is_some();
-    }
-    removed
-}
-
-fn codex_sanitized_snippet_for_operation(
-    snippet: &str,
-    remove_identity_keys: bool,
-) -> Result<Option<String>, AppError> {
-    let mut doc = parse_codex_snippet(snippet)?;
-    let removed_runtime = remove_codex_keys(&mut doc, CODEX_RUNTIME_KEYS);
-    if remove_identity_keys {
-        let _ = remove_codex_keys(&mut doc, CODEX_IDENTITY_KEYS);
-    }
-    if removed_runtime {
-        log::warn!(
-            "Ignoring Codex runtime-local keys in historical common config snippet: {}",
-            CODEX_RUNTIME_KEYS.join(", ")
-        );
-    }
-    if doc.as_table().is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(doc.to_string()))
-}
-
-fn codex_snippet_for_apply(snippet: &str) -> Result<Option<String>, AppError> {
-    codex_sanitized_snippet_for_operation(snippet, false)
-}
-
-fn codex_snippet_for_remove(snippet: &str) -> Result<Option<String>, AppError> {
-    codex_sanitized_snippet_for_operation(snippet, true)
-}
-
 pub(super) fn validate_common_config_snippet(
     app_type: &AppType,
     snippet: Option<&str>,
@@ -378,25 +339,15 @@ pub(super) fn validate_common_config_snippet(
     }
 
     match app_type {
-        AppType::Claude | AppType::Gemini | AppType::OpenCode | AppType::OpenClaw => {
+        AppType::Claude
+        | AppType::Gemini
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw => {
             parse_json_object_snippet(app_type, snippet, false)?;
         }
         AppType::Codex => {
-            let doc = parse_codex_snippet(snippet)?;
-            if let Some(key) = CODEX_RUNTIME_KEYS
-                .iter()
-                .find(|key| doc.as_table().contains_key(**key))
-            {
-                return Err(AppError::localized(
-                    "common_config.codex.runtime_key",
-                    format!(
-                        "Codex 通用配置不能包含运行时本地配置 `{key}`，请从片段中移除该表"
-                    ),
-                    format!(
-                        "Codex common config must not contain runtime-local key `{key}`; remove it from the snippet"
-                    ),
-                ));
-            }
+            parse_codex_snippet(snippet)?;
         }
     }
 
@@ -428,11 +379,7 @@ pub(super) fn settings_contain_common_config(
                 Ok(doc) => doc,
                 Err(_) => return false,
             };
-            let source_snippet = match codex_snippet_for_apply(trimmed) {
-                Ok(Some(snippet)) => snippet,
-                Ok(None) | Err(_) => return false,
-            };
-            let source_doc = match source_snippet.parse::<DocumentMut>() {
+            let source_doc = match trimmed.parse::<DocumentMut>() {
                 Ok(doc) => doc,
                 Err(_) => return false,
             };
@@ -452,7 +399,7 @@ pub(super) fn settings_contain_common_config(
             }
             _ => false,
         },
-        AppType::OpenCode | AppType::OpenClaw => false,
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
     }
 }
 
@@ -461,16 +408,13 @@ pub(super) fn provider_uses_common_config(
     provider: &Provider,
     snippet: Option<&str>,
 ) -> bool {
-    match provider
+    let _ = app_type;
+    provider
         .meta
         .as_ref()
         .and_then(|meta| meta.apply_common_config)
-    {
-        Some(explicit) => explicit && snippet.is_some_and(|value| !value.trim().is_empty()),
-        None => snippet.is_some_and(|value| {
-            settings_contain_common_config(app_type, &provider.settings_config, value)
-        }),
-    }
+        == Some(true)
+        && snippet.is_some_and(|value| !value.trim().is_empty())
 }
 
 pub(super) fn apply_common_config_to_settings(
@@ -491,10 +435,6 @@ pub(super) fn apply_common_config_to_settings(
             Ok(result)
         }
         AppType::Codex => {
-            let Some(snippet) = codex_snippet_for_apply(trimmed)? else {
-                return Ok(settings.clone());
-            };
-
             let mut result = settings.clone();
             let config_toml = settings.get("config").and_then(Value::as_str).unwrap_or("");
             let mut target_doc = if config_toml.trim().is_empty() {
@@ -506,7 +446,7 @@ pub(super) fn apply_common_config_to_settings(
                     ))
                 })?
             };
-            let source_doc = parse_codex_snippet(&snippet)?;
+            let source_doc = parse_codex_snippet(trimmed)?;
 
             merge_toml_table_like(target_doc.as_table_mut(), source_doc.as_table());
             if let Some(obj) = result.as_object_mut() {
@@ -524,7 +464,7 @@ pub(super) fn apply_common_config_to_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode | AppType::OpenClaw => Ok(settings.clone()),
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(settings.clone()),
     }
 }
 
@@ -546,10 +486,6 @@ pub(super) fn remove_common_config_from_settings(
             Ok(result)
         }
         AppType::Codex => {
-            let Some(snippet) = codex_snippet_for_remove(trimmed)? else {
-                return Ok(settings.clone());
-            };
-
             let mut result = settings.clone();
             let config_toml = settings.get("config").and_then(Value::as_str).unwrap_or("");
             let mut target_doc = if config_toml.trim().is_empty() {
@@ -561,7 +497,7 @@ pub(super) fn remove_common_config_from_settings(
                     ))
                 })?
             };
-            let source_doc = parse_codex_snippet(&snippet)?;
+            let source_doc = parse_codex_snippet(trimmed)?;
 
             remove_toml_table_like(target_doc.as_table_mut(), source_doc.as_table());
             if let Some(obj) = result.as_object_mut() {
@@ -577,7 +513,7 @@ pub(super) fn remove_common_config_from_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode | AppType::OpenClaw => Ok(settings.clone()),
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(settings.clone()),
     }
 }
 
@@ -589,7 +525,7 @@ pub(super) fn build_effective_settings_with_common_config(
 ) -> Result<Value, AppError> {
     let mut effective_settings = provider.settings_config.clone();
 
-    if requested_apply_common_config && provider_uses_common_config(app_type, provider, snippet) {
+    if requested_apply_common_config {
         if let Some(snippet_text) = snippet {
             match apply_common_config_to_settings(app_type, &effective_settings, snippet_text) {
                 Ok(settings) => effective_settings = settings,
@@ -613,13 +549,48 @@ pub(super) fn strip_common_config_from_live_settings(
     live_settings: Value,
     snippet: Option<&str>,
 ) -> Value {
-    if !provider_uses_common_config(app_type, provider, snippet) {
-        return live_settings;
-    }
+    strip_common_config_from_live_settings_with_fallback(
+        app_type,
+        provider,
+        live_settings,
+        snippet,
+        None,
+    )
+}
 
+#[expect(
+    dead_code,
+    reason = "kept for live-setting fallback stripping when provider snapshots are needed"
+)]
+pub(super) fn strip_common_config_from_live_settings_or_provider_snapshot(
+    app_type: &AppType,
+    provider: &Provider,
+    live_settings: Value,
+    snippet: Option<&str>,
+) -> Value {
+    strip_common_config_from_live_settings_with_fallback(
+        app_type,
+        provider,
+        live_settings,
+        snippet,
+        Some(&provider.settings_config),
+    )
+}
+
+fn strip_common_config_snippet_from_live_settings_with_fallback(
+    app_type: &AppType,
+    provider: &Provider,
+    live_settings: Value,
+    snippet: Option<&str>,
+    fallback_settings: Option<&Value>,
+) -> Value {
     let Some(snippet_text) = snippet else {
         return live_settings;
     };
+
+    if snippet_text.trim().is_empty() {
+        return live_settings;
+    }
 
     match remove_common_config_from_settings(app_type, &live_settings, snippet_text) {
         Ok(settings) => settings,
@@ -629,9 +600,29 @@ pub(super) fn strip_common_config_from_live_settings(
                 app_type.as_str(),
                 provider.id
             );
-            live_settings
+            fallback_settings.cloned().unwrap_or(live_settings)
         }
     }
+}
+
+fn strip_common_config_from_live_settings_with_fallback(
+    app_type: &AppType,
+    provider: &Provider,
+    live_settings: Value,
+    snippet: Option<&str>,
+    fallback_settings: Option<&Value>,
+) -> Value {
+    if !provider_uses_common_config(app_type, provider, snippet) {
+        return live_settings;
+    }
+
+    strip_common_config_snippet_from_live_settings_with_fallback(
+        app_type,
+        provider,
+        live_settings,
+        snippet,
+        fallback_settings,
+    )
 }
 
 pub(super) fn normalize_provider_common_config_for_storage(
@@ -639,13 +630,12 @@ pub(super) fn normalize_provider_common_config_for_storage(
     provider: &mut Provider,
     snippet: Option<&str>,
 ) -> Result<(), AppError> {
-    let uses_common_config = provider
+    if provider
         .meta
         .as_ref()
         .and_then(|meta| meta.apply_common_config)
-        .unwrap_or(false);
-
-    if !uses_common_config {
+        != Some(true)
+    {
         return Ok(());
     }
 
@@ -725,6 +715,7 @@ pub(crate) fn migrate_common_config_upstream_semantics_if_needed(
                 .as_ref()
                 .and_then(|meta| meta.apply_common_config)
                 .is_none()
+                && settings_contain_common_config(&app_type, &provider.settings_config, &snippet)
             {
                 provider
                     .meta

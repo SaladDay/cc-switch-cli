@@ -2,15 +2,17 @@
 //!
 //! 提供 SQL 导出/导入和二进制快照备份功能。
 
-use super::{lock_conn, Database, DB_BACKUP_RETAIN};
-use crate::config::get_app_config_dir;
+use super::{create_secure_dir_all, lock_conn, Database, DB_BACKUP_RETAIN};
 use crate::error::AppError;
 use chrono::Utc;
 use rusqlite::backup::Backup;
 use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tempfile::NamedTempFile;
 
 const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- CC Switch SQLite 导出";
@@ -19,6 +21,7 @@ const SYNC_IMPORT_RESTORE_TABLES: &[&str] = &[
     "proxy_request_logs",
     "stream_check_logs",
     "proxy_live_backup",
+    "proxy_failover_live_snapshots",
     "usage_daily_rollups",
 ];
 
@@ -83,6 +86,10 @@ const PROXY_CONFIG_EXPORT_DEFAULTS: &[SyncNeutralizedColumn] = &[
         value: SyncNeutralValue::Integer(0),
     },
     SyncNeutralizedColumn {
+        column: "auto_failover_enabled",
+        value: SyncNeutralValue::Integer(0),
+    },
+    SyncNeutralizedColumn {
         column: "live_takeover_active",
         value: SyncNeutralValue::Integer(0),
     },
@@ -119,7 +126,7 @@ impl Database {
         let dump = self.export_sql_string()?;
 
         if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+            create_secure_dir_all(parent)?;
         }
 
         crate::config::atomic_write(target_path, dump.as_bytes())
@@ -167,6 +174,7 @@ impl Database {
         if let (Some(local_snapshot), Some(policy)) = (local_snapshot.as_ref(), policy) {
             Self::restore_sync_local_overlay(local_snapshot, &temp_conn, policy)?;
         }
+        Self::clear_imported_auto_failover_flags(&temp_conn)?;
 
         // 使用 Backup 将临时库原子写回主库
         {
@@ -174,7 +182,7 @@ impl Database {
             let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             backup
-                .step(-1)
+                .run_to_completion(5, Duration::from_millis(25), None)
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
 
@@ -208,7 +216,7 @@ impl Database {
             let backup =
                 Backup::new(&conn, &mut snapshot).map_err(|e| AppError::Database(e.to_string()))?;
             backup
-                .step(-1)
+                .run_to_completion(5, Duration::from_millis(25), None)
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
 
@@ -295,6 +303,30 @@ impl Database {
         for group in policy.row_keyed_column_groups {
             Self::restore_row_keyed_column_group(source_conn, target_conn, group)?;
         }
+        Ok(())
+    }
+
+    fn clear_imported_auto_failover_flags(target_conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(target_conn, "proxy_config")? {
+            return Ok(());
+        }
+        let columns = Self::get_table_columns(target_conn, "proxy_config")?;
+        if !columns
+            .iter()
+            .any(|column| column == "auto_failover_enabled")
+        {
+            return Ok(());
+        }
+
+        target_conn
+            .execute(
+                "UPDATE proxy_config
+                 SET auto_failover_enabled = 0
+                 WHERE auto_failover_enabled != 0",
+                [],
+            )
+            .map_err(|e| AppError::Database(format!("清理导入的自动故障转移状态失败: {e}")))?;
+
         Ok(())
     }
 
@@ -441,7 +473,9 @@ impl Database {
 
     /// 生成一致性快照备份，返回备份文件路径（不存在主库时返回 None）
     pub(crate) fn backup_database_file(&self) -> Result<Option<PathBuf>, AppError> {
-        let db_path = get_app_config_dir().join("cc-switch.db");
+        let Some(db_path) = self.db_path.as_deref() else {
+            return Ok(None);
+        };
         if !db_path.exists() {
             return Ok(None);
         }
@@ -451,31 +485,140 @@ impl Database {
             .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
             .join("backups");
 
-        fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+        create_secure_dir_all(&backup_dir)?;
 
-        let base_id = format!("db_backup_{}", Utc::now().format("%Y%m%d_%H%M%S"));
-        let mut backup_id = base_id.clone();
-        let mut backup_path = backup_dir.join(format!("{backup_id}.db"));
-        let mut counter = 1;
-        while backup_path.exists() {
-            backup_id = format!("{base_id}_{counter}");
-            backup_path = backup_dir.join(format!("{backup_id}.db"));
-            counter += 1;
-        }
-
-        {
+        let backup_path = {
             let conn = lock_conn!(self.conn);
-            let mut dest_conn =
-                Connection::open(&backup_path).map_err(|e| AppError::Database(e.to_string()))?;
-            let backup = Backup::new(&conn, &mut dest_conn)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            backup
-                .step(-1)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-        }
+            let (backup_path, mut dest_conn) =
+                Self::create_unique_backup_db_connection(&backup_dir)?;
+            {
+                let backup = Backup::new(&conn, &mut dest_conn)
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                backup
+                    .run_to_completion(5, Duration::from_millis(25), None)
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+            }
+            backup_path
+        };
 
         Self::cleanup_db_backups(&backup_dir)?;
         Ok(Some(backup_path))
+    }
+
+    fn create_unique_backup_db_connection(
+        backup_dir: &Path,
+    ) -> Result<(PathBuf, Connection), AppError> {
+        for _ in 0..100 {
+            let backup_path = backup_dir.join(format!("{}.db", Self::new_db_backup_id()));
+            match Self::try_create_backup_db_connection(&backup_path)? {
+                Some(conn) => return Ok((backup_path, conn)),
+                None => continue,
+            }
+        }
+
+        Err(AppError::Io {
+            path: backup_dir.display().to_string(),
+            source: std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "failed to allocate a unique database backup path",
+            ),
+        })
+    }
+
+    fn new_db_backup_id() -> String {
+        static NEXT_BACKUP_ID: AtomicU64 = AtomicU64::new(0);
+
+        format!(
+            "db_backup_{}_{}_{}",
+            Utc::now().format("%Y%m%d_%H%M%S_%f"),
+            std::process::id(),
+            NEXT_BACKUP_ID.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_backup_db_connection(backup_path: &Path) -> Result<Connection, AppError> {
+        Self::try_create_backup_db_connection(backup_path)?.ok_or_else(|| AppError::Io {
+            path: backup_path.display().to_string(),
+            source: std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "database backup path already exists",
+            ),
+        })
+    }
+
+    fn try_create_backup_db_connection(backup_path: &Path) -> Result<Option<Connection>, AppError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            match std::fs::symlink_metadata(backup_path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(AppError::InvalidInput(format!(
+                        "数据库备份文件不能是符号链接: {}",
+                        backup_path.display()
+                    )));
+                }
+                Ok(meta) if meta.is_file() => return Ok(None),
+                Ok(_) => {
+                    return Err(AppError::InvalidInput(format!(
+                        "数据库备份路径不是普通文件: {}",
+                        backup_path.display()
+                    )));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    match std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(backup_path)
+                    {
+                        Ok(_) => {}
+                        Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(None),
+                        Err(err) => return Err(AppError::io(backup_path, err)),
+                    }
+                }
+                Err(err) => return Err(AppError::io(backup_path, err)),
+            }
+
+            let open_path = Self::canonicalize_existing_parent(backup_path)?;
+            let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+            Connection::open_with_flags(&open_path, flags)
+                .map(Some)
+                .map_err(|e| AppError::Database(e.to_string()))
+        }
+
+        #[cfg(not(unix))]
+        {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(backup_path)
+            {
+                Ok(_) => {}
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(None),
+                Err(err) => return Err(AppError::io(backup_path, err)),
+            }
+            Connection::open(backup_path)
+                .map(Some)
+                .map_err(|e| AppError::Database(e.to_string()))
+        }
+    }
+
+    fn canonicalize_existing_parent(path: &Path) -> Result<PathBuf, AppError> {
+        let Some(file_name) = path.file_name() else {
+            return Err(AppError::InvalidInput(format!(
+                "数据库备份路径缺少文件名: {}",
+                path.display()
+            )));
+        };
+        let parent = path
+            .parent()
+            .ok_or_else(|| AppError::InvalidInput(format!("无效路径: {}", path.display())))?;
+        let parent = parent.canonicalize().map_err(|e| AppError::io(parent, e))?;
+        Ok(parent.join(file_name))
     }
 
     /// 清理旧的数据库备份，保留最新的 N 个
@@ -691,10 +834,7 @@ impl Database {
             return Ok(true);
         };
 
-        Ok(!policy
-            .local_settings_keys
-            .iter()
-            .any(|local_key| *local_key == key))
+        Ok(!policy.local_settings_keys.contains(&key))
     }
 
     fn neutralize_export_row(
@@ -890,6 +1030,60 @@ mod tests {
     }
 
     #[test]
+    fn memory_import_does_not_create_global_database_backup() -> Result<(), AppError> {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+
+        let global_db = Database::init()?;
+        {
+            let conn = crate::database::lock_conn!(global_db.conn);
+            seed_provider(&conn, "global-provider")?;
+        }
+
+        let remote_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            seed_provider(&conn, "remote-provider")?;
+        }
+        let remote_sql = remote_db.export_sql_string_for_sync()?;
+
+        let local_db = Database::memory()?;
+        local_db.import_sql_string_for_sync(&remote_sql)?;
+
+        assert!(
+            !temp.path().join(".cc-switch").join("backups").exists(),
+            "importing into an in-memory database must not back up the process-global database"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn file_database_backups_use_unique_paths() -> Result<(), AppError> {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+
+        let db = Database::init()?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            seed_provider(&conn, "local-provider")?;
+        }
+
+        let first = db
+            .backup_database_file()?
+            .expect("first backup should be created");
+        let second = db
+            .backup_database_file()?
+            .expect("second backup should be created");
+
+        assert_ne!(first, second, "backup paths should not collide");
+        assert!(first.exists(), "first backup should exist");
+        assert!(second.exists(), "second backup should exist");
+
+        Ok(())
+    }
+
+    #[test]
     fn sync_import_preserves_local_settings_keys() -> Result<(), AppError> {
         let remote_db = Database::memory()?;
         {
@@ -926,7 +1120,8 @@ mod tests {
     }
 
     #[test]
-    fn sync_import_preserves_local_proxy_state_and_keeps_remote_strategy() -> Result<(), AppError> {
+    fn sync_import_preserves_local_proxy_state_and_clears_runtime_failover() -> Result<(), AppError>
+    {
         let remote_db = Database::memory()?;
         {
             let conn = crate::database::lock_conn!(remote_db.conn);
@@ -977,7 +1172,7 @@ mod tests {
         let conn = crate::database::lock_conn!(local_db.conn);
         assert_eq!(
             read_proxy_row(&conn, "claude")?,
-            (true, "10.0.0.1".to_string(), 21001, true, true, 9)
+            (true, "10.0.0.1".to_string(), 21001, true, false, 9)
         );
         assert_eq!(
             read_proxy_row(&conn, "codex")?,
@@ -985,7 +1180,7 @@ mod tests {
         );
         assert_eq!(
             read_proxy_row(&conn, "gemini")?,
-            (true, "10.0.0.3".to_string(), 21003, false, true, 7)
+            (true, "10.0.0.3".to_string(), 21003, false, false, 7)
         );
 
         drop(conn);
@@ -995,6 +1190,28 @@ mod tests {
                 .expect("read local runtime session after overlay")
                 .as_deref(),
             Some("{\"pid\":123}")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn plain_sql_import_clears_runtime_failover_state() -> Result<(), AppError> {
+        let remote_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            seed_provider(&conn, "remote-provider")?;
+            set_proxy_row(&conn, "claude", true, "127.0.0.1", 15721, true, true, 9)?;
+        }
+        let remote_sql = remote_db.export_sql_string()?;
+
+        let local_db = Database::memory()?;
+        local_db.import_sql_string(&remote_sql)?;
+
+        let conn = crate::database::lock_conn!(local_db.conn);
+        assert_eq!(
+            read_proxy_row(&conn, "claude")?,
+            (true, "127.0.0.1".to_string(), 15721, true, false, 9)
         );
 
         Ok(())
@@ -1025,7 +1242,7 @@ mod tests {
         let conn = crate::database::lock_conn!(old_client_db.conn);
         assert_eq!(
             read_proxy_row(&conn, "claude")?,
-            (false, "127.0.0.1".to_string(), 15721, false, true, 6)
+            (false, "127.0.0.1".to_string(), 15721, false, false, 6)
         );
         assert_eq!(
             read_proxy_row(&conn, "codex")?,
@@ -1033,7 +1250,7 @@ mod tests {
         );
         assert_eq!(
             read_proxy_row(&conn, "gemini")?,
-            (false, "127.0.0.1".to_string(), 15721, false, true, 4)
+            (false, "127.0.0.1".to_string(), 15721, false, false, 4)
         );
         drop(conn);
         assert!(

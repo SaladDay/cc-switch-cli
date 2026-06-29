@@ -174,9 +174,12 @@ impl Database {
         )", []).map_err(|e| AppError::Database(e.to_string()))?;
 
         // 10. Proxy Request Logs 表
+        // pricing_model = 写入时实际用于计价的模型名；NULL 表示 v11 之前的历史行，
+        // '' 表示未计价的错误行。
         conn.execute("CREATE TABLE IF NOT EXISTS proxy_request_logs (
             request_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, app_type TEXT NOT NULL, model TEXT NOT NULL,
             request_model TEXT,
+            pricing_model TEXT,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
             input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
@@ -188,25 +191,7 @@ impl Database {
             data_source TEXT NOT NULL DEFAULT 'proxy'
         )", []).map_err(|e| AppError::Database(e.to_string()))?;
 
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_provider ON proxy_request_logs(provider_id, app_type)", [])
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON proxy_request_logs(created_at)", [])
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_request_logs_model ON proxy_request_logs(model)",
-            [],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_request_logs_session ON proxy_request_logs(session_id)",
-            [],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_request_logs_status ON proxy_request_logs(status_code)",
-            [],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
+        Self::create_request_logs_indexes_if_supported(conn)?;
 
         // 11. Model Pricing 表
         conn.execute(
@@ -246,12 +231,28 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 17. Proxy Failover Live Snapshots 表 (按供应商生成的故障转移 Live 配置)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS proxy_failover_live_snapshots (
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            PRIMARY KEY (app_type, provider_id),
+            FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+        )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS usage_daily_rollups (
                 date TEXT NOT NULL,
                 app_type TEXT NOT NULL,
                 provider_id TEXT NOT NULL,
                 model TEXT NOT NULL,
+                request_model TEXT NOT NULL DEFAULT '',
+                pricing_model TEXT NOT NULL DEFAULT '',
                 request_count INTEGER NOT NULL DEFAULT 0,
                 success_count INTEGER NOT NULL DEFAULT 0,
                 input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -260,7 +261,7 @@ impl Database {
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
                 total_cost_usd TEXT NOT NULL DEFAULT '0',
                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (date, app_type, provider_id, model)
+                PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
             )",
             [],
         )
@@ -361,9 +362,7 @@ impl Database {
         if version > SCHEMA_VERSION {
             conn.execute("ROLLBACK TO schema_migration;", []).ok();
             conn.execute("RELEASE schema_migration;", []).ok();
-            return Err(AppError::Database(format!(
-                "数据库版本过新（{version}），当前应用仅支持 {SCHEMA_VERSION}，请升级应用后再尝试。"
-            )));
+            return Err(Self::future_schema_error(version));
         }
 
         let result = (|| {
@@ -421,6 +420,13 @@ impl Database {
                         Self::migrate_v9_to_v10(conn)?;
                         Self::set_user_version(conn, 10)?;
                     }
+                    10 => {
+                        log::info!(
+                            "迁移数据库从 v10 到 v11（usage_daily_rollups 保留请求/计价模型维度 + 故障转移 Live 配置快照）"
+                        );
+                        Self::migrate_v10_to_v11(conn)?;
+                        Self::set_user_version(conn, 11)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -429,6 +435,9 @@ impl Database {
                 }
                 version = Self::get_user_version(conn)?;
             }
+            Self::repair_proxy_request_logs_columns(conn)?;
+            Self::create_request_logs_indexes_if_supported(conn)?;
+            Self::normalize_auto_failover_requires_takeover(conn)?;
             Ok(())
         })();
 
@@ -591,6 +600,7 @@ impl Database {
         conn.execute("CREATE TABLE IF NOT EXISTS proxy_request_logs (
             request_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, app_type TEXT NOT NULL, model TEXT NOT NULL,
             request_model TEXT,
+            pricing_model TEXT,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
             input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
@@ -761,7 +771,8 @@ impl Database {
                  circuit_error_rate_threshold, circuit_min_requests)
                  VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params![app, old_config.0, old_config.1, old_config.3,
-                    if takeover { 1 } else { 0 }, if failover { 1 } else { 0 },
+                    if takeover { 1 } else { 0 },
+                    if takeover && failover && Self::has_failover_queue(conn, app)? { 1 } else { 0 },
                     retries, fb, idle, old_config.6, cb_f, cb_s, cb_t, cb_r, cb_m]
             ).map_err(|e| AppError::Database(format!("插入 {app} 配置失败: {e}")))?;
         }
@@ -777,6 +788,106 @@ impl Database {
         )?;
 
         log::info!("proxy_config 已迁移为三行结构");
+        Ok(())
+    }
+
+    fn has_failover_queue(conn: &Connection, app_type: &str) -> Result<bool, AppError> {
+        if !Self::table_exists(conn, "providers")?
+            || !Self::has_column(conn, "providers", "app_type")?
+            || !Self::has_column(conn, "providers", "in_failover_queue")?
+        {
+            return Ok(false);
+        }
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM providers
+                 WHERE app_type = ?1 AND in_failover_queue = 1",
+                [app_type],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(format!("读取故障转移队列失败: {e}")))?;
+
+        Ok(count > 0)
+    }
+
+    fn normalize_auto_failover_requires_takeover(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "proxy_config")?
+            || !Self::has_column(conn, "proxy_config", "app_type")?
+            || !Self::has_column(conn, "proxy_config", "enabled")?
+            || !Self::has_column(conn, "proxy_config", "auto_failover_enabled")?
+        {
+            return Ok(());
+        }
+
+        let stale_without_takeover: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM proxy_config
+                 WHERE enabled = 0 AND auto_failover_enabled != 0",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(format!("检查无代理接管的故障转移状态失败: {e}")))?;
+
+        if stale_without_takeover > 0 {
+            let changed = conn
+                .execute(
+                    "UPDATE proxy_config
+                     SET auto_failover_enabled = 0
+                     WHERE enabled = 0 AND auto_failover_enabled != 0",
+                    [],
+                )
+                .map_err(|e| {
+                    AppError::Database(format!("清理无代理接管的故障转移状态失败: {e}"))
+                })?;
+
+            if changed > 0 {
+                log::warn!("已清理 {changed} 个未启用代理接管的故障转移状态");
+            }
+        }
+
+        if Self::table_exists(conn, "providers")?
+            && Self::has_column(conn, "providers", "app_type")?
+            && Self::has_column(conn, "providers", "in_failover_queue")?
+        {
+            let stale_empty_queue: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*)
+                     FROM proxy_config
+                     WHERE auto_failover_enabled != 0
+                       AND NOT EXISTS (
+                           SELECT 1 FROM providers
+                           WHERE providers.app_type = proxy_config.app_type
+                             AND providers.in_failover_queue = 1
+                       )",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| AppError::Database(format!("检查空队列故障转移状态失败: {e}")))?;
+
+            if stale_empty_queue > 0 {
+                let changed = conn
+                    .execute(
+                        "UPDATE proxy_config
+                         SET auto_failover_enabled = 0
+                         WHERE auto_failover_enabled != 0
+                           AND NOT EXISTS (
+                               SELECT 1 FROM providers
+                               WHERE providers.app_type = proxy_config.app_type
+                                 AND providers.in_failover_queue = 1
+                           )",
+                        [],
+                    )
+                    .map_err(|e| AppError::Database(format!("清理空队列故障转移状态失败: {e}")))?;
+
+                if changed > 0 {
+                    log::warn!("已清理 {changed} 个空故障转移队列的自动故障转移状态");
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -982,6 +1093,8 @@ impl Database {
                 app_type TEXT NOT NULL,
                 provider_id TEXT NOT NULL,
                 model TEXT NOT NULL,
+                request_model TEXT NOT NULL DEFAULT '',
+                pricing_model TEXT NOT NULL DEFAULT '',
                 request_count INTEGER NOT NULL DEFAULT 0,
                 success_count INTEGER NOT NULL DEFAULT 0,
                 input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -990,7 +1103,7 @@ impl Database {
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
                 total_cost_usd TEXT NOT NULL DEFAULT '0',
                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (date, app_type, provider_id, model)
+                PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
             )",
             [],
         )
@@ -1159,11 +1272,95 @@ impl Database {
         Ok(())
     }
 
+    /// v10 -> v11 迁移：保留请求/计价模型维度并添加故障转移 Live 配置快照。
+    ///
+    /// WebDAV 同步会在不同分支之间交换 SQLite 快照；上游 v11 已经把
+    /// `usage_daily_rollups` 的主键扩展为 `(model, request_model, pricing_model)`。
+    /// 本迁移让当前分支可以接收并继续维护这些快照，而不是把上游 v11 误判为
+    /// future schema。
+    fn migrate_v10_to_v11(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_request_logs")? {
+            Self::add_column_if_missing(conn, "proxy_request_logs", "pricing_model", "TEXT")?;
+        }
+
+        if Self::table_exists(conn, "usage_daily_rollups")? {
+            if Self::has_column(conn, "usage_daily_rollups", "request_model")?
+                && Self::has_column(conn, "usage_daily_rollups", "pricing_model")?
+            {
+                log::info!("v10 -> v11：usage_daily_rollups 已包含 v11 维度，跳过重建");
+            } else {
+                conn.execute_batch(
+                    "ALTER TABLE usage_daily_rollups RENAME TO usage_daily_rollups_v10;
+                     CREATE TABLE usage_daily_rollups (
+                         date TEXT NOT NULL,
+                         app_type TEXT NOT NULL,
+                         provider_id TEXT NOT NULL,
+                         model TEXT NOT NULL,
+                         request_model TEXT NOT NULL DEFAULT '',
+                         pricing_model TEXT NOT NULL DEFAULT '',
+                         request_count INTEGER NOT NULL DEFAULT 0,
+                         success_count INTEGER NOT NULL DEFAULT 0,
+                         input_tokens INTEGER NOT NULL DEFAULT 0,
+                         output_tokens INTEGER NOT NULL DEFAULT 0,
+                         cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                         cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                         total_cost_usd TEXT NOT NULL DEFAULT '0',
+                         avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+                         PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
+                     );
+                     INSERT INTO usage_daily_rollups
+                         (date, app_type, provider_id, model, request_model, pricing_model,
+                          request_count, success_count, input_tokens, output_tokens,
+                          cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms)
+                     SELECT date, app_type, provider_id, model, '', '',
+                          request_count, success_count, input_tokens, output_tokens,
+                          cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms
+                     FROM usage_daily_rollups_v10;
+                     DROP TABLE usage_daily_rollups_v10;",
+                )
+                .map_err(|e| {
+                    AppError::Database(format!("v10 -> v11 重建 usage_daily_rollups 失败: {e}"))
+                })?;
+
+                log::info!(
+                    "v10 -> v11 迁移完成：usage_daily_rollups 已保留 request_model/pricing_model 维度"
+                );
+            }
+        } else {
+            log::info!("v10 -> v11：usage_daily_rollups 不存在，跳过重建");
+        }
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS proxy_failover_live_snapshots (
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            PRIMARY KEY (app_type, provider_id),
+            FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+        )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建故障转移 Live 配置快照表失败: {e}")))?;
+
+        log::info!("v10 -> v11 迁移完成：已添加故障转移 Live 配置快照表");
+        Ok(())
+    }
+
     /// 插入默认模型定价数据
     /// 格式: (model_id, display_name, input, output, cache_read, cache_creation)
     /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
     fn seed_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_data = [
+            // Claude 4.8 系列
+            (
+                "claude-opus-4-8",
+                "Claude Opus 4.8",
+                "5",
+                "25",
+                "0.50",
+                "6.25",
+            ),
             // Claude 4.7 系列
             (
                 "claude-opus-4-7",
@@ -1257,6 +1454,13 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
+            // GPT-5.5 系列
+            ("gpt-5.5", "GPT-5.5", "5", "30", "0.50", "0"),
+            ("gpt-5.5-low", "GPT-5.5", "5", "30", "0.50", "0"),
+            ("gpt-5.5-medium", "GPT-5.5", "5", "30", "0.50", "0"),
+            ("gpt-5.5-high", "GPT-5.5", "5", "30", "0.50", "0"),
+            ("gpt-5.5-xhigh", "GPT-5.5", "5", "30", "0.50", "0"),
+            ("gpt-5.5-minimal", "GPT-5.5", "5", "30", "0.50", "0"),
             // GPT-5.4 系列
             ("gpt-5.4", "GPT-5.4", "2.50", "15", "0.25", "0"),
             ("gpt-5.4-mini", "GPT-5.4 Mini", "0.75", "4.50", "0.075", "0"),
@@ -1824,6 +2028,96 @@ impl Database {
         Ok(())
     }
 
+    fn repair_current_model_pricing(conn: &Connection) -> Result<(), AppError> {
+        let pricing_fixes = [
+            (
+                "deepseek-v4-flash",
+                "DeepSeek V4 Flash",
+                "0.14",
+                "0.28",
+                "0.0028",
+                "0",
+                "0.14",
+                "0.28",
+                "0.028",
+                "0",
+            ),
+            (
+                "deepseek-v4-pro",
+                "DeepSeek V4 Pro",
+                "0.435",
+                "0.87",
+                "0.003625",
+                "0",
+                "1.68",
+                "3.36",
+                "0.14",
+                "0",
+            ),
+            (
+                "glm-5", "GLM-5", "1", "3.2", "0.2", "0", "0.72", "2.30", "0", "0",
+            ),
+            (
+                "glm-5.1", "GLM-5.1", "1.4", "4.4", "0.26", "0", "0.95", "3.15", "0", "0",
+            ),
+            (
+                "grok-code-fast-1",
+                "Grok Build 0.1 (Code Fast Alias)",
+                "1",
+                "2",
+                "0.20",
+                "0",
+                "0.20",
+                "1.50",
+                "0.02",
+                "0",
+            ),
+        ];
+
+        for (
+            model_id,
+            display_name,
+            input,
+            output,
+            cache_read,
+            cache_creation,
+            old_input,
+            old_output,
+            old_cache_read,
+            old_cache_creation,
+        ) in pricing_fixes
+        {
+            conn.execute(
+                "UPDATE model_pricing SET
+                    display_name = ?2,
+                    input_cost_per_million = ?3,
+                    output_cost_per_million = ?4,
+                    cache_read_cost_per_million = ?5,
+                    cache_creation_cost_per_million = ?6
+                 WHERE model_id = ?1
+                   AND input_cost_per_million = ?7
+                   AND output_cost_per_million = ?8
+                   AND cache_read_cost_per_million = ?9
+                   AND cache_creation_cost_per_million = ?10",
+                rusqlite::params![
+                    model_id,
+                    display_name,
+                    input,
+                    output,
+                    cache_read,
+                    cache_creation,
+                    old_input,
+                    old_output,
+                    old_cache_read,
+                    old_cache_creation
+                ],
+            )
+            .map_err(|e| AppError::Database(format!("修复模型 {model_id} 定价失败: {e}")))?;
+        }
+
+        Ok(())
+    }
+
     /// 确保模型定价表具备默认数据
     pub fn ensure_model_pricing_seeded(&self) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
@@ -1831,12 +2125,23 @@ impl Database {
     }
 
     fn ensure_model_pricing_seeded_on_conn(conn: &Connection) -> Result<(), AppError> {
-        // 每次启动都增量补种新模型，已有记录保持不变；
-        // 强制纠正历史价格则交给版本化迁移负责。
-        Self::seed_model_pricing(conn)
+        // 每次启动都执行 INSERT OR IGNORE，增量追加新模型；仅修复仍等于旧内置值的定价。
+        Self::seed_model_pricing(conn)?;
+        Self::repair_current_model_pricing(conn)?;
+        Self::prune_deleted_model_pricing_on_conn(conn)
     }
 
     // --- 辅助方法 ---
+
+    pub(crate) fn future_schema_error(version: i32) -> AppError {
+        AppError::Database(format!(
+            "当前数据库由较新版本的 CC Switch 创建，旧版本无法打开。\n\
+             数据库版本: {version}\n\
+             当前应用: v{}，最高支持数据库版本: {SCHEMA_VERSION}\n\
+             请运行 `cc-switch update` 升级到最新版；如果仍然失败，请从 GitHub Releases 安装最新版本。",
+            env!("CARGO_PKG_VERSION")
+        ))
+    }
 
     pub(crate) fn get_user_version(conn: &Connection) -> Result<i32, AppError> {
         conn.query_row("PRAGMA user_version;", [], |row| row.get(0))
@@ -1933,6 +2238,128 @@ impl Database {
         conn.execute(&sql, [])
             .map_err(|e| AppError::Database(format!("为表 {table} 添加列 {column} 失败: {e}")))?;
         log::info!("已为表 {table} 添加缺失列 {column}");
+        Ok(true)
+    }
+
+    fn repair_proxy_request_logs_columns(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "proxy_request_logs")? {
+            return Ok(());
+        }
+
+        for (column, definition) in [
+            ("provider_id", "TEXT NOT NULL DEFAULT ''"),
+            ("app_type", "TEXT NOT NULL DEFAULT 'claude'"),
+            ("model", "TEXT NOT NULL DEFAULT ''"),
+            ("request_model", "TEXT"),
+            ("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("cache_read_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("cache_creation_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("input_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
+            ("output_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
+            ("cache_read_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
+            ("cache_creation_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
+            ("total_cost_usd", "TEXT NOT NULL DEFAULT '0'"),
+            ("latency_ms", "INTEGER NOT NULL DEFAULT 0"),
+            ("first_token_ms", "INTEGER"),
+            ("duration_ms", "INTEGER"),
+            ("status_code", "INTEGER NOT NULL DEFAULT 0"),
+            ("error_message", "TEXT"),
+            ("session_id", "TEXT"),
+            ("provider_type", "TEXT"),
+            ("is_streaming", "INTEGER NOT NULL DEFAULT 0"),
+            ("cost_multiplier", "TEXT NOT NULL DEFAULT '1.0'"),
+            ("created_at", "INTEGER NOT NULL DEFAULT 0"),
+            ("data_source", "TEXT NOT NULL DEFAULT 'proxy'"),
+        ] {
+            Self::add_column_if_missing(conn, "proxy_request_logs", column, definition)?;
+        }
+
+        Ok(())
+    }
+
+    fn create_request_logs_indexes_if_supported(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "proxy_request_logs")? {
+            return Ok(());
+        }
+
+        if Self::has_columns(conn, "proxy_request_logs", &["provider_id", "app_type"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_provider ON proxy_request_logs(provider_id, app_type)",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        if Self::has_columns(conn, "proxy_request_logs", &["created_at"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON proxy_request_logs(created_at)",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        if Self::has_columns(conn, "proxy_request_logs", &["model"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_model ON proxy_request_logs(model)",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        if Self::has_columns(conn, "proxy_request_logs", &["session_id"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_session ON proxy_request_logs(session_id)",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        if Self::has_columns(conn, "proxy_request_logs", &["status_code"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_status ON proxy_request_logs(status_code)",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        if Self::has_columns(conn, "proxy_request_logs", &["app_type", "created_at"])? {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_app_created_at
+                 ON proxy_request_logs(app_type, created_at DESC)",
+                [],
+            )
+            .map_err(|e| AppError::Database(format!("创建使用量应用时间索引失败: {e}")))?;
+        }
+        if Self::has_columns(
+            conn,
+            "proxy_request_logs",
+            &[
+                "app_type",
+                "data_source",
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "created_at",
+                "cache_creation_tokens",
+            ],
+        )? {
+            conn.execute("DROP INDEX IF EXISTS idx_request_logs_dedup_lookup", [])
+                .map_err(|e| AppError::Database(format!("删除旧使用量去重索引失败: {e}")))?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_dedup_lookup_expr
+                 ON proxy_request_logs(app_type, COALESCE(data_source, 'proxy'), input_tokens,
+                                       output_tokens, cache_read_tokens, created_at,
+                                       cache_creation_tokens)",
+                [],
+            )
+            .map_err(|e| AppError::Database(format!("创建使用量去重表达式索引失败: {e}")))?;
+        }
+
+        Ok(())
+    }
+
+    fn has_columns(conn: &Connection, table: &str, columns: &[&str]) -> Result<bool, AppError> {
+        for column in columns {
+            if !Self::has_column(conn, table, column)? {
+                return Ok(false);
+            }
+        }
         Ok(true)
     }
 }

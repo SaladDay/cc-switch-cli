@@ -137,6 +137,8 @@ mod tests {
                     providers: ProvidersSnapshot {
                         current_id: current_id.to_string(),
                         rows,
+                        live_ids: Default::default(),
+                        loading: false,
                     },
                     ..UiData::default()
                 },
@@ -157,11 +159,13 @@ mod tests {
                 proxy_req_tx: None,
                 proxy_loading: &mut self.proxy_loading,
                 local_env_req_tx: None,
+                session_req_tx: None,
                 webdav_req_tx: None,
                 webdav_loading: &mut self.webdav_loading,
                 update_req_tx: None,
                 update_check: &mut self.update_check,
                 model_fetch_req_tx: None,
+                managed_auth_req_tx: None,
             }
         }
     }

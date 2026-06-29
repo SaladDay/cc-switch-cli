@@ -4,11 +4,11 @@ use crate::{app_config::AppType, error::AppError, provider::Provider};
 
 use super::types::{HealthStatus, StreamCheckConfig, StreamCheckResult};
 
-/// 流式健康检查服务
+/// 连通性检查服务
 pub struct StreamCheckService;
 
 impl StreamCheckService {
-    /// 执行流式健康检查（带重试）
+    /// 执行连通性检查（仅对超时类失败重试）
     pub async fn check_with_retry(
         app_type: &AppType,
         provider: &Provider,
@@ -18,34 +18,24 @@ impl StreamCheckService {
         let mut last_result = None;
 
         for attempt in 0..=effective_config.max_retries {
-            let result = Self::check_once(app_type, provider, &effective_config).await;
+            let result = Self::check_once(app_type, provider, &effective_config).await?;
 
-            match &result {
-                Ok(r) if r.success => {
-                    return Ok(StreamCheckResult {
-                        retry_count: attempt,
-                        ..r.clone()
-                    });
-                }
-                Ok(r) => {
-                    if Self::should_retry(&r.message) && attempt < effective_config.max_retries {
-                        last_result = Some(r.clone());
-                        continue;
-                    }
-                    return Ok(StreamCheckResult {
-                        retry_count: attempt,
-                        ..r.clone()
-                    });
-                }
-                Err(err) => {
-                    if Self::should_retry(&err.to_string())
-                        && attempt < effective_config.max_retries
-                    {
-                        continue;
-                    }
-                    return Err(AppError::Message(err.to_string()));
-                }
+            if result.success {
+                return Ok(StreamCheckResult {
+                    retry_count: attempt,
+                    ..result
+                });
             }
+
+            if Self::should_retry(&result.message) && attempt < effective_config.max_retries {
+                last_result = Some(result);
+                continue;
+            }
+
+            return Ok(StreamCheckResult {
+                retry_count: attempt,
+                ..result
+            });
         }
 
         Ok(last_result.unwrap_or_else(|| StreamCheckResult {
@@ -57,6 +47,7 @@ impl StreamCheckService {
             model_used: String::new(),
             tested_at: chrono::Utc::now().timestamp(),
             retry_count: effective_config.max_retries,
+            error_category: None,
         }))
     }
 
@@ -77,22 +68,6 @@ impl StreamCheckService {
                 degraded_threshold_ms: cfg
                     .degraded_threshold_ms
                     .unwrap_or(global_config.degraded_threshold_ms),
-                claude_model: cfg
-                    .test_model
-                    .clone()
-                    .unwrap_or_else(|| global_config.claude_model.clone()),
-                codex_model: cfg
-                    .test_model
-                    .clone()
-                    .unwrap_or_else(|| global_config.codex_model.clone()),
-                gemini_model: cfg
-                    .test_model
-                    .clone()
-                    .unwrap_or_else(|| global_config.gemini_model.clone()),
-                test_prompt: cfg
-                    .test_prompt
-                    .clone()
-                    .unwrap_or_else(|| global_config.test_prompt.clone()),
             },
             None => global_config.clone(),
         }
@@ -103,82 +78,65 @@ impl StreamCheckService {
         provider: &Provider,
         config: &StreamCheckConfig,
     ) -> Result<StreamCheckResult, AppError> {
-        if matches!(app_type, AppType::OpenClaw) {
-            return Err(AppError::Message("OpenClaw 暂不支持流式检查".to_string()));
-        }
-
         let start = Instant::now();
         let base_url = Self::extract_base_url(provider, app_type)?;
-        let auth = Self::extract_auth(provider, app_type, &base_url)?;
         let client = Self::build_client_for_provider(provider)?;
-        let request_timeout = std::time::Duration::from_secs(config.timeout_secs);
-        let model_to_test = Self::resolve_test_model(app_type, provider, config);
-        let test_prompt = &config.test_prompt;
+        let timeout = std::time::Duration::from_secs(config.timeout_secs);
 
-        let result = match app_type {
-            AppType::Claude => {
-                Self::check_claude_stream(
-                    &client,
-                    &base_url,
-                    &auth,
-                    &model_to_test,
-                    test_prompt,
-                    request_timeout,
-                    provider,
-                )
-                .await
-            }
-            AppType::Codex => {
-                Self::check_codex_stream(
-                    &client,
-                    &base_url,
-                    &auth,
-                    &model_to_test,
-                    test_prompt,
-                    request_timeout,
-                )
-                .await
-            }
-            AppType::Gemini => {
-                Self::check_gemini_stream(
-                    &client,
-                    &base_url,
-                    &auth,
-                    &model_to_test,
-                    test_prompt,
-                    request_timeout,
-                )
-                .await
-            }
-            AppType::OpenCode => {
-                Self::check_codex_stream(
-                    &client,
-                    &base_url,
-                    &auth,
-                    &model_to_test,
-                    test_prompt,
-                    request_timeout,
-                )
-                .await
-            }
-            AppType::OpenClaw => unreachable!("OpenClaw should return unsupported earlier"),
-        };
-
+        let result = Self::probe_reachability(&client, &base_url, timeout).await;
         let response_time = start.elapsed().as_millis() as u64;
-        let tested_at = chrono::Utc::now().timestamp();
 
+        Ok(Self::build_result(
+            result,
+            response_time,
+            config.degraded_threshold_ms,
+        ))
+    }
+
+    /// 轻量可达性探测：GET `base_url`，收到任意 HTTP 响应即可达。
+    ///
+    /// `send()` 在收到响应头时即返回，reqwest 对 4xx/5xx 仍返回 Ok。
+    async fn probe_reachability(
+        client: &reqwest::Client,
+        base_url: &str,
+        timeout: std::time::Duration,
+    ) -> Result<u16, AppError> {
+        let url = base_url.trim();
+        if url.is_empty() {
+            return Err(AppError::Message("base_url 为空".to_string()));
+        }
+
+        let response = client
+            .get(url)
+            .timeout(timeout)
+            .header("accept", "*/*")
+            .header("accept-encoding", "identity")
+            .send()
+            .await
+            .map_err(Self::map_request_error)?;
+
+        Ok(response.status().as_u16())
+    }
+
+    pub(crate) fn build_result(
+        result: Result<u16, AppError>,
+        response_time: u64,
+        degraded_threshold_ms: u64,
+    ) -> StreamCheckResult {
+        let tested_at = chrono::Utc::now().timestamp();
         match result {
-            Ok((status_code, model)) => Ok(StreamCheckResult {
-                status: Self::determine_status(response_time, config.degraded_threshold_ms),
+            Ok(status) => StreamCheckResult {
+                status: Self::determine_status(response_time, degraded_threshold_ms),
                 success: true,
-                message: "Check succeeded".to_string(),
+                message: "Reachable".to_string(),
                 response_time_ms: Some(response_time),
-                http_status: Some(status_code),
-                model_used: model,
+                http_status: Some(status),
+                model_used: String::new(),
                 tested_at,
                 retry_count: 0,
-            }),
-            Err(err) => Ok(StreamCheckResult {
+                error_category: None,
+            },
+            Err(err) => StreamCheckResult {
                 status: HealthStatus::Failed,
                 success: false,
                 message: err.to_string(),
@@ -187,7 +145,8 @@ impl StreamCheckService {
                 model_used: String::new(),
                 tested_at,
                 retry_count: 0,
-            }),
+                error_category: None,
+            },
         }
     }
 
@@ -202,5 +161,15 @@ impl StreamCheckService {
     pub(crate) fn should_retry(msg: &str) -> bool {
         let lower = msg.to_lowercase();
         lower.contains("timeout") || lower.contains("abort") || lower.contains("timed out")
+    }
+
+    pub(crate) fn map_request_error(err: reqwest::Error) -> AppError {
+        if err.is_timeout() {
+            AppError::Message("Request timeout".to_string())
+        } else if err.is_connect() {
+            AppError::Message(format!("Connection failed: {err}"))
+        } else {
+            AppError::Message(err.to_string())
+        }
     }
 }

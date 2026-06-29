@@ -26,7 +26,7 @@ struct StreamChoice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "reasoning_content")]
     reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<DeltaToolCall>>,
@@ -115,7 +115,7 @@ pub fn create_anthropic_sse_stream(
                         }
 
                         for raw_line in line.lines() {
-                            let Some(data) = raw_line.strip_prefix("data: ") else {
+                            let Some(data) = raw_line.strip_prefix("data:").map(str::trim_start) else {
                                 continue;
                             };
 
@@ -125,8 +125,9 @@ pub fn create_anthropic_sse_stream(
                                     "event: message_stop\ndata: {}\n\n",
                                     serde_json::to_string(&event).unwrap_or_default()
                                 );
+                                stream_completion.record_success();
                                 yield Ok(Bytes::from(sse_data));
-                                continue;
+                                return;
                             }
 
                             let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) else {
@@ -279,137 +280,140 @@ pub fn create_anthropic_sse_stream(
                             }
 
                             if let Some(tool_calls) = &choice.delta.tool_calls {
-                                if let Some(index) = current_non_tool_block_index.take() {
-                                    let event = json!({
-                                        "type": "content_block_stop",
-                                        "index": index
-                                    });
-                                    let sse_data = format!(
-                                        "event: content_block_stop\ndata: {}\n\n",
-                                        serde_json::to_string(&event).unwrap_or_default()
-                                    );
-                                    yield Ok(Bytes::from(sse_data));
-                                }
-                                current_non_tool_block_type = None;
+                                if !tool_calls.is_empty() {
+                                    if let Some(index) = current_non_tool_block_index.take() {
+                                        let event = json!({
+                                            "type": "content_block_stop",
+                                            "index": index
+                                        });
+                                        let sse_data = format!(
+                                            "event: content_block_stop\ndata: {}\n\n",
+                                            serde_json::to_string(&event).unwrap_or_default()
+                                        );
+                                        yield Ok(Bytes::from(sse_data));
+                                    }
+                                    current_non_tool_block_type = None;
 
-                                for tool_call in tool_calls {
-                                    let (
-                                        anthropic_index,
-                                        id,
-                                        name,
-                                        should_start,
-                                        pending_after_start,
-                                        immediate_delta,
-                                    ) = {
-                                        let state = tool_blocks_by_index
-                                            .entry(tool_call.index)
-                                            .or_insert_with(|| {
-                                                let index = next_content_index;
-                                                next_content_index += 1;
-                                                ToolBlockState {
-                                                    anthropic_index: index,
-                                                    id: String::new(),
-                                                    name: String::new(),
-                                                    started: false,
-                                                    pending_args: String::new(),
-                                                }
-                                            });
-
-                                        if let Some(id) = &tool_call.id {
-                                            state.id = id.clone();
-                                        }
-                                        if let Some(function) = &tool_call.function {
-                                            if let Some(name) = &function.name {
-                                                state.name = name.clone();
-                                            }
-                                        }
-
-                                        let should_start = !state.started
-                                            && !state.id.is_empty()
-                                            && !state.name.is_empty();
-                                        if should_start {
-                                            state.started = true;
-                                        }
-                                        let pending_after_start = if should_start
-                                            && !state.pending_args.is_empty()
-                                        {
-                                            Some(std::mem::take(&mut state.pending_args))
-                                        } else {
-                                            None
-                                        };
-                                        let args_delta = tool_call
-                                            .function
-                                            .as_ref()
-                                            .and_then(|f| f.arguments.clone());
-                                        let immediate_delta = if let Some(args) = args_delta {
-                                            if state.started {
-                                                Some(args)
-                                            } else {
-                                                state.pending_args.push_str(&args);
-                                                None
-                                            }
-                                        } else {
-                                            None
-                                        };
-
-                                        (
-                                            state.anthropic_index,
-                                            state.id.clone(),
-                                            state.name.clone(),
+                                    for tool_call in tool_calls {
+                                        let (
+                                            anthropic_index,
+                                            id,
+                                            name,
                                             should_start,
                                             pending_after_start,
                                             immediate_delta,
-                                        )
-                                    };
+                                        ) = {
+                                            let state = tool_blocks_by_index
+                                                .entry(tool_call.index)
+                                                .or_insert_with(|| {
+                                                    let index = next_content_index;
+                                                    next_content_index += 1;
+                                                    ToolBlockState {
+                                                        anthropic_index: index,
+                                                        id: String::new(),
+                                                        name: String::new(),
+                                                        started: false,
+                                                        pending_args: String::new(),
+                                                    }
+                                                });
 
-                                    if should_start {
-                                        let event = json!({
-                                            "type": "content_block_start",
-                                            "index": anthropic_index,
-                                            "content_block": {
-                                                "type": "tool_use",
-                                                "id": id,
-                                                "name": name
+                                            if let Some(id) = &tool_call.id {
+                                                state.id = id.clone();
                                             }
-                                        });
-                                        let sse_data = format!(
-                                            "event: content_block_start\ndata: {}\n\n",
-                                            serde_json::to_string(&event).unwrap_or_default()
-                                        );
-                                        yield Ok(Bytes::from(sse_data));
-                                        open_tool_block_indices.insert(anthropic_index);
-                                    }
+                                            if let Some(function) = &tool_call.function {
+                                                if let Some(name) = &function.name {
+                                                    state.name = name.clone();
+                                                }
+                                            }
 
-                                    if let Some(args) = pending_after_start {
-                                        let event = json!({
-                                            "type": "content_block_delta",
-                                            "index": anthropic_index,
-                                            "delta": {
-                                                "type": "input_json_delta",
-                                                "partial_json": args
+                                            let should_start = !state.started
+                                                && !state.id.is_empty()
+                                                && !state.name.is_empty();
+                                            if should_start {
+                                                state.started = true;
                                             }
-                                        });
-                                        let sse_data = format!(
-                                            "event: content_block_delta\ndata: {}\n\n",
-                                            serde_json::to_string(&event).unwrap_or_default()
-                                        );
-                                        yield Ok(Bytes::from(sse_data));
-                                    }
+                                            let pending_after_start = if should_start
+                                                && !state.pending_args.is_empty()
+                                            {
+                                                Some(std::mem::take(&mut state.pending_args))
+                                            } else {
+                                                None
+                                            };
+                                            let args_delta = tool_call
+                                                .function
+                                                .as_ref()
+                                                .and_then(|f| f.arguments.clone());
+                                            let immediate_delta = if let Some(args) = args_delta {
+                                                if state.started {
+                                                    Some(args)
+                                                } else {
+                                                    state.pending_args.push_str(&args);
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            };
 
-                                    if let Some(args) = immediate_delta {
-                                        let event = json!({
-                                            "type": "content_block_delta",
-                                            "index": anthropic_index,
-                                            "delta": {
-                                                "type": "input_json_delta",
-                                                "partial_json": args
-                                            }
-                                        });
-                                        let sse_data = format!(
-                                            "event: content_block_delta\ndata: {}\n\n",
-                                            serde_json::to_string(&event).unwrap_or_default()
-                                        );
-                                        yield Ok(Bytes::from(sse_data));
+                                            (
+                                                state.anthropic_index,
+                                                state.id.clone(),
+                                                state.name.clone(),
+                                                should_start,
+                                                pending_after_start,
+                                                immediate_delta,
+                                            )
+                                        };
+
+                                        if should_start {
+                                            let event = json!({
+                                                "type": "content_block_start",
+                                                "index": anthropic_index,
+                                                "content_block": {
+                                                    "type": "tool_use",
+                                                    "id": id,
+                                                    "name": name,
+                                                    "input": {}
+                                                }
+                                            });
+                                            let sse_data = format!(
+                                                "event: content_block_start\ndata: {}\n\n",
+                                                serde_json::to_string(&event).unwrap_or_default()
+                                            );
+                                            yield Ok(Bytes::from(sse_data));
+                                            open_tool_block_indices.insert(anthropic_index);
+                                        }
+
+                                        if let Some(args) = pending_after_start {
+                                            let event = json!({
+                                                "type": "content_block_delta",
+                                                "index": anthropic_index,
+                                                "delta": {
+                                                    "type": "input_json_delta",
+                                                    "partial_json": args
+                                                }
+                                            });
+                                            let sse_data = format!(
+                                                "event: content_block_delta\ndata: {}\n\n",
+                                                serde_json::to_string(&event).unwrap_or_default()
+                                            );
+                                            yield Ok(Bytes::from(sse_data));
+                                        }
+
+                                        if let Some(args) = immediate_delta {
+                                            let event = json!({
+                                                "type": "content_block_delta",
+                                                "index": anthropic_index,
+                                                "delta": {
+                                                    "type": "input_json_delta",
+                                                    "partial_json": args
+                                                }
+                                            });
+                                            let sse_data = format!(
+                                                "event: content_block_delta\ndata: {}\n\n",
+                                                serde_json::to_string(&event).unwrap_or_default()
+                                            );
+                                            yield Ok(Bytes::from(sse_data));
+                                        }
                                     }
                                 }
                             }
@@ -443,7 +447,8 @@ pub fn create_anthropic_sse_stream(
                                             "content_block": {
                                                 "type": "tool_use",
                                                 "id": "",
-                                                "name": legacy_function_name.clone().unwrap_or_default()
+                                                "name": legacy_function_name.clone().unwrap_or_default(),
+                                                "input": {}
                                             }
                                         });
                                         let sse_data = format!(
@@ -526,7 +531,8 @@ pub fn create_anthropic_sse_stream(
                                         "content_block": {
                                             "type": "tool_use",
                                             "id": id,
-                                            "name": name
+                                            "name": name,
+                                            "input": {}
                                         }
                                     });
                                     let sse_data = format!(
@@ -582,7 +588,7 @@ pub fn create_anthropic_sse_stream(
                                     open_tool_block_indices.clear();
                                 }
 
-                                let usage_json = chunk.usage.as_ref().map(|usage| {
+                                let usage_json = if let Some(usage) = chunk.usage.as_ref() {
                                     let mut usage_json = json!({
                                         "input_tokens": usage.prompt_tokens,
                                         "output_tokens": usage.completion_tokens
@@ -594,7 +600,11 @@ pub fn create_anthropic_sse_stream(
                                         usage_json["cache_creation_input_tokens"] = json!(created);
                                     }
                                     usage_json
-                                });
+                                } else {
+                                    json!({
+                                        "output_tokens": 0
+                                    })
+                                };
                                 let event = json!({
                                     "type": "message_delta",
                                     "delta": {
@@ -686,6 +696,53 @@ mod tests {
             .collect()
     }
 
+    async fn collect_event_names_and_payload_types(input: &str) -> Vec<(String, String)> {
+        let upstream = stream::iter(vec![Ok(Bytes::from(input.as_bytes().to_vec()))]);
+        let converted = create_anthropic_sse_stream(upstream, StreamCompletion::default());
+        let chunks: Vec<_> = converted.collect().await;
+
+        chunks
+            .into_iter()
+            .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
+            .collect::<String>()
+            .split("\n\n")
+            .filter_map(|block| {
+                let event = block
+                    .lines()
+                    .find_map(|line| line.strip_prefix("event: "))?
+                    .to_string();
+                let data = block.lines().find_map(|line| line.strip_prefix("data: "))?;
+                let payload = serde_json::from_str::<Value>(data).ok()?;
+                let payload_type = payload.get("type")?.as_str()?.to_string();
+                Some((event, payload_type))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn done_marker_ends_stream_without_waiting_for_upstream_eof() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(input))])
+            .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+        let completion = StreamCompletion::default();
+        let converted = create_anthropic_sse_stream(upstream, completion.clone());
+
+        let chunks: Vec<_> =
+            tokio::time::timeout(std::time::Duration::from_millis(100), converted.collect())
+                .await
+                .expect("stream should end at [DONE]");
+        let merged = chunks
+            .into_iter()
+            .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
+            .collect::<String>();
+
+        assert!(merged.contains("event: message_stop"));
+        assert_eq!(completion.outcome(), Some(Ok(())));
+    }
+
     #[test]
     fn map_stop_reason_covers_existing_and_parity_values() {
         assert_eq!(
@@ -763,6 +820,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_accepts_deepseek_reasoning_content_alias() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_events(input).await;
+        let thinking_delta = events
+            .iter()
+            .find(|event| event["type"] == "content_block_delta")
+            .expect("thinking delta should be emitted");
+
+        assert_eq!(thinking_delta["delta"]["type"], "thinking_delta");
+        assert_eq!(thinking_delta["delta"]["thinking"], "think");
+    }
+
+    #[tokio::test]
     async fn legacy_function_call_stream_emits_tool_use_block_and_argument_delta() {
         let input = concat!(
             "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"get_weather\"}}}]}\n\n",
@@ -792,6 +867,7 @@ mod tests {
             .expect("message_delta event");
 
         assert_eq!(tool_start["content_block"]["name"], "get_weather");
+        assert_eq!(tool_start["content_block"]["input"], json!({}));
         assert_eq!(
             tool_delta["delta"]["partial_json"],
             "{\"location\":\"Tokyo\"}"
@@ -858,6 +934,37 @@ mod tests {
 
         assert_eq!(second_idx, *tool_index_by_call.get("call_1").unwrap());
         assert_eq!(first_idx, *tool_index_by_call.get("call_0").unwrap());
+    }
+
+    #[tokio::test]
+    async fn streaming_tool_call_schema_is_valid_when_finish_chunk_omits_usage() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_tool\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\"}}]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_tool\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"location\\\":\\\"Tokyo\\\"}\"}}]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_tool\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_events(input).await;
+        let tool_start = events
+            .iter()
+            .find(|event| {
+                event["type"] == "content_block_start"
+                    && event["content_block"]["type"] == "tool_use"
+            })
+            .expect("tool_use block start");
+        let message_delta = events
+            .iter()
+            .find(|event| event["type"] == "message_delta")
+            .expect("message_delta event");
+
+        assert_eq!(tool_start["content_block"]["id"], "call_0");
+        assert_eq!(tool_start["content_block"]["name"], "get_weather");
+        assert_eq!(tool_start["content_block"]["input"], json!({}));
+        assert_eq!(message_delta["delta"]["stop_reason"], "tool_use");
+        assert!(message_delta["usage"].is_object());
+        assert_eq!(message_delta["usage"]["output_tokens"], 0);
+        assert!(events.iter().any(|event| event["type"] == "message_stop"));
     }
 
     #[tokio::test]
@@ -932,6 +1039,7 @@ mod tests {
             .expect("message_delta emitted");
 
         assert_eq!(events[tool_start_pos]["content_block"]["id"], "tool_call_0");
+        assert_eq!(events[tool_start_pos]["content_block"]["input"], json!({}));
         assert_eq!(
             events[tool_start_pos]["content_block"]["name"],
             "unknown_tool"
@@ -962,5 +1070,50 @@ mod tests {
             text_block_starts.is_empty(),
             "empty content deltas should not open text blocks"
         );
+    }
+
+    #[tokio::test]
+    async fn content_block_sse_event_names_match_payload_types() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"reasoning\":\"thinking\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_event_names_and_payload_types(input).await;
+        for (event_name, payload_type) in events
+            .iter()
+            .filter(|(_, payload_type)| payload_type.starts_with("content_block_"))
+        {
+            assert_eq!(event_name, payload_type);
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_tool_calls_delta_does_not_close_text_block() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_events(input).await;
+        let text_block_starts = events
+            .iter()
+            .filter(|event| {
+                event["type"] == "content_block_start" && event["content_block"]["type"] == "text"
+            })
+            .count();
+        let text_block_stops = events
+            .iter()
+            .filter(|event| event["type"] == "content_block_stop")
+            .count();
+
+        assert_eq!(text_block_starts, 1);
+        assert_eq!(text_block_stops, 1);
     }
 }

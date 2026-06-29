@@ -126,7 +126,10 @@ pub(super) fn render_header(
         .proxy
         .routes_current_app_through_proxy(&app.app_type)
         .map(|enabled| {
-            let text = texts::tui_header_proxy_status(enabled);
+            let text = texts::tui_header_proxy_status_with_failover(
+                enabled,
+                data.proxy.auto_failover_enabled,
+            );
             let style = if enabled {
                 selection_style(theme)
             } else if theme.no_color {
@@ -213,8 +216,11 @@ pub(super) fn nav_label(item: NavItem) -> &'static str {
     match item {
         NavItem::Main => texts::menu_home(),
         NavItem::Providers => texts::menu_manage_providers(),
+        NavItem::Usage => texts::menu_usage(),
+        NavItem::Sessions => texts::menu_manage_sessions(),
         NavItem::Mcp => texts::menu_manage_mcp(),
         NavItem::Prompts => texts::menu_manage_prompts(),
+        NavItem::HermesMemory => texts::menu_hermes_memory(),
         NavItem::Config => texts::menu_manage_config(),
         NavItem::Skills => texts::menu_manage_skills(),
         NavItem::OpenClawWorkspace => texts::menu_openclaw_workspace(),
@@ -230,8 +236,11 @@ pub(super) fn nav_label_variants(item: NavItem) -> (&'static str, &'static str) 
     match item {
         NavItem::Main => texts::menu_home_variants(),
         NavItem::Providers => texts::menu_manage_providers_variants(),
+        NavItem::Usage => texts::menu_usage_variants(),
+        NavItem::Sessions => texts::menu_manage_sessions_variants(),
         NavItem::Mcp => texts::menu_manage_mcp_variants(),
         NavItem::Prompts => texts::menu_manage_prompts_variants(),
+        NavItem::HermesMemory => texts::menu_hermes_memory_variants(),
         NavItem::Config => texts::menu_manage_config_variants(),
         NavItem::Skills => texts::menu_manage_skills_variants(),
         NavItem::OpenClawWorkspace => texts::menu_openclaw_workspace_variants(),
@@ -254,6 +263,7 @@ pub(super) fn nav_pane_width(theme: &super::theme::Theme) -> u16 {
     let max_text_width = NavItem::ALL
         .iter()
         .chain(NavItem::OPENCLAW_ALL.iter())
+        .chain(NavItem::HERMES_ALL.iter())
         .flat_map(|item| {
             let (en, zh) = nav_label_variants(*item);
             [en, zh]
@@ -330,102 +340,86 @@ pub(super) fn render_footer(
             texts::tui_footer_filter_mode(),
             Style::default().fg(theme.dim),
         )]
-    } else {
-        if theme.no_color {
-            let proxy_segment = if proxy_action_available {
-                format!("  P {}", proxy_footer_label)
-            } else {
-                String::new()
-            };
-            vec![Span::styled(
-                format!(
-                    "{} {}  {} {}{}",
-                    texts::tui_footer_group_nav(),
-                    texts::tui_footer_nav_keys(),
-                    texts::tui_footer_group_actions(),
-                    texts::tui_footer_action_keys_global(),
-                    proxy_segment,
-                ),
-                Style::default(),
-            )]
+    } else if theme.no_color {
+        let proxy_segment = if proxy_action_available {
+            format!("P {}  ", proxy_footer_label)
         } else {
-            let nav_bg = super::theme::terminal_palette_color((101, 113, 160)); // #6571A0
-            let act_bg = super::theme::terminal_palette_color((248, 248, 248)); // #F8F8F8
-            let nav_fg = super::theme::terminal_palette_color((255, 255, 255));
-            let act_fg = super::theme::terminal_palette_color((108, 108, 108));
-            let nav_label_style = Style::default()
-                .fg(nav_fg)
-                .bg(nav_bg)
-                .add_modifier(Modifier::BOLD);
-            let act_label_style = Style::default()
-                .fg(act_fg)
-                .bg(act_bg)
-                .add_modifier(Modifier::BOLD);
-            let nav_key_style = Style::default()
-                .fg(nav_fg)
-                .bg(nav_bg)
-                .add_modifier(Modifier::BOLD);
-            let nav_desc_style = Style::default().fg(nav_fg).bg(nav_bg);
-            let act_key_style = Style::default()
-                .fg(act_fg)
-                .bg(act_bg)
-                .add_modifier(Modifier::BOLD);
-            let act_desc_style = Style::default().fg(act_fg).bg(act_bg);
-            let nav_sep = Span::styled("  ", nav_desc_style);
-            let act_sep = Span::styled("  ", act_desc_style);
+            String::new()
+        };
+        vec![Span::styled(
+            format!(
+                "{}  {}{}",
+                texts::tui_footer_nav_keys(),
+                proxy_segment,
+                texts::tui_footer_action_keys_global(),
+            ),
+            Style::default(),
+        )]
+    } else {
+        let nav_bg = super::theme::terminal_palette_color((101, 113, 160)); // #6571A0
+        let act_bg = super::theme::terminal_palette_color((248, 248, 248)); // #F8F8F8
+        let nav_fg = super::theme::terminal_palette_color((255, 255, 255));
+        let act_fg = super::theme::terminal_palette_color((108, 108, 108));
+        let nav_key_style = Style::default()
+            .fg(nav_fg)
+            .bg(nav_bg)
+            .add_modifier(Modifier::BOLD);
+        let nav_desc_style = Style::default().fg(nav_fg).bg(nav_bg);
+        let act_key_style = Style::default()
+            .fg(act_fg)
+            .bg(act_bg)
+            .add_modifier(Modifier::BOLD);
+        let act_desc_style = Style::default().fg(act_fg).bg(act_bg);
+        let nav_sep = Span::styled("  ", nav_desc_style);
+        let act_sep = Span::styled("  ", act_desc_style);
 
-            let nav_items: &[(&str, &str)] = if i18n::is_chinese() {
-                &[("←→", "菜单/内容"), ("↑↓", "移动")]
-            } else {
-                &[("←→", "menu/content"), ("↑↓", "move")]
-            };
+        let nav_items: &[(&str, &str)] = if i18n::is_chinese() {
+            &[("←→", "菜单/内容"), ("↑↓", "移动")]
+        } else {
+            &[("←→", "menu/content"), ("↑↓", "move")]
+        };
 
-            let act_items_base: &[(&str, &str)] = if i18n::is_chinese() {
-                &[
-                    ("[ ]", "切换应用"),
-                    ("/", "过滤"),
-                    ("Esc", "返回"),
-                    ("?", "帮助"),
-                ]
-            } else {
-                &[
-                    ("[ ]", "switch app"),
-                    ("/", "filter"),
-                    ("Esc", "back"),
-                    ("?", "help"),
-                ]
-            };
+        let act_items_base: &[(&str, &str)] = if i18n::is_chinese() {
+            &[
+                ("[ ]", "切换应用"),
+                ("/", "过滤"),
+                ("Esc", "返回"),
+                ("?", "帮助"),
+            ]
+        } else {
+            &[
+                ("[ ]", "switch app"),
+                ("/", "filter"),
+                ("Esc", "back"),
+                ("?", "help"),
+            ]
+        };
 
-            let mut act_items = act_items_base.to_vec();
-            if proxy_action_available {
-                act_items.push(("P", proxy_footer_label));
-            }
-
-            let mut v = Vec::new();
-            // NAV block
-            v.push(Span::styled(" NAV ", nav_label_style));
-            for (i, (key, desc)) in nav_items.iter().enumerate() {
-                if i > 0 {
-                    v.push(nav_sep.clone());
-                }
-                v.push(Span::styled(format!(" {} ", key), nav_key_style));
-                v.push(Span::styled(format!(" {}", desc), nav_desc_style));
-            }
-            v.push(Span::styled(" ", nav_desc_style));
-            // gap between blocks
-            v.push(Span::raw(" "));
-            // ACT block
-            v.push(Span::styled(" ACT ", act_label_style));
-            for (i, (key, desc)) in act_items.iter().enumerate() {
-                if i > 0 {
-                    v.push(act_sep.clone());
-                }
-                v.push(Span::styled(format!(" {} ", key), act_key_style));
-                v.push(Span::styled(format!(" {}", desc), act_desc_style));
-            }
-            v.push(Span::styled(" ", act_desc_style));
-            v
+        let mut act_items = act_items_base.to_vec();
+        if proxy_action_available {
+            act_items.insert(0, ("P", proxy_footer_label));
         }
+
+        let mut v = Vec::new();
+        for (i, (key, desc)) in nav_items.iter().enumerate() {
+            if i > 0 {
+                v.push(nav_sep.clone());
+            }
+            v.push(Span::styled(format!(" {} ", key), nav_key_style));
+            v.push(Span::styled(format!(" {}", desc), nav_desc_style));
+        }
+        v.push(Span::styled(" ", nav_desc_style));
+        // gap between blocks
+        v.push(Span::raw(" "));
+        for (i, (key, desc)) in act_items.iter().enumerate() {
+            if i > 0 {
+                v.push(act_sep.clone());
+            }
+            v.push(Span::styled(format!(" {} ", key), act_key_style));
+            v.push(Span::styled(format!(" {}", desc), act_desc_style));
+        }
+        v.push(Span::styled(" ", act_desc_style));
+        v
     };
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -490,12 +484,14 @@ pub(super) fn toast_rect(content_area: Rect, message: &str) -> Rect {
     let max_width = content_area
         .width
         .saturating_sub(4)
-        .max(1)
-        .min(TOAST_MAX_WIDTH);
+        .clamp(1, TOAST_MAX_WIDTH);
     let min_width = TOAST_MIN_WIDTH.min(max_width);
-    let width = (UnicodeWidthStr::width(message) as u16)
-        .saturating_add(8)
-        .clamp(min_width, max_width);
+    let content_width = message
+        .lines()
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0) as u16;
+    let width = content_width.saturating_add(8).clamp(min_width, max_width);
 
     let inner_width = width.saturating_sub(2).max(1);
     let wrapped_lines = wrap_message_lines(message, inner_width).len() as u16;

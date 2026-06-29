@@ -212,6 +212,30 @@ pub fn claude_plugin_sync_failed_warning(err: &str) -> String {
     }
 }
 
+pub fn codex_unified_session_history_label() -> &'static str {
+    if is_chinese() {
+        "统一 Codex 会话历史"
+    } else {
+        "Unified Codex session history"
+    }
+}
+
+pub fn codex_unified_session_history_confirm(enable: bool) -> String {
+    if is_chinese() {
+        if enable {
+            "确认开启统一 Codex 会话历史？\n官方订阅将使用共享 custom 供应商标识运行；已有官方会话不会自动迁移，可用 CLI 命令 settings codex-history migrate-existing 单独迁移。".to_string()
+        } else {
+            "确认关闭统一 Codex 会话历史？\n不会自动恢复已迁移的会话；如需恢复，请使用 CLI 命令 settings codex-history restore。".to_string()
+        }
+    } else {
+        if enable {
+            "Enable unified Codex session history?\nOfficial subscriptions will use the shared custom provider id. Existing official sessions are not migrated automatically; use settings codex-history migrate-existing from the CLI if needed.".to_string()
+        } else {
+            "Disable unified Codex session history?\nMigrated sessions are not restored automatically; use settings codex-history restore from the CLI if needed.".to_string()
+        }
+    }
+}
+
 // App Selection
 pub fn select_application() -> &'static str {
     if is_chinese() {
@@ -534,6 +558,54 @@ pub fn common_config_snippet_apply_hint() -> &'static str {
         "提示：切换一次供应商即可重新写入 live 配置。"
     } else {
         "Tip: switch provider once to re-write the live config."
+    }
+}
+
+pub fn common_config_snippet_extracted() -> &'static str {
+    if is_chinese() {
+        "已从当前编辑内容提取通用配置片段"
+    } else {
+        "Extracted common config snippet from current edits"
+    }
+}
+
+pub fn common_config_snippet_formatted() -> &'static str {
+    if is_chinese() {
+        "已格式化通用配置片段"
+    } else {
+        "Formatted common config snippet"
+    }
+}
+
+pub fn common_config_snippet_extract_empty() -> &'static str {
+    if is_chinese() {
+        "当前编辑内容没有可提取的通用配置"
+    } else {
+        "No common config found in the current edits"
+    }
+}
+
+pub fn tui_common_config_notice_title() -> &'static str {
+    if is_chinese() {
+        "关于通用配置"
+    } else {
+        "About Common Config"
+    }
+}
+
+pub fn tui_common_config_notice_message(app: &str) -> String {
+    if is_chinese() {
+        format!(
+            "通用配置适合保存多个 {app} 供应商共享的插件、环境变量和工具配置。\
+             \n\n有可用片段时，新建供应商会默认勾选“添加通用配置”。\
+             \n\n如果在当前表单里新增了插件、hooks 或环境变量，可以在“通用配置”编辑器里按 F4 从当前编辑内容提取，再按 Ctrl+S 保存片段。"
+        )
+    } else {
+        format!(
+            "Common Config is for plugin, environment, and tool settings shared by multiple {app} providers.\
+             \n\nWhen a usable snippet exists, new providers will default to attaching it.\
+             \n\nAfter adding plugins, hooks, or environment variables in this form, open Common Config, press F4 to extract from the current edits, then press Ctrl+S to save the snippet."
+        )
     }
 }
 

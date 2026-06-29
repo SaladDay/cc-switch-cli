@@ -11,7 +11,7 @@ pub(super) fn render_skills_installed(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(texts::skills_management());
+        .title(texts::menu_manage_skills());
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
@@ -31,7 +31,7 @@ pub(super) fn render_skills_installed(
             theme,
             &[
                 ("Enter", texts::tui_key_details()),
-                ("x", texts::tui_key_toggle()),
+                ("Space", texts::tui_key_toggle()),
                 ("m", texts::tui_key_apps()),
                 ("f", texts::tui_key_discover()),
                 ("i", texts::tui_skills_action_import_existing()),
@@ -43,17 +43,14 @@ pub(super) fn render_skills_installed(
     render_summary_bar(frame, chunks[1], theme, installed_summary(data));
 
     let visible = skills_installed_filtered(app, data);
-    if visible.is_empty() {
-        render_installed_empty_state(frame, chunks[2], theme);
-        return;
-    }
 
     let header = Row::new(vec![
         Cell::from(texts::header_name()),
-        Cell::from(texts::tui_header_claude_short()),
-        Cell::from(texts::tui_header_codex_short()),
-        Cell::from(texts::tui_header_gemini_short()),
-        Cell::from(texts::tui_header_opencode_short()),
+        Cell::from(crate::app_config::AppType::Claude.as_str()),
+        Cell::from(crate::app_config::AppType::Codex.as_str()),
+        Cell::from(crate::app_config::AppType::Gemini.as_str()),
+        Cell::from(crate::app_config::AppType::OpenCode.as_str()),
+        Cell::from(crate::app_config::AppType::Hermes.as_str()),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
@@ -64,17 +61,19 @@ pub(super) fn render_skills_installed(
             Cell::from(skill_marker(skill.apps.codex)),
             Cell::from(skill_marker(skill.apps.gemini)),
             Cell::from(skill_marker(skill.apps.opencode)),
+            Cell::from(skill_marker(skill.apps.hermes)),
         ])
     });
 
     let table = Table::new(
         rows,
         [
-            Constraint::Min(10),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Percentage(50),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(8),
         ],
     )
     .header(header)
@@ -112,54 +111,20 @@ fn installed_summary(data: &UiData) -> String {
         .iter()
         .filter(|s| s.apps.opencode)
         .count();
+    let enabled_hermes = data
+        .skills
+        .installed
+        .iter()
+        .filter(|s| s.apps.hermes)
+        .count();
 
     texts::tui_skills_installed_counts(
         enabled_claude,
         enabled_codex,
         enabled_gemini,
         enabled_opencode,
+        enabled_hermes,
     )
-}
-
-fn render_installed_empty_state(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
-    let empty_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(7),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    let icon_style = if theme.no_color {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    };
-
-    let empty_lines = vec![
-        Line::raw(""),
-        Line::from(Span::styled("✦", icon_style)),
-        Line::raw(""),
-        Line::from(Span::styled(
-            texts::tui_skills_empty_title(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::raw(""),
-        Line::from(Span::styled(
-            texts::tui_skills_empty_subtitle(),
-            Style::default().fg(theme.dim),
-        )),
-    ];
-
-    frame.render_widget(
-        Paragraph::new(empty_lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false }),
-        empty_chunks[1],
-    );
 }
 
 fn skill_marker(enabled: bool) -> &'static str {

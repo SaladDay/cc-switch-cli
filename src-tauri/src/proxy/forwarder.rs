@@ -11,13 +11,15 @@ use crate::{app_config::AppType, provider::Provider};
 use super::{
     error::ProxyError,
     provider_router::ProviderRouter,
+    providers::codex_chat_history::CodexChatHistoryStore,
+    providers::gemini_shadow::GeminiShadowStore,
     providers::get_adapter,
+    response::decode_buffered_response_body,
     thinking_budget_rectifier::{rectify_thinking_budget, should_rectify_thinking_budget},
     thinking_rectifier::{
         normalize_thinking_type, rectify_anthropic_request, should_rectify_thinking_signature,
     },
-    types::OptimizerConfig,
-    types::RectifierConfig,
+    types::{CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
 };
 
 mod request_builder;
@@ -25,6 +27,11 @@ mod request_builder;
 pub struct RequestForwarder {
     router: Arc<ProviderRouter>,
     optimizer_config: OptimizerConfig,
+    copilot_optimizer_config: CopilotOptimizerConfig,
+    session_id: String,
+    session_client_provided: bool,
+    codex_chat_history: Option<Arc<CodexChatHistoryStore>>,
+    gemini_shadow: Option<Arc<GeminiShadowStore>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,6 +113,11 @@ impl RequestForwarder {
         Ok(Self {
             router,
             optimizer_config: OptimizerConfig::default(),
+            copilot_optimizer_config: CopilotOptimizerConfig::default(),
+            session_id: String::new(),
+            session_client_provided: false,
+            codex_chat_history: None,
+            gemini_shadow: None,
         })
     }
 
@@ -114,6 +126,35 @@ impl RequestForwarder {
         self
     }
 
+    pub fn with_copilot_optimizer_config(
+        mut self,
+        copilot_optimizer_config: CopilotOptimizerConfig,
+    ) -> Self {
+        self.copilot_optimizer_config = copilot_optimizer_config;
+        self
+    }
+
+    pub fn with_session(mut self, session_id: String, client_provided: bool) -> Self {
+        self.session_id = session_id;
+        self.session_client_provided = client_provided;
+        self
+    }
+
+    pub fn with_codex_chat_history(mut self, history: Arc<CodexChatHistoryStore>) -> Self {
+        self.codex_chat_history = Some(history);
+        self
+    }
+
+    pub fn with_gemini_shadow(mut self, shadow: Arc<GeminiShadowStore>) -> Self {
+        self.gemini_shadow = Some(shadow);
+        self
+    }
+
+    #[cfg(test)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper mirrors proxy forwarding inputs"
+    )]
     pub async fn forward_response(
         &self,
         app_type: &AppType,
@@ -137,6 +178,10 @@ impl RequestForwarder {
         .map_err(|failure| failure.error)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "forwarding requires request, provider, and retry options"
+    )]
     pub async fn forward_response_detailed(
         &self,
         app_type: &AppType,
@@ -152,7 +197,7 @@ impl RequestForwarder {
         }
 
         let claude_error_path = matches!(app_type, AppType::Claude);
-        let bypass_circuit_breaker = options.bypass_circuit_breaker || providers.len() == 1;
+        let bypass_circuit_breaker = options.bypass_circuit_breaker;
         let mut last_error = None;
         let mut attempted_provider = false;
         let mut pending_upstream_response = None;
@@ -351,6 +396,11 @@ impl RequestForwarder {
         }
     }
 
+    #[allow(dead_code)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "forwarding requires request, provider, and retry options"
+    )]
     pub async fn forward_buffered_response(
         &self,
         app_type: &AppType,
@@ -374,6 +424,10 @@ impl RequestForwarder {
         .map_err(|failure| failure.error)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "forwarding requires request, provider, and retry options"
+    )]
     pub async fn forward_buffered_response_detailed(
         &self,
         app_type: &AppType,
@@ -389,7 +443,7 @@ impl RequestForwarder {
         }
 
         let claude_error_path = matches!(app_type, AppType::Claude);
-        let bypass_circuit_breaker = options.bypass_circuit_breaker || providers.len() == 1;
+        let bypass_circuit_breaker = options.bypass_circuit_breaker;
         let mut last_error = None;
         let mut attempted_provider = false;
         let mut pending_upstream_response = None;
@@ -588,6 +642,10 @@ impl RequestForwarder {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "request execution needs provider, endpoint, headers, and retry options"
+    )]
     async fn send_streaming_request(
         &self,
         app_type: &AppType,
@@ -648,7 +706,6 @@ impl RequestForwarder {
                         tokio::time::timeout(remaining_timeout, request.send())
                             .await
                             .map_err(|_| ())
-                            .map(|result| result)
                     }
                     None => Ok(request.send().await),
                 } {
@@ -737,6 +794,10 @@ impl RequestForwarder {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "request execution needs provider, endpoint, headers, and retry options"
+    )]
     async fn send_buffered_request(
         &self,
         app_type: &AppType,
@@ -797,13 +858,12 @@ impl RequestForwarder {
                         tokio::time::timeout(remaining_timeout, request.send())
                             .await
                             .map_err(|_| ())
-                            .map(|result| result)
                     }
                     None => Ok(request.send().await),
                 } {
                     Ok(Ok(response)) => {
                         let status = response.status();
-                        let response_headers = response.headers().clone();
+                        let mut response_headers = response.headers().clone();
                         let response_body = match options.request_timeout {
                             Some(request_timeout) => {
                                 let remaining_timeout =
@@ -833,6 +893,8 @@ impl RequestForwarder {
                                 ))
                             })?,
                         };
+                        let response_body =
+                            decode_buffered_response_body(&mut response_headers, response_body);
 
                         let buffered_response = BufferedResponse {
                             status,
@@ -965,7 +1027,7 @@ async fn read_streaming_error_response(
     request_timeout: Option<Duration>,
 ) -> Result<BufferedResponse, ProxyError> {
     let status = response.status();
-    let headers = response.headers().clone();
+    let mut headers = response.headers().clone();
     let body = match request_timeout {
         Some(request_timeout) => {
             let remaining_timeout = request_timeout.saturating_sub(started_at.elapsed());
@@ -983,6 +1045,7 @@ async fn read_streaming_error_response(
             .await
             .map_err(|error| map_request_send_error(error, None))?,
     };
+    let body = decode_buffered_response_body(&mut headers, body);
 
     Ok(BufferedResponse {
         status,

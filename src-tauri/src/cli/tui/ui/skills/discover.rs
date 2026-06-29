@@ -27,18 +27,25 @@ pub(super) fn render_skills_discover(
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
         .split(inner);
+
+    render_skills_discover_source_tabs(frame, app, chunks[0], theme);
 
     if app.focus == Focus::Content {
         render_key_bar_center(
             frame,
-            chunks[0],
+            chunks[1],
             theme,
             &[
                 ("Enter", texts::tui_key_install()),
                 ("f", texts::tui_key_search()),
-                ("r", texts::tui_key_repos()),
+                ("r", texts::tui_key_refresh()),
+                ("e", texts::tui_key_repo_manager()),
             ],
         );
     }
@@ -58,12 +65,27 @@ pub(super) fn render_skills_discover(
         })
         .collect::<Vec<_>>();
 
+    if app.skills_discover_loading {
+        render_skills_discover_loading(frame, chunks[2], theme);
+        return;
+    }
+
     if visible.is_empty() {
+        let empty_text = if matches!(
+            app.skills_discover_source,
+            app::SkillsDiscoverSource::Marketplace
+        ) && app.skills_discover_query.trim().chars().count() < 2
+        {
+            texts::tui_skills_skillssh_search_prompt()
+        } else {
+            texts::tui_skills_discover_empty()
+        };
         frame.render_widget(
-            Paragraph::new(texts::tui_skills_discover_hint())
+            Paragraph::new(empty_text)
                 .style(Style::default().fg(theme.dim))
+                .alignment(Alignment::Center)
                 .wrap(Wrap { trim: false }),
-            inset_left(chunks[1], CONTENT_INSET_LEFT),
+            inset_left(chunks[2], CONTENT_INSET_LEFT),
         );
         return;
     }
@@ -106,5 +128,49 @@ pub(super) fn render_skills_discover(
 
     let mut state = TableState::default();
     state.select(Some(app.skills_discover_idx));
-    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(table, inset_left(chunks[2], CONTENT_INSET_LEFT), &mut state);
+}
+
+fn render_skills_discover_loading(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
+    let line = Line::styled(texts::tui_loading(), Style::default().fg(theme.comment));
+    let y = area.y + area.height.saturating_sub(1) / 2;
+    let centered = Rect::new(area.x, y, area.width, 1.min(area.height));
+    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), centered);
+}
+
+fn render_skills_discover_source_tabs(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let tabs = [
+        (
+            app::SkillsDiscoverSource::Repos,
+            texts::tui_skills_source_repos(),
+        ),
+        (
+            app::SkillsDiscoverSource::Marketplace,
+            texts::tui_skills_source_marketplace(),
+        ),
+    ];
+    let mut spans = Vec::new();
+    for (source, label) in tabs {
+        let style = if app.skills_discover_source == source {
+            active_chip_style(theme)
+        } else {
+            inactive_chip_style(theme)
+        };
+        spans.push(Span::styled(format!(" {label} "), style));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(
+        texts::tui_skills_source_switch_hint(),
+        Style::default().fg(theme.dim),
+    ));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }),
+        inset_left(area, CONTENT_INSET_LEFT),
+    );
 }

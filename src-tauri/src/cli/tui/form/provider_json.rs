@@ -1,12 +1,15 @@
 use crate::app_config::AppType;
+use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
 use crate::services::ProviderService;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 use super::codex_config::{
     build_codex_provider_config_toml, clean_codex_provider_key, update_codex_config_snippet,
 };
 use super::{
-    ClaudeApiFormat, GeminiAuthType, ProviderAddFormState, OPENCLAW_DEFAULT_API_PROTOCOL,
+    parse_codex_model_catalog_context_window, ClaudeApiFormat, GeminiAuthType,
+    ProviderAddFormState, UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
     OPENCLAW_DEFAULT_USER_AGENT,
 };
 
@@ -50,8 +53,26 @@ impl ProviderAddFormState {
                 let env_obj = env_value
                     .as_object_mut()
                     .expect("env must be a JSON object");
-                set_or_remove_trimmed(env_obj, "ANTHROPIC_AUTH_TOKEN", &self.claude_api_key.value);
-                set_or_remove_trimmed(env_obj, "ANTHROPIC_BASE_URL", &self.claude_base_url.value);
+                if self.is_claude_codex_oauth_provider() {
+                    env_obj.remove("ANTHROPIC_AUTH_TOKEN");
+                    env_obj.remove("ANTHROPIC_API_KEY");
+                    env_obj.insert(
+                        "ANTHROPIC_BASE_URL".to_string(),
+                        json!("https://chatgpt.com/backend-api/codex"),
+                    );
+                } else {
+                    set_or_remove_trimmed(
+                        env_obj,
+                        self.claude_api_key_field.as_env_key(),
+                        &self.claude_api_key.value,
+                    );
+                    env_obj.remove(self.claude_api_key_field.alternate_env_key());
+                    set_or_remove_trimmed(
+                        env_obj,
+                        "ANTHROPIC_BASE_URL",
+                        &self.claude_base_url.value,
+                    );
+                }
                 if self.claude_model_config_touched {
                     set_or_remove_trimmed(env_obj, "ANTHROPIC_MODEL", &self.claude_model.value);
                     set_or_remove_trimmed(
@@ -77,7 +98,19 @@ impl ProviderAddFormState {
                     env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
                 }
                 settings_obj.remove("api_format");
+                settings_obj.remove("apiFormat");
                 settings_obj.remove("openrouter_compat_mode");
+                if self.claude_hide_attribution && self.claude_hide_attribution_touched {
+                    settings_obj.insert(
+                        "attribution".to_string(),
+                        json!({
+                            "commit": "",
+                            "pr": ""
+                        }),
+                    );
+                } else if self.claude_hide_attribution_touched {
+                    settings_obj.remove("attribution");
+                }
             }
             AppType::Codex => {
                 if self.is_codex_official_provider() {
@@ -97,11 +130,15 @@ impl ProviderAddFormState {
                     if !auth_value.is_object() {
                         *auth_value = json!({});
                     }
+                    settings_obj.remove("modelCatalog");
                 } else {
                     let provider_key =
                         clean_codex_provider_key(self.id.value.trim(), self.name.value.trim());
                     let base_url = self.codex_base_url.value.trim().trim_end_matches('/');
-                    let model = if self.codex_model.is_blank() {
+                    let model_catalog = self.normalized_codex_model_catalog_for_save();
+                    let model = if self.codex_local_routing_enabled() && !model_catalog.is_empty() {
+                        model_catalog[0]["model"].as_str().unwrap_or("gpt-5.4")
+                    } else if self.codex_model.is_blank() {
                         "gpt-5.4"
                     } else {
                         self.codex_model.value.trim()
@@ -130,6 +167,14 @@ impl ProviderAddFormState {
                         self.codex_env_key.value.trim(),
                     );
                     settings_obj.insert("config".to_string(), Value::String(config_toml));
+                    if self.codex_local_routing_enabled() && !model_catalog.is_empty() {
+                        settings_obj.insert(
+                            "modelCatalog".to_string(),
+                            json!({ "models": model_catalog }),
+                        );
+                    } else {
+                        settings_obj.remove("modelCatalog");
+                    }
 
                     let api_key = self.codex_api_key.value.trim();
                     if api_key.is_empty() {
@@ -276,6 +321,37 @@ impl ProviderAddFormState {
                     settings_obj.insert("models".to_string(), models_value);
                 }
             }
+            AppType::Hermes => {
+                for legacy_key in ["api", "apiKey", "apiMode", "baseUrl", "baseURL", "endpoint"] {
+                    settings_obj.remove(legacy_key);
+                }
+
+                settings_obj.insert("api_mode".to_string(), json!(self.hermes_api_mode_value()));
+
+                let base_url = self
+                    .hermes_base_url
+                    .value
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_string();
+                set_or_remove_trimmed(settings_obj, "base_url", &base_url);
+                set_or_remove_trimmed(settings_obj, "api_key", &self.hermes_api_key.value);
+
+                if self.hermes_models.is_empty() {
+                    settings_obj.remove("models");
+                } else {
+                    settings_obj.insert(
+                        "models".to_string(),
+                        Value::Array(self.hermes_models.clone()),
+                    );
+                }
+
+                set_or_remove_f64(
+                    settings_obj,
+                    "rate_limit_delay",
+                    &self.hermes_rate_limit_delay.value,
+                );
+            }
             AppType::OpenClaw => {
                 settings_obj.remove("npm");
                 settings_obj.remove("options");
@@ -402,7 +478,7 @@ impl ProviderAddFormState {
         if snippet.is_empty() {
             return Ok(provider_value);
         }
-        if matches!(self.app_type, AppType::OpenCode | AppType::OpenClaw) {
+        if !ProviderAddFormState::supports_common_config(&self.app_type) {
             return Ok(provider_value);
         }
 
@@ -430,12 +506,25 @@ impl ProviderAddFormState {
         let should_write_common_config_meta = self.should_write_common_config_meta();
         let should_write_claude_api_format = matches!(
             self.claude_api_format,
-            ClaudeApiFormat::OpenAiChat | ClaudeApiFormat::OpenAiResponses
+            ClaudeApiFormat::OpenAiChat
+                | ClaudeApiFormat::OpenAiResponses
+                | ClaudeApiFormat::GeminiNative
         ) && matches!(self.app_type, AppType::Claude)
             && !self.is_claude_official_provider();
+        let should_write_codex_api_format =
+            matches!(self.app_type, AppType::Codex) && !self.is_codex_official_provider();
+        let should_write_claude_api_key_field = matches!(self.app_type, AppType::Claude)
+            && !self.is_claude_official_provider()
+            && !self.is_claude_codex_oauth_provider()
+            && self.claude_api_key_field == ClaudeApiKeyField::ApiKey;
+        let is_codex_oauth = self.is_claude_codex_oauth_provider();
 
         if !should_write_common_config_meta
             && !should_write_claude_api_format
+            && !should_write_codex_api_format
+            && !should_write_claude_api_key_field
+            && !is_codex_oauth
+            && !self.has_usage_script_meta()
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
             return;
@@ -456,11 +545,7 @@ impl ProviderAddFormState {
         if should_write_common_config_meta {
             meta_obj.insert(
                 "commonConfigEnabled".to_string(),
-                json!(if matches!(self.app_type, AppType::OpenClaw) {
-                    false
-                } else {
-                    self.include_common_config
-                }),
+                json!(self.include_common_config),
             );
         } else {
             meta_obj.remove("commonConfigEnabled");
@@ -468,8 +553,11 @@ impl ProviderAddFormState {
 
         if matches!(self.app_type, AppType::Claude) {
             match self.claude_api_format {
-                _ if self.is_claude_official_provider() => {
+                _ if self.is_claude_official_provider() && !is_codex_oauth => {
                     meta_obj.remove("apiFormat");
+                }
+                ClaudeApiFormat::Anthropic if is_codex_oauth => {
+                    meta_obj.insert("apiFormat".to_string(), json!("openai_responses"));
                 }
                 ClaudeApiFormat::Anthropic => {
                     meta_obj.remove("apiFormat");
@@ -480,12 +568,142 @@ impl ProviderAddFormState {
                 ClaudeApiFormat::OpenAiResponses => {
                     meta_obj.insert("apiFormat".to_string(), json!("openai_responses"));
                 }
+                ClaudeApiFormat::GeminiNative => {
+                    meta_obj.insert("apiFormat".to_string(), json!("gemini_native"));
+                }
+            }
+
+            if should_write_claude_api_key_field {
+                meta_obj.insert(
+                    "apiKeyField".to_string(),
+                    json!(self.claude_api_key_field.as_env_key()),
+                );
+            } else {
+                meta_obj.remove("apiKeyField");
             }
         }
+
+        if matches!(self.app_type, AppType::Codex) {
+            if self.is_codex_official_provider() {
+                meta_obj.remove("apiFormat");
+                meta_obj.remove("codexChatReasoning");
+            } else {
+                let api_format = match self.claude_api_format {
+                    ClaudeApiFormat::OpenAiChat => "openai_chat",
+                    _ => "openai_responses",
+                };
+                meta_obj.insert("apiFormat".to_string(), json!(api_format));
+                if self.codex_local_routing_enabled() {
+                    if let Some(reasoning) =
+                        normalize_codex_chat_reasoning_for_save(&self.codex_chat_reasoning)
+                    {
+                        meta_obj.insert("codexChatReasoning".to_string(), reasoning);
+                    } else {
+                        meta_obj.remove("codexChatReasoning");
+                    }
+                } else {
+                    meta_obj.remove("codexChatReasoning");
+                }
+            }
+        }
+
+        if is_codex_oauth {
+            meta_obj.insert("providerType".to_string(), json!("codex_oauth"));
+            meta_obj.insert(
+                "authBinding".to_string(),
+                json!({
+                    "source": "managed_account",
+                    "authProvider": "codex_oauth",
+                    "accountId": self.codex_oauth_account_id.as_deref(),
+                }),
+            );
+            if self.codex_oauth_account_id.is_none() {
+                if let Some(auth_binding) = meta_obj
+                    .get_mut("authBinding")
+                    .and_then(|value| value.as_object_mut())
+                {
+                    auth_binding.remove("accountId");
+                }
+            }
+            meta_obj.insert("codexFastMode".to_string(), json!(self.codex_fast_mode));
+        } else {
+            if meta_obj
+                .get("providerType")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "codex_oauth")
+            {
+                meta_obj.remove("providerType");
+            }
+            if meta_obj
+                .get("authBinding")
+                .and_then(|value| value.get("authProvider"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "codex_oauth")
+            {
+                meta_obj.remove("authBinding");
+            }
+            meta_obj.remove("codexFastMode");
+        }
+
+        self.update_usage_script_meta(meta_obj);
 
         if meta_obj.is_empty() {
             provider_obj.remove("meta");
         }
+    }
+
+    fn update_usage_script_meta(&self, meta_obj: &mut serde_json::Map<String, Value>) {
+        if !self.has_usage_script_meta() && !self.usage_query_enabled && !self.usage_query_touched {
+            meta_obj.remove("usage_script");
+            return;
+        }
+
+        let mut script = serde_json::Map::new();
+        script.insert("enabled".to_string(), json!(self.usage_query_enabled));
+        script.insert("language".to_string(), json!("javascript"));
+        script.insert("code".to_string(), json!(self.usage_query_code.as_str()));
+        script.insert(
+            "timeout".to_string(),
+            json!(normalize_usage_timeout(&self.usage_query_timeout.value)),
+        );
+        script.insert(
+            "templateType".to_string(),
+            json!(self.usage_query_template.as_str()),
+        );
+        script.insert(
+            "autoQueryInterval".to_string(),
+            json!(normalize_usage_interval(
+                &self.usage_query_auto_interval.value
+            )),
+        );
+
+        match self.usage_query_template {
+            UsageQueryTemplate::General => {
+                set_or_remove_trimmed(&mut script, "apiKey", &self.usage_query_api_key.value);
+                set_or_remove_trimmed(&mut script, "baseUrl", &self.usage_query_base_url.value);
+            }
+            UsageQueryTemplate::NewApi => {
+                set_or_remove_trimmed(&mut script, "baseUrl", &self.usage_query_base_url.value);
+                set_or_remove_trimmed(
+                    &mut script,
+                    "accessToken",
+                    &self.usage_query_access_token.value,
+                );
+                set_or_remove_trimmed(&mut script, "userId", &self.usage_query_user_id.value);
+            }
+            UsageQueryTemplate::TokenPlan => {
+                set_or_remove_trimmed(
+                    &mut script,
+                    "codingPlanProvider",
+                    &self.usage_query_coding_plan_provider.value,
+                );
+            }
+            UsageQueryTemplate::Custom
+            | UsageQueryTemplate::GitHubCopilot
+            | UsageQueryTemplate::Balance => {}
+        }
+
+        meta_obj.insert("usage_script".to_string(), Value::Object(script));
     }
 
     pub(crate) fn should_strip_common_config_from_applied_settings_json(&self) -> bool {
@@ -493,10 +711,10 @@ impl ProviderAddFormState {
     }
 
     fn should_write_common_config_meta(&self) -> bool {
-        matches!(self.app_type, AppType::OpenClaw)
-            || !self.mode.is_edit()
-            || self.include_common_config_touched
-            || self.has_common_config_meta()
+        ProviderAddFormState::supports_common_config(&self.app_type)
+            && (!self.mode.is_edit()
+                || self.include_common_config_touched
+                || self.has_common_config_meta())
     }
 
     fn has_common_config_meta(&self) -> bool {
@@ -507,6 +725,125 @@ impl ProviderAddFormState {
                 meta.contains_key("commonConfigEnabled") || meta.contains_key("applyCommonConfig")
             })
     }
+
+    pub(super) fn has_usage_script_meta(&self) -> bool {
+        self.extra
+            .get("meta")
+            .and_then(Value::as_object)
+            .is_some_and(|meta| meta.contains_key("usage_script"))
+    }
+
+    fn normalized_codex_model_catalog_for_save(&self) -> Vec<Value> {
+        let mut seen = HashSet::new();
+        let mut models = Vec::new();
+
+        for row in &self.codex_model_catalog {
+            let model = row.model.trim();
+            if model.is_empty() || !seen.insert(model.to_string()) {
+                continue;
+            }
+
+            let mut obj = serde_json::Map::new();
+            obj.insert("model".to_string(), json!(model));
+
+            let display_name = row.display_name.trim();
+            if !display_name.is_empty() {
+                obj.insert("displayName".to_string(), json!(display_name));
+            }
+
+            if let Some(context_window) =
+                parse_codex_model_catalog_context_window(row.context_window.trim())
+            {
+                if context_window > 0 {
+                    obj.insert("contextWindow".to_string(), json!(context_window));
+                }
+            }
+
+            models.push(Value::Object(obj));
+        }
+
+        models
+    }
+}
+
+fn normalize_codex_chat_reasoning_for_save(value: &CodexChatReasoningConfig) -> Option<Value> {
+    let raw = serde_json::to_value(value).ok()?;
+    let has_explicit_config = raw.as_object().is_some_and(|obj| !obj.is_empty());
+    let supports_effort = value.supports_effort == Some(true);
+    let supports_thinking = value.supports_thinking == Some(true) || supports_effort;
+
+    if !supports_thinking && !supports_effort {
+        return has_explicit_config.then(|| {
+            json!({
+                "supportsThinking": false,
+                "supportsEffort": false,
+                "thinkingParam": "none",
+                "effortParam": "none",
+                "outputFormat": value.output_format.as_deref().unwrap_or("auto"),
+            })
+        });
+    }
+
+    let mut obj = serde_json::Map::new();
+    obj.insert("supportsThinking".to_string(), json!(supports_thinking));
+    obj.insert("supportsEffort".to_string(), json!(supports_effort));
+    obj.insert(
+        "thinkingParam".to_string(),
+        json!(if supports_thinking {
+            value.thinking_param.as_deref().unwrap_or("thinking")
+        } else {
+            "none"
+        }),
+    );
+    obj.insert(
+        "effortParam".to_string(),
+        json!(if supports_effort {
+            value.effort_param.as_deref().unwrap_or("reasoning_effort")
+        } else {
+            "none"
+        }),
+    );
+    if supports_effort {
+        obj.insert(
+            "effortValueMode".to_string(),
+            json!(value.effort_value_mode.as_deref().unwrap_or("passthrough")),
+        );
+    }
+    obj.insert(
+        "outputFormat".to_string(),
+        json!(value.output_format.as_deref().unwrap_or("auto")),
+    );
+
+    Some(Value::Object(obj))
+}
+
+pub(crate) fn normalize_usage_timeout(raw: &str) -> u64 {
+    normalize_usage_number(raw, 10, None)
+}
+
+pub(crate) fn normalize_usage_interval(raw: &str) -> u64 {
+    normalize_usage_number(raw, 0, Some(1440))
+}
+
+fn normalize_usage_number(raw: &str, fallback: u64, max: Option<u64>) -> u64 {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return fallback;
+    }
+
+    let Ok(value) = trimmed.parse::<f64>() else {
+        return fallback;
+    };
+    if !value.is_finite() || value < 0.0 {
+        return fallback;
+    }
+
+    let floored = value.floor();
+    let capped = max
+        .map(|max| floored.min(max as f64))
+        .unwrap_or(floored)
+        .max(0.0);
+    capped as u64
 }
 
 fn openclaw_model_index(models: &[Value], model_id: &str) -> Option<usize> {
@@ -556,7 +893,7 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::OpenCode | AppType::OpenClaw => {}
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,
@@ -568,6 +905,18 @@ pub(crate) fn strip_common_config_from_settings(
     }
 
     Ok(())
+}
+
+pub(crate) fn claude_hide_attribution_enabled(settings_config: &Value) -> bool {
+    let Some(attribution) = settings_config
+        .get("attribution")
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+
+    attribution.get("commit").and_then(Value::as_str) == Some("")
+        && attribution.get("pr").and_then(Value::as_str) == Some("")
 }
 
 pub(crate) fn should_hide_provider_field(key: &str) -> bool {
@@ -628,6 +977,21 @@ fn set_or_remove_u64(obj: &mut serde_json::Map<String, Value>, key: &str, raw: &
         obj.remove(key);
     } else if let Ok(value) = trimmed.parse::<u64>() {
         obj.insert(key.to_string(), json!(value));
+    } else {
+        obj.remove(key);
+    }
+}
+
+fn set_or_remove_f64(obj: &mut serde_json::Map<String, Value>, key: &str, raw: &str) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        obj.remove(key);
+    } else if let Ok(value) = trimmed.parse::<f64>() {
+        if value.is_finite() && value >= 0.0 {
+            obj.insert(key.to_string(), json!(value));
+        } else {
+            obj.remove(key);
+        }
     } else {
         obj.remove(key);
     }

@@ -1,4 +1,4 @@
-use cc_switch_lib::{AppType, Database, SkillService};
+use cc_switch_lib::{AppType, Database, ImportSkillSelection, SkillApps, SkillService};
 
 #[path = "support.rs"]
 mod support;
@@ -89,7 +89,7 @@ fn import_from_apps_imports_agents_skill_with_lock_metadata() {
     )
     .expect("write agents lock file");
 
-    let imported = SkillService::import_from_apps(vec!["hello-skill".to_string()])
+    let imported = SkillService::import_from_app_dirs(vec!["hello-skill".to_string()])
         .expect("import agents skill");
 
     assert_eq!(imported.len(), 1, "agents skill should be imported");
@@ -164,7 +164,7 @@ fn toggle_app_openclaw_skips_live_skill_side_effects() {
     write_skill_md(&claude_skill_dir, "Hello Skill", "A test skill");
 
     let imported =
-        SkillService::import_from_apps(vec!["hello-skill".to_string()]).expect("import skill");
+        SkillService::import_from_app_dirs(vec!["hello-skill".to_string()]).expect("import skill");
     assert_eq!(
         imported.len(),
         1,
@@ -195,7 +195,7 @@ fn toggle_app_openclaw_skips_live_skill_side_effects() {
 }
 
 #[test]
-fn scan_unmanaged_ignores_openclaw_skill_directory() {
+fn scan_unmanaged_includes_openclaw_skill_source() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -203,20 +203,55 @@ fn scan_unmanaged_ignores_openclaw_skill_directory() {
     write_skill_md(
         &home.join(".openclaw").join("skills").join("openclaw-skill"),
         "OpenClaw Skill",
-        "Should be ignored",
+        "OpenClaw source",
     );
 
     let unmanaged = SkillService::scan_unmanaged().expect("scan unmanaged skills");
+    let skill = unmanaged
+        .iter()
+        .find(|skill| skill.directory == "openclaw-skill")
+        .expect("scan_unmanaged should include ~/.openclaw/skills as an import source");
+    assert_eq!(skill.name, "OpenClaw Skill");
+    assert!(skill
+        .found_in
+        .iter()
+        .any(|source| source == AppType::OpenClaw.as_str()));
+}
+
+#[test]
+fn import_from_app_dirs_imports_openclaw_source_without_openclaw_target() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    write_skill_md(
+        &home.join(".openclaw").join("skills").join("openclaw-skill"),
+        "OpenClaw Skill",
+        "OpenClaw source",
+    );
+
+    let imported = SkillService::import_from_app_dirs(vec!["openclaw-skill".to_string()])
+        .expect("import should not fail");
+    assert_eq!(
+        imported.len(),
+        1,
+        "OpenClaw source skill should be imported"
+    );
     assert!(
-        unmanaged
-            .iter()
-            .all(|skill| skill.directory != "openclaw-skill"),
-        "scan_unmanaged should ignore ~/.openclaw/skills"
+        imported[0].apps.is_empty(),
+        "OpenClaw is not a supported skill target app"
+    );
+    assert!(
+        home.join(".cc-switch")
+            .join("skills")
+            .join("openclaw-skill")
+            .exists(),
+        "OpenClaw source skill should be copied into SSOT"
     );
 }
 
 #[test]
-fn import_from_apps_ignores_openclaw_skill_directory() {
+fn import_from_apps_applies_explicit_target_apps_for_openclaw_source() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -224,22 +259,27 @@ fn import_from_apps_ignores_openclaw_skill_directory() {
     write_skill_md(
         &home.join(".openclaw").join("skills").join("openclaw-skill"),
         "OpenClaw Skill",
-        "Should be ignored",
+        "OpenClaw source",
     );
 
-    let imported = SkillService::import_from_apps(vec!["openclaw-skill".to_string()])
-        .expect("import should not fail");
-    assert!(
-        imported.is_empty(),
-        "import_from_apps should not import OpenClaw skill directories"
+    let imported = SkillService::import_from_apps(vec![ImportSkillSelection {
+        directory: "openclaw-skill".to_string(),
+        apps: SkillApps::only(&AppType::Claude),
+    }])
+    .expect("import should not fail");
+
+    assert_eq!(
+        imported.len(),
+        1,
+        "OpenClaw source skill should be imported"
     );
     assert!(
-        !home
-            .join(".cc-switch")
-            .join("skills")
-            .join("openclaw-skill")
-            .exists(),
-        "OpenClaw-only skills should not be copied into SSOT"
+        imported[0].apps.claude,
+        "explicit Claude target should be preserved"
+    );
+    assert!(
+        !imported[0].apps.is_enabled_for(&AppType::OpenClaw),
+        "OpenClaw should never be persisted as a target app"
     );
 }
 
@@ -263,7 +303,7 @@ fn pending_migration_with_existing_managed_list_does_not_claim_unmanaged_skills(
     );
 
     // Seed the DB with a managed list containing only "managed-skill".
-    SkillService::import_from_apps(vec!["managed-skill".to_string()])
+    SkillService::import_from_app_dirs(vec!["managed-skill".to_string()])
         .expect("import managed-skill from apps");
 
     // Remove SSOT copy to ensure pending migration performs a best-effort re-copy.

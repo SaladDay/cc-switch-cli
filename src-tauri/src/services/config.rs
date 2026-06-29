@@ -5,7 +5,6 @@ use crate::error::AppError;
 use crate::provider::Provider;
 use crate::store::AppState;
 use chrono::Utc;
-use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -59,11 +58,13 @@ impl ConfigService {
             .ok_or_else(|| AppError::Config("Invalid config path".into()))?
             .join("backups");
 
-        fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+        crate::database::create_secure_dir_all(&backup_dir)?;
 
         let backup_path = backup_dir.join(format!("{backup_id}.sql"));
         let db = Database::init()?;
         db.export_sql(&backup_path)?;
+        crate::config::restrict_file_permissions(&backup_path)
+            .map_err(|e| AppError::io(&backup_path, e))?;
 
         Self::cleanup_old_backups(&backup_dir, MAX_BACKUPS)?;
 
@@ -252,6 +253,7 @@ impl ConfigService {
         Self::sync_current_provider_for_app(config, &AppType::Codex)?;
         Self::sync_current_provider_for_app(config, &AppType::Gemini)?;
         Self::sync_current_provider_for_app(config, &AppType::OpenCode)?;
+        Self::sync_current_provider_for_app(config, &AppType::Hermes)?;
         Self::sync_current_provider_for_app(config, &AppType::OpenClaw)?;
         Ok(())
     }
@@ -288,6 +290,7 @@ impl ConfigService {
             AppType::Claude => Self::sync_claude_live(config, &current_id, &provider)?,
             AppType::Gemini => Self::sync_gemini_live(config, &current_id, &provider)?,
             AppType::OpenCode => {}
+            AppType::Hermes => {}
             AppType::OpenClaw => {}
         }
 
@@ -300,41 +303,50 @@ impl ConfigService {
         provider: &Provider,
     ) -> Result<(), AppError> {
         let common_config_snippet = config.common_config_snippets.codex.clone();
-        let effective = ProviderService::build_effective_live_snapshot(
+        let apply_common_config = ProviderService::provider_uses_common_config_for_app(
             &AppType::Codex,
             provider,
             common_config_snippet.as_deref(),
-            true,
+        );
+        ProviderService::write_codex_live_force(
+            provider,
+            common_config_snippet.as_deref(),
+            apply_common_config,
         )?;
-        let settings = effective.as_object().ok_or_else(|| {
-            AppError::Config(format!("供应商 {provider_id} 的 Codex 配置必须是对象"))
-        })?;
-        let auth = settings.get("auth").ok_or_else(|| {
-            AppError::Config(format!("供应商 {provider_id} 的 Codex 配置缺少 auth 字段"))
-        })?;
-        if !auth.is_object() {
-            return Err(AppError::Config(format!(
-                "供应商 {provider_id} 的 Codex auth 配置必须是 JSON 对象"
-            )));
-        }
-        let cfg_text = settings.get("config").and_then(Value::as_str);
-
-        crate::codex_config::write_codex_live_atomic(auth, cfg_text)?;
         crate::mcp::sync_enabled_to_codex(config)?;
 
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        let auth_after = if auth_path.exists() {
+            crate::config::read_json_file(&auth_path)?
+        } else {
+            serde_json::json!({})
+        };
         let cfg_text_after = crate::codex_config::read_and_validate_codex_config_text()?;
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
-                let mut raw_settings = serde_json::Map::new();
-                raw_settings.insert("auth".to_string(), auth.clone());
-                raw_settings.insert(
-                    "config".to_string(),
-                    serde_json::Value::String(cfg_text_after),
-                );
+                let mut restored = serde_json::json!({
+                    "auth": auth_after,
+                    "config": cfg_text_after,
+                });
+                let restore_provider_token =
+                    crate::codex_config::should_restore_codex_provider_token_for_backfill(
+                        ProviderService::codex_live_write_category(provider),
+                        &provider.settings_config,
+                    );
+                crate::codex_config::restore_codex_settings_for_backfill(
+                    &mut restored,
+                    &provider.settings_config,
+                    restore_provider_token,
+                )?;
+                if ProviderService::codex_live_write_category(provider) == Some("official") {
+                    crate::codex_config::strip_codex_unified_session_bucket_from_settings(
+                        &mut restored,
+                    )?;
+                }
                 target.settings_config = ProviderService::normalize_settings_config_for_storage(
                     &AppType::Codex,
                     provider,
-                    serde_json::Value::Object(raw_settings),
+                    restored,
                     common_config_snippet.as_deref(),
                 )?;
             }
@@ -348,24 +360,20 @@ impl ConfigService {
         provider_id: &str,
         provider: &Provider,
     ) -> Result<(), AppError> {
-        use crate::config::{read_json_file, write_json_file};
-
-        let settings_path = crate::config::get_claude_settings_path();
-        if let Some(parent) = settings_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-        }
-
         let common_config_snippet = config.common_config_snippets.claude.clone();
-        let effective = ProviderService::build_effective_live_snapshot(
+        let apply_common_config = ProviderService::provider_uses_common_config_for_app(
             &AppType::Claude,
             provider,
             common_config_snippet.as_deref(),
-            true,
+        );
+        ProviderService::write_claude_live_force(
+            provider,
+            common_config_snippet.as_deref(),
+            apply_common_config,
         )?;
 
-        write_json_file(&settings_path, &effective)?;
-
-        let live_after = read_json_file::<serde_json::Value>(&settings_path)?;
+        let settings_path = crate::config::get_claude_settings_path();
+        let live_after = crate::config::read_json_file::<serde_json::Value>(&settings_path)?;
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
             if let Some(target) = manager.providers.get_mut(provider_id) {
                 target.settings_config = ProviderService::normalize_settings_config_for_storage(
@@ -388,7 +396,16 @@ impl ConfigService {
         use crate::gemini_config::{env_to_json, read_gemini_env};
 
         let common_config_snippet = config.common_config_snippets.gemini.clone();
-        ProviderService::write_gemini_live_force(provider, common_config_snippet.as_deref())?;
+        let common_config_snippet_to_apply = if ProviderService::provider_uses_common_config_for_app(
+            &AppType::Gemini,
+            provider,
+            common_config_snippet.as_deref(),
+        ) {
+            common_config_snippet.as_deref()
+        } else {
+            None
+        };
+        ProviderService::write_gemini_live_force(provider, common_config_snippet_to_apply)?;
 
         // 读回实际写入的内容并更新到配置中（包含 settings.json）
         let live_after_env = read_gemini_env()?;
