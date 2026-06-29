@@ -1,9 +1,12 @@
 use crate::app_config::AppType;
 use crate::cli::ui::{create_table, error, highlight, info, success};
+use crate::database::Database;
 use crate::error::AppError;
 use crate::services::env_checker;
 use crate::services::local_env_check::{check_local_environment, ToolCheckStatus};
 use clap::Subcommand;
+use serde_json::Value;
+use std::path::Path;
 
 #[derive(Subcommand)]
 pub enum EnvCommand {
@@ -43,57 +46,277 @@ fn check_conflicts(app_type: AppType) -> Result<(), AppError> {
             "\n{}",
             success("✓ No environment variable conflicts detected")
         );
+    } else {
+        // 显示冲突
         println!(
-            "{}",
-            info(&format!(
-                "Your {} configuration should work correctly.",
-                app_str
+            "\n{}",
+            error(&format!(
+                "⚠ Found {} environment variable(s) that may conflict:",
+                conflicts.len()
             ))
         );
-        return Ok(());
+        println!();
+
+        let mut table = create_table();
+        table.set_header(vec!["Variable", "Value", "Source Type", "Source Location"]);
+
+        for conflict in &conflicts {
+            let value_display = truncate_value(&conflict.var_value, 30);
+
+            table.add_row(vec![
+                conflict.var_name.as_str(),
+                &value_display,
+                conflict.source_type.as_str(),
+                conflict.source_path.as_str(),
+            ]);
+        }
+
+        println!("{}", table);
+        println!();
+        println!(
+            "{}",
+            info("These environment variables may override CC-Switch's configuration.")
+        );
+        println!(
+            "{}",
+            info("Please manually remove them from your shell config files or system settings.")
+        );
     }
 
-    // 显示冲突
-    println!(
-        "\n{}",
-        error(&format!(
-            "⚠ Found {} environment variable(s) that may conflict:",
-            conflicts.len()
-        ))
-    );
-    println!();
-
-    let mut table = create_table();
-    table.set_header(vec!["Variable", "Value", "Source Type", "Source Location"]);
-
-    for conflict in &conflicts {
-        // 截断过长的值
-        let value_display = if conflict.var_value.len() > 30 {
-            format!("{}...", &conflict.var_value[..27])
-        } else {
-            conflict.var_value.clone()
-        };
-
-        table.add_row(vec![
-            conflict.var_name.as_str(),
-            &value_display,
-            conflict.source_type.as_str(),
-            conflict.source_path.as_str(),
-        ]);
-    }
-
-    println!("{}", table);
-    println!();
-    println!(
-        "{}",
-        info("These environment variables may override CC-Switch's configuration.")
-    );
-    println!(
-        "{}",
-        info("Please manually remove them from your shell config files or system settings.")
-    );
+    run_app_doctor(&app_type)?;
 
     Ok(())
+}
+
+fn run_app_doctor(app_type: &AppType) -> Result<(), AppError> {
+    println!("\n{}", highlight("Configuration Doctor"));
+    println!("{}", "─".repeat(60));
+
+    match app_type {
+        AppType::Claude => check_claude_doctor(),
+        AppType::Codex => check_codex_doctor(),
+        AppType::Gemini => check_gemini_doctor(),
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+            println!(
+                "{}",
+                info(&format!(
+                    "No app-specific doctor checks are implemented for {} yet.",
+                    app_type.as_str()
+                ))
+            );
+            Ok(())
+        }
+    }
+}
+
+fn check_claude_doctor() -> Result<(), AppError> {
+    let db = Database::open_readonly_current_schema()?;
+    let current = crate::settings::get_effective_current_provider(&db, &AppType::Claude)?;
+    let live_path = crate::config::get_claude_settings_path();
+    let mcp_path = crate::config::get_claude_mcp_path();
+
+    let mut rows = Vec::new();
+    rows.push(check_file_exists("Claude settings.json", &live_path));
+    rows.push(check_claude_onboarding(&mcp_path));
+
+    match current {
+        Some(provider_id) => {
+            rows.push(ok_row("Current provider", provider_id.clone()));
+            match db.get_provider_by_id(&provider_id, AppType::Claude.as_str())? {
+                Some(provider) => {
+                    rows.extend(check_claude_provider_settings(&provider.settings_config));
+                }
+                None => rows.push(warn_row(
+                    "Provider record",
+                    format!("current provider '{provider_id}' is missing from database"),
+                )),
+            }
+        }
+        None => rows.push(warn_row(
+            "Current provider",
+            "no current Claude provider selected".to_string(),
+        )),
+    }
+
+    print_doctor_rows(rows);
+    Ok(())
+}
+
+fn check_codex_doctor() -> Result<(), AppError> {
+    let db = Database::open_readonly_current_schema()?;
+    let current = crate::settings::get_effective_current_provider(&db, &AppType::Codex)?;
+    let auth_path = crate::codex_config::get_codex_auth_path();
+    let config_path = crate::codex_config::get_codex_config_path();
+
+    let mut rows = vec![
+        check_file_exists("Codex auth.json", &auth_path),
+        check_file_exists("Codex config.toml", &config_path),
+    ];
+
+    match current {
+        Some(provider_id) => rows.push(ok_row("Current provider", provider_id)),
+        None => rows.push(warn_row(
+            "Current provider",
+            "no current Codex provider selected".to_string(),
+        )),
+    }
+
+    print_doctor_rows(rows);
+    Ok(())
+}
+
+fn check_gemini_doctor() -> Result<(), AppError> {
+    let db = Database::open_readonly_current_schema()?;
+    let current = crate::settings::get_effective_current_provider(&db, &AppType::Gemini)?;
+    let env_path = crate::gemini_config::get_gemini_env_path();
+    let settings_path = crate::gemini_config::get_gemini_settings_path();
+
+    let mut rows = vec![
+        check_file_exists("Gemini .env", &env_path),
+        check_file_exists("Gemini settings.json", &settings_path),
+    ];
+
+    match current {
+        Some(provider_id) => rows.push(ok_row("Current provider", provider_id)),
+        None => rows.push(warn_row(
+            "Current provider",
+            "no current Gemini provider selected".to_string(),
+        )),
+    }
+
+    print_doctor_rows(rows);
+    Ok(())
+}
+
+fn check_file_exists(label: &'static str, path: &Path) -> DoctorRow {
+    if path.exists() {
+        ok_row(label, path.display().to_string())
+    } else {
+        warn_row(label, format!("missing: {}", path.display()))
+    }
+}
+
+fn check_claude_onboarding(path: &Path) -> DoctorRow {
+    if !path.exists() {
+        return warn_row(
+            "Claude onboarding",
+            format!("{} is missing; first-run prompt may appear", path.display()),
+        );
+    }
+
+    match crate::config::read_json_file::<Value>(path) {
+        Ok(value) if value.get("hasCompletedOnboarding").and_then(Value::as_bool) == Some(true) => {
+            ok_row(
+                "Claude onboarding",
+                "hasCompletedOnboarding=true".to_string(),
+            )
+        }
+        Ok(_) => warn_row(
+            "Claude onboarding",
+            "hasCompletedOnboarding is not true; first-run prompt may appear".to_string(),
+        ),
+        Err(error) => warn_row(
+            "Claude onboarding",
+            format!("cannot read {}: {error}", path.display()),
+        ),
+    }
+}
+
+fn check_claude_provider_settings(settings: &Value) -> Vec<DoctorRow> {
+    let mut rows = Vec::new();
+    let env = settings.get("env").and_then(Value::as_object);
+    let auth_token = env
+        .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let api_key = env
+        .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let base_url = env
+        .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    if auth_token.trim().is_empty() && api_key.trim().is_empty() {
+        rows.push(warn_row(
+            "Claude auth env",
+            "ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY are empty; Claude may ask to login".to_string(),
+        ));
+    } else if auth_token.trim().is_empty()
+        && env.is_some_and(|env| env.contains_key("ANTHROPIC_AUTH_TOKEN"))
+    {
+        rows.push(warn_row(
+            "Claude auth env",
+            "ANTHROPIC_AUTH_TOKEN is present but empty; remove it or set a token".to_string(),
+        ));
+    } else {
+        rows.push(ok_row(
+            "Claude auth env",
+            "token/key is configured".to_string(),
+        ));
+    }
+
+    if base_url.trim().is_empty() {
+        rows.push(warn_row(
+            "Claude base URL",
+            "ANTHROPIC_BASE_URL is empty; official Claude endpoint/auth will be used".to_string(),
+        ));
+    } else if is_probably_url(base_url) {
+        rows.push(ok_row("Claude base URL", base_url.to_string()));
+    } else {
+        rows.push(warn_row(
+            "Claude base URL",
+            format!("ANTHROPIC_BASE_URL does not look like a URL: {base_url}"),
+        ));
+    }
+
+    rows
+}
+
+#[derive(Debug)]
+struct DoctorRow {
+    status: &'static str,
+    check: &'static str,
+    detail: String,
+}
+
+fn ok_row(check: &'static str, detail: String) -> DoctorRow {
+    DoctorRow {
+        status: "ok",
+        check,
+        detail,
+    }
+}
+
+fn warn_row(check: &'static str, detail: String) -> DoctorRow {
+    DoctorRow {
+        status: "warn",
+        check,
+        detail,
+    }
+}
+
+fn print_doctor_rows(rows: Vec<DoctorRow>) {
+    let mut table = create_table();
+    table.set_header(vec!["Status", "Check", "Detail"]);
+    for row in rows {
+        table.add_row(vec![row.status, row.check, row.detail.as_str()]);
+    }
+    println!("{}", table);
+}
+
+fn is_probably_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn truncate_value(value: &str, max_len: usize) -> String {
+    if value.chars().count() > max_len {
+        let prefix: String = value.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{prefix}...")
+    } else {
+        value.to_string()
+    }
 }
 
 fn list_env_vars(app_type: AppType) -> Result<(), AppError> {
@@ -180,5 +403,10 @@ mod tests {
         let summary = tool_status_summary(&ToolCheckStatus::NotInstalledOrNotExecutable);
 
         assert_eq!(summary, "not installed");
+    }
+
+    #[test]
+    fn truncate_value_handles_multibyte_text() {
+        assert_eq!(super::truncate_value("中文中文中文", 5), "中文...");
     }
 }
