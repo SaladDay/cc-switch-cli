@@ -9,6 +9,9 @@ fn main() {
 
     init_logger_if_needed(&cli);
 
+    // Best-effort cleanup of orphaned temp credential files from previous sessions
+    let _ = cc_switch_lib::cli::orphan_scan::scan_and_clean(&std::env::temp_dir());
+
     // 执行命令
     if let Err(e) = run(cli) {
         eprintln!("Error: {}", e);
@@ -76,7 +79,7 @@ fn run(cli: Cli) -> Result<(), AppError> {
             cc_switch_lib::cli::commands::sessions::execute(cmd, cli.app)
         }
         Some(Commands::Hermes(cmd)) => cc_switch_lib::cli::commands::hermes::execute(cmd),
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         Some(Commands::Start(cmd)) => cc_switch_lib::cli::commands::start::execute(cmd),
         #[cfg(unix)]
         Some(Commands::Daemon(cmd)) => cc_switch_lib::cli::commands::daemon::execute(cmd),

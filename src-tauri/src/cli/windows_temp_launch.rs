@@ -1,0 +1,1192 @@
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::path::{Path, PathBuf};
+
+use crate::error::AppError;
+
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, FALSE, HANDLE, INVALID_HANDLE_VALUE, TRUE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    CreateProcessW, GetExitCodeProcess, WaitForSingleObject,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
+};
+
+// ── cmd shim detection ───────────────────────────────────────────────
+
+#[cfg(windows)]
+pub(crate) fn is_cmd_shim(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+        .unwrap_or(false)
+}
+
+// ── argument quoting ─────────────────────────────────────────────────
+
+/// Returns true when `quote_windows_arg_for_cmd` would wrap `s` in double
+/// quotes. We mirror its predicate (sans the `"` case, which is rejected by
+/// the caller before this is consulted) so callers can decide whether a
+/// trailing `\` is dangerous: only quoted args risk the trailing `\`
+/// escaping the closing `"`. Plain Windows paths like `C:\work\` pass
+/// through unquoted and are safe.
+#[cfg(windows)]
+pub(crate) fn arg_requires_cmd_quote(s: &str) -> bool {
+    const CMD_SPECIAL: &[char] = &['&', '|', '<', '>', '^', '%', '!', '(', ')'];
+    s.is_empty()
+        || s.contains(' ')
+        || s.contains('\t')
+        || s.contains('\n')
+        || s.chars().any(|c| CMD_SPECIAL.contains(&c))
+}
+
+/// Result of validating a single argument for `cmd.exe /c` safety.
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+pub(crate) enum CmdArgError {
+    DoubleQuote(String),
+    UnsafeTrailingBackslash(String),
+    Percent(String),
+    Exclamation(String),
+}
+
+impl std::fmt::Display for CmdArgError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CmdArgError::DoubleQuote(arg) => {
+                write!(f, "double quote in cmd.exe arg: {}", arg)
+            }
+            CmdArgError::UnsafeTrailingBackslash(arg) => {
+                write!(f, "trailing backslash in quoted cmd.exe arg: {}", arg)
+            }
+            CmdArgError::Percent(arg) => {
+                write!(f, "percent sign in cmd.exe arg (cmd.exe expands env vars): {}", arg)
+            }
+            CmdArgError::Exclamation(arg) => {
+                write!(f, "exclamation mark in cmd.exe arg (cmd.exe expands delayed vars): {}", arg)
+            }
+        }
+    }
+}
+
+/// Validates a single argument for safety when passed through `cmd.exe /c`.
+/// Returns `Ok(())` if safe, `Err(CmdArgError)` if the argument contains
+/// characters that cmd.exe treats specially: double quotes, percent signs
+/// (environment variable expansion), exclamation marks (delayed expansion),
+/// or an unsafe trailing backslash inside a quoted segment.
+#[cfg(windows)]
+pub(crate) fn validate_cmd_arg(arg: &str) -> Result<(), CmdArgError> {
+    if arg.contains('%') {
+        return Err(CmdArgError::Percent(arg.to_string()));
+    }
+    if arg.contains('!') {
+        return Err(CmdArgError::Exclamation(arg.to_string()));
+    }
+    if arg.contains('"') {
+        return Err(CmdArgError::DoubleQuote(arg.to_string()));
+    }
+    if arg.ends_with('\\') && arg_requires_cmd_quote(arg) {
+        return Err(CmdArgError::UnsafeTrailingBackslash(arg.to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn quote_windows_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "\"\"".to_string();
+    }
+    if !arg.contains(' ') && !arg.contains('\t') && !arg.contains('\n') && !arg.contains('"') {
+        return arg.to_string();
+    }
+
+    let mut result = String::with_capacity(arg.len() + 2);
+    result.push('"');
+
+    let mut chars = arg.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            result.push('\\');
+            result.push('"');
+        } else if ch == '\\' {
+            let mut count = 1;
+            while chars.peek() == Some(&'\\') {
+                count += 1;
+                chars.next();
+            }
+            if chars.peek() == Some(&'"') || chars.peek().is_none() {
+                for _ in 0..count * 2 {
+                    result.push('\\');
+                }
+            } else {
+                for _ in 0..count {
+                    result.push('\\');
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result.push('"');
+    result
+}
+
+#[cfg(windows)]
+pub(crate) fn quote_windows_arg_for_cmd(arg: &str) -> String {
+    const CMD_SPECIAL: &[char] = &['&', '|', '<', '>', '^', '%', '!', '(', ')'];
+    let needs_quote = arg.is_empty()
+        || arg.contains(' ')
+        || arg.contains('\t')
+        || arg.contains('\n')
+        || arg.contains('"')
+        || arg.chars().any(|c| CMD_SPECIAL.contains(&c));
+
+    if !needs_quote {
+        return arg.to_string();
+    }
+
+    let mut result = String::with_capacity(arg.len() + 2);
+    result.push('"');
+
+    let mut chars = arg.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            result.push('\\');
+            result.push('"');
+        } else if ch == '\\' {
+            let mut count = 1;
+            while chars.peek() == Some(&'\\') {
+                count += 1;
+                chars.next();
+            }
+            if chars.peek() == Some(&'"') || chars.peek().is_none() {
+                for _ in 0..count * 2 {
+                    result.push('\\');
+                }
+            } else {
+                for _ in 0..count {
+                    result.push('\\');
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result.push('"');
+    result
+}
+
+/// Resolve the system `cmd.exe` to an absolute path via
+/// `GetSystemDirectoryW` so `CreateProcessW` does not search the current
+/// directory (which would allow executable hijacking). This is strictly more
+/// trustworthy than `which` or `%ComSpec%` because it asks the OS for the
+/// system directory directly.
+#[cfg(windows)]
+pub(crate) fn resolve_system_cmd_exe() -> Result<PathBuf, AppError> {
+    let mut buffer = vec![0u16; 512];
+    let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if len == 0 {
+        return Err(AppError::localized(
+            "windows.resolve_cmd_exe_failed",
+            "无法定位系统 cmd.exe 路径".to_string(),
+            "Could not locate system cmd.exe path.".to_string(),
+        ));
+    }
+    if len as usize >= buffer.len() {
+        buffer.resize(len as usize + 1, 0);
+        let len2 = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if len2 == 0 || len2 as usize >= buffer.len() {
+            return Err(AppError::localized(
+                "windows.resolve_cmd_exe_failed",
+                "无法定位系统 cmd.exe 路径".to_string(),
+                "Could not locate system cmd.exe path.".to_string(),
+            ));
+        }
+    }
+    let system_dir = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len as usize]));
+    Ok(system_dir.join("cmd.exe"))
+}
+
+// ── command line construction ────────────────────────────────────────
+
+#[cfg(windows)]
+pub(crate) fn build_windows_command_line(program: &OsStr, args: &[OsString]) -> Vec<u16> {
+    let program_str = program.to_string_lossy();
+    let is_cmd = program_str.eq_ignore_ascii_case("cmd.exe") || program_str.eq_ignore_ascii_case("cmd");
+
+    let mut line = String::new();
+    line.push_str(&quote_windows_arg(&program_str));
+
+    let mut after_c = false;
+    for arg in args {
+        line.push(' ');
+        let arg_str = arg.to_string_lossy();
+        if is_cmd && after_c {
+            line.push_str(&quote_windows_arg_for_cmd(&arg_str));
+        } else {
+            line.push_str(&quote_windows_arg(&arg_str));
+            if is_cmd && arg_str.eq_ignore_ascii_case("/c") {
+                after_c = true;
+            }
+        }
+    }
+    std::ffi::OsStr::new(&line)
+        .encode_wide()
+        .chain(Some(0))
+        .collect()
+}
+
+#[cfg(windows)]
+pub(crate) fn build_env_block_with_override(key: &str, value: &OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    // When lpEnvironment is non-null, CreateProcessW does not automatically
+    // propagate the hidden "=X:" per-drive current-directory entries.
+    // Microsoft docs say callers must preserve them explicitly.
+    // See: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw
+    let mut drive_vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
+    let mut regular_vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
+
+    for (k, v) in std::env::vars_os() {
+        let k_str = k.to_string_lossy();
+        if k_str.starts_with('=')
+            && k_str.len() >= 2
+            && k_str.as_bytes()[1].is_ascii_alphabetic()
+        {
+            // Per-drive current-directory variable (e.g., "=C:", "=D:")
+            drive_vars.push((k, v));
+        } else if !k_str.eq_ignore_ascii_case(key) {
+            regular_vars.push((k, v));
+        }
+    }
+
+    // Add our override
+    regular_vars.push((std::ffi::OsString::from(key), value.to_os_string()));
+
+    // Sort regular variables alphabetically (case-insensitively).
+    // Drive vars are kept in their original order (they are not required to
+    // be sorted, and typically appear first in GetEnvironmentStringsW).
+    regular_vars.sort_by(|(a, _), (b, _)| {
+        a.to_string_lossy()
+            .to_lowercase()
+            .cmp(&b.to_string_lossy().to_lowercase())
+    });
+
+    let mut result = Vec::new();
+
+    // Write drive vars first (must be present in a custom block)
+    for (k, v) in drive_vars {
+        result.extend(k.encode_wide());
+        result.push(b'=' as u16);
+        result.extend(v.encode_wide());
+        result.push(0);
+    }
+
+    // Write sorted regular vars
+    for (k, v) in regular_vars {
+        result.extend(k.encode_wide());
+        result.push(b'=' as u16);
+        result.extend(v.encode_wide());
+        result.push(0);
+    }
+
+    // Double-null terminate the block
+    result.push(0);
+    result
+}
+
+// ── Ctrl handler guard ───────────────────────────────────────────────
+
+#[cfg(windows)]
+pub(crate) struct ScopedConsoleCtrlHandler;
+
+#[cfg(windows)]
+impl ScopedConsoleCtrlHandler {
+    pub(crate) fn install() -> Result<Self, AppError> {
+        unsafe {
+            let result = SetConsoleCtrlHandler(Some(ctrl_handler_swallow), TRUE);
+            if result == 0 {
+                return Err(AppError::localized(
+                    "windows.set_console_ctrl_handler_failed",
+                    "设置控制台 Ctrl 处理器失败".to_string(),
+                    "Failed to set console Ctrl handler.".to_string(),
+                ));
+            }
+        }
+        Ok(ScopedConsoleCtrlHandler)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ScopedConsoleCtrlHandler {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = SetConsoleCtrlHandler(Some(ctrl_handler_swallow), FALSE);
+        }
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn ctrl_handler_swallow(_ctrl_type: u32) -> i32 {
+    TRUE
+}
+
+// ── Job Object ───────────────────────────────────────────────────────
+
+#[cfg(windows)]
+pub(crate) struct Job {
+    handle: HANDLE,
+}
+
+#[cfg(windows)]
+impl Job {
+    pub(crate) fn create_with_kill_on_close() -> Result<Self, AppError> {
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                let code = GetLastError();
+                return Err(AppError::windows_create_job_object_failed(code));
+            }
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+            let result = SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &mut info as *mut _ as *mut _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+
+            if result == 0 {
+                let code = GetLastError();
+                CloseHandle(handle);
+                return Err(AppError::windows_set_job_information_failed(code));
+            }
+
+            Ok(Job { handle })
+        }
+    }
+
+    pub(crate) fn try_assign(&self, process: HANDLE) -> Result<(), std::io::Error> {
+        unsafe {
+            let result = AssignProcessToJobObject(self.handle, process);
+            if result == 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+// ── process spawning ─────────────────────────────────────────────────
+
+#[cfg(windows)]
+pub(crate) fn spawn_suspended_createprocessw(
+    program: &std::path::Path,
+    args: &[OsString],
+    env_block: Option<&[u16]>,
+    application_name: Option<&std::path::Path>,
+) -> Result<(HANDLE, HANDLE, u32), AppError> {
+    use std::ptr;
+
+    let application_name_wide: Option<Vec<u16>> = application_name.map(|p| {
+        std::ffi::OsStr::new(p)
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    });
+
+    let mut command_line = build_windows_command_line(std::ffi::OsStr::new(program), args);
+
+    let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+
+    let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+    let env_ptr = env_block
+        .map(|b| b.as_ptr() as *mut _)
+        .unwrap_or(ptr::null_mut());
+
+    let app_name_ptr = application_name_wide
+        .as_ref()
+        .map(|s| s.as_ptr())
+        .unwrap_or(ptr::null());
+
+    let result = unsafe {
+        CreateProcessW(
+            app_name_ptr,
+            command_line.as_mut_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            FALSE,
+            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+            env_ptr,
+            ptr::null(),
+            &startup_info,
+            &mut process_info,
+        )
+    };
+
+    if result == 0 {
+        let code = unsafe { GetLastError() };
+        return Err(AppError::windows_create_process_failed(code));
+    }
+
+    Ok((
+        process_info.hProcess,
+        process_info.hThread,
+        process_info.dwProcessId,
+    ))
+}
+
+/// Read the creation time of the process referenced by `handle` and convert
+/// it to nanos-since-Unix-epoch. Used to record the child PID + creation
+/// time pair in the orphan-scan sidecar so the next scan can detect PID
+/// reuse independently of the launcher's own lifetime.
+#[cfg(windows)]
+unsafe fn process_creation_time_nanos(handle: HANDLE) -> Option<u128> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+    let mut creation_time = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exit_time = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut kernel_time = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut user_time = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+
+    let ok = GetProcessTimes(
+        handle,
+        &mut creation_time,
+        &mut exit_time,
+        &mut kernel_time,
+        &mut user_time,
+    );
+
+    if ok == 0 {
+        return None;
+    }
+
+    let low = creation_time.dwLowDateTime as u64;
+    let high = creation_time.dwHighDateTime as u64;
+    let intervals = (high << 32) | low;
+    let nanos_since_1601 = intervals as u128 * 100;
+    Some(nanos_since_1601.saturating_sub(11644473600_000_000_000u128))
+}
+
+#[cfg(windows)]
+pub(crate) fn wait_for_child(process_handle: HANDLE) -> Result<u32, AppError> {
+    unsafe {
+        let wait_result = WaitForSingleObject(process_handle, INFINITE);
+        if wait_result != 0 {
+            let code = GetLastError();
+            return Err(AppError::localized(
+                "windows.wait_for_child_failed",
+                format!("等待子进程失败，Win32 错误码: {code}"),
+                format!("Failed to wait for child process, Win32 error: {code}"),
+            ));
+        }
+
+        let mut exit_code: u32 = 0;
+        if GetExitCodeProcess(process_handle, &mut exit_code) == 0 {
+            let code = GetLastError();
+            return Err(AppError::localized(
+                "windows.get_exit_code_failed",
+                format!("获取子进程退出码失败，Win32 错误码: {code}"),
+                format!("Failed to get child exit code, Win32 error: {code}"),
+            ));
+        }
+
+        Ok(exit_code)
+    }
+}
+
+/// Shared Windows child-process lifecycle: spawn suspended, create a Job
+/// Object with KILL_ON_JOB_CLOSE, assign the process, resume the main
+/// thread, wait for termination, and return the exit code. All handles are
+/// cleaned up regardless of success or failure.
+///
+/// `temp_path`, when supplied, is the path to the temp settings file (claude)
+/// or temp CODEX_HOME directory (codex) that the child will be reading from.
+/// After the suspended child is created we record its PID + creation time
+/// next to that path as an `.child-meta` sidecar. The orphan scanner then
+/// uses the *child* liveness (via the sidecar) instead of the launcher PID
+/// to decide whether the temp entry is safe to delete. This is what makes
+/// the nested-job fallback path safe: even if the launcher dies but the
+/// child Codex/Claude session keeps running, the temp dir is *not* deleted.
+#[cfg(windows)]
+pub(crate) fn run_suspended_child(
+    program: &std::path::Path,
+    args: &[OsString],
+    env_block: Option<&[u16]>,
+    application_name: Option<&std::path::Path>,
+    temp_path: Option<&std::path::Path>,
+) -> Result<u32, AppError> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::ResumeThread;
+
+    let (h_process, h_thread, child_pid) =
+        spawn_suspended_createprocessw(program, args, env_block, application_name)?;
+
+    // Write the sidecar before resuming the main thread, so even if
+    // ResumeThread or the wait loop crashes the launcher between here and
+    // the cleanup call, a future orphan scan trusts the *child* PID rather
+    // than the (now-dead) launcher PID. Failure to write the sidecar is
+    // non-fatal: we just lose the precise child-PID liveness check and
+    // fall back to the legacy launcher-PID heuristic on the next scan.
+    if let Some(path) = temp_path {
+        let creation_nanos = unsafe { process_creation_time_nanos(h_process) };
+        match creation_nanos {
+            Some(nanos) => {
+                if let Err(e) =
+                    crate::cli::orphan_scan::write_child_sidecar(path, child_pid, nanos)
+                {
+                    log::warn!(
+                        target: "windows_temp_launch",
+                        "Failed to write child sidecar for {}: {}. Orphan scan will fall back to launcher PID.",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+            None => {
+                log::warn!(
+                    target: "windows_temp_launch",
+                    "GetProcessTimes failed for child PID {}; orphan scan will fall back to launcher PID for {}.",
+                    child_pid,
+                    path.display()
+                );
+            }
+        }
+    }
+
+    let job = match Job::create_with_kill_on_close() {
+        Ok(job) => job,
+        Err(e) => {
+            unsafe {
+                let _ = windows_sys::Win32::System::Threading::TerminateProcess(h_process, 1);
+                CloseHandle(h_thread);
+                CloseHandle(h_process);
+            }
+            return Err(e);
+        }
+    };
+
+    if let Err(e) = job.try_assign(h_process) {
+        let code = e.raw_os_error().unwrap_or(0);
+        if code == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32 {
+            // Expected nested-job fallback: the parent is already in a job
+            // that does not allow nested assignments. We degrade gracefully
+            // but warn the user visibly since KILL_ON_JOB_CLOSE is lost.
+            // The sidecar above ensures orphan_scan still detects when the
+            // *child* exits, so a stuck temp dir does not leak indefinitely.
+            eprintln!(
+                "cc-switch warning: cannot assign child to Job Object (already in a nested job). \
+                 Child cleanup will rely on orphan scan instead of automatic parent-death termination."
+            );
+        } else {
+            // Unexpected assignment failure: clean up and fail hard.
+            unsafe {
+                let _ = windows_sys::Win32::System::Threading::TerminateProcess(h_process, 1);
+                CloseHandle(h_thread);
+                CloseHandle(h_process);
+            }
+            return Err(AppError::localized(
+                "windows.job_assign_failed",
+                format!("无法将子进程分配到 Job Object: {e}"),
+                format!("Failed to assign child process to Job Object: {e}"),
+            ));
+        }
+    }
+
+    let resume_result = unsafe { ResumeThread(h_thread) };
+    if resume_result == u32::MAX {
+        let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        unsafe {
+            let _ = windows_sys::Win32::System::Threading::TerminateProcess(h_process, 1);
+            CloseHandle(h_thread);
+            CloseHandle(h_process);
+        }
+        return Err(AppError::windows_resume_thread_failed(code));
+    }
+
+    unsafe {
+        CloseHandle(h_thread);
+    }
+
+    let exit_code = match wait_for_child(h_process) {
+        Ok(code) => code,
+        Err(e) => {
+            unsafe { CloseHandle(h_process) };
+            return Err(e);
+        }
+    };
+    unsafe { CloseHandle(h_process) };
+
+    Ok(exit_code)
+}
+
+// ── ACL / file security ──────────────────────────────────────────────
+
+#[cfg(windows)]
+fn get_current_user_sid() -> Result<Vec<u8>, AppError> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetLengthSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    let result = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+    if result == 0 {
+        return Err(AppError::io("token", std::io::Error::last_os_error()));
+    }
+
+    let mut size = 0u32;
+    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut size); }
+
+    let mut buffer = vec![0u8; size as usize];
+    let result = unsafe {
+        GetTokenInformation(token, TokenUser, buffer.as_mut_ptr() as *mut _, size, &mut size)
+    };
+    if result == 0 {
+        unsafe { CloseHandle(token) };
+        return Err(AppError::io("token", std::io::Error::last_os_error()));
+    }
+
+    let token_user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
+    let sid = token_user.User.Sid;
+    let sid_len = unsafe { GetLengthSid(sid) };
+
+    let mut sid_buffer = vec![0u8; sid_len as usize];
+    unsafe {
+        std::ptr::copy_nonoverlapping(sid as *const u8, sid_buffer.as_mut_ptr(), sid_len as usize);
+    }
+
+    unsafe { CloseHandle(token) };
+    Ok(sid_buffer)
+}
+
+#[cfg(windows)]
+fn build_owner_only_acl(inherit: bool) -> Result<Vec<u8>, AppError> {
+    use windows_sys::Win32::Security::{
+        ACL, AddAccessAllowedAceEx, GetLengthSid, InitializeAcl,
+    };
+
+    let sid = get_current_user_sid()?;
+    let sid_ptr = sid.as_ptr() as *mut _;
+
+    const NO_INHERITANCE: u32 = 0;
+    const OBJECT_INHERIT_ACE: u32 = 0x1;
+    const CONTAINER_INHERIT_ACE: u32 = 0x2;
+    const FILE_ALL_ACCESS: u32 = 0x1F01FF;
+    const ACL_REVISION: u32 = 2;
+
+    let sid_len = unsafe { GetLengthSid(sid_ptr) };
+    let acl_size = (std::mem::size_of::<ACL>() + 8 + sid_len as usize) as u32;
+    let mut acl_buffer = vec![0u8; acl_size as usize];
+    let acl = acl_buffer.as_mut_ptr() as *mut ACL;
+
+    let result = unsafe { InitializeAcl(acl, acl_size, ACL_REVISION) };
+    if result == 0 {
+        return Err(AppError::io("acl", std::io::Error::last_os_error()));
+    }
+
+    let ace_flags = if inherit {
+        OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+    } else {
+        NO_INHERITANCE
+    };
+
+    let result = unsafe {
+        AddAccessAllowedAceEx(acl, ACL_REVISION, ace_flags, FILE_ALL_ACCESS, sid_ptr)
+    };
+    if result == 0 {
+        return Err(AppError::io("acl", std::io::Error::last_os_error()));
+    }
+
+    Ok(acl_buffer)
+}
+
+#[cfg(windows)]
+pub(crate) fn restrict_to_owner(path: &Path, inherit: bool) -> Result<(), AppError> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::Security::Authorization::{
+        SetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    let acl_buffer = build_owner_only_acl(inherit)?;
+    let acl = acl_buffer.as_ptr() as *mut _;
+
+    let path_wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let result = unsafe {
+        SetNamedSecurityInfoW(
+            path_wide.as_ptr() as *mut _,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if result != ERROR_SUCCESS {
+        return Err(AppError::io(path, std::io::Error::from_raw_os_error(result as i32)));
+    }
+
+    Ok(())
+}
+
+/// Create a file atomically with an owner-only DACL, eliminating the
+/// TOCTOU window between creation and ACL restriction.
+#[cfg(windows)]
+pub(crate) fn create_secret_file_with_acl(path: &Path) -> Result<File, AppError> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Security::{
+        InitializeSecurityDescriptor, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+        SECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, CREATE_NEW,
+    };
+
+    let mut acl_buffer = build_owner_only_acl(false)?;
+    let acl = acl_buffer.as_mut_ptr() as *mut _;
+
+    let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let result = unsafe { InitializeSecurityDescriptor(&mut sd as *mut _ as *mut _, 1) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let result = unsafe { SetSecurityDescriptorDacl(&mut sd as *mut _ as *mut _, 1, acl, 0) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let result = unsafe {
+        SetSecurityDescriptorControl(
+            &mut sd as *mut _ as *mut _,
+            SE_DACL_PROTECTED,
+            SE_DACL_PROTECTED,
+        )
+    };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: &mut sd as *mut _ as *mut _,
+        bInheritHandle: 0,
+    };
+
+    let path_wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let handle = unsafe {
+        CreateFileW(
+            path_wide.as_ptr(),
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &sa,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let file = unsafe { File::from_raw_handle(handle as _) };
+    Ok(file)
+}
+
+/// Create a directory atomically with an owner-only DACL, eliminating the
+/// TOCTOU window between creation and ACL restriction.
+#[cfg(windows)]
+pub(crate) fn create_secret_dir_with_acl(path: &Path) -> Result<(), AppError> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::{
+        InitializeSecurityDescriptor, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+        SECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED,
+    };
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    let mut acl_buffer = build_owner_only_acl(true)?;
+    let acl = acl_buffer.as_mut_ptr() as *mut _;
+
+    let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let result = unsafe { InitializeSecurityDescriptor(&mut sd as *mut _ as *mut _, 1) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let result = unsafe { SetSecurityDescriptorDacl(&mut sd as *mut _ as *mut _, 1, acl, 0) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let result = unsafe {
+        SetSecurityDescriptorControl(
+            &mut sd as *mut _ as *mut _,
+            SE_DACL_PROTECTED,
+            SE_DACL_PROTECTED,
+        )
+    };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: &mut sd as *mut _ as *mut _,
+        bInheritHandle: 0,
+    };
+
+    let path_wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let result = unsafe { CreateDirectoryW(path_wide.as_ptr(), &sa) };
+    if result == 0 {
+        return Err(AppError::io(path, std::io::Error::last_os_error()));
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
+    create_secret_file_with_acl(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn create_secret_dir_all_with_acl(path: &Path) -> Result<(), AppError> {
+    // Ensure parent directories exist with default permissions.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| AppError::io(parent, err))?;
+    }
+    // Create the leaf directory atomically with owner-only ACL.
+    create_secret_dir_with_acl(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_windows_arg_for_cmd_quotes_special_chars() {
+        assert_eq!(quote_windows_arg_for_cmd("foo&bar"), "\"foo&bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo|bar"), "\"foo|bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo<bar"), "\"foo<bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo>bar"), "\"foo>bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo^bar"), "\"foo^bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo%bar"), "\"foo%bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo!bar"), "\"foo!bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo(bar"), "\"foo(bar\"");
+        assert_eq!(quote_windows_arg_for_cmd("foo)bar"), "\"foo)bar\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_windows_arg_for_cmd_escapes_quotes() {
+        assert_eq!(quote_windows_arg_for_cmd("foo\"bar"), "\"foo\\\"bar\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_windows_arg_for_cmd_quotes_spaces_and_specials() {
+        assert_eq!(quote_windows_arg_for_cmd("foo & bar"), "\"foo & bar\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_windows_arg_for_cmd_leaves_plain_args_unchanged() {
+        assert_eq!(quote_windows_arg_for_cmd("normal"), "normal");
+        assert_eq!(
+            quote_windows_arg_for_cmd("C:\\path\\file.exe"),
+            "C:\\path\\file.exe"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_windows_arg_for_cmd_handles_empty_string() {
+        assert_eq!(quote_windows_arg_for_cmd(""), "\"\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_windows_arg_handles_newlines() {
+        assert_eq!(quote_windows_arg("foo\nbar"), "\"foo\nbar\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn is_cmd_shim_matches_cmd_and_bat_case_insensitive() {
+        assert!(is_cmd_shim(std::path::Path::new("C:/tools/app.cmd")));
+        assert!(is_cmd_shim(std::path::Path::new("C:/tools/app.CMD")));
+        assert!(is_cmd_shim(std::path::Path::new("C:/tools/app.bat")));
+        assert!(is_cmd_shim(std::path::Path::new("C:/tools/app.BaT")));
+        assert!(!is_cmd_shim(std::path::Path::new("C:/tools/app.exe")));
+        assert!(!is_cmd_shim(std::path::Path::new("C:/tools/app")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn arg_requires_cmd_quote_recognizes_unsafe_inputs() {
+        assert!(arg_requires_cmd_quote(""));
+        assert!(arg_requires_cmd_quote("a b"));
+        assert!(arg_requires_cmd_quote("a\tb"));
+        assert!(arg_requires_cmd_quote("a&b"));
+        assert!(arg_requires_cmd_quote("a%b"));
+        assert!(!arg_requires_cmd_quote("plain"));
+        assert!(!arg_requires_cmd_quote("C:\\work\\"));
+        assert!(!arg_requires_cmd_quote("--project-dir=C:\\tmp\\"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn validate_cmd_arg_rejects_percent_and_exclamation() {
+        assert!(
+            matches!(validate_cmd_arg("foo%bar"), Err(CmdArgError::Percent(s)) if s == "foo%bar")
+        );
+        assert!(
+            matches!(validate_cmd_arg("foo!bar"), Err(CmdArgError::Exclamation(s)) if s == "foo!bar")
+        );
+        assert!(
+            matches!(validate_cmd_arg("%CCSWITCH_TEST%"), Err(CmdArgError::Percent(s)) if s == "%CCSWITCH_TEST%")
+        );
+        // Plain args should still pass
+        assert!(validate_cmd_arg("plain").is_ok());
+        assert!(validate_cmd_arg("C:\\path\\file.exe").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn build_windows_command_line_quotes_after_c_for_cmd() {
+        let line = build_windows_command_line(
+            OsStr::new("cmd.exe"),
+            &[
+                OsString::from("/c"),
+                OsString::from("foo&bar"),
+                OsString::from("normal"),
+            ],
+        );
+        let s = String::from_utf16_lossy(&line);
+        // Should contain quoted foo&bar but not normal
+        assert!(s.contains("\"foo&bar\""));
+        assert!(s.contains("normal"));
+    }
+
+    /// Verify that `create_secret_file_with_acl` creates a file with an
+    /// owner-only DACL and no inherited ACEs (SE_DACL_PROTECTED).
+    #[cfg(windows)]
+    #[test]
+    fn create_secret_file_with_acl_has_protected_dacl() {
+        use std::ffi::OsStr;
+        use std::io::Write;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Security::Authorization::{
+            GetNamedSecurityInfoW, SE_FILE_OBJECT,
+        };
+        use windows_sys::Win32::Security::{
+            GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+            DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        };
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("secret.txt");
+        let mut file = create_secret_file_with_acl(&path).unwrap();
+        file.write_all(b"secret").unwrap();
+        drop(file);
+
+        let path_wide: Vec<u16> =
+            OsStr::new(&path).encode_wide().chain(std::iter::once(0)).collect();
+
+        let mut psec_desc: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let result = unsafe {
+            GetNamedSecurityInfoW(
+                path_wide.as_ptr() as *mut _,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut psec_desc,
+            )
+        };
+        assert_eq!(result, 0, "GetNamedSecurityInfoW should succeed");
+
+        let mut control: u16 = 0;
+        let mut revision: u32 = 0;
+        let result = unsafe {
+            GetSecurityDescriptorControl(psec_desc as *mut _, &mut control, &mut revision)
+        };
+        assert_eq!(result, 1, "GetSecurityDescriptorControl should succeed");
+        assert!(
+            control & SE_DACL_PROTECTED as u16 != 0,
+            "DACL should be protected (no inherited ACEs)"
+        );
+
+        let mut present: i32 = 0;
+        let mut defaulted: i32 = 0;
+        let mut pacl: *mut windows_sys::Win32::Security::ACL = std::ptr::null_mut();
+        let result = unsafe {
+            GetSecurityDescriptorDacl(psec_desc as *mut _, &mut present, &mut pacl, &mut defaulted)
+        };
+        assert_eq!(result, 1, "GetSecurityDescriptorDacl should succeed");
+        assert!(present != 0, "DACL should be present");
+        assert!(!pacl.is_null(), "DACL pointer should not be null");
+        // psec_desc is allocated by GetNamedSecurityInfoW and would normally
+        // be freed with LocalFree; we skip the free in this test since the
+        // process exit will reclaim the memory.
+    }
+
+    /// Verify that `build_env_block_with_override` produces a sorted,
+    /// double-null-terminated block containing the override and preserving
+    /// existing variables (including per-drive current-directory entries).
+    #[cfg(windows)]
+    #[test]
+    fn build_env_block_with_override_sorted_and_terminated() {
+        let block = build_env_block_with_override("CC_SWITCH_TEST_VAR", OsStr::new("override_value"));
+        // Convert back to strings for inspection
+        let mut entries = Vec::new();
+        let mut start = 0usize;
+        for (i, &ch) in block.iter().enumerate() {
+            if ch == 0 {
+                if i == start {
+                    // Double-null terminator
+                    break;
+                }
+                let s = String::from_utf16_lossy(&block[start..i]);
+                entries.push(s);
+                start = i + 1;
+            }
+        }
+        // Must end with a double-null (we broke at the second null)
+        assert!(
+            block.len() >= 2 && block[block.len() - 1] == 0 && block[block.len() - 2] == 0,
+            "block must be double-null terminated"
+        );
+        // Must contain our override
+        assert!(
+            entries.iter().any(|e| e == "CC_SWITCH_TEST_VAR=override_value"),
+            "override must be present in block"
+        );
+        // Must not contain duplicate keys (the original CC_SWITCH_TEST_VAR if it existed)
+        let count = entries
+            .iter()
+            .filter(|e| e.starts_with("CC_SWITCH_TEST_VAR="))
+            .count();
+        assert_eq!(count, 1, "override must replace any pre-existing key");
+        // Regular vars (excluding drive vars that start with '=') must be sorted
+        let regular: Vec<&String> = entries.iter().filter(|e| !e.starts_with('=')).collect();
+        let mut sorted = regular.clone();
+        sorted.sort_by(|a, b| {
+            let a_key = a.split('=').next().unwrap_or("").to_lowercase();
+            let b_key = b.split('=').next().unwrap_or("").to_lowercase();
+            a_key.cmp(&b_key)
+        });
+        assert_eq!(
+            regular, sorted,
+            "regular environment variables must be sorted case-insensitively"
+        );
+    }
+
+    /// Smoke test: spawn a real child process via the shared Windows path,
+    /// assign it to a Job Object, resume it, and verify the exit code.
+    #[cfg(windows)]
+    #[test]
+    fn windows_smoke_test_spawn_job_wait_exit_code() {
+        use windows_sys::Win32::System::Threading::ResumeThread;
+        let (h_process, h_thread, _pid) = spawn_suspended_createprocessw(
+            std::path::Path::new("cmd.exe"),
+            &[
+                OsString::from("/c"),
+                OsString::from("exit"),
+                OsString::from("42"),
+            ],
+            None,
+            None,
+        )
+        .expect("spawn_suspended_createprocessw should succeed for cmd.exe");
+
+        let job = Job::create_with_kill_on_close()
+            .expect("Job::create_with_kill_on_close should succeed");
+        job.try_assign(h_process)
+            .expect("try_assign should succeed for a non-nested process");
+
+        let resume_result = unsafe { ResumeThread(h_thread) };
+        assert_ne!(
+            resume_result, u32::MAX,
+            "ResumeThread should not fail"
+        );
+
+        unsafe { CloseHandle(h_thread) };
+
+        let exit_code = wait_for_child(h_process).expect("wait_for_child should succeed");
+        unsafe { CloseHandle(h_process) };
+
+        assert_eq!(exit_code, 42, "child exit code should be propagated");
+    }
+}

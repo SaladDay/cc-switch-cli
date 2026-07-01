@@ -1058,7 +1058,7 @@ mod tests {
         assert_eq!(all.matches(texts::tui_label_quota()).count(), 1, "{all}");
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[test]
     fn claude_provider_list_key_bar_hides_launch_temp_hint_on_non_unix() {
         let _lock = super::super::tests::lock_env();
@@ -1077,7 +1077,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[test]
     fn codex_provider_detail_key_bar_hides_launch_temp_hint_on_non_unix() {
         let _lock = super::super::tests::lock_env();
