@@ -1854,6 +1854,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_claude_teammates() -> &'static str {
+        if is_chinese() {
+            "Teammates 模式"
+        } else {
+            "Teammates Mode"
+        }
+    }
+
     pub fn tui_label_chatgpt_account() -> &'static str {
         if is_chinese() {
             "ChatGPT 账号"

@@ -50,6 +50,7 @@ pub(crate) fn add_form_key_items(
                     Some(
                         ProviderAddField::GeminiAuthType
                         | ProviderAddField::ClaudeHideAttribution
+                        | ProviderAddField::ClaudeTeammates
                         | ProviderAddField::CodexFastMode
                         | ProviderAddField::OpenClawApiProtocol
                         | ProviderAddField::OpenClawUserAgent

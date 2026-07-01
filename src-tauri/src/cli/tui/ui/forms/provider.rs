@@ -1216,6 +1216,7 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::ClaudeHideAttribution => {
             texts::tui_label_claude_hide_attribution().to_string()
         }
+        ProviderAddField::ClaudeTeammates => texts::tui_label_claude_teammates().to_string(),
         ProviderAddField::CodexOAuthAccount => texts::tui_label_chatgpt_account().to_string(),
         ProviderAddField::CodexFastMode => texts::tui_label_codex_fast_mode().to_string(),
         ProviderAddField::CodexBaseUrl => texts::tui_label_base_url().to_string(),
@@ -1285,6 +1286,13 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::ClaudeHideAttribution => {
             if provider.claude_hide_attribution {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        ProviderAddField::ClaudeTeammates => {
+            if provider.claude_teammates {
                 format!("[{}]", texts::tui_marker_active())
             } else {
                 "[ ]".to_string()
@@ -1400,6 +1408,16 @@ pub(crate) fn provider_field_editor_line(
                         "\"\""
                     } else {
                         "<default>"
+                    }
+                )
+            }
+            ProviderAddField::ClaudeTeammates => {
+                format!(
+                    "env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = {}",
+                    if provider.claude_teammates {
+                        "\"1\""
+                    } else {
+                        "<unset>"
                     }
                 )
             }

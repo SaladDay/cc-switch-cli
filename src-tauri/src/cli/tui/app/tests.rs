@@ -13614,17 +13614,22 @@ mod tests {
             AppType::Claude,
         )));
 
-        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+        // The focusable field directly above the usage-query divider (whatever
+        // the last Claude quick toggle happens to be) is our anchor.
+        let field_before_divider = {
+            let Some(FormState::ProviderAdd(form)) = app.form.as_mut() else {
+                panic!("expected ProviderAdd form");
+            };
             form.focus = FormFocus::Fields;
             form.editing = false;
             let fields = form.fields();
-            form.field_idx = fields
+            let divider_idx = fields
                 .iter()
-                .position(|field| *field == ProviderAddField::ClaudeHideAttribution)
-                .expect("ClaudeHideAttribution field should exist");
-        } else {
-            panic!("expected ProviderAdd form");
-        }
+                .position(|field| *field == ProviderAddField::UsageQueryDivider)
+                .expect("UsageQueryDivider field should exist");
+            form.field_idx = divider_idx - 1;
+            fields[form.field_idx]
+        };
 
         app.on_key(key(KeyCode::Down), &UiData::default());
         assert!(matches!(
@@ -13637,7 +13642,7 @@ mod tests {
         assert!(matches!(
             app.form,
             Some(FormState::ProviderAdd(ref form))
-                if form.fields().get(form.field_idx) == Some(&ProviderAddField::ClaudeHideAttribution)
+                if form.fields().get(form.field_idx) == Some(&field_before_divider)
         ));
     }
 

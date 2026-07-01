@@ -315,6 +315,13 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Controls whether Claude Code adds attribution when writing commits or pull requests.",
             ),
         ),
+        ProviderAddField::ClaudeTeammates => HelpContent::new(
+            texts::tui_label_claude_teammates(),
+            help_lines(
+                "启用 Claude Code 的实验性 Teammates（多智能体协作）模式，写入 env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1；关闭时移除该变量。",
+                "Enables Claude Code's experimental Teammates (multi-agent) mode by writing env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1; turning it off removes the variable.",
+            ),
+        ),
         ProviderAddField::CodexOAuthAccount => HelpContent::new(
             texts::tui_label_chatgpt_account(),
             help_lines(

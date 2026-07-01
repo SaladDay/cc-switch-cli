@@ -97,6 +97,16 @@ impl ProviderAddFormState {
                     );
                     env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
                 }
+                if self.claude_teammates_touched {
+                    if self.claude_teammates {
+                        env_obj.insert(
+                            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(),
+                            json!("1"),
+                        );
+                    } else {
+                        env_obj.remove("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS");
+                    }
+                }
                 settings_obj.remove("api_format");
                 settings_obj.remove("apiFormat");
                 settings_obj.remove("openrouter_compat_mode");
@@ -928,6 +938,16 @@ pub(crate) fn claude_hide_attribution_enabled(settings_config: &Value) -> bool {
 
     attribution.get("commit").and_then(Value::as_str) == Some("")
         && attribution.get("pr").and_then(Value::as_str) == Some("")
+}
+
+pub(crate) fn claude_teammates_enabled(settings_config: &Value) -> bool {
+    let Some(value) = settings_config
+        .get("env")
+        .and_then(|env| env.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"))
+    else {
+        return false;
+    };
+    value.as_str() == Some("1") || value.as_i64() == Some(1)
 }
 
 pub(crate) fn should_hide_provider_field(key: &str) -> bool {

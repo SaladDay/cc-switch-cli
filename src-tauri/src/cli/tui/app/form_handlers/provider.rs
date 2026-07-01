@@ -313,6 +313,13 @@ impl App {
                 provider.toggle_claude_hide_attribution();
                 Action::None
             }
+            ProviderAddField::ClaudeTeammates => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.toggle_claude_teammates();
+                Action::None
+            }
             ProviderAddField::CodexOAuthAccount => {
                 if matches!(key.code, KeyCode::Enter) {
                     let selected = self

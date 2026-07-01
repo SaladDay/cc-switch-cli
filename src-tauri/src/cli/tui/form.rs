@@ -21,6 +21,7 @@ pub(crate) use provider_json::strip_provider_internal_fields;
 pub(crate) use super::text_edit::TextInput;
 pub(crate) use codex_config::parse_codex_config_snippet;
 pub(crate) use provider_json::claude_hide_attribution_enabled;
+pub(crate) use provider_json::claude_teammates_enabled;
 pub(crate) use provider_json::strip_common_config_from_settings;
 pub(crate) use provider_json::{normalize_usage_interval, normalize_usage_timeout};
 pub(crate) use provider_state::resolve_provider_id_for_submit;
@@ -189,6 +190,7 @@ pub enum ProviderAddField {
     ClaudeFallbackModel,
     ClaudeAdvancedDivider,
     ClaudeHideAttribution,
+    ClaudeTeammates,
     CodexOAuthAccount,
     CodexFastMode,
     CodexBaseUrl,
@@ -439,6 +441,8 @@ pub struct ProviderAddFormState {
     pub claude_opus_model: TextInput,
     pub claude_hide_attribution: bool,
     claude_hide_attribution_touched: bool,
+    pub claude_teammates: bool,
+    claude_teammates_touched: bool,
     pub codex_oauth_account_id: Option<String>,
     pub codex_fast_mode: bool,
 
