@@ -13620,8 +13620,8 @@ mod tests {
             let fields = form.fields();
             form.field_idx = fields
                 .iter()
-                .position(|field| *field == ProviderAddField::IncludeCommonConfig)
-                .expect("IncludeCommonConfig field should exist");
+                .position(|field| *field == ProviderAddField::ClaudeHideAttribution)
+                .expect("ClaudeHideAttribution field should exist");
         } else {
             panic!("expected ProviderAdd form");
         }
@@ -13637,7 +13637,7 @@ mod tests {
         assert!(matches!(
             app.form,
             Some(FormState::ProviderAdd(ref form))
-                if form.fields().get(form.field_idx) == Some(&ProviderAddField::IncludeCommonConfig)
+                if form.fields().get(form.field_idx) == Some(&ProviderAddField::ClaudeHideAttribution)
         ));
     }
 

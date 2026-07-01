@@ -359,20 +359,16 @@ impl ProviderAddFormState {
                 if self.is_claude_codex_oauth_provider() {
                     fields.push(ProviderAddField::CodexOAuthAccount);
                     fields.push(ProviderAddField::CodexFastMode);
-                    fields.push(ProviderAddField::ClaudeHideAttribution);
                     fields.push(ProviderAddField::ClaudeAdvancedDivider);
                     fields.push(ProviderAddField::ClaudeModelConfig);
                     fields.push(ProviderAddField::ClaudeFallbackModel);
                 } else if !self.is_claude_official_provider() {
                     fields.push(ProviderAddField::ClaudeBaseUrl);
                     fields.push(ProviderAddField::ClaudeApiKey);
-                    fields.push(ProviderAddField::ClaudeHideAttribution);
                     fields.push(ProviderAddField::ClaudeAdvancedDivider);
                     fields.push(ProviderAddField::ClaudeApiFormat);
                     fields.push(ProviderAddField::ClaudeModelConfig);
                     fields.push(ProviderAddField::ClaudeFallbackModel);
-                } else {
-                    fields.push(ProviderAddField::ClaudeHideAttribution);
                 }
             }
             AppType::Codex => {
@@ -427,6 +423,11 @@ impl ProviderAddFormState {
             fields.push(ProviderAddField::CommonConfigDivider);
             fields.push(ProviderAddField::CommonSnippet);
             fields.push(ProviderAddField::IncludeCommonConfig);
+        }
+        // Claude quick toggles sit directly below the common-config controls,
+        // matching upstream's CommonConfigEditor layout.
+        if matches!(self.app_type, AppType::Claude) {
+            fields.push(ProviderAddField::ClaudeHideAttribution);
         }
         fields.push(ProviderAddField::UsageQueryDivider);
         fields.push(ProviderAddField::UsageQuery);

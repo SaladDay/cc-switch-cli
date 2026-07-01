@@ -889,37 +889,32 @@ fn provider_add_form_claude_fields_include_model_config_entry() {
 }
 
 #[test]
-fn provider_add_form_claude_fields_include_hide_attribution_entry() {
+fn provider_add_form_claude_places_hide_attribution_below_common_config() {
     let form = ProviderAddFormState::new(AppType::Claude);
     let fields = form.fields();
-    let advanced_divider_idx = fields
-        .iter()
-        .position(|field| *field == ProviderAddField::ClaudeAdvancedDivider)
-        .expect("ClaudeAdvancedDivider field should exist");
-    let model_cfg_idx = fields
-        .iter()
-        .position(|field| *field == ProviderAddField::ClaudeModelConfig)
-        .expect("ClaudeModelConfig field should exist");
-    let hide_attribution_idx = fields
-        .iter()
-        .position(|field| *field == ProviderAddField::ClaudeHideAttribution)
-        .expect("ClaudeHideAttribution field should exist");
-    let common_divider_idx = fields
-        .iter()
-        .position(|field| *field == ProviderAddField::CommonConfigDivider)
-        .expect("CommonConfigDivider field should exist");
+    let pos = |field: ProviderAddField| {
+        fields
+            .iter()
+            .position(|candidate| *candidate == field)
+            .unwrap_or_else(|| panic!("{field:?} field should exist"))
+    };
+    let advanced_divider_idx = pos(ProviderAddField::ClaudeAdvancedDivider);
+    let model_cfg_idx = pos(ProviderAddField::ClaudeModelConfig);
+    let include_common_idx = pos(ProviderAddField::IncludeCommonConfig);
+    let hide_attribution_idx = pos(ProviderAddField::ClaudeHideAttribution);
+    let usage_divider_idx = pos(ProviderAddField::UsageQueryDivider);
 
-    assert!(
-        hide_attribution_idx < advanced_divider_idx,
-        "hide attribution is a basic field, before the advanced divider"
-    );
     assert!(
         advanced_divider_idx < model_cfg_idx,
         "model mapping should sit in the advanced section after the divider"
     );
     assert!(
-        hide_attribution_idx < common_divider_idx,
-        "hide attribution should stay with Claude-specific fields"
+        hide_attribution_idx == include_common_idx + 1,
+        "hide attribution should sit directly below the add-common-config toggle"
+    );
+    assert!(
+        hide_attribution_idx < usage_divider_idx,
+        "hide attribution stays above the usage-query section"
     );
 }
 
