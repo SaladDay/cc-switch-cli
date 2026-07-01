@@ -53,7 +53,7 @@ struct DeltaFunction {
     arguments: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Usage {
     #[serde(default)]
     prompt_tokens: u32,
@@ -67,7 +67,7 @@ struct Usage {
     cache_creation_input_tokens: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct PromptTokensDetails {
     #[serde(default)]
     cached_tokens: u32,
@@ -98,6 +98,11 @@ pub fn create_anthropic_sse_stream(
         let mut open_tool_block_indices: HashSet<u32> = HashSet::new();
         let mut legacy_function_name: Option<String> = None;
         let mut legacy_function_block_index: Option<u32> = None;
+        // Final usage and stop reason are deferred: OpenAI-compatible upstreams emit
+        // them in separate trailing chunks (the usage chunk has empty `choices`), so
+        // we cache them here and flush a single message_delta at [DONE]/stream end.
+        let mut latest_usage: Option<Usage> = None;
+        let mut pending_stop_reason: Option<String> = None;
 
         tokio::pin!(stream);
 
@@ -120,6 +125,17 @@ pub fn create_anthropic_sse_stream(
                             };
 
                             if data.trim() == "[DONE]" {
+                                if has_sent_message_start && pending_stop_reason.is_some() {
+                                    let event = build_message_delta_event(
+                                        pending_stop_reason.as_deref(),
+                                        latest_usage.as_ref(),
+                                    );
+                                    let sse_data = format!(
+                                        "event: message_delta\ndata: {}\n\n",
+                                        serde_json::to_string(&event).unwrap_or_default()
+                                    );
+                                    yield Ok(Bytes::from(sse_data));
+                                }
                                 let event = json!({"type": "message_stop"});
                                 let sse_data = format!(
                                     "event: message_stop\ndata: {}\n\n",
@@ -139,6 +155,15 @@ pub fn create_anthropic_sse_stream(
                             }
                             if current_model.is_none() {
                                 current_model = Some(chunk.model.clone());
+                            }
+
+                            // Cache usage from any chunk (incl. the trailing
+                            // `choices: []` usage chunk that include_usage produces).
+                            // Must happen before the choices.first() guard below, which
+                            // otherwise drops that chunk and zeroes token/cost/cache
+                            // accounting. Mirrors streaming_codex_chat's latest_usage.
+                            if let Some(usage) = &chunk.usage {
+                                latest_usage = Some(usage.clone());
                             }
 
                             let Some(choice) = chunk.choices.first() else {
@@ -597,36 +622,13 @@ pub fn create_anthropic_sse_stream(
                                     open_tool_block_indices.clear();
                                 }
 
-                                let usage_json = if let Some(usage) = chunk.usage.as_ref() {
-                                    let mut usage_json = json!({
-                                        "input_tokens": usage.prompt_tokens,
-                                        "output_tokens": usage.completion_tokens
-                                    });
-                                    if let Some(cached) = extract_cache_read_tokens(usage) {
-                                        usage_json["cache_read_input_tokens"] = json!(cached);
-                                    }
-                                    if let Some(created) = usage.cache_creation_input_tokens {
-                                        usage_json["cache_creation_input_tokens"] = json!(created);
-                                    }
-                                    usage_json
-                                } else {
-                                    json!({
-                                        "output_tokens": 0
-                                    })
-                                };
-                                let event = json!({
-                                    "type": "message_delta",
-                                    "delta": {
-                                        "stop_reason": map_stop_reason(Some(finish_reason)),
-                                        "stop_sequence": null
-                                    },
-                                    "usage": usage_json
-                                });
-                                let sse_data = format!(
-                                    "event: message_delta\ndata: {}\n\n",
-                                    serde_json::to_string(&event).unwrap_or_default()
-                                );
-                                yield Ok(Bytes::from(sse_data));
+                                // Defer the message_delta: the final usage often arrives
+                                // in a *later* chunk than finish_reason (OpenAI-compatible
+                                // streams send `choices:[{finish_reason}]` then a separate
+                                // `choices:[]` usage chunk). Emitting now would lock in
+                                // output_tokens=0; instead record the stop reason and flush
+                                // one message_delta with the cached usage at stream end.
+                                pending_stop_reason = Some(finish_reason.clone());
                             }
                         }
                     }
@@ -650,8 +652,51 @@ pub fn create_anthropic_sse_stream(
             }
         }
 
+        // Flush the deferred message_delta if the upstream closed without a [DONE]
+        // marker, so the final usage still reaches the client.
+        if has_sent_message_start && pending_stop_reason.is_some() {
+            let event = build_message_delta_event(
+                pending_stop_reason.as_deref(),
+                latest_usage.as_ref(),
+            );
+            let sse_data = format!(
+                "event: message_delta\ndata: {}\n\n",
+                serde_json::to_string(&event).unwrap_or_default()
+            );
+            yield Ok(Bytes::from(sse_data));
+        }
+
         stream_completion.record_success();
     }
+}
+
+fn build_message_delta_event(
+    stop_reason: Option<&str>,
+    usage: Option<&Usage>,
+) -> serde_json::Value {
+    let usage_json = if let Some(usage) = usage {
+        let mut usage_json = json!({
+            "input_tokens": usage.prompt_tokens,
+            "output_tokens": usage.completion_tokens
+        });
+        if let Some(cached) = extract_cache_read_tokens(usage) {
+            usage_json["cache_read_input_tokens"] = json!(cached);
+        }
+        if let Some(created) = usage.cache_creation_input_tokens {
+            usage_json["cache_creation_input_tokens"] = json!(created);
+        }
+        usage_json
+    } else {
+        json!({ "output_tokens": 0 })
+    };
+    json!({
+        "type": "message_delta",
+        "delta": {
+            "stop_reason": map_stop_reason(stop_reason),
+            "stop_sequence": null
+        },
+        "usage": usage_json
+    })
 }
 
 fn map_stop_reason(finish_reason: Option<&str>) -> Option<String> {
@@ -825,6 +870,47 @@ mod tests {
         assert_eq!(
             message_start["message"]["usage"]["cache_read_input_tokens"],
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_usage_from_trailing_empty_choices_chunk_is_mapped() {
+        // OpenAI-compatible upstreams (LiteLLM, kimi, MiniMax, ...) send the final
+        // usage in a separate `choices: []` chunk *after* the finish_reason chunk
+        // when stream_options.include_usage=true. The choices.first() guard used to
+        // drop it, leaving message_delta usage at 0, zeroing token/cost accounting.
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-5.5\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-5.5\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-5.5\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":9,\"total_tokens\":21}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_events(input).await;
+        let message_delta = events
+            .iter()
+            .find(|event| event["type"] == "message_delta")
+            .expect("message_delta event");
+
+        assert_eq!(message_delta["delta"]["stop_reason"], "end_turn");
+        assert_eq!(message_delta["usage"]["input_tokens"], 12);
+        assert_eq!(message_delta["usage"]["output_tokens"], 9);
+
+        // Exactly one message_delta is emitted, and it precedes message_stop.
+        let delta_count = events
+            .iter()
+            .filter(|event| event["type"] == "message_delta")
+            .count();
+        assert_eq!(delta_count, 1);
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|event| event["type"].as_str())
+            .collect();
+        let delta_pos = names.iter().position(|n| *n == "message_delta");
+        let stop_pos = names.iter().position(|n| *n == "message_stop");
+        assert!(
+            delta_pos < stop_pos,
+            "message_delta must precede message_stop"
         );
     }
 

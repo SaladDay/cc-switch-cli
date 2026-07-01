@@ -162,6 +162,28 @@ pub fn anthropic_to_openai_with_reasoning_content(
         result["stream"] = v.clone();
     }
 
+    // OpenAI-compatible upstreams do not emit usage in a streaming response
+    // unless stream_options.include_usage is set; without it the final usage
+    // chunk never arrives, so streaming.rs cannot populate message_start /
+    // message_delta and every input/output/cache token is reported as 0.
+    // Mirrors the injection already done on the Codex chat bridge path.
+    let is_stream = result
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if is_stream {
+        match result.get_mut("stream_options") {
+            // Preserve any other stream_options the client passed through;
+            // only add include_usage.
+            Some(Value::Object(opts)) => {
+                opts.insert("include_usage".to_string(), json!(true));
+            }
+            _ => {
+                result["stream_options"] = json!({ "include_usage": true });
+            }
+        }
+    }
+
     if supports_reasoning_effort(model) {
         if let Some(effort) = resolve_reasoning_effort(&body) {
             result["reasoning_effort"] = json!(effort);
@@ -671,6 +693,34 @@ mod tests {
         let result = anthropic_to_openai(input, Some("provider-123")).unwrap();
 
         assert_eq!(result["prompt_cache_key"], "provider-123");
+    }
+
+    #[test]
+    fn anthropic_to_openai_stream_injects_include_usage() {
+        let input = json!({
+            "model": "gpt-5.5",
+            "max_tokens": 1024,
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert_eq!(result["stream"], true);
+        assert_eq!(result["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn anthropic_to_openai_non_stream_omits_stream_options() {
+        let input = json!({
+            "model": "gpt-5.5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+
+        assert!(result.get("stream_options").is_none());
     }
 
     #[test]
