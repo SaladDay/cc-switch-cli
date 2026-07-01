@@ -18,6 +18,7 @@ use crate::test_support::{
     lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
 };
 use crate::{AppError, AppType};
+use runtime_systems::ProxyMsg;
 
 fn pending_snapshot_app_data(request_id: u64) -> PendingAppDataLoad {
     PendingAppDataLoad {
@@ -1901,6 +1902,195 @@ fn managed_proxy_action_enqueues_background_request_and_shows_loading_overlay() 
             ..
         }
     ));
+}
+
+#[test]
+fn proxy_snapshot_refresh_enqueues_single_background_request() {
+    let mut tracker = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+
+    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::Codex);
+    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::Claude);
+
+    let req = rx.recv().expect("proxy snapshot request should be queued");
+    assert!(matches!(
+        req,
+        ProxyReq::RefreshSnapshot {
+            request_id: 1,
+            app_type: AppType::Codex,
+        }
+    ));
+    assert!(rx.try_recv().is_err(), "in-flight refresh should not stack");
+    assert_eq!(tracker.active, Some(1));
+}
+
+#[test]
+fn proxy_snapshot_refresh_can_be_requeued_after_app_switch_cancel() {
+    let mut tracker = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let (tx, rx) = mpsc::channel();
+
+    tracker.cancel();
+    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::OpenCode);
+
+    let req = rx
+        .recv()
+        .expect("new app snapshot request should be queued");
+    assert!(matches!(
+        req,
+        ProxyReq::RefreshSnapshot {
+            request_id: 2,
+            app_type: AppType::OpenCode,
+        }
+    ));
+    assert_eq!(tracker.active, Some(2));
+}
+
+#[test]
+fn proxy_snapshot_refresh_send_failure_clears_active_request() {
+    let mut tracker = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+    drop(rx);
+
+    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::Claude);
+
+    assert_eq!(tracker.active, None);
+}
+
+#[test]
+fn proxy_snapshot_after_app_switch_queues_only_after_successful_change() {
+    let (tx, rx) = mpsc::channel();
+    let mut tracker = RequestTracker {
+        seq: 7,
+        active: Some(7),
+    };
+
+    queue_proxy_snapshot_refresh_after_app_switch(
+        &mut tracker,
+        Some(&tx),
+        &AppType::Claude,
+        &AppType::Codex,
+        false,
+    );
+    assert_eq!(tracker.active, Some(7));
+    assert!(rx.try_recv().is_err());
+
+    queue_proxy_snapshot_refresh_after_app_switch(
+        &mut tracker,
+        Some(&tx),
+        &AppType::Claude,
+        &AppType::Claude,
+        true,
+    );
+    assert_eq!(tracker.active, Some(7));
+    assert!(rx.try_recv().is_err());
+
+    queue_proxy_snapshot_refresh_after_app_switch(
+        &mut tracker,
+        Some(&tx),
+        &AppType::Claude,
+        &AppType::Codex,
+        true,
+    );
+    let req = rx
+        .recv()
+        .expect("successful app switch should queue proxy snapshot");
+    assert!(matches!(
+        req,
+        ProxyReq::RefreshSnapshot {
+            request_id: 8,
+            app_type: AppType::Codex,
+        }
+    ));
+    assert_eq!(tracker.active, Some(8));
+}
+
+#[test]
+fn proxy_snapshot_result_updates_proxy_without_cache_invalidation() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut proxy_snapshot_refresh = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let proxy = data::ProxySnapshot {
+        running: true,
+        estimated_input_tokens_total: 12,
+        estimated_output_tokens_total: 34,
+        ..data::ProxySnapshot::default()
+    };
+    app.reset_proxy_activity(0, 0);
+
+    let invalidation = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::SnapshotRefreshed {
+            request_id: 1,
+            app_type: AppType::Claude,
+            result: Ok(proxy),
+        },
+    )
+    .expect("snapshot result should be handled");
+
+    assert_eq!(invalidation, CacheInvalidation::None);
+    assert!(data.proxy.running);
+    assert_eq!(data.proxy.estimated_input_tokens_total, 12);
+    assert_eq!(data.proxy.estimated_output_tokens_total, 34);
+    assert_eq!(app.proxy_activity_last_input_tokens, Some(12));
+    assert_eq!(app.proxy_activity_last_output_tokens, Some(34));
+    assert_eq!(proxy_snapshot_refresh.active, None);
+}
+
+#[test]
+fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut proxy_snapshot_refresh = RequestTracker {
+        seq: 2,
+        active: Some(2),
+    };
+
+    handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::SnapshotRefreshed {
+            request_id: 1,
+            app_type: AppType::Claude,
+            result: Ok(data::ProxySnapshot {
+                running: true,
+                ..data::ProxySnapshot::default()
+            }),
+        },
+    )
+    .expect("stale snapshot result should be ignored");
+    assert!(!data.proxy.running);
+    assert_eq!(proxy_snapshot_refresh.active, Some(2));
+
+    handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::SnapshotRefreshed {
+            request_id: 2,
+            app_type: AppType::Codex,
+            result: Ok(data::ProxySnapshot {
+                running: true,
+                ..data::ProxySnapshot::default()
+            }),
+        },
+    )
+    .expect("wrong-app snapshot result should be ignored");
+    assert!(!data.proxy.running);
+    assert_eq!(proxy_snapshot_refresh.active, None);
 }
 
 #[test]

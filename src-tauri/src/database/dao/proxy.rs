@@ -16,7 +16,7 @@ fn default_app_preferred_port(app_type: &str) -> u16 {
         "claude" => 15721,
         "codex" => 15722,
         "gemini" => 15723,
-        _ => 15721,
+        _ => 15724,
     }
 }
 
@@ -649,7 +649,9 @@ impl Database {
         }
 
         if let Some(port) = self.get_legacy_app_proxy_listen_port(app_type)? {
-            return Ok(port);
+            if app_type == "claude" || port != default_app_preferred_port("claude") {
+                return Ok(port);
+            }
         }
 
         Ok(default_app_preferred_port(app_type))

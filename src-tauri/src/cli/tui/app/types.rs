@@ -31,6 +31,21 @@ pub enum FilterScope {
     SessionMessages,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SkillsDiscoverSource {
+    Repos,
+    Marketplace,
+}
+
+impl SkillsDiscoverSource {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Repos => Self::Marketplace,
+            Self::Marketplace => Self::Repos,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Nav,

@@ -166,6 +166,29 @@ mod tests {
     }
 
     #[test]
+    fn skills_market_command_parses() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "skills",
+            "market",
+            "python",
+            "--limit",
+            "10",
+            "--offset",
+            "20",
+        ]);
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Skills(super::commands::skills::SkillsCommand::Market {
+                query,
+                limit: 10,
+                offset: 20,
+            })) if query == "python"
+        ));
+    }
+
+    #[test]
     fn parses_proxy_serve_subcommand() {
         let cli = Cli::parse_from(["cc-switch", "proxy", "serve", "--listen-port", "0"]);
 

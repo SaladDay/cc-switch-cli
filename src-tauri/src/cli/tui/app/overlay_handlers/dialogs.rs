@@ -313,7 +313,11 @@ impl App {
             }
             TextSubmit::SkillsDiscoverQuery => {
                 self.skills_discover_query = raw.clone();
-                Action::SkillsDiscover { query: raw }
+                Action::SkillsDiscover {
+                    query: raw,
+                    source: self.skills_discover_source,
+                    force: false,
+                }
             }
             TextSubmit::SkillsRepoAdd => {
                 if raw.is_empty() {

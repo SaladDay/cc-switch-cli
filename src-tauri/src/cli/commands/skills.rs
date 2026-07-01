@@ -20,6 +20,18 @@ pub enum SkillsCommand {
         /// Optional query filter (matches name/directory)
         query: Option<String>,
     },
+    /// Search the public skills.sh marketplace
+    #[command(alias = "marketplace")]
+    Market {
+        /// Search query
+        query: String,
+        /// Maximum number of results to show
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Result offset for pagination
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
     /// Install a skill (SSOT -> app skills dir)
     Install {
         /// Skill directory name or full key (owner/name:directory)
@@ -120,6 +132,11 @@ pub fn execute(cmd: SkillsCommand, app: Option<AppType>) -> Result<(), AppError>
     match cmd {
         SkillsCommand::List => list_installed(),
         SkillsCommand::Discover { query } => discover_skills(query.as_deref()),
+        SkillsCommand::Market {
+            query,
+            limit,
+            offset,
+        } => search_market(&query, limit, offset),
         SkillsCommand::Install { spec } => install_skill(&app_type, &spec),
         SkillsCommand::Uninstall { spec } => uninstall_skill(&spec),
         SkillsCommand::Enable { spec, apps } => toggle_skill(&app_type, &spec, &apps, true),
@@ -140,6 +157,47 @@ fn run_async<T>(fut: impl Future<Output = Result<T, AppError>>) -> Result<T, App
         .build()
         .map_err(|e| AppError::Message(format!("Failed to create runtime: {e}")))?
         .block_on(fut)
+}
+
+fn search_market(query: &str, limit: usize, offset: usize) -> Result<(), AppError> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(AppError::Message(
+            "Search query cannot be empty".to_string(),
+        ));
+    }
+
+    let service = SkillService::new()?;
+    let result = run_async(service.search_skills_sh(query, limit, offset))?;
+
+    if result.skills.is_empty() {
+        println!("{}", info("No skills found on skills.sh."));
+        return Ok(());
+    }
+
+    let mut table = create_table();
+    table.set_header(vec!["Key", "Directory", "Name", "Installs", "Repo"]);
+    for skill in result.skills {
+        table.add_row(vec![
+            skill.key,
+            skill.directory,
+            skill.name,
+            skill.installs.to_string(),
+            format!("{}/{}", skill.repo_owner, skill.repo_name),
+        ]);
+    }
+
+    println!("{}", table);
+    println!(
+        "{}",
+        info(&format!(
+            "Showing skills.sh results {}-{} of {}. Install with: cc-switch skills install <key>",
+            offset + 1,
+            offset + limit.min(result.total_count.saturating_sub(offset)),
+            result.total_count
+        ))
+    );
+    Ok(())
 }
 
 fn list_installed() -> Result<(), AppError> {

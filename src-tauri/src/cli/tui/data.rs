@@ -73,23 +73,6 @@ pub(crate) struct ProviderQuotaState {
     pub(crate) updated_at: Option<i64>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ModelRouteRow {
-    pub id: String,
-    pub pattern: String,
-    pub provider_id: String,
-    pub provider_name: String,
-    pub priority: i32,
-    pub enabled: bool,
-    pub hit_count: i64,
-    pub last_hit_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ModelRouteSnapshot {
-    pub rows: Vec<ModelRouteRow>,
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct QuotaSnapshot {
     by_provider: HashMap<String, ProviderQuotaState>,
@@ -318,8 +301,6 @@ pub struct ProxySnapshot {
     pub last_error: Option<String>,
     #[allow(dead_code)]
     pub current_app_target: Option<ProxyTargetSnapshot>,
-    /// 按 provider 聚合的预估 token 数（provider_id → token_count）
-    pub provider_token_map: HashMap<String, u64>,
 }
 
 impl ProxySnapshot {
@@ -864,6 +845,24 @@ pub struct UiData {
     pub(crate) reload_token: UiDataReloadToken,
 }
 
+
+#[derive(Debug, Clone)]
+pub struct ModelRouteRow {
+    pub id: String,
+    pub pattern: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub priority: i32,
+    pub enabled: bool,
+    pub hit_count: i64,
+    pub last_hit_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelRouteSnapshot {
+    pub rows: Vec<ModelRouteRow>,
+}
+
 pub(crate) fn load_state() -> Result<AppState, AppError> {
     AppState::try_new()
 }
@@ -945,8 +944,6 @@ impl UiData {
         };
         let proxy = load_proxy_snapshot_from_state(state, app_type)?;
 
-        let model_routes = load_model_routes_snapshot(state, app_type, &providers)?;
-
         Ok(Self {
             providers,
             mcp,
@@ -954,21 +951,12 @@ impl UiData {
             config,
             skills,
             proxy,
-            model_routes,
             usage: UsageSnapshot::default(),
             pricing: ModelPricingSnapshot::default(),
+            model_routes: ModelRouteSnapshot::default(),
             quota: QuotaSnapshot::default(),
             reload_token: next_reload_token(),
         })
-    }
-
-    pub(crate) fn refresh_proxy_snapshot(&mut self, app_type: &AppType) -> Result<(), AppError> {
-        let state = load_state()?;
-        self.proxy = load_proxy_snapshot_from_state(&state, app_type)?;
-        // 同时刷新 model_routes 命中统计，使仪表盘的路由命中图例
-        // 能反映代理运行期间累积的 hit_count（否则停留在 UiData::load 快照）。
-        self.model_routes = load_model_routes_snapshot(&state, app_type, &self.providers)?;
-        Ok(())
     }
 
     pub(crate) fn app_switch_loading_projection(&self, app_type: &AppType) -> Self {
@@ -987,9 +975,9 @@ impl UiData {
             config: self.config.loading_projection(app_type),
             skills: self.skills.clone(),
             proxy,
-            model_routes: ModelRouteSnapshot::default(),
             usage: UsageSnapshot::default(),
             pricing: ModelPricingSnapshot::default(),
+            model_routes: ModelRouteSnapshot::default(),
             quota: QuotaSnapshot::default(),
             reload_token: next_reload_token(),
         }
@@ -2514,153 +2502,116 @@ pub(crate) fn load_proxy_config() -> Result<Option<crate::proxy::ProxyConfig>, A
     runtime.block_on(async { state.db.get_proxy_config().await.map(Some) })
 }
 
-fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
-    let state = load_state()?;
-    load_proxy_snapshot_from_state(&state, app_type)
-}
-
 fn load_proxy_snapshot_from_state(
     state: &AppState,
     app_type: &AppType,
 ) -> Result<ProxySnapshot, AppError> {
-    let current_app = app_type.as_str().to_string();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| AppError::Message(format!("failed to create async runtime: {e}")))?;
 
-    runtime.block_on(async {
-        let config = state.db.get_global_proxy_config_or_default().await?;
-        let app_proxy_config = state
-            .db
-            .get_proxy_config_for_app_or_default(app_type.as_str())
-            .await?;
-        let configured_listen_port = state.db.get_app_proxy_preferred_port(app_type.as_str())?;
-        let runtime_status = state
-            .proxy_service
-            .get_status_snapshot_for_app(app_type)
-            .await;
-        let claude_takeover = state
-            .db
-            .get_proxy_config_for_app_or_default("claude")
-            .await?
-            .enabled;
-        let codex_takeover = state
-            .db
-            .get_proxy_config_for_app_or_default("codex")
-            .await?
-            .enabled;
-        let gemini_takeover = state
-            .db
-            .get_proxy_config_for_app_or_default("gemini")
-            .await?
-            .enabled;
-
-        let current_app_target = runtime_status
-            .active_targets
-            .iter()
-            .find(|target| target.app_type.eq_ignore_ascii_case(&current_app))
-            .map(|target| ProxyTargetSnapshot {
-                provider_name: target.provider_name.clone(),
-            });
-        let active_worker_apps = runtime_status
-            .active_workers
-            .iter()
-            .map(|worker| worker.app_type.trim().to_ascii_lowercase())
-            .filter(|app| !app.is_empty())
-            .collect::<HashSet<_>>();
-        let listen_address = if runtime_status.address.trim().is_empty() {
-            config.listen_address.clone()
-        } else {
-            runtime_status.address.clone()
-        };
-        let listen_port = runtime_status
-            .active_workers
-            .iter()
-            .find(|worker| worker.app_type.eq_ignore_ascii_case(&current_app))
-            .map(|worker| worker.port)
-            .or_else(|| (runtime_status.port != 0).then_some(runtime_status.port))
-            .unwrap_or(configured_listen_port);
-        let default_cost_multiplier = state
-            .db
-            .get_default_cost_multiplier_or_default(app_type.as_str())
-            .await
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-
-        Ok(ProxySnapshot {
-            enabled: config.proxy_enabled,
-            running: runtime_status.running,
-            managed_runtime: runtime_status.managed_session_token.is_some()
-                || !runtime_status.active_workers.is_empty(),
-            active_worker_apps,
-            auto_failover_enabled: app_proxy_config.auto_failover_enabled,
-            claude_takeover,
-            codex_takeover,
-            gemini_takeover,
-            default_cost_multiplier,
-            configured_listen_address: config.listen_address.clone(),
-            configured_listen_port,
-            listen_address,
-            listen_port,
-            uptime_seconds: runtime_status.uptime_seconds,
-            total_requests: runtime_status.total_requests,
-            estimated_input_tokens_total: runtime_status.estimated_input_tokens_total,
-            estimated_output_tokens_total: runtime_status.estimated_output_tokens_total,
-            success_rate: (runtime_status.total_requests > 0)
-                .then_some(runtime_status.success_rate),
-            current_provider: runtime_status
-                .current_provider
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
-            last_error: runtime_status
-                .last_error
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
-            current_app_target,
-            provider_token_map: runtime_status.provider_token_map,
-        })
-    })
+    runtime.block_on(load_proxy_snapshot_from_state_async(state, app_type))
 }
 
-fn load_model_routes_snapshot(
+pub(crate) async fn load_proxy_snapshot_from_state_async(
     state: &AppState,
     app_type: &AppType,
-    providers: &ProvidersSnapshot,
-) -> Result<ModelRouteSnapshot, AppError> {
-    let model_routes = state.db.list_model_routes(app_type.as_str())?;
+) -> Result<ProxySnapshot, AppError> {
+    let current_app = app_type.as_str().to_string();
+    let config = state.db.get_global_proxy_config_or_default().await?;
+    let app_proxy_config = state
+        .db
+        .get_proxy_config_for_app_or_default(app_type.as_str())
+        .await?;
+    let configured_listen_port = state.db.get_app_proxy_preferred_port(app_type.as_str())?;
+    let runtime_status = state
+        .proxy_service
+        .get_status_snapshot_for_app(app_type)
+        .await;
+    let claude_takeover = state
+        .db
+        .get_proxy_config_for_app_or_default("claude")
+        .await?
+        .enabled;
+    let codex_takeover = state
+        .db
+        .get_proxy_config_for_app_or_default("codex")
+        .await?
+        .enabled;
+    let gemini_takeover = state
+        .db
+        .get_proxy_config_for_app_or_default("gemini")
+        .await?
+        .enabled;
 
-    let mut rows = model_routes
-        .into_iter()
-        .map(|route| {
-            let provider_name = providers
-                .rows
-                .iter()
-                .find(|p| p.id == route.provider_id)
-                .map(|p| crate::cli::tui::data::provider_display_name(app_type, p))
-                .unwrap_or_else(|| route.provider_id.clone());
+    let current_app_target = runtime_status
+        .active_targets
+        .iter()
+        .find(|target| target.app_type.eq_ignore_ascii_case(&current_app))
+        .map(|target| ProxyTargetSnapshot {
+            provider_name: target.provider_name.clone(),
+        });
+    let active_worker_apps = runtime_status
+        .active_workers
+        .iter()
+        .map(|worker| worker.app_type.trim().to_ascii_lowercase())
+        .filter(|app| !app.is_empty())
+        .collect::<HashSet<_>>();
+    let listen_address = if runtime_status.address.trim().is_empty() {
+        config.listen_address.clone()
+    } else {
+        runtime_status.address.clone()
+    };
+    let listen_port = runtime_status
+        .active_workers
+        .iter()
+        .find(|worker| worker.app_type.eq_ignore_ascii_case(&current_app))
+        .map(|worker| worker.port)
+        .or_else(|| (runtime_status.port != 0).then_some(runtime_status.port))
+        .unwrap_or(configured_listen_port);
+    let default_cost_multiplier = state
+        .db
+        .get_default_cost_multiplier_or_default(app_type.as_str())
+        .await
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
-            ModelRouteRow {
-                id: route.id,
-                pattern: route.pattern,
-                provider_id: route.provider_id,
-                provider_name,
-                priority: route.priority,
-                enabled: route.enabled,
-                hit_count: route.hit_count,
-                last_hit_at: route.last_hit_at,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    rows.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
-
-    Ok(ModelRouteSnapshot { rows })
+    Ok(ProxySnapshot {
+        enabled: config.proxy_enabled,
+        running: runtime_status.running,
+        managed_runtime: runtime_status.managed_session_token.is_some()
+            || !runtime_status.active_workers.is_empty(),
+        active_worker_apps,
+        auto_failover_enabled: app_proxy_config.auto_failover_enabled,
+        claude_takeover,
+        codex_takeover,
+        gemini_takeover,
+        default_cost_multiplier,
+        configured_listen_address: config.listen_address.clone(),
+        configured_listen_port,
+        listen_address,
+        listen_port,
+        uptime_seconds: runtime_status.uptime_seconds,
+        total_requests: runtime_status.total_requests,
+        estimated_input_tokens_total: runtime_status.estimated_input_tokens_total,
+        estimated_output_tokens_total: runtime_status.estimated_output_tokens_total,
+        success_rate: (runtime_status.total_requests > 0).then_some(runtime_status.success_rate),
+        current_provider: runtime_status
+            .current_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        last_error: runtime_status
+            .last_error
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        current_app_target,
+    })
 }
 
 fn load_skills_snapshot() -> Result<SkillsSnapshot, AppError> {
@@ -3189,7 +3140,8 @@ mod tests {
                 .expect("persist claude app proxy config");
         });
 
-        let snapshot = load_proxy_snapshot(&AppType::Claude).expect("load proxy snapshot");
+        let snapshot =
+            load_proxy_snapshot_from_state(&state, &AppType::Claude).expect("load proxy snapshot");
         assert!(snapshot.auto_failover_enabled);
     }
 

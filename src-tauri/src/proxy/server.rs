@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
+use std::{collections::HashMap, io::ErrorKind, net::SocketAddr, sync::Arc, time::Instant};
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -574,9 +574,25 @@ impl ProxyServer {
                 .parse()
                 .map_err(|e| format!("invalid bind address: {e}"))?;
 
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(|e| format!("bind proxy listener failed: {e}"))?;
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == ErrorKind::AddrInUse && addr.port() != 0 => {
+                let fallback_addr = SocketAddr::new(addr.ip(), 0);
+                log::warn!(
+                    "proxy listen address {} is already in use; retrying with ephemeral port",
+                    addr
+                );
+                tokio::net::TcpListener::bind(fallback_addr)
+                    .await
+                    .map_err(|fallback_error| {
+                        format!(
+                            "bind proxy listener failed after {} was in use: {}",
+                            addr, fallback_error
+                        )
+                    })?
+            }
+            Err(error) => return Err(format!("bind proxy listener failed: {error}")),
+        };
         let local_addr = listener
             .local_addr()
             .map_err(|e| format!("read proxy listener address failed: {e}"))?;

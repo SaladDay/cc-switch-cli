@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.8.5-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.8.6-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -354,11 +354,12 @@ cc-switch prompts delete <id>        # Delete prompt
 
 Manage and extend Claude Code/Codex/Gemini/OpenCode/Hermes capabilities with community skills.
 
-**Features:** SSOT-based skills store, multi-app enable/disable, sync to app directories, unmanaged scan/import, repo discovery.
+**Features:** SSOT-based skills store, multi-app enable/disable, sync to app directories, unmanaged scan/import, repo discovery, skills.sh marketplace search.
 
 ```bash
 cc-switch skills list                # List installed skills
 cc-switch skills discover <query>      # Discover available skills (alias: search)
+cc-switch skills market <query>      # Search skills.sh marketplace
 cc-switch skills install <name>      # Install a skill
 cc-switch skills uninstall <name>    # Uninstall a skill
 cc-switch skills enable <name>       # Enable for current app (--app)

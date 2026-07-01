@@ -565,6 +565,53 @@ mod tests {
     }
 
     #[test]
+    fn skills_discover_tab_toggles_marketplace_source() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SkillsDiscover;
+        app.focus = Focus::Content;
+        app.skills_discover_query = "python".to_string();
+
+        let action = app.on_key(key(KeyCode::Tab), &data());
+
+        assert_eq!(
+            app.skills_discover_source,
+            SkillsDiscoverSource::Marketplace
+        );
+        assert!(matches!(action, Action::None));
+    }
+
+    #[test]
+    fn skills_discover_r_refreshes_current_source() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SkillsDiscover;
+        app.focus = Focus::Content;
+        app.skills_discover_query = "python".to_string();
+        app.skills_discover_source = SkillsDiscoverSource::Marketplace;
+
+        let action = app.on_key(key(KeyCode::Char('r')), &data());
+
+        assert!(matches!(
+            action,
+            Action::SkillsDiscover {
+                query,
+                source: SkillsDiscoverSource::Marketplace,
+                force: true,
+            } if query == "python"
+        ));
+    }
+
+    #[test]
+    fn skills_discover_e_opens_repo_manager() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::SkillsDiscover;
+        app.focus = Focus::Content;
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data());
+
+        assert!(matches!(action, Action::SwitchRoute(Route::SkillsRepos)));
+    }
+
+    #[test]
     fn skills_m_opens_apps_picker_overlay() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Skills;
@@ -971,6 +1018,39 @@ mod tests {
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('[')), &data()),
+            Action::SetAppType(AppType::OpenClaw)
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn app_cycles_with_chinese_brackets() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        crate::settings::set_visible_apps(crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: true,
+            opencode: true,
+            hermes: false,
+            openclaw: true,
+        })
+        .expect("save visible apps");
+        let mut app = App::new(Some(AppType::Claude));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('】')), &data()),
+            Action::SetAppType(AppType::Codex)
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('【')), &data()),
+            Action::SetAppType(AppType::OpenClaw)
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('］')), &data()),
+            Action::SetAppType(AppType::Codex)
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('［')), &data()),
             Action::SetAppType(AppType::OpenClaw)
         ));
     }

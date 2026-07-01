@@ -7,6 +7,33 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.8.6] - 2026-06-29
+
+### Added
+
+- **Skills / Marketplace**: Add upstream-aligned skill marketplace discovery, including repository discovery with disk caching, `skills.sh` search, install-state detection, CLI market search, and TUI source switching.
+- **Providers / CLI**: Allow provider selection by name in `cc-switch use` and provider switch flows. [#317](https://github.com/SaladDay/cc-switch-cli/pull/317)
+- **Environment Check**: Improve local environment diagnostics with clearer tool status details.
+- **TUI / App Switching**: Support Chinese bracket keys for app switching.
+
+### Fixed
+
+- **Proxy / Managed Sessions**: Avoid per-app port collisions on the default proxy port by falling back safely when a worker port is already in use. Fixes [#290](https://github.com/SaladDay/cc-switch-cli/issues/290). [#305](https://github.com/SaladDay/cc-switch-cli/pull/305)
+- **TUI / Proxy**: Refresh the home-page proxy snapshot asynchronously so switching between proxy and non-proxy apps stays responsive.
+
+### Performance
+
+- **TUI / Startup**: Pre-seed lightweight app snapshots, defer usage/pricing aggregation, managed-auth status, and session-usage sync until needed, and keep large session lists responsive.
+- **Session Usage**: Batch Claude session sync-state lookups to avoid thousands of per-file database queries on large histories.
+
+### Thanks
+
+Thanks to everyone who helped land this release:
+
+- Code & PRs: [@mvanhorn](https://github.com/mvanhorn), [@SaladDay](https://github.com/SaladDay)
+- Reports, feature requests & diagnosis: [@fangyuan99](https://github.com/fangyuan99), [@Orangee511](https://github.com/Orangee511), [@Jony1211-lab](https://github.com/Jony1211-lab), [@QQuan930](https://github.com/QQuan930), [@leetomlee123](https://github.com/leetomlee123), [@meichuanyi](https://github.com/meichuanyi), [@shijunti19](https://github.com/shijunti19), [@HasonHuang](https://github.com/HasonHuang), [@zenpuhls](https://github.com/zenpuhls), [@sakuralost](https://github.com/sakuralost), [@jackjie330](https://github.com/jackjie330)
+- Thanks to every contributor who reported issues, tested the TUI/proxy changes, reviewed behavior, or helped diagnose performance problems.
+
 ## [5.8.5] - 2026-06-25
 
 ### Changed

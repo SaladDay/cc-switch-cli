@@ -17,6 +17,7 @@ use crate::error::AppError;
 use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
 use crate::services::{AuthService, ManagedAuthAccount, ProviderService};
 use crate::store::AppState;
+use indexmap::IndexMap;
 use inquire::{Confirm, Select};
 
 const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
@@ -683,16 +684,53 @@ fn get_state() -> Result<AppState, AppError> {
     AppState::try_new()
 }
 
+/// Resolve a switch argument to a real provider id and its provider record.
+///
+/// An exact id match always wins, so a provider whose name happens to collide
+/// with another provider's id never shadows the id lookup. When the id lookup
+/// misses, fall back to a case- and whitespace-insensitive `name` match. A
+/// single name match resolves to that provider's real id; multiple matches
+/// return an ambiguity error listing the candidate ids so the user can pick one.
+fn resolve_provider_for_switch(
+    providers: &IndexMap<String, Provider>,
+    arg: &str,
+) -> Result<(String, Provider), AppError> {
+    if let Some(provider) = providers.get(arg) {
+        return Ok((arg.to_string(), provider.clone()));
+    }
+
+    let needle = arg.trim();
+    let matches: Vec<(&String, &Provider)> = providers
+        .iter()
+        .filter(|(_, provider)| provider.name.trim().eq_ignore_ascii_case(needle))
+        .collect();
+
+    match matches.as_slice() {
+        [] => Err(AppError::Message(format!("Provider '{}' not found", arg))),
+        [(id, provider)] => Ok(((*id).clone(), (*provider).clone())),
+        multiple => {
+            let candidate_ids = multiple
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(AppError::Message(format!(
+                "Multiple providers named '{}'. Specify one by id: {}",
+                arg, candidate_ids
+            )))
+        }
+    }
+}
+
 fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let state = get_state()?;
     let app_str = app_type.as_str().to_string();
     let skip_live_sync = !crate::sync_policy::should_sync_live(&app_type);
 
-    // 检查 provider 是否存在
+    // 检查 provider 是否存在（支持按 id 或名称解析）
     let providers = ProviderService::list(&state, app_type.clone())?;
-    let Some(provider) = providers.get(id).cloned() else {
-        return Err(AppError::Message(format!("Provider '{}' not found", id)));
-    };
+    let (resolved_id, provider) = resolve_provider_for_switch(&providers, id)?;
+    let id = resolved_id.as_str();
 
     // 执行切换（upstream parity：干净写入，无冲突提示）
     ProviderService::switch(&state, app_type.clone(), id)?;

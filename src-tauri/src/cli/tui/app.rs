@@ -1,7 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::Size;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app_config::AppType;
@@ -46,8 +45,8 @@ pub(crate) use helpers::*;
 pub use types::{
     CommonSnippetViewSource, ConfirmAction, ConfirmOverlay, FilterScope, FilterState, Focus,
     LoadingKind, ManagedAuthLoginState, Overlay, PricingState, SessionsPane, SessionsState,
-    TextInputState, TextSubmit, TextViewAction, TextViewState, Toast, ToastKind, UsageMetric,
-    UsagePane, UsageState,
+    SkillsDiscoverSource, TextInputState, TextSubmit, TextViewAction, TextViewState, Toast,
+    ToastKind, UsageMetric, UsagePane, UsageState,
 };
 
 pub(crate) fn supports_failover_controls(app_type: &AppType) -> bool {

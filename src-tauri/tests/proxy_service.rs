@@ -252,6 +252,56 @@ async fn proxy_service_runtime_override_does_not_persist_proxy_config() {
 }
 
 #[tokio::test]
+async fn proxy_service_falls_back_to_ephemeral_port_when_configured_port_is_in_use() {
+    let occupied = TcpListener::bind(("127.0.0.1", 0)).expect("bind occupied local port");
+    let occupied_port = occupied
+        .local_addr()
+        .expect("read occupied listener address")
+        .port();
+    let db = Arc::new(Database::memory().expect("create database"));
+    let service = ProxyService::new(db);
+
+    let mut config = service.get_config().await.expect("get config");
+    config.listen_port = occupied_port;
+
+    let started = service
+        .start_with_runtime_config(config)
+        .await
+        .expect("start proxy on fallback port");
+    assert_ne!(
+        started.port, occupied_port,
+        "proxy should not report the occupied configured port"
+    );
+    assert!(started.port > 0, "fallback port should be bound");
+
+    let status = service.get_status().await;
+    assert_eq!(
+        status.port, started.port,
+        "status should report the actual fallback port"
+    );
+
+    service.stop().await.expect("stop proxy");
+}
+
+#[tokio::test]
+async fn proxy_service_preserves_non_address_in_use_bind_errors() {
+    let db = Arc::new(Database::memory().expect("create database"));
+    let service = ProxyService::new(db);
+
+    let mut config = service.get_config().await.expect("get config");
+    config.listen_address = "not-an-address".to_string();
+
+    let error = service
+        .start_with_runtime_config(config)
+        .await
+        .expect_err("invalid listen address should fail");
+    assert!(
+        error.contains("invalid bind address"),
+        "unexpected bind error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn proxy_service_status_tracks_runtime_uptime() {
     let db = Arc::new(Database::memory().expect("create database"));
     let service = ProxyService::new(db);
@@ -835,7 +885,6 @@ async fn managed_session_allows_second_supported_app_to_start_its_own_worker() {
 
     let state = AppState::try_new().expect("create app state");
     set_claude_proxy_port(&state.db, 0).await;
-    set_codex_proxy_port(&state.db, find_free_port()).await;
 
     state
         .proxy_service
@@ -844,6 +893,17 @@ async fn managed_session_allows_second_supported_app_to_start_its_own_worker() {
         .expect("start managed proxy for claude");
     let claude_pid = load_runtime_session_pid_for_app(&state, "claude");
     let _claude_cleanup = ManagedSessionCleanup::new(claude_pid);
+    let claude_port = state
+        .proxy_service
+        .get_status()
+        .await
+        .active_workers
+        .iter()
+        .find(|worker| worker.app_type == "claude")
+        .expect("claude worker status after start")
+        .port;
+    assert!(claude_port > 0, "claude worker should report a bound port");
+    set_codex_proxy_port(&state.db, claude_port).await;
 
     state
         .proxy_service
@@ -872,6 +932,25 @@ async fn managed_session_allows_second_supported_app_to_start_its_own_worker() {
         "attaching a second app should persist one worker per app"
     );
     let status = state.proxy_service.get_status().await;
+    let claude_worker = status
+        .active_workers
+        .iter()
+        .find(|worker| worker.app_type == "claude")
+        .expect("claude worker status");
+    let codex_worker = status
+        .active_workers
+        .iter()
+        .find(|worker| worker.app_type == "codex")
+        .expect("codex worker status");
+    assert_eq!(
+        claude_worker.port, claude_port,
+        "claude worker should keep its original bound port"
+    );
+    assert_ne!(
+        codex_worker.port, claude_port,
+        "second worker should fall back from the occupied claude port"
+    );
+    assert!(codex_worker.port > 0, "fallback port should be reported");
     assert_eq!(
         status.active_workers.len(),
         2,

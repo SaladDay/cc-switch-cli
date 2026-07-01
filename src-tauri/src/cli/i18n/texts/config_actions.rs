@@ -165,9 +165,65 @@ pub fn tui_skills_discover_query_empty() -> &'static str {
 
 pub fn tui_skills_discover_hint() -> &'static str {
     if is_chinese() {
-        "按 f 搜索仓库里的技能，按 r 管理技能仓库。"
+        "按 Tab 切换仓库/skills.sh，按 f 搜索，按 r 管理技能仓库。"
     } else {
-        "Press f to search skills from enabled repositories, or r to manage repositories."
+        "Press Tab to switch repositories/skills.sh, f to search, or r to manage repositories."
+    }
+}
+
+pub fn tui_skills_discover_empty() -> &'static str {
+    if is_chinese() {
+        "暂无结果"
+    } else {
+        "No results"
+    }
+}
+
+pub fn tui_skills_skillssh_search_prompt() -> &'static str {
+    if is_chinese() {
+        "搜索 skills.sh（至少 2 个字符）..."
+    } else {
+        "Search skills.sh (at least 2 characters)..."
+    }
+}
+
+pub fn tui_skills_source_repos() -> &'static str {
+    if is_chinese() {
+        "仓库"
+    } else {
+        "Repos"
+    }
+}
+
+pub fn tui_skills_source_marketplace() -> &'static str {
+    if is_chinese() {
+        "skills.sh"
+    } else {
+        "skills.sh"
+    }
+}
+
+pub fn tui_skills_source_switch_hint() -> &'static str {
+    if is_chinese() {
+        "Tab 切换来源"
+    } else {
+        "Tab to switch source"
+    }
+}
+
+pub fn tui_key_source() -> &'static str {
+    if is_chinese() {
+        "来源"
+    } else {
+        "Source"
+    }
+}
+
+pub fn tui_key_repo_manager() -> &'static str {
+    if is_chinese() {
+        "仓库管理"
+    } else {
+        "Manage repos"
     }
 }
 

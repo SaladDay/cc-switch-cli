@@ -50,6 +50,8 @@ pub enum Action {
     },
     SkillsDiscover {
         query: String,
+        source: SkillsDiscoverSource,
+        force: bool,
     },
     SkillsRepoAdd {
         spec: String,
@@ -596,6 +598,12 @@ pub struct App {
     pub skills_unmanaged_idx: usize,
     pub skills_discover_results: Vec<crate::services::skill::Skill>,
     pub skills_discover_query: String,
+    pub skills_discover_source: SkillsDiscoverSource,
+    pub skills_discover_loading: bool,
+    pub skills_discover_request_id: u64,
+    pub skills_discover_active_request_id: Option<u64>,
+    pub skills_discover_cache:
+        HashMap<(SkillsDiscoverSource, String), Vec<crate::services::skill::Skill>>,
     pub skills_unmanaged_results: Vec<crate::services::skill::UnmanagedSkill>,
     pub skills_unmanaged_selected: HashSet<String>,
     pub config_idx: usize,

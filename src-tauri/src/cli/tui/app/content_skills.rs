@@ -100,13 +100,50 @@ impl App {
             KeyCode::Char('f') => {
                 self.overlay = Overlay::TextInput(TextInputState {
                     title: texts::tui_skills_discover_title().to_string(),
-                    prompt: texts::tui_skills_discover_prompt().to_string(),
+                    prompt: if matches!(
+                        self.skills_discover_source,
+                        SkillsDiscoverSource::Marketplace
+                    ) {
+                        texts::tui_skills_skillssh_search_prompt().to_string()
+                    } else {
+                        texts::tui_skills_discover_prompt().to_string()
+                    },
                     input: TextInput::new(self.skills_discover_query.clone()),
                     submit: TextSubmit::SkillsDiscoverQuery,
                     secret: false,
                 });
                 Action::None
             }
+            KeyCode::Tab => {
+                self.skills_discover_source = self.skills_discover_source.toggled();
+                self.skills_discover_idx = 0;
+                let cache_key = (
+                    self.skills_discover_source,
+                    self.skills_discover_query.trim().to_lowercase(),
+                );
+                if let Some(skills) = self.skills_discover_cache.get(&cache_key) {
+                    self.skills_discover_results = skills.clone();
+                    self.skills_discover_loading = false;
+                    return Action::None;
+                }
+
+                self.skills_discover_results.clear();
+                self.skills_discover_loading = false;
+                if matches!(self.skills_discover_source, SkillsDiscoverSource::Repos) {
+                    Action::SkillsDiscover {
+                        query: self.skills_discover_query.clone(),
+                        source: self.skills_discover_source,
+                        force: false,
+                    }
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Char('r') => Action::SkillsDiscover {
+                query: self.skills_discover_query.clone(),
+                source: self.skills_discover_source,
+                force: true,
+            },
             KeyCode::Enter => {
                 let visible = visible_skills_discover(&self.filter, &self.skills_discover_results);
                 let Some(skill) = visible.get(self.skills_discover_idx) else {
@@ -120,7 +157,7 @@ impl App {
                     spec: skill.key.clone(),
                 }
             }
-            KeyCode::Char('r') => self.push_route_and_switch(Route::SkillsRepos),
+            KeyCode::Char('e') => self.push_route_and_switch(Route::SkillsRepos),
             _ => Action::None,
         }
     }

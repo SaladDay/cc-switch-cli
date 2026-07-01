@@ -4202,7 +4202,7 @@ fn mcp_page_shows_summary_bar() {
 }
 
 #[test]
-fn skills_discover_page_shows_hint_when_empty() {
+fn skills_discover_page_shows_empty_state() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
 
@@ -4216,7 +4216,71 @@ fn skills_discover_page_shows_hint_when_empty() {
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    assert!(all.contains(texts::tui_skills_discover_hint()));
+    assert!(all.contains(texts::tui_skills_discover_empty()));
+    assert!(!all.contains(texts::tui_skills_discover_hint()));
+}
+
+#[test]
+fn skills_discover_page_shows_inline_loading() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SkillsDiscover;
+    app.focus = Focus::Content;
+    app.skills_discover_loading = true;
+
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains(texts::tui_loading()), "{all}");
+}
+
+#[test]
+fn skills_discover_marketplace_prompts_for_search() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SkillsDiscover;
+    app.focus = Focus::Content;
+    app.skills_discover_source = crate::cli::tui::app::SkillsDiscoverSource::Marketplace;
+
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(
+        all.contains(texts::tui_skills_skillssh_search_prompt()),
+        "{all}"
+    );
+}
+
+#[test]
+fn skills_discover_page_renders_source_tabs() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::SkillsDiscover;
+    app.focus = Focus::Content;
+
+    let data = minimal_data(&app.app_type);
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+
+    assert!(all.contains(texts::tui_skills_source_repos()), "{all}");
+    assert!(
+        all.contains(texts::tui_skills_source_marketplace()),
+        "{all}"
+    );
+    assert!(
+        all.contains(texts::tui_skills_source_switch_hint()),
+        "{all}"
+    );
+    assert!(all.contains(texts::tui_key_refresh()), "{all}");
+    assert!(all.contains(texts::tui_key_repo_manager()), "{all}");
 }
 
 #[test]

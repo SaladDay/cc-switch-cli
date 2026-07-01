@@ -449,19 +449,39 @@ pub(crate) fn handle_skills_msg(
 ) -> Result<CacheInvalidation, AppError> {
     let mut invalidation = CacheInvalidation::None;
     match msg {
-        SkillsMsg::DiscoverFinished { query, result } => match result {
+        SkillsMsg::DiscoverFinished {
+            request_id,
+            query,
+            source,
+            result,
+        } => match result {
             Ok(skills) => {
+                if app.skills_discover_active_request_id != Some(request_id) {
+                    return Ok(invalidation);
+                }
                 app.overlay = Overlay::None;
+                app.skills_discover_loading = false;
+                app.skills_discover_active_request_id = None;
                 app.skills_discover_results = skills;
                 app.skills_discover_idx = 0;
                 app.skills_discover_query = query.clone();
+                app.skills_discover_source = source;
+                app.skills_discover_cache.insert(
+                    (source, query.trim().to_lowercase()),
+                    app.skills_discover_results.clone(),
+                );
                 app.push_toast(
                     texts::tui_toast_skills_discover_finished(app.skills_discover_results.len()),
                     ToastKind::Success,
                 );
             }
             Err(err) => {
+                if app.skills_discover_active_request_id != Some(request_id) {
+                    return Ok(invalidation);
+                }
                 app.overlay = Overlay::None;
+                app.skills_discover_loading = false;
+                app.skills_discover_active_request_id = None;
                 app.push_toast(
                     texts::tui_toast_skills_discover_failed(&err),
                     ToastKind::Error,
@@ -475,8 +495,19 @@ pub(crate) fn handle_skills_msg(
                 invalidation = CacheInvalidation::DataReloaded;
 
                 for row in app.skills_discover_results.iter_mut() {
-                    if row.directory.eq_ignore_ascii_case(&installed.directory) {
+                    if row.key == installed.id
+                        || row.directory.eq_ignore_ascii_case(&installed.directory)
+                    {
                         row.installed = true;
+                    }
+                }
+                for rows in app.skills_discover_cache.values_mut() {
+                    for row in rows.iter_mut() {
+                        if row.key == installed.id
+                            || row.directory.eq_ignore_ascii_case(&installed.directory)
+                        {
+                            row.installed = true;
+                        }
                     }
                 }
 
@@ -686,6 +717,7 @@ pub(crate) fn handle_proxy_msg(
     app: &mut App,
     data: &mut UiData,
     proxy_loading: &mut RequestTracker,
+    proxy_snapshot_refresh: &mut RequestTracker,
     msg: ProxyMsg,
 ) -> Result<CacheInvalidation, AppError> {
     let mut invalidation = CacheInvalidation::None;
@@ -713,6 +745,7 @@ pub(crate) fn handle_proxy_msg(
             match result {
                 Ok(()) => {
                     *data = UiData::load(&app.app_type)?;
+                    proxy_snapshot_refresh.cancel();
                     invalidation = CacheInvalidation::DataReloaded;
                     app.reset_proxy_activity(
                         data.proxy.estimated_input_tokens_total,
@@ -728,6 +761,31 @@ pub(crate) fn handle_proxy_msg(
                 }
                 Err(err) => {
                     app.push_toast(err, ToastKind::Error);
+                }
+            }
+        }
+        ProxyMsg::SnapshotRefreshed {
+            request_id,
+            app_type,
+            result,
+        } => {
+            if !proxy_snapshot_refresh.finish_if_active(request_id) {
+                return Ok(CacheInvalidation::None);
+            }
+            if app.app_type != app_type {
+                return Ok(CacheInvalidation::None);
+            }
+
+            match result {
+                Ok(proxy) => {
+                    data.proxy = proxy;
+                    app.observe_proxy_token_activity(
+                        data.proxy.estimated_input_tokens_total,
+                        data.proxy.estimated_output_tokens_total,
+                    );
+                }
+                Err(err) => {
+                    log::debug!("refresh proxy snapshot failed: {err}");
                 }
             }
         }

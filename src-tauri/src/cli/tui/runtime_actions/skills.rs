@@ -126,25 +126,58 @@ pub(super) fn set_sync_method(
     Ok(())
 }
 
-pub(super) fn discover(ctx: &mut RuntimeActionContext<'_>, query: String) -> Result<(), AppError> {
+pub(super) fn discover(
+    ctx: &mut RuntimeActionContext<'_>,
+    query: String,
+    source: super::super::app::SkillsDiscoverSource,
+    force: bool,
+) -> Result<(), AppError> {
+    if matches!(source, super::super::app::SkillsDiscoverSource::Marketplace)
+        && query.trim().chars().count() < 2
+    {
+        ctx.app.skills_discover_results.clear();
+        ctx.app.skills_discover_idx = 0;
+        ctx.app.skills_discover_query = query;
+        ctx.app.skills_discover_source = source;
+        ctx.app.skills_discover_loading = false;
+        return Ok(());
+    }
+
     let Some(tx) = ctx.skills_req_tx else {
         return Err(AppError::Message(
             texts::tui_error_skills_worker_unavailable().to_string(),
         ));
     };
-    ctx.app.overlay = Overlay::Loading {
-        kind: LoadingKind::Generic,
-        title: texts::tui_skills_discover_title().to_string(),
-        message: texts::tui_loading().to_string(),
-    };
-    tx.send(super::super::runtime_systems::SkillsReq::Discover { query })
-        .map_err(|e| AppError::Message(e.to_string()))?;
+    let cache_key = (source, query.trim().to_lowercase());
+    if !force {
+        if let Some(skills) = ctx.app.skills_discover_cache.get(&cache_key) {
+            ctx.app.skills_discover_results = skills.clone();
+            ctx.app.skills_discover_idx = 0;
+            ctx.app.skills_discover_query = query;
+            ctx.app.skills_discover_source = source;
+            ctx.app.skills_discover_loading = false;
+            return Ok(());
+        }
+    }
+
+    ctx.app.skills_discover_request_id = ctx.app.skills_discover_request_id.saturating_add(1);
+    let request_id = ctx.app.skills_discover_request_id;
+    ctx.app.skills_discover_active_request_id = Some(request_id);
+    ctx.app.skills_discover_loading = true;
+    tx.send(super::super::runtime_systems::SkillsReq::Discover {
+        request_id,
+        query,
+        source,
+        force,
+    })
+    .map_err(|e| AppError::Message(e.to_string()))?;
     Ok(())
 }
 
 pub(super) fn repo_add(ctx: &mut RuntimeActionContext<'_>, spec: String) -> Result<(), AppError> {
     let repo = parse_repo_spec(&spec)?;
     SkillService::upsert_repo(repo)?;
+    clear_repo_discover_state(ctx);
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app
         .push_toast(texts::tui_toast_repo_added(), ToastKind::Success);
@@ -157,6 +190,7 @@ pub(super) fn repo_remove(
     name: String,
 ) -> Result<(), AppError> {
     SkillService::remove_repo(&owner, &name)?;
+    clear_repo_discover_state(ctx);
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app
         .push_toast(texts::tui_toast_repo_removed(), ToastKind::Success);
@@ -177,11 +211,27 @@ pub(super) fn repo_toggle_enabled(
     {
         repo.enabled = enabled;
         SkillService::save_index(&index)?;
+        clear_repo_discover_state(ctx);
     }
     *ctx.data = super::super::data::UiData::load(&ctx.app.app_type)?;
     ctx.app
         .push_toast(texts::tui_toast_repo_toggled(enabled), ToastKind::Success);
     Ok(())
+}
+
+fn clear_repo_discover_state(ctx: &mut RuntimeActionContext<'_>) {
+    ctx.app
+        .skills_discover_cache
+        .retain(|(source, _), _| !matches!(source, super::super::app::SkillsDiscoverSource::Repos));
+    if matches!(
+        ctx.app.skills_discover_source,
+        super::super::app::SkillsDiscoverSource::Repos
+    ) {
+        ctx.app.skills_discover_results.clear();
+        ctx.app.skills_discover_idx = 0;
+        ctx.app.skills_discover_loading = false;
+        ctx.app.skills_discover_active_request_id = None;
+    }
 }
 
 pub(super) fn open_import(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {

@@ -2034,3 +2034,146 @@ async fn switch_provider_under_takeover_refreshes_claude_restore_backup_to_selec
         "switching after takeover restore should write provider C instead of stale provider A"
     );
 }
+
+fn seed_claude_provider(config: &mut MultiAppConfig, id: &str, name: &str) {
+    let manager = config
+        .get_manager_mut(&AppType::Claude)
+        .expect("claude manager");
+    let provider = Provider::with_id(
+        id.to_string(),
+        name.to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_API_KEY": format!("sk-{id}")
+            }
+        }),
+        None,
+    );
+    manager.providers.insert(id.to_string(), provider);
+}
+
+#[test]
+#[serial]
+fn provider_switch_resolves_by_name_case_and_whitespace_insensitive() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "id-alpha".to_string();
+    }
+    seed_claude_provider(&mut config, "id-alpha", "Alpha");
+    seed_claude_provider(&mut config, "id-beta", "Beta Provider");
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    provider_command(
+        ProviderCommand::Switch {
+            id: "  beta provider  ".to_string(),
+        },
+        AppType::Claude,
+    );
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    assert_eq!(
+        ProviderService::current(&refreshed, AppType::Claude).expect("read current provider"),
+        "id-beta"
+    );
+}
+
+#[test]
+#[serial]
+fn provider_switch_prefers_exact_id_over_name_collision() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "id-other".to_string();
+    }
+    // A provider whose id is "shared" and another whose *name* is "shared".
+    seed_claude_provider(&mut config, "shared", "Real Id Provider");
+    seed_claude_provider(&mut config, "id-other", "shared");
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    provider_command(
+        ProviderCommand::Switch {
+            id: "shared".to_string(),
+        },
+        AppType::Claude,
+    );
+
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    assert_eq!(
+        ProviderService::current(&refreshed, AppType::Claude).expect("read current provider"),
+        "shared",
+        "exact id match must win over a colliding provider name"
+    );
+}
+
+#[test]
+#[serial]
+fn provider_switch_unknown_name_or_id_reports_not_found() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    seed_claude_provider(&mut config, "id-alpha", "Alpha");
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    let err = provider_command_result(
+        ProviderCommand::Switch {
+            id: "nonexistent".to_string(),
+        },
+        AppType::Claude,
+    )
+    .expect_err("unknown provider should error");
+    assert!(
+        err.to_string().contains("not found"),
+        "expected not-found error, got: {err}"
+    );
+}
+
+#[test]
+#[serial]
+fn provider_switch_ambiguous_name_lists_candidate_ids() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    seed_claude_provider(&mut config, "id-one", "Duplicate");
+    seed_claude_provider(&mut config, "id-two", "Duplicate");
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    let err = provider_command_result(
+        ProviderCommand::Switch {
+            id: "duplicate".to_string(),
+        },
+        AppType::Claude,
+    )
+    .expect_err("ambiguous name should error");
+    let message = err.to_string();
+    assert!(message.contains("id-one"), "expected id-one in: {message}");
+    assert!(message.contains("id-two"), "expected id-two in: {message}");
+}

@@ -249,6 +249,45 @@ fn queue_provider_quota_refresh(
     queue_quota_refresh(app, data, quota_req_tx, target, true);
 }
 
+fn queue_proxy_snapshot_refresh(
+    tracker: &mut RequestTracker,
+    proxy_req_tx: Option<&mpsc::Sender<ProxyReq>>,
+    app_type: &AppType,
+) {
+    let Some(tx) = proxy_req_tx else {
+        return;
+    };
+    if tracker.active.is_some() {
+        return;
+    }
+
+    let request_id = tracker.start();
+    if tx
+        .send(ProxyReq::RefreshSnapshot {
+            request_id,
+            app_type: app_type.clone(),
+        })
+        .is_err()
+    {
+        tracker.cancel();
+    }
+}
+
+fn queue_proxy_snapshot_refresh_after_app_switch(
+    tracker: &mut RequestTracker,
+    proxy_req_tx: Option<&mpsc::Sender<ProxyReq>>,
+    before_app_type: &AppType,
+    app_type: &AppType,
+    action_succeeded: bool,
+) {
+    if !action_succeeded || before_app_type == app_type {
+        return;
+    }
+
+    tracker.cancel();
+    queue_proxy_snapshot_refresh(tracker, proxy_req_tx, app_type);
+}
+
 #[derive(Default)]
 struct UiDataByAppCache {
     by_app: HashMap<AppType, data::UiData>,
@@ -1206,11 +1245,11 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ProviderImportLiveConfig
         | Action::ProviderDelete { .. }
         | Action::ProviderSetFailoverQueue { .. }
-        | Action::ProviderMoveFailoverQueue { .. }
         | Action::ModelRouteAdd { .. }
         | Action::ModelRouteEdit { .. }
         | Action::ModelRouteDelete { .. }
         | Action::ModelRouteToggle { .. }
+        | Action::ProviderMoveFailoverQueue { .. }
         | Action::EditorSubmit {
             submit: EditorSubmit::ProviderAdd | EditorSubmit::ProviderEdit { .. },
             ..
@@ -1665,6 +1704,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let mut last_frame = Instant::now();
     let mut proxy_open_flash = ProxyOpenFlash::default();
     let mut proxy_loading = RequestTracker::default();
+    let mut proxy_snapshot_refresh = RequestTracker::default();
     let mut webdav_loading = RequestTracker::default();
     let mut update_check = RequestTracker::default();
     let mut session_usage_sync = RequestTracker::default();
@@ -2020,7 +2060,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
 
         if let Some(proxy) = proxy_system.as_ref() {
             while let Ok(msg) = proxy.result_rx.try_recv() {
-                match handle_proxy_msg(&mut app, &mut data, &mut proxy_loading, msg) {
+                match handle_proxy_msg(
+                    &mut app,
+                    &mut data,
+                    &mut proxy_loading,
+                    &mut proxy_snapshot_refresh,
+                    msg,
+                ) {
                     Ok(invalidation) => {
                         if let Err(err) = apply_cache_invalidation(
                             &mut app,
@@ -2160,8 +2206,9 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             match event::read().map_err(|e| AppError::Message(e.to_string()))? {
                 event::Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let key = normalize_key_event(key);
+                    let before_app_type = app.app_type.clone();
                     let action = app.on_key(key, &data);
-                    if let Err(err) = handle_tui_action(
+                    let action_result = handle_tui_action(
                         &mut terminal,
                         &mut app,
                         &mut data,
@@ -2183,7 +2230,9 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         quota.as_ref().map(|s| &s.req_tx),
                         usage_pricing.as_ref().map(|s| &s.req_tx),
                         action,
-                    ) {
+                    );
+                    let action_succeeded = action_result.is_ok();
+                    if let Err(err) = action_result {
                         if matches!(
                             &err,
                             AppError::Localized { key, .. } if *key == "tui_terminal_error"
@@ -2192,6 +2241,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         }
                         app.push_toast(err.to_string(), ToastKind::Error);
                     }
+                    queue_proxy_snapshot_refresh_after_app_switch(
+                        &mut proxy_snapshot_refresh,
+                        proxy_system.as_ref().map(|s| &s.req_tx),
+                        &before_app_type,
+                        &app.app_type,
+                        action_succeeded,
+                    );
                 }
                 event::Event::Mouse(mouse) => {
                     if let MouseEventKind::ScrollUp | MouseEventKind::ScrollDown = mouse.kind {
@@ -2201,8 +2257,9 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                             event::KeyCode::Down
                         };
                         let key = event::KeyEvent::new(code, event::KeyModifiers::NONE);
+                        let before_app_type = app.app_type.clone();
                         let action = app.on_key(key, &data);
-                        if let Err(err) = handle_tui_action(
+                        let action_result = handle_tui_action(
                             &mut terminal,
                             &mut app,
                             &mut data,
@@ -2224,7 +2281,9 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                             quota.as_ref().map(|s| &s.req_tx),
                             usage_pricing.as_ref().map(|s| &s.req_tx),
                             action,
-                        ) {
+                        );
+                        let action_succeeded = action_result.is_ok();
+                        if let Err(err) = action_result {
                             if matches!(
                                 &err,
                                 AppError::Localized { key, .. } if *key == "tui_terminal_error"
@@ -2233,6 +2292,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                             }
                             app.push_toast(err.to_string(), ToastKind::Error);
                         }
+                        queue_proxy_snapshot_refresh_after_app_switch(
+                            &mut proxy_snapshot_refresh,
+                            proxy_system.as_ref().map(|s| &s.req_tx),
+                            &before_app_type,
+                            &app.app_type,
+                            action_succeeded,
+                        );
                     }
                 }
                 event::Event::Resize(_, _) => {}
@@ -2259,15 +2325,11 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         if last_tick.elapsed() >= tick_rate {
             app.on_tick();
             if app.should_poll_proxy_activity() {
-                if let Err(err) = data.refresh_proxy_snapshot(&app.app_type) {
-                    log::debug!("refresh proxy snapshot failed: {err}");
-                } else {
-                    app.observe_proxy_token_activity(
-                        data.proxy.estimated_input_tokens_total,
-                        data.proxy.estimated_output_tokens_total,
-                    );
-                    app.observe_proxy_provider_activity(&data.proxy.provider_token_map);
-                }
+                queue_proxy_snapshot_refresh(
+                    &mut proxy_snapshot_refresh,
+                    proxy_system.as_ref().map(|s| &s.req_tx),
+                    &app.app_type,
+                );
             }
             queue_current_quota_refresh_if_due(
                 &mut app,

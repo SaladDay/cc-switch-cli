@@ -12,8 +12,8 @@ use crate::services::{SkillService, StreamCheckService, WebDavSyncService};
 use crate::settings::{set_webdav_sync_settings, webdav_jianguoyun_preset};
 
 use super::super::data::{
-    load_snapshot_state, load_state, load_usage_pricing_data_from_state_for_range, UiData,
-    UsageRangePreset,
+    load_proxy_snapshot_from_state_async, load_snapshot_state, load_state,
+    load_usage_pricing_data_from_state_for_range, UiData, UsageRangePreset,
 };
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
@@ -67,6 +67,16 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                             result: Err(err.clone()),
                         });
                     }
+                    ProxyReq::RefreshSnapshot {
+                        request_id,
+                        app_type,
+                    } => {
+                        let _ = tx.send(ProxyMsg::SnapshotRefreshed {
+                            request_id,
+                            app_type,
+                            result: Err(err.clone()),
+                        });
+                    }
                 }
             }
             return;
@@ -92,6 +102,21 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                     request_id,
                     app_type,
                     enabled,
+                    result,
+                });
+            }
+            ProxyReq::RefreshSnapshot {
+                request_id,
+                app_type,
+            } => {
+                let result = load_state().map_err(|e| e.to_string()).and_then(|state| {
+                    rt.block_on(load_proxy_snapshot_from_state_async(&state, &app_type))
+                        .map_err(|e| e.to_string())
+                });
+
+                let _ = tx.send(ProxyMsg::SnapshotRefreshed {
+                    request_id,
+                    app_type,
                     result,
                 });
             }
@@ -1529,9 +1554,16 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
             let err = e.to_string();
             while let Ok(req) = rx.recv() {
                 match req {
-                    SkillsReq::Discover { query } => {
+                    SkillsReq::Discover {
+                        request_id,
+                        query,
+                        source,
+                        ..
+                    } => {
                         let _ = tx.send(SkillsMsg::DiscoverFinished {
+                            request_id,
                             query,
+                            source,
                             result: Err(err.clone()),
                         });
                     }
@@ -1553,9 +1585,16 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
             let err = e.to_string();
             while let Ok(req) = rx.recv() {
                 match req {
-                    SkillsReq::Discover { query } => {
+                    SkillsReq::Discover {
+                        request_id,
+                        query,
+                        source,
+                        ..
+                    } => {
                         let _ = tx.send(SkillsMsg::DiscoverFinished {
+                            request_id,
                             query,
+                            source,
                             result: Err(err.clone()),
                         });
                     }
@@ -1573,24 +1612,83 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
 
     while let Ok(req) = rx.recv() {
         match req {
-            SkillsReq::Discover { query } => {
+            SkillsReq::Discover {
+                request_id,
+                query,
+                source,
+                force,
+            } => {
                 let query_trimmed = query.trim().to_lowercase();
-                let result = rt
-                    .block_on(async { service.list_skills().await })
-                    .map_err(|e| e.to_string())
-                    .map(|mut skills| {
-                        if !query_trimmed.is_empty() {
-                            skills.retain(|s| {
-                                s.name.to_lowercase().contains(&query_trimmed)
-                                    || s.directory.to_lowercase().contains(&query_trimmed)
-                                    || s.description.to_lowercase().contains(&query_trimmed)
-                                    || s.key.to_lowercase().contains(&query_trimmed)
-                            });
-                        }
-                        skills
-                    });
+                let installed_skill_keys = crate::services::SkillService::load_index()
+                    .map(|index| {
+                        index
+                            .skills
+                            .values()
+                            .map(|skill| {
+                                (
+                                    skill.directory.to_lowercase(),
+                                    skill
+                                        .repo_owner
+                                        .as_deref()
+                                        .unwrap_or_default()
+                                        .to_lowercase(),
+                                    skill
+                                        .repo_name
+                                        .as_deref()
+                                        .unwrap_or_default()
+                                        .to_lowercase(),
+                                )
+                            })
+                            .collect::<std::collections::HashSet<_>>()
+                    })
+                    .unwrap_or_default();
+                let result = match source {
+                    crate::cli::tui::app::SkillsDiscoverSource::Repos => rt
+                        .block_on(async { service.list_skills_cached(force).await })
+                        .map_err(|e| e.to_string()),
+                    crate::cli::tui::app::SkillsDiscoverSource::Marketplace => rt
+                        .block_on(async { service.search_skills_sh(&query, 50, 0).await })
+                        .map(|result| {
+                            result
+                                .skills
+                                .into_iter()
+                                .map(|skill| crate::services::skill::Skill {
+                                    installed: installed_skill_keys.contains(&(
+                                        skill.directory.to_lowercase(),
+                                        skill.repo_owner.to_lowercase(),
+                                        skill.repo_name.to_lowercase(),
+                                    )),
+                                    key: skill.key,
+                                    name: skill.name,
+                                    description: format!("{} installs", skill.installs),
+                                    directory: skill.directory,
+                                    readme_url: skill.readme_url,
+                                    repo_owner: Some(skill.repo_owner),
+                                    repo_name: Some(skill.repo_name),
+                                    repo_branch: Some(skill.repo_branch),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .map_err(|e| e.to_string()),
+                }
+                .map(|mut skills| {
+                    if !query_trimmed.is_empty() {
+                        skills.retain(|s| {
+                            s.name.to_lowercase().contains(&query_trimmed)
+                                || s.directory.to_lowercase().contains(&query_trimmed)
+                                || s.description.to_lowercase().contains(&query_trimmed)
+                                || s.key.to_lowercase().contains(&query_trimmed)
+                        });
+                    }
+                    skills
+                });
 
-                let _ = tx.send(SkillsMsg::DiscoverFinished { query, result });
+                let _ = tx.send(SkillsMsg::DiscoverFinished {
+                    request_id,
+                    query,
+                    source,
+                    result,
+                });
             }
             SkillsReq::Install { spec, app } => {
                 let spec_clone = spec.clone();

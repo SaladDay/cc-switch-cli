@@ -7597,7 +7597,7 @@ requires_openai_auth = true
         service
             .write_gemini_live(&json!({
                 "env": {
-                    "GOOGLE_GEMINI_BASE_URL": "http://127.0.0.1:15721",
+                    "GOOGLE_GEMINI_BASE_URL": "http://127.0.0.1:15723",
                     "GEMINI_API_KEY": PROXY_TOKEN_PLACEHOLDER
                 }
             }))
@@ -7643,7 +7643,7 @@ requires_openai_auth = true
         assert_eq!(
             live.pointer("/env/GOOGLE_GEMINI_BASE_URL")
                 .and_then(Value::as_str),
-            Some("http://127.0.0.1:15721"),
+            Some("http://127.0.0.1:15723"),
             "active Gemini live config should keep the proxy base URL"
         );
 
