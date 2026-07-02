@@ -845,8 +845,27 @@ pub struct UiData {
     pub proxy: ProxySnapshot,
     pub usage: UsageSnapshot,
     pub pricing: ModelPricingSnapshot,
+    pub model_routes: ModelRouteSnapshot,
     pub(crate) quota: QuotaSnapshot,
     pub(crate) reload_token: UiDataReloadToken,
+}
+
+
+#[derive(Debug, Clone)]
+pub struct ModelRouteRow {
+    pub id: String,
+    pub pattern: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub priority: i32,
+    pub enabled: bool,
+    pub hit_count: i64,
+    pub last_hit_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelRouteSnapshot {
+    pub rows: Vec<ModelRouteRow>,
 }
 
 pub(crate) fn load_state() -> Result<AppState, AppError> {
@@ -939,6 +958,7 @@ impl UiData {
             proxy,
             usage: UsageSnapshot::default(),
             pricing: ModelPricingSnapshot::default(),
+            model_routes: ModelRouteSnapshot::default(),
             quota: QuotaSnapshot::default(),
             reload_token: next_reload_token(),
         })
@@ -962,6 +982,7 @@ impl UiData {
             proxy,
             usage: UsageSnapshot::default(),
             pricing: ModelPricingSnapshot::default(),
+            model_routes: ModelRouteSnapshot::default(),
             quota: QuotaSnapshot::default(),
             reload_token: next_reload_token(),
         }

@@ -1220,6 +1220,56 @@ mod tests {
     }
 
     #[test]
+    fn proxy_provider_activity_aligns_with_main_samples_on_first_tick() {
+        let mut app = App::new(Some(AppType::Claude));
+
+        // 首 tick：主样本 push 一个 0，provider 样本必须同长（修复前会因
+        // 静默 return 而落后一列，导致点阵图颜色栈错位退化为单色）。
+        app.reset_proxy_activity(10, 20);
+        app.observe_proxy_token_activity(10, 20);
+        let mut map = HashMap::new();
+        map.insert("p1".to_string(), 5);
+        app.observe_proxy_provider_activity(&map);
+
+        assert_eq!(app.proxy_input_activity_samples.len(), 1);
+        assert_eq!(
+            app.proxy_provider_activity_samples
+                .get("p1")
+                .map(|s| s.len()),
+            Some(1),
+            "provider samples must align with main samples from the first tick"
+        );
+    }
+
+    #[test]
+    fn proxy_provider_activity_resyncs_after_proxy_restart() {
+        let mut app = App::new(Some(AppType::Claude));
+
+        // 正常积累几个 tick
+        app.reset_proxy_activity(0, 0);
+        for i in 1..=3 {
+            app.observe_proxy_token_activity(i * 10, i * 20);
+            let mut map = HashMap::new();
+            map.insert("p1".to_string(), i * 5);
+            app.observe_proxy_provider_activity(&map);
+        }
+        assert_eq!(app.proxy_input_activity_samples.len(), 3);
+        assert_eq!(app.proxy_provider_activity_samples["p1"].len(), 3);
+
+        // proxy 重启：主计数回退触发主样本清空，provider 样本必须同步清空
+        app.observe_proxy_token_activity(1, 2);
+        assert_eq!(app.proxy_input_activity_samples, vec![0]);
+        let mut map = HashMap::new();
+        map.insert("p1".to_string(), 1);
+        app.observe_proxy_provider_activity(&map);
+        assert_eq!(
+            app.proxy_provider_activity_samples["p1"].len(),
+            1,
+            "provider samples must resync after proxy restart realigns main samples"
+        );
+    }
+
+    #[test]
     fn proxy_transition_starts_when_proxy_route_state_changes() {
         let mut app = App::new(Some(AppType::Claude));
 

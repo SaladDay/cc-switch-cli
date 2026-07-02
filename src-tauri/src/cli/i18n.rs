@@ -4066,6 +4066,150 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_model_routes_title() -> &'static str {
+        if is_chinese() {
+            "模型路由"
+        } else {
+            "Model Routes"
+        }
+    }
+
+    pub fn tui_toast_model_route_added() -> &'static str {
+        if is_chinese() {
+            "已添加模型路由"
+        } else {
+            "Model route added"
+        }
+    }
+
+    pub fn tui_toast_model_route_updated() -> &'static str {
+        if is_chinese() {
+            "已更新模型路由"
+        } else {
+            "Model route updated"
+        }
+    }
+
+    pub fn tui_toast_model_route_deleted() -> &'static str {
+        if is_chinese() {
+            "已删除模型路由"
+        } else {
+            "Model route deleted"
+        }
+    }
+
+    pub fn tui_model_route_add_pattern_title() -> &'static str {
+        if is_chinese() {
+            "添加模型路由 — 模型模式"
+        } else {
+            "Add Model Route — Pattern"
+        }
+    }
+
+    pub fn tui_model_route_add_pattern_prompt() -> &'static str {
+        if is_chinese() {
+            "输入模型名称模式（如 *-sonnet, gpt-4*）"
+        } else {
+            "Enter model name pattern (e.g. *-sonnet, gpt-4*)"
+        }
+    }
+
+    pub fn tui_model_route_add_provider_title() -> &'static str {
+        if is_chinese() {
+            "添加模型路由 — 供应商"
+        } else {
+            "Add Model Route — Provider"
+        }
+    }
+
+    pub fn tui_model_route_add_provider_prompt() -> &'static str {
+        if is_chinese() {
+            "输入供应商 ID"
+        } else {
+            "Enter provider ID"
+        }
+    }
+
+    pub fn tui_model_route_add_priority_title() -> &'static str {
+        if is_chinese() {
+            "添加模型路由 — 优先级"
+        } else {
+            "Add Model Route — Priority"
+        }
+    }
+
+    pub fn tui_model_route_add_priority_prompt() -> &'static str {
+        if is_chinese() {
+            "输入优先级（数值越小越优先，默认 0）"
+        } else {
+            "Enter priority (lower = higher priority, default 0)"
+        }
+    }
+
+    pub fn tui_model_route_edit_pattern_title() -> &'static str {
+        if is_chinese() {
+            "编辑模型路由 — 模型模式"
+        } else {
+            "Edit Model Route — Pattern"
+        }
+    }
+
+    pub fn tui_model_route_edit_pattern_prompt() -> &'static str {
+        if is_chinese() {
+            "输入模型名称模式"
+        } else {
+            "Enter model name pattern"
+        }
+    }
+
+    pub fn tui_model_route_edit_provider_title() -> &'static str {
+        if is_chinese() {
+            "编辑模型路由 — 供应商"
+        } else {
+            "Edit Model Route — Provider"
+        }
+    }
+
+    pub fn tui_model_route_edit_provider_prompt() -> &'static str {
+        if is_chinese() {
+            "输入供应商 ID"
+        } else {
+            "Enter provider ID"
+        }
+    }
+
+    pub fn tui_model_route_edit_priority_title() -> &'static str {
+        if is_chinese() {
+            "编辑模型路由 — 优先级"
+        } else {
+            "Edit Model Route — Priority"
+        }
+    }
+
+    pub fn tui_model_route_edit_priority_prompt() -> &'static str {
+        if is_chinese() {
+            "输入优先级"
+        } else {
+            "Enter priority"
+        }
+    }
+
+    pub fn tui_model_route_confirm_delete_message(pattern: &str) -> String {
+        if is_chinese() {
+            format!("确认删除模型路由 \"{pattern}\"？此操作不可撤销。")
+        } else {
+            format!("Delete model route \"{pattern}\"? This cannot be undone.")
+        }
+    }
+
+    pub fn tui_model_route_confirm_delete_title() -> &'static str {
+        if is_chinese() {
+            "删除模型路由"
+        } else {
+            "Delete Model Route"
+        }
+    }
+
     pub fn tui_managed_accounts_not_loaded() -> &'static str {
         if is_chinese() {
             "未加载"

@@ -146,6 +146,9 @@ impl App {
                         };
                         return Some(Action::None);
                     }
+                    ConfirmAction::ModelRouteDelete { id } => {
+                        Action::ModelRouteDelete { id: id.clone() }
+                    }
                 };
                 self.close_overlay();
                 action
@@ -370,6 +373,101 @@ impl App {
             }
             TextSubmit::WebDavJianguoyunUsername => self.handle_webdav_username_submit(raw),
             TextSubmit::WebDavJianguoyunPassword => self.handle_webdav_password_submit(raw),
+            TextSubmit::ModelRouteAddPattern => {
+                if raw.is_empty() {
+                    self.push_toast(
+                        texts::tui_toast_provider_add_missing_fields(),
+                        ToastKind::Warning,
+                    );
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_model_route_add_pattern_title().to_string(),
+                        prompt: texts::tui_model_route_add_pattern_prompt().to_string(),
+                        input: TextInput::new(raw),
+                        submit: TextSubmit::ModelRouteAddPattern,
+                        secret: false,
+                    });
+                    return Action::None;
+                }
+                // 打开 provider 选择器而非文本输入
+                self.overlay = Overlay::ModelRouteProviderPicker {
+                    pattern: raw,
+                    selected: 0,
+                    editing: false,
+                    existing_id: None,
+                };
+                Action::None
+            }
+            TextSubmit::ModelRouteAddProvider { .. } => {
+                // 不再使用 — provider 选择器直接跳到优先级步骤
+                Action::None
+            }
+            TextSubmit::ModelRouteAddPriority {
+                pattern,
+                provider_id,
+            } => {
+                let priority: i32 = raw.trim().parse().unwrap_or(0);
+                Action::ModelRouteAdd {
+                    pattern,
+                    provider_id,
+                    priority,
+                }
+            }
+            TextSubmit::ModelRouteEditPattern { id } => {
+                if raw.is_empty() {
+                    self.push_toast(
+                        texts::tui_toast_provider_add_missing_fields(),
+                        ToastKind::Warning,
+                    );
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_model_route_edit_pattern_title().to_string(),
+                        prompt: texts::tui_model_route_edit_pattern_prompt().to_string(),
+                        input: TextInput::new(raw),
+                        submit: TextSubmit::ModelRouteEditPattern { id },
+                        secret: false,
+                    });
+                    return Action::None;
+                }
+                // 编辑时预选当前 provider，避免回车静默改成首个 provider (Codex P2)
+                let selected = data
+                    .model_routes
+                    .rows
+                    .iter()
+                    .find(|row| row.id == id)
+                    .and_then(|route| {
+                        data.providers
+                            .rows
+                            .iter()
+                            .position(|p| p.id == route.provider_id)
+                    })
+                    .unwrap_or(0);
+                self.overlay = Overlay::ModelRouteProviderPicker {
+                    pattern: raw,
+
+                    selected,
+
+                    editing: true,
+
+                    existing_id: Some(id),
+                };
+
+                Action::None
+            }
+
+            TextSubmit::ModelRouteEditProvider { .. } => Action::None,
+
+            TextSubmit::ModelRouteEditPriority {
+                id,
+                pattern,
+                provider_id,
+            } => {
+                let priority: i32 = raw.trim().parse().unwrap_or(0);
+                Action::ModelRouteEdit {
+                    id,
+                    pattern,
+                    provider_id,
+                    priority,
+                }
+            }
         }
     }
 

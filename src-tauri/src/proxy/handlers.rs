@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use crate::{app_config::AppType, provider::Provider};
 
+use super::model_mapper::strip_one_m_suffix_for_upstream;
+
 use super::{
     error::ProxyError,
     forwarder::{ForwardOptions, RequestForwarder},
@@ -36,6 +38,173 @@ pub async fn health_check() -> impl IntoResponse {
 
 pub async fn get_status(State(state): State<ProxyServerState>) -> impl IntoResponse {
     Json(state.snapshot_status().await)
+}
+
+/// Handle `GET /v1/models` — return merged model list from model routes
+/// and provider env configs.
+///
+/// Emits a protocol superset (Anthropic + OpenAI) so that both
+/// Anthropic clients (via `ANTHROPIC_BASE_URL`) and OpenAI-style
+/// clients can consume the response.
+pub async fn handle_models(State(state): State<ProxyServerState>) -> impl IntoResponse {
+    let db = state.db;
+    let mut model_ids: Vec<String> = Vec::new();
+
+    // /v1/models 是模型发现端点，客户端（Claude Code、Codex 等）不会携带 app 标识，
+    // 所以遍历所有 app，合并各自的供应商 env 模型和启用的 model route，
+    // 让每个客户端都能看到为自己 app 配置的模型。
+    for app in AppType::all() {
+        let app_type = app.as_str();
+
+        // 1. Collect model names from this app's providers' env config
+        if let Ok(providers) = db.get_all_providers(app_type) {
+            for provider in providers.values() {
+                let env = provider.settings_config.get("env");
+                if let Some(env) = env {
+                    let keys = [
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                        "ANTHROPIC_MODEL",
+                    ];
+                    for key in &keys {
+                        if let Some(val) = env
+                            .get(*key)
+                            .and_then(|v| v.as_str())
+                            .filter(|v| !v.is_empty())
+                        {
+                            let cleaned = strip_one_m_suffix_for_upstream(val).to_string();
+                            if !model_ids.contains(&cleaned) {
+                                model_ids.push(cleaned);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Add standard Claude role models from route patterns
+        if let Ok(routes) = db.list_model_routes(app_type) {
+            for route in &routes {
+                if !route.enabled {
+                    continue;
+                }
+                let pattern_lower = route.pattern.trim().to_ascii_lowercase();
+                let standard_models = match pattern_lower.as_str() {
+                    "*haiku*" | "haiku" => vec!["claude-haiku-4-5-20251001"],
+                    "*sonnet*" | "sonnet" => vec!["claude-sonnet-4-6"],
+                    "*opus*" | "opus" => vec!["claude-opus-4-8"],
+                    _ => Vec::new(),
+                };
+                for m in standard_models {
+                    if !model_ids.contains(&m.to_string()) {
+                        model_ids.push(m.to_string());
+                    }
+                }
+                // 精确 pattern（无通配符）也作为 model id 暴露，否则路由专属 model
+                // （如 gpt-5、deepseek-v4-pro）不会出现在 /v1/models，客户端 picker 看不到。
+                if !pattern_lower.contains('*') {
+                    let exact = route.pattern.trim().to_string();
+                    if !exact.is_empty() && !model_ids.contains(&exact) {
+                        model_ids.push(exact);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Build protocol superset: Anthropic + OpenAI fields
+    let data: Vec<Value> = model_ids
+        .iter()
+        .map(|id| {
+            let display_name = model_display_name(id);
+            json!({
+                // Anthropic fields
+                "type": "model",
+                "display_name": display_name,
+                "created_at": "2025-01-01T00:00:00Z",
+                // OpenAI fields
+                "id": id,
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "cc-switch"
+            })
+        })
+        .collect();
+
+    let first_id = model_ids.first().cloned();
+    let last_id = model_ids.last().cloned();
+
+    Json(json!({
+        // Anthropic pagination
+        "type": "page",
+        "has_more": false,
+        "first_id": first_id,
+        "last_id": last_id,
+        // OpenAI
+        "object": "list",
+        "data": data
+    }))
+}
+
+/// Map a model id to a human-readable display name for Anthropic's
+/// `display_name` field on GET /v1/models.
+fn model_display_name(id: &str) -> String {
+    // Some common well-known model patterns
+    let mapping: &[(&str, &str)] = &[
+        ("claude-opus-4-8-20250514", "Claude 4.8 Opus"),
+        ("claude-opus-4-8", "Claude 4.8 Opus"),
+        ("claude-sonnet-4-6-20250514", "Claude 4.6 Sonnet"),
+        ("claude-sonnet-4-6", "Claude 4.6 Sonnet"),
+        ("claude-haiku-4-5-20251001", "Claude 4.5 Haiku"),
+        ("claude-haiku-4-5", "Claude 4.5 Haiku"),
+        ("claude-opus-4-5-20251101", "Claude 4.5 Opus"),
+        ("claude-opus-4-5", "Claude 4.5 Opus"),
+        ("claude-sonnet-4-5-20250915", "Claude 4.5 Sonnet"),
+        ("claude-sonnet-4-5", "Claude 4.5 Sonnet"),
+        ("claude-haiku-3-5-20250112", "Claude 3.5 Haiku"),
+        ("claude-haiku-3-5", "Claude 3.5 Haiku"),
+        ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+        ("deepseek-v4", "DeepSeek V4"),
+        ("deepseek-v3-1", "DeepSeek V3.1"),
+        ("deepseek-v3", "DeepSeek V3"),
+        ("deepseek-r1", "DeepSeek R1"),
+        ("gpt-5", "GPT-5"),
+        ("gpt-5-mini", "GPT-5 Mini"),
+        ("gpt-5-nano", "GPT-5 Nano"),
+        ("gpt-4.1", "GPT-4.1"),
+        ("gpt-4.1-mini", "GPT-4.1 Mini"),
+        ("gpt-4.1-nano", "GPT-4.1 Nano"),
+        ("gemini-3.0-pro", "Gemini 3.0 Pro"),
+        ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+        ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+        ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite"),
+        ("minimax-m2.5", "MiniMax M2.5"),
+        ("minimax-m1", "MiniMax M1"),
+        ("kimi-k2.5", "Kimi K2.5"),
+        ("kimi-k2", "Kimi K2"),
+        ("qwen3-coder", "Qwen3 Coder"),
+        ("qwen3-235b", "Qwen3 235B"),
+    ];
+
+    let id_lower = id.to_ascii_lowercase();
+    for (pattern, name) in mapping {
+        if id_lower == *pattern {
+            return name.to_string();
+        }
+    }
+
+    // Fallback: title-case the segments
+    id.split('-')
+        .map(|seg| {
+            let mut chars = seg.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub async fn handle_messages(
@@ -123,10 +292,11 @@ async fn handle_claude_request(
     headers: HeaderMap,
     body: Value,
 ) -> Response {
+    let estimated_input_tokens = estimate_tokens_from_value(&body);
     state
-        .record_estimated_input_tokens(estimate_tokens_from_value(&body))
+        .record_estimated_input_tokens(estimated_input_tokens)
         .await;
-    let context = match HandlerContext::load(&state, AppType::Claude, &headers, &body).await {
+    let context = match HandlerContext::load(&state, AppType::Claude, &headers, &body, "").await {
         Ok(context) => context,
         Err(error) => {
             state.record_request_error(&error).await;
@@ -209,6 +379,8 @@ async fn handle_claude_request(
             app_type: context.app_type.clone(),
             provider: forward_result.provider.clone(),
             current_provider_id_at_start: context.current_provider_id_at_start.clone(),
+            is_model_routed: context.route_source.as_deref() == Some("model_route"),
+            estimated_input_tokens,
         });
         let first_byte_timeout = remaining_timeout(first_byte_timeout, request_started_at);
         let idle_timeout = context.streaming_idle_timeout();
@@ -326,6 +498,8 @@ async fn handle_claude_request(
         app_type: context.app_type.clone(),
         provider: provider.clone(),
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
+        is_model_routed: context.route_source.as_deref() == Some("model_route"),
+        estimated_input_tokens,
     });
     let api_format = super::providers::get_claude_api_format(provider);
     let response_result = if adapter.needs_transform(provider) {
@@ -465,10 +639,11 @@ async fn handle_passthrough_request(
     app_type: AppType,
     endpoint: String,
 ) -> Response {
+    let estimated_input_tokens = estimate_tokens_from_value(&body);
     state
-        .record_estimated_input_tokens(estimate_tokens_from_value(&body))
+        .record_estimated_input_tokens(estimated_input_tokens)
         .await;
-    let context = match HandlerContext::load(&state, app_type, &headers, &body).await {
+    let context = match HandlerContext::load(&state, app_type, &headers, &body, &endpoint).await {
         Ok(context) => context,
         Err(error) => {
             state.record_request_error(&error).await;
@@ -558,6 +733,8 @@ async fn handle_passthrough_request(
             app_type: context.app_type.clone(),
             provider: forward_result.provider.clone(),
             current_provider_id_at_start: context.current_provider_id_at_start.clone(),
+            is_model_routed: context.route_source.as_deref() == Some("model_route"),
+            estimated_input_tokens,
         });
         let response_result = match response {
             super::forwarder::StreamingResponse::Live(response)
@@ -667,6 +844,7 @@ async fn handle_passthrough_request(
             streaming_first_byte_timeout,
             non_streaming_timeout,
             codex_tool_context.unwrap_or_default(),
+            estimated_input_tokens,
         )
         .await;
     }
@@ -709,6 +887,8 @@ async fn handle_passthrough_request(
         app_type: context.app_type.clone(),
         provider: forward_result.provider.clone(),
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
+        is_model_routed: context.route_source.as_deref() == Some("model_route"),
+        estimated_input_tokens,
     });
     let status = response.status;
     let request_log = Some(RequestLogContext::from_handler(
@@ -930,6 +1110,7 @@ async fn finish_codex_live_aware_response(
     streaming_first_byte_timeout: Option<Duration>,
     non_streaming_timeout: Option<Duration>,
     tool_context: super::providers::transform_codex_chat::CodexToolContext,
+    estimated_input_tokens: u64,
 ) -> Response {
     let provider = forward_result.provider;
     let response = forward_result.response;
@@ -938,6 +1119,8 @@ async fn finish_codex_live_aware_response(
         app_type: context.app_type.clone(),
         provider: provider.clone(),
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
+        is_model_routed: context.route_source.as_deref() == Some("model_route"),
+        estimated_input_tokens,
     });
 
     if super::providers::should_convert_codex_responses_to_chat(&provider, endpoint) {
@@ -1131,7 +1314,7 @@ fn remaining_timeout(timeout: Option<Duration>, started_at: Instant) -> Option<D
 mod tests {
     use super::{
         build_buffered_claude_transform_response, endpoint_with_query, handle_responses,
-        handle_responses_compact, responses_sse_to_response_value,
+        handle_responses_compact, model_display_name, responses_sse_to_response_value,
         should_use_claude_transform_streaming,
     };
     use crate::{
@@ -1140,6 +1323,7 @@ mod tests {
         provider::Provider,
         proxy::{
             error::ProxyError,
+            model_router::ModelRouter,
             provider_router::ProviderRouter,
             providers::codex_chat_history::CodexChatHistoryStore,
             providers::gemini_shadow::GeminiShadowStore,
@@ -1219,9 +1403,11 @@ mod tests {
             status: Arc::new(RwLock::new(ProxyStatus::default())),
             start_time: Arc::new(RwLock::new(None)),
             current_providers: Arc::new(RwLock::new(HashMap::new())),
-            provider_router: Arc::new(ProviderRouter::new(db)),
+            provider_router: Arc::new(ProviderRouter::new(db.clone())),
+            model_router: Arc::new(ModelRouter::new(db)),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
+            provider_token_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1690,5 +1876,21 @@ data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"upstr
 data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n\n";
 
         assert!(responses_sse_to_response_value(sse).is_err());
+    }
+
+    #[test]
+    fn model_display_name_known_patterns() {
+        assert_eq!(model_display_name("claude-opus-4-8"), "Claude 4.8 Opus");
+        assert_eq!(model_display_name("claude-sonnet-4-6"), "Claude 4.6 Sonnet");
+        assert_eq!(model_display_name("claude-haiku-4-5"), "Claude 4.5 Haiku");
+        assert_eq!(model_display_name("deepseek-v4-pro"), "DeepSeek V4 Pro");
+        assert_eq!(model_display_name("gemini-2.5-pro"), "Gemini 2.5 Pro");
+    }
+
+    #[test]
+    fn model_display_name_fallback() {
+        // Unknown models get title-cased segments
+        assert_eq!(model_display_name("my-custom-model"), "My Custom Model");
+        assert_eq!(model_display_name("test"), "Test");
     }
 }
