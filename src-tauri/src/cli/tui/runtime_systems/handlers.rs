@@ -114,10 +114,13 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                     let visible_len = crate::cli::tui::app::visible_sessions_for_state(
                         &app.filter,
                         &app.app_type,
+                        app.sessions.show_all_providers,
                         &app.sessions.rows,
                         app.sessions.detail_key.as_deref(),
                         app.sessions.messages_loaded,
                         &app.sessions.messages,
+                        app.sessions.deep_search_query.as_deref(),
+                        &app.sessions.deep_search_results,
                     )
                     .len();
                     if visible_len == 0 {
@@ -164,10 +167,13 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                     let visible_len = crate::cli::tui::app::visible_sessions_for_state(
                         &app.filter,
                         &app.app_type,
+                        app.sessions.show_all_providers,
                         &app.sessions.rows,
                         app.sessions.detail_key.as_deref(),
                         app.sessions.messages_loaded,
                         &app.sessions.messages,
+                        app.sessions.deep_search_query.as_deref(),
+                        &app.sessions.deep_search_results,
                     )
                     .len();
                     if visible_len == 0 {
@@ -189,6 +195,22 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                 );
             }
         },
+        SessionMsg::SearchFinished { request_id, result } => {
+            // Only apply if this is the latest search request
+            if app.sessions.deep_search_active != Some(request_id) {
+                return;
+            }
+            app.sessions.deep_search_active = None;
+            match result {
+                Ok(hits) => {
+                    app.sessions.deep_search_results = hits;
+                    app.sessions.selected_idx = 0;
+                }
+                Err(_) => {
+                    app.sessions.deep_search_results.clear();
+                }
+            }
+        }
     }
 }
 

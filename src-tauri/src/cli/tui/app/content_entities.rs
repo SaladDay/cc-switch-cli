@@ -34,10 +34,13 @@ impl App {
         let visible = visible_sessions_for_state(
             &self.filter,
             &self.app_type,
+            self.sessions.show_all_providers,
             &self.sessions.rows,
             self.sessions.detail_key.as_deref(),
             self.sessions.messages_loaded,
             &self.sessions.messages,
+            self.sessions.deep_search_query.as_deref(),
+            &self.sessions.deep_search_results,
         );
         let Some(session) = visible.get(self.sessions.selected_idx) else {
             return Action::None;
@@ -456,10 +459,13 @@ impl App {
         let visible = visible_sessions_for_state(
             &self.filter,
             &self.app_type,
+            self.sessions.show_all_providers,
             &self.sessions.rows,
             self.sessions.detail_key.as_deref(),
             self.sessions.messages_loaded,
             &self.sessions.messages,
+            self.sessions.deep_search_query.as_deref(),
+            &self.sessions.deep_search_results,
         );
         match key.code {
             KeyCode::Left => self.move_sessions_focus_left(),
@@ -618,6 +624,16 @@ impl App {
                 Action::None
             }
             KeyCode::Char('r') => Action::SessionsRefresh,
+            KeyCode::Char('a') => {
+                // Enter "show all providers" mode (the "全部" tab)
+                if !self.sessions.show_all_providers {
+                    self.sessions.show_all_providers = true;
+                    self.sessions.loaded_once = false;
+                    self.sessions.selected_idx = 0;
+                    self.sessions.clear_detail();
+                }
+                Action::None
+            }
             _ => Action::None,
         }
     }

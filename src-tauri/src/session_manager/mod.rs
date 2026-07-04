@@ -113,6 +113,95 @@ pub fn scan_sessions_for_provider(provider_id: &str) -> Vec<SessionMeta> {
     sessions
 }
 
+/// A single search hit (matched message snippet inside a session).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSnippet {
+    pub role: String,
+    pub snippet: String,
+}
+
+/// Result of searching a session's full conversation content.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSearchHit {
+    pub provider_id: String,
+    pub session_id: String,
+    pub source_path: String,
+    pub snippets: Vec<SearchSnippet>,
+}
+
+/// Search the full conversation content of every session (across all providers)
+/// for the given query. Returns one `SessionSearchHit` per session that contains
+/// at least one match. This is a live, full-scan search — no index, always fresh.
+pub fn search_sessions(query: &str) -> Vec<SessionSearchHit> {
+    let sessions = scan_sessions();
+    search_sessions_in(&sessions, query)
+}
+
+/// Same as `search_sessions`, but operates on an already-loaded session list.
+pub fn search_sessions_in(sessions: &[SessionMeta], query: &str) -> Vec<SessionSearchHit> {
+    let needle = query.trim();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+
+    let mut buckets: std::collections::HashMap<&str, Vec<&SessionMeta>> =
+        std::collections::HashMap::new();
+    for s in sessions {
+        buckets.entry(&s.provider_id).or_default().push(s);
+    }
+
+    let results: Vec<Vec<SessionSearchHit>> = std::thread::scope(|s| {
+        let handles: Vec<_> = buckets
+            .iter()
+            .map(|(provider_id, metas)| {
+                s.spawn(move || search_provider(provider_id, metas, needle))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+
+    let mut flat: Vec<SessionSearchHit> = results.into_iter().flatten().collect();
+    flat.sort_by(|a, b| {
+        a.provider_id
+            .cmp(&b.provider_id)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    flat
+}
+
+fn search_provider(
+    provider_id: &str,
+    metas: &[&SessionMeta],
+    needle: &str,
+) -> Vec<SessionSearchHit> {
+    match provider_id {
+        "codex" => metas
+            .iter()
+            .filter_map(|m| codex::search_session(m, needle))
+            .collect(),
+        "claude" => metas
+            .iter()
+            .filter_map(|m| claude::search_session(m, needle))
+            .collect(),
+        "opencode" => opencode::search_sessions(metas, needle),
+        "openclaw" => metas
+            .iter()
+            .filter_map(|m| openclaw::search_session(m, needle))
+            .collect(),
+        "gemini" => metas
+            .iter()
+            .filter_map(|m| gemini::search_session(m, needle))
+            .collect(),
+        "hermes" => hermes::search_sessions(metas, needle),
+        _ => Vec::new(),
+    }
+}
+
 pub fn load_messages(provider_id: &str, source_path: &str) -> Result<Vec<SessionMessage>, String> {
     // SQLite sessions use a "sqlite:" prefixed source_path
     if provider_id == "opencode" && source_path.starts_with("sqlite:") {

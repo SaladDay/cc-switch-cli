@@ -1186,6 +1186,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::SetAppType(_)
         | Action::LocalEnvRefresh
         | Action::SessionsRefresh
+        | Action::SessionsDeepSearch { .. }
         | Action::SessionMessagesLoad { .. }
         | Action::SessionResume { .. }
         | Action::SessionDelete { .. }
@@ -1564,7 +1565,13 @@ fn queue_sessions_refresh_if_needed(
     if !matches!(app.route, route::Route::Sessions) {
         return;
     }
-    let provider_id = app.app_type.as_str().to_string();
+    // When "show all providers" is on, use "all" as the virtual provider id
+    // so the worker scans every provider and the cache is keyed separately.
+    let provider_id = if app.sessions.show_all_providers {
+        "all".to_string()
+    } else {
+        app.app_type.as_str().to_string()
+    };
     if app.sessions.loaded_for_provider(&provider_id) || app.sessions.loading {
         return;
     }
@@ -2022,6 +2029,26 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 last_tick = Instant::now();
             }
 
+            // Fire pending deep search from debounce timer
+            if let Some(query) = app.pending_deep_search.take() {
+                // Directly send search request without full handle_tui_action
+                if let Some(sessions_sys) = sessions.as_ref() {
+                    let request_id = {
+                        app.sessions.deep_search_query = Some(query.clone());
+                        app.sessions.deep_search_results.clear();
+                        app.sessions.deep_search_seq = app.sessions.deep_search_seq.wrapping_add(1);
+                        app.sessions.deep_search_active = Some(app.sessions.deep_search_seq);
+                        app.sessions.deep_search_seq
+                    };
+                    let sessions_snapshot = app.sessions.rows.clone();
+                    let _ = sessions_sys.req_tx.send(runtime_systems::SessionReq::Search {
+                        request_id,
+                        query,
+                        sessions: sessions_snapshot,
+                    });
+                }
+            }
+
             if app.should_quit {
                 break;
             }
@@ -2333,6 +2360,23 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 quota.as_ref().map(|s| &s.req_tx),
             );
             last_tick = Instant::now();
+        }
+
+        // Fire pending deep search from debounce timer
+        if let Some(query) = app.pending_deep_search.take() {
+            if let Some(sessions_sys) = sessions.as_ref() {
+                app.sessions.deep_search_query = Some(query.clone());
+                app.sessions.deep_search_results.clear();
+                app.sessions.deep_search_seq = app.sessions.deep_search_seq.wrapping_add(1);
+                app.sessions.deep_search_active = Some(app.sessions.deep_search_seq);
+                let request_id = app.sessions.deep_search_seq;
+                let sessions_snapshot = app.sessions.rows.clone();
+                let _ = sessions_sys.req_tx.send(runtime_systems::SessionReq::Search {
+                    request_id,
+                    query,
+                    sessions: sessions_snapshot,
+                });
+            }
         }
 
         if app.should_quit {

@@ -82,6 +82,11 @@ pub(crate) enum SessionReq {
         session_id: String,
         source_path: String,
     },
+    Search {
+        request_id: u64,
+        query: String,
+        sessions: Vec<crate::session_manager::SessionMeta>,
+    },
 }
 
 pub(crate) enum SessionMsg {
@@ -98,6 +103,10 @@ pub(crate) enum SessionMsg {
         request_id: u64,
         key: String,
         result: Result<(), String>,
+    },
+    SearchFinished {
+        request_id: u64,
+        result: Result<Vec<crate::session_manager::SessionSearchHit>, String>,
     },
 }
 

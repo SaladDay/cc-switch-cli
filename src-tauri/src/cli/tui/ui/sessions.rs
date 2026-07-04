@@ -12,10 +12,13 @@ pub(super) fn render_sessions(
     let visible = app::visible_sessions_for_state(
         &app.filter,
         &app.app_type,
+        app.sessions.show_all_providers,
         &app.sessions.rows,
         app.sessions.detail_key.as_deref(),
         app.sessions.messages_loaded,
         &app.sessions.messages,
+        app.sessions.deep_search_query.as_deref(),
+        &app.sessions.deep_search_results,
     );
 
     let outer = Block::default()
@@ -47,12 +50,23 @@ pub(super) fn render_sessions(
                 ("R", texts::tui_key_restore()),
                 ("d", texts::tui_key_delete()),
                 ("r", texts::tui_key_refresh()),
+                ("a", if app.sessions.show_all_providers { "全部 (Esc返回)" } else { "全部" }),
             ],
         );
     }
 
     let summary = if app.sessions.loading && !app.sessions.loaded_once {
         texts::tui_sessions_loading_summary().to_string()
+    } else if app.sessions.deep_search_active.is_some() {
+        // Show spinner animation while deep search is running
+        let spinner = match app.tick % 4 {
+            0 => "⠋",
+            1 => "⠙",
+            2 => "⠹",
+            _ => "⠸",
+        };
+        let query = app.sessions.deep_search_query.as_deref().unwrap_or("");
+        format!("{spinner} 搜索中: \"{query}\"...")
     } else {
         texts::tui_sessions_summary(app.sessions.rows.len(), visible.len())
     };
@@ -129,10 +143,20 @@ fn render_session_list(
         return;
     }
 
-    let header = Row::new(vec![
-        Cell::from(texts::tui_sessions_header_title()),
-        Cell::from(texts::tui_sessions_header_time()),
-    ])
+    let show_all = app.sessions.show_all_providers;
+
+    let header = if show_all {
+        Row::new(vec![
+            Cell::from("Provider"),
+            Cell::from(texts::tui_sessions_header_title()),
+            Cell::from(texts::tui_sessions_header_time()),
+        ])
+    } else {
+        Row::new(vec![
+            Cell::from(texts::tui_sessions_header_title()),
+            Cell::from(texts::tui_sessions_header_time()),
+        ])
+    }
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     // Only build Row objects for the rows actually on screen. Without this the
@@ -163,14 +187,33 @@ fn render_session_list(
             ]),
             None => Line::raw(title),
         };
-        Row::new(vec![Cell::from(title_line), Cell::from(time)])
+        if show_all {
+            Row::new(vec![
+                Cell::from(session.provider_id.clone()),
+                Cell::from(title_line),
+                Cell::from(time),
+            ])
+        } else {
+            Row::new(vec![Cell::from(title_line), Cell::from(time)])
+        }
     });
 
-    let table = Table::new(rows, [Constraint::Percentage(72), Constraint::Length(12)])
-        .header(header)
-        .block(Block::default().borders(Borders::NONE))
-        .row_highlight_style(selection_style(theme))
-        .highlight_symbol(highlight_symbol(theme));
+    let table = if show_all {
+        Table::new(
+            rows,
+            [
+                Constraint::Length(10),
+                Constraint::Percentage(62),
+                Constraint::Length(12),
+            ],
+        )
+    } else {
+        Table::new(rows, [Constraint::Percentage(72), Constraint::Length(12)])
+    }
+    .header(header)
+    .block(Block::default().borders(Borders::NONE))
+    .row_highlight_style(selection_style(theme))
+    .highlight_symbol(highlight_symbol(theme));
 
     // The rows are pre-sliced to the window, so the highlight index is relative
     // to `start`.

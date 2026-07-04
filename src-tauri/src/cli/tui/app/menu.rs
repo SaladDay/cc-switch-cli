@@ -59,6 +59,7 @@ impl App {
             overlay: Overlay::None,
             toast: None,
             should_quit: false,
+            pending_deep_search: None,
             last_size: Size::new(0, 0),
             tick: 0,
             proxy_input_activity_samples: Vec::new(),
@@ -258,6 +259,18 @@ impl App {
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
         self.expire_managed_auth_login_if_needed();
+
+        // Deep search debounce: count ticks since last input, fire after threshold
+        const DEEP_SEARCH_DEBOUNCE_TICKS: u64 = 2; // ~2 ticks ≈ 400ms at 200ms/tick
+        if let Some((query, ticks)) = &mut self.sessions.deep_search_pending {
+            *ticks += 1;
+            if *ticks >= DEEP_SEARCH_DEBOUNCE_TICKS {
+                let q = std::mem::take(query);
+                self.sessions.deep_search_pending = None;
+                self.pending_deep_search = Some(q);
+            }
+        }
+
         if let Some(toast) = &mut self.toast {
             if !toast.persistent && toast.remaining_ticks > 0 {
                 toast.remaining_ticks -= 1;
@@ -638,6 +651,15 @@ impl App {
                 return self.on_usage_key(key, data);
             }
             KeyCode::Char('q') | KeyCode::Esc => {
+                // If in sessions "show all providers" mode, Esc exits that mode
+                // instead of navigating back.
+                if matches!(self.route, Route::Sessions) && self.sessions.show_all_providers {
+                    self.sessions.show_all_providers = false;
+                    self.sessions.loaded_once = false;
+                    self.sessions.selected_idx = 0;
+                    self.sessions.clear_detail();
+                    return Action::None;
+                }
                 return self.on_back_key();
             }
             _ => {}
@@ -680,6 +702,11 @@ impl App {
                 filter_changed = !self.active_filter_input_mut().value.is_empty();
                 self.filter.active = false;
                 self.active_filter_input_mut().set("");
+                // Clear deep search when filter is cleared
+                if matches!(self.route, Route::Sessions) {
+                    self.sessions.deep_search_query = None;
+                    self.sessions.deep_search_results.clear();
+                }
                 if is_daily_memory {
                     self.openclaw_daily_memory_search_results.clear();
                     self.daily_memory_idx = 0;
@@ -696,6 +723,18 @@ impl App {
                     Action::OpenClawDailyMemorySearch {
                         query: self.filter.input.value.clone(),
                     }
+                } else if matches!(self.route, Route::Sessions) {
+                    // Enter immediately fires the deep search (no debounce wait)
+                    let q = self.filter.input.value.trim().to_string();
+                    if q.is_empty() {
+                        self.sessions.deep_search_query = None;
+                        self.sessions.deep_search_results.clear();
+                        self.sessions.deep_search_pending = None;
+                        Action::None
+                    } else {
+                        self.sessions.deep_search_pending = None;
+                        Action::SessionsDeepSearch { query: q }
+                    }
                 } else {
                     Action::None
                 }
@@ -705,6 +744,23 @@ impl App {
                     return Action::None;
                 };
                 filter_changed = edit.changed;
+                // In sessions page, set pending deep search only when text content changes
+                // (not on cursor movement via Left/Right keys)
+                if edit.changed && matches!(self.route, Route::Sessions) {
+                    let q = self.filter.input.value.trim().to_string();
+                    // Only re-trigger if the query string actually changed
+                    let current_query = self.sessions.deep_search_pending.as_ref().map(|(q, _)| q.as_str())
+                        .or(self.sessions.deep_search_query.as_deref());
+                    if q == current_query.unwrap_or("") {
+                        // Query didn't change (just cursor moved), don't reset pending
+                    } else if q.is_empty() {
+                        self.sessions.deep_search_pending = None;
+                        self.sessions.deep_search_query = None;
+                        self.sessions.deep_search_results.clear();
+                    } else {
+                        self.sessions.deep_search_pending = Some((q, 0));
+                    }
+                }
                 if is_daily_memory && edit.changed && self.filter.input.value.is_empty() {
                     Action::OpenClawDailyMemorySearch {
                         query: String::new(),
@@ -833,10 +889,13 @@ impl App {
         let visible_session_rows = visible_sessions_for_state(
             &self.filter,
             &self.app_type,
+            self.sessions.show_all_providers,
             &self.sessions.rows,
             self.sessions.detail_key.as_deref(),
             self.sessions.messages_loaded,
             &self.sessions.messages,
+            self.sessions.deep_search_query.as_deref(),
+            &self.sessions.deep_search_results,
         );
         let sessions_len = visible_session_rows.len();
         if sessions_len == 0 {

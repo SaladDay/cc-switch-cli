@@ -11,6 +11,9 @@ pub enum Action {
     LocalEnvRefresh,
 
     SessionsRefresh,
+    SessionsDeepSearch {
+        query: String,
+    },
     SessionMessagesLoad {
         key: String,
         provider_id: String,
@@ -544,6 +547,8 @@ pub struct App {
     pub overlay: Overlay,
     pub toast: Option<Toast>,
     pub should_quit: bool,
+    /// When set, the main loop should fire a SessionsDeepSearch action.
+    pub pending_deep_search: Option<String>,
     pub last_size: Size,
     pub tick: u64,
     pub proxy_input_activity_samples: Vec<u64>,

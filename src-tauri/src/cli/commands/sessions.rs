@@ -9,7 +9,7 @@ use crate::cli::ui::{create_table, info, success, to_json, warning};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::services::session_usage::SessionSyncResult;
-use crate::session_manager::{self, SessionMessage, SessionMeta};
+use crate::session_manager::{self, SessionMessage, SessionMeta, SessionSearchHit};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SessionsCommand {
@@ -81,6 +81,14 @@ pub enum SessionsCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Search full conversation content across all sessions
+    Search {
+        /// Search query (case-insensitive, matches message content)
+        query: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Sync local session logs into usage statistics
     SyncUsage {
         /// Sync a specific provider instead of --app
@@ -136,6 +144,9 @@ pub fn execute(cmd: SessionsCommand, app: Option<AppType>) -> Result<(), AppErro
             all,
             yes,
         } => delete_session(app, provider, all, &selector, yes),
+        SessionsCommand::Search { query, json } => {
+            search_sessions_cmd(&query, json)
+        }
         SessionsCommand::SyncUsage {
             provider,
             all,
@@ -319,6 +330,62 @@ fn delete_session(
             session.provider_id
         ))
     );
+    Ok(())
+}
+
+fn search_sessions_cmd(query: &str, json: bool) -> Result<(), AppError> {
+    let sessions = session_manager::scan_sessions();
+    let hits = session_manager::search_sessions_in(&sessions, query);
+
+    if json {
+        println!(
+            "{}",
+            to_json(&hits).map_err(|source| AppError::JsonSerialize { source })?
+        );
+        return Ok(());
+    }
+
+    if hits.is_empty() {
+        println!("{}", info("No matches found."));
+        return Ok(());
+    }
+
+    let mut table = create_table();
+    table.set_header(vec!["Provider", "Session", "Title", "Snippets"]);
+    for hit in &hits {
+        let session = sessions
+            .iter()
+            .find(|s| s.source_path.as_deref() == Some(&hit.source_path))
+            .map(session_title)
+            .unwrap_or_else(|| short_session_id(&hit.session_id));
+        let snippet_preview = hit
+            .snippets
+            .iter()
+            .take(2)
+            .map(|s| truncate_chars(&s.snippet, 80))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        table.add_row(vec![
+            hit.provider_id.clone(),
+            short_session_id(&hit.session_id),
+            session,
+            snippet_preview,
+        ]);
+    }
+    println!("{table}");
+
+    // Show full snippets for each hit
+    for hit in &hits {
+        println!();
+        println!(
+            "{}",
+            info(&format!("=== {} / {} ===", hit.provider_id, short_session_id(&hit.session_id)))
+        );
+        for snippet in &hit.snippets {
+            println!("  [{}] {}", snippet.role, truncate_chars(&snippet.snippet, 200));
+        }
+    }
+
     Ok(())
 }
 

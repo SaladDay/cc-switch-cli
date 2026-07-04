@@ -686,7 +686,11 @@ fn handle_session_req(req: SessionReq, tx: &mpsc::Sender<SessionMsg>) -> Result<
             provider_id,
         } => {
             let result = std::panic::catch_unwind(|| {
-                crate::session_manager::scan_sessions_for_provider(&provider_id)
+                if provider_id == "all" {
+                    crate::session_manager::scan_sessions()
+                } else {
+                    crate::session_manager::scan_sessions_for_provider(&provider_id)
+                }
             })
             .map_err(|_| "session scan panicked".to_string());
             tx.send(SessionMsg::ScanFinished { request_id, result })
@@ -728,6 +732,18 @@ fn handle_session_req(req: SessionReq, tx: &mpsc::Sender<SessionMsg>) -> Result<
                 result,
             })
             .map_err(|_| ())
+        }
+        SessionReq::Search {
+            request_id,
+            query,
+            sessions,
+        } => {
+            let result = std::panic::catch_unwind(|| {
+                crate::session_manager::search_sessions_in(&sessions, &query)
+            })
+            .map_err(|_| "session search panicked".to_string());
+            tx.send(SessionMsg::SearchFinished { request_id, result })
+                .map_err(|_| ())
         }
     }
 }

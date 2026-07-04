@@ -237,6 +237,25 @@ pub(crate) fn handle_action(
             }
             Ok(())
         }
+        Action::SessionsDeepSearch { query } => {
+            let Some(tx) = ctx.session_req_tx else {
+                return Ok(());
+            };
+            // Set the query immediately so the UI shows "searching" state
+            ctx.app.sessions.deep_search_query = Some(query.clone());
+            ctx.app.sessions.deep_search_results.clear();
+            ctx.app.sessions.deep_search_seq = ctx.app.sessions.deep_search_seq.wrapping_add(1);
+            let request_id = ctx.app.sessions.deep_search_seq;
+            ctx.app.sessions.deep_search_active = Some(request_id);
+            // Snapshot the sessions to search (respecting show_all / provider filter)
+            let sessions = ctx.app.sessions.rows.clone();
+            let _ = tx.send(SessionReq::Search {
+                request_id,
+                query,
+                sessions,
+            });
+            Ok(())
+        }
         Action::SessionResume { command, cwd } => {
             let preferred_terminal = crate::settings::get_preferred_terminal();
             let target = session_terminal_target(preferred_terminal.as_deref());

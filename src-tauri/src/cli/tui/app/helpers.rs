@@ -791,10 +791,13 @@ pub(crate) fn visible_sessions<'a>(
 pub(crate) fn visible_sessions_for_state<'a>(
     filter: &FilterState,
     app_type: &AppType,
+    show_all: bool,
     rows: &'a [crate::session_manager::SessionMeta],
     detail_key: Option<&str>,
     messages_loaded: bool,
     messages: &[crate::session_manager::SessionMessage],
+    deep_search_query: Option<&str>,
+    deep_search_results: &[crate::session_manager::SessionSearchHit],
 ) -> Vec<&'a crate::session_manager::SessionMeta> {
     let query = filter.query_lower();
     let provider_id = app_type.as_str();
@@ -802,15 +805,50 @@ pub(crate) fn visible_sessions_for_state<'a>(
         loaded_detail_message_match_key(filter, detail_key, messages_loaded, messages)
     });
 
+    // If deep search is active, only show sessions that appear in search hits
+    // (merged with metadata matches).
+    let deep_search_source_paths: Option<std::collections::HashSet<&str>> =
+        if let Some(_q) = deep_search_query {
+            Some(
+                deep_search_results
+                    .iter()
+                    .map(|h| h.source_path.as_str())
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
     rows.iter()
-        .filter(|row| row.provider_id == provider_id)
-        .filter(|row| match &query {
-            None => true,
-            Some(q) => {
-                session_matches_filter(row, q)
-                    || message_match_key
-                        .as_deref()
-                        .is_some_and(|key| session_key(row) == key)
+        .filter(|row| show_all || row.provider_id == provider_id)
+        .filter(|row| {
+            // Deep search filtering: if active, show session if it's in search hits
+            // OR matches metadata filter
+            if let Some(ref hit_paths) = deep_search_source_paths {
+                let in_hits = row
+                    .source_path
+                    .as_deref()
+                    .is_some_and(|sp| hit_paths.contains(sp));
+                let meta_match = match &query {
+                    None => false,
+                    Some(q) => {
+                        session_matches_filter(row, q)
+                            || message_match_key
+                                .as_deref()
+                                .is_some_and(|key| session_key(row) == key)
+                    }
+                };
+                return in_hits || meta_match;
+            }
+            // Normal metadata filter
+            match &query {
+                None => true,
+                Some(q) => {
+                    session_matches_filter(row, q)
+                        || message_match_key
+                            .as_deref()
+                            .is_some_and(|key| session_key(row) == key)
+                }
             }
         })
         .collect()
