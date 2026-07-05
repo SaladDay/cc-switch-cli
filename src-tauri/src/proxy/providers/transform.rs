@@ -425,11 +425,68 @@ pub(crate) fn clean_schema(mut schema: Value) -> Value {
     schema
 }
 
+/// Map an OpenAI-compatible `usage` object onto Anthropic usage fields.
+fn openai_usage_to_anthropic(body: &Value) -> Value {
+    let usage = body.get("usage").cloned().unwrap_or(json!({}));
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    let mut usage_json = json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens
+    });
+
+    if let Some(cached) = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(|v| v.as_u64())
+    {
+        usage_json["cache_read_input_tokens"] = json!(cached);
+    }
+    if let Some(v) = usage.get("cache_read_input_tokens") {
+        usage_json["cache_read_input_tokens"] = v.clone();
+    }
+    if let Some(v) = usage.get("cache_creation_input_tokens") {
+        usage_json["cache_creation_input_tokens"] = v.clone();
+    }
+
+    usage_json
+}
+
 pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
     let choices = body
         .get("choices")
         .and_then(|c| c.as_array())
         .ok_or_else(|| ProxyError::TransformError("No choices in response".to_string()))?;
+
+    // Some upstreams (e.g. NVIDIA NIM's z-ai/glm-5.2) intermittently return a valid
+    // JSON body whose `choices` is an empty array alongside a usage-only payload:
+    //   {"id":"...","choices":[],"usage":{...}}
+    // Treat this as an empty assistant turn instead of failing the whole request with
+    // a 502, mirroring how the streaming path skips usage-only tail chunks. See #325
+    // and the desktop fix for farion1231/cc-switch#3951.
+    //
+    // Guard on the absence of a top-level `error`: an error body that also carries an
+    // empty `choices` array must not be masked as a successful empty turn. It falls
+    // through and is surfaced as a transform failure instead.
+    if choices.is_empty() && body.get("error").is_none() {
+        return Ok(json!({
+            "id": body.get("id").and_then(|i| i.as_str()).unwrap_or(""),
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": body.get("model").and_then(|m| m.as_str()).unwrap_or(""),
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": openai_usage_to_anthropic(&body)
+        }));
+    }
+
     let choice = choices
         .first()
         .ok_or_else(|| ProxyError::TransformError("Empty choices array".to_string()))?;
@@ -551,33 +608,7 @@ pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
         })
         .or(if has_tool_use { Some("tool_use") } else { None });
 
-    let usage = body.get("usage").cloned().unwrap_or(json!({}));
-    let input_tokens = usage
-        .get("prompt_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
-    let output_tokens = usage
-        .get("completion_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
-
-    let mut usage_json = json!({
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens
-    });
-
-    if let Some(cached) = usage
-        .pointer("/prompt_tokens_details/cached_tokens")
-        .and_then(|v| v.as_u64())
-    {
-        usage_json["cache_read_input_tokens"] = json!(cached);
-    }
-    if let Some(v) = usage.get("cache_read_input_tokens") {
-        usage_json["cache_read_input_tokens"] = v.clone();
-    }
-    if let Some(v) = usage.get("cache_creation_input_tokens") {
-        usage_json["cache_creation_input_tokens"] = v.clone();
-    }
+    let usage_json = openai_usage_to_anthropic(&body);
 
     Ok(json!({
         "id": body.get("id").and_then(|i| i.as_str()).unwrap_or(""),
@@ -1043,6 +1074,55 @@ mod tests {
         );
         assert_eq!(result["content"][1]["type"], "text");
         assert_eq!(result["content"][2]["type"], "tool_use");
+    }
+
+    #[test]
+    fn openai_to_anthropic_treats_empty_choices_as_empty_turn() {
+        // NVIDIA NIM's z-ai/glm-5.2 intermittently returns a usage-only body with an
+        // empty `choices` array. It must map to a valid empty message, not a 502. (#325)
+        let input = json!({
+            "id": "chatcmpl-nvidia",
+            "model": "z-ai/glm-5.2",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 13312,
+                "completion_tokens": 79,
+                "prompt_tokens_details": {"cached_tokens": 100}
+            }
+        });
+
+        let result = openai_to_anthropic(input).unwrap();
+
+        assert_eq!(result["type"], "message");
+        assert_eq!(result["role"], "assistant");
+        assert_eq!(result["id"], "chatcmpl-nvidia");
+        assert_eq!(result["model"], "z-ai/glm-5.2");
+        assert_eq!(result["stop_reason"], "end_turn");
+        assert_eq!(result["content"], json!([]));
+        assert_eq!(result["usage"]["input_tokens"], 13312);
+        assert_eq!(result["usage"]["output_tokens"], 79);
+        assert_eq!(result["usage"]["cache_read_input_tokens"], 100);
+    }
+
+    #[test]
+    fn openai_to_anthropic_still_errors_when_choices_field_missing() {
+        // A body with no `choices` field at all is genuinely malformed and should
+        // still be rejected, unlike an explicitly empty array.
+        let input = json!({"id": "chatcmpl-bad", "usage": {}});
+        let err = openai_to_anthropic(input).unwrap_err();
+        assert!(matches!(err, ProxyError::TransformError(_)));
+    }
+
+    #[test]
+    fn openai_to_anthropic_does_not_mask_error_body_with_empty_choices() {
+        // An error payload that also carries an empty `choices` array must not be
+        // silently converted into a successful empty turn.
+        let input = json!({
+            "choices": [],
+            "error": {"message": "upstream exploded", "type": "server_error"}
+        });
+        let err = openai_to_anthropic(input).unwrap_err();
+        assert!(matches!(err, ProxyError::TransformError(_)));
     }
 
     #[test]

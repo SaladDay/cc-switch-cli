@@ -6,7 +6,8 @@ use serde_json::{json, Value};
 
 use crate::helpers::{
     bind_test_listener, capture_openai_chat_upstream_body, handle_chat_completions,
-    handle_responses, provider_meta_from_json, set_claude_proxy_port_to_ephemeral, UpstreamState,
+    handle_chat_completions_empty_choices, handle_responses, provider_meta_from_json,
+    set_claude_proxy_port_to_ephemeral, UpstreamState,
 };
 
 #[tokio::test]
@@ -254,6 +255,110 @@ async fn proxy_claude_openai_chat_transforms_request_and_response() {
         body.pointer("/usage/output_tokens")
             .and_then(|v| v.as_u64()),
         Some(7)
+    );
+
+    service.stop().await.expect("stop proxy service");
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn proxy_claude_openai_chat_empty_choices_returns_empty_turn_not_error() {
+    // NVIDIA NIM's z-ai/glm-5.2 intermittently returns a usage-only body with an
+    // empty `choices` array. The buffered transform must yield a valid 200 Anthropic
+    // message with empty content instead of a 502 "Empty choices array". (#325)
+    let upstream_state = UpstreamState::default();
+    let upstream_router = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(handle_chat_completions_empty_choices),
+        )
+        .with_state(upstream_state.clone());
+
+    let upstream_listener = bind_test_listener().await;
+    let upstream_addr = upstream_listener
+        .local_addr()
+        .expect("read upstream address");
+    let upstream_handle = tokio::spawn(async move {
+        let _ = axum::serve(upstream_listener, upstream_router).await;
+    });
+
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    let provider = Provider {
+        id: "claude-openai-chat".to_string(),
+        name: "Claude OpenAI Chat".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": format!("http://{}", upstream_addr),
+                "ANTHROPIC_API_KEY": "sk-test-claude"
+            }
+        }),
+        website_url: None,
+        category: Some("claude".to_string()),
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..ProviderMeta::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider("claude", &provider)
+        .expect("save test provider");
+    db.set_current_provider("claude", &provider.id)
+        .expect("set current provider");
+
+    set_claude_proxy_port_to_ephemeral(&db).await;
+    let service = ProxyService::new(db);
+
+    let mut config = service.get_config().await.expect("read proxy config");
+    config.listen_port = 0;
+    let proxy = service
+        .start_with_runtime_config(config)
+        .await
+        .expect("start proxy service");
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "http://{}:{}/v1/messages",
+            proxy.address, proxy.port
+        ))
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({
+            "model": "claude-3-7-sonnet",
+            "max_tokens": 64,
+            "messages": [{
+                "role": "user",
+                "content": "hello"
+            }]
+        }))
+        .send()
+        .await
+        .expect("send request to proxy");
+
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "empty choices should not fail the request"
+    );
+    let body: Value = response.json().await.expect("parse proxy response");
+
+    assert_eq!(body.get("type").and_then(|v| v.as_str()), Some("message"));
+    assert_eq!(body.get("role").and_then(|v| v.as_str()), Some("assistant"));
+    assert_eq!(
+        body.get("content").and_then(|v| v.as_array()).map(Vec::len),
+        Some(0),
+        "content should be an empty array"
+    );
+    assert_eq!(
+        body.get("stop_reason").and_then(|v| v.as_str()),
+        Some("end_turn")
+    );
+    assert_eq!(
+        body.pointer("/usage/input_tokens").and_then(|v| v.as_u64()),
+        Some(42)
     );
 
     service.stop().await.expect("stop proxy service");

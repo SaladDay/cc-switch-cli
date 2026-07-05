@@ -104,6 +104,32 @@ pub(crate) async fn handle_chat_completions(
     )
 }
 
+pub(crate) async fn handle_chat_completions_empty_choices(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    record_upstream_request(&state, &headers, body).await;
+
+    // Mirrors NVIDIA NIM's z-ai/glm-5.2 usage-only tail body (#325).
+    (
+        StatusCode::OK,
+        [("x-upstream-trace", "claude-openai-chat")],
+        Json(json!({
+            "id": "chatcmpl-empty",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "z-ai/glm-5.2",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 42,
+                "completion_tokens": 0,
+                "total_tokens": 42
+            }
+        })),
+    )
+}
+
 pub(crate) async fn handle_chat_completions_priced(
     State(state): State<UpstreamState>,
     headers: HeaderMap,
