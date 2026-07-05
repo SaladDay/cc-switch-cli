@@ -67,6 +67,44 @@ impl App {
         }
     }
 
+    /// Automatically load the detail (messages) for the currently selected
+    /// session in the list, without switching to the Detail pane. This allows
+    /// users to browse session details with Up/Down keys without pressing Enter.
+    fn auto_load_selected_detail(&mut self, _data: &UiData) -> Action {
+        let visible = visible_sessions_for_state(
+            &self.filter,
+            &self.app_type,
+            self.sessions.show_all_providers,
+            &self.sessions.rows,
+            self.sessions.detail_key.as_deref(),
+            self.sessions.messages_loaded,
+            &self.sessions.messages,
+            self.sessions.deep_search_query.as_deref(),
+            &self.sessions.deep_search_results,
+        );
+        let Some(session) = visible.get(self.sessions.selected_idx) else {
+            return Action::None;
+        };
+        let key = session_key(session);
+        // If detail already matches the current selection, no need to reload.
+        if self.sessions.detail_key.as_deref() == Some(key.as_str()) {
+            return Action::None;
+        }
+        let provider_id = session.provider_id.clone();
+        let source_path = session.source_path.clone();
+        self.sessions.open_detail(key.clone());
+        // Stay in List pane during navigation; don't switch to Detail.
+        self.sessions.pane = SessionsPane::List;
+        match source_path {
+            Some(source_path) => Action::SessionMessagesLoad {
+                key,
+                provider_id,
+                source_path,
+            },
+            None => Action::None,
+        }
+    }
+
     fn is_provider_read_only(&self, row: &super::data::ProviderRow) -> bool {
         super::data::provider_is_read_only(&self.app_type, row)
     }
@@ -474,6 +512,7 @@ impl App {
                 match self.sessions.pane {
                     SessionsPane::List => {
                         self.sessions.selected_idx = self.sessions.selected_idx.saturating_sub(1);
+                        return self.auto_load_selected_detail(data);
                     }
                     SessionsPane::Detail => {
                         let next_idx = {
@@ -502,6 +541,7 @@ impl App {
                             self.sessions.selected_idx =
                                 (self.sessions.selected_idx + 1).min(visible.len() - 1);
                         }
+                        return self.auto_load_selected_detail(data);
                     }
                     SessionsPane::Detail => {
                         let next_idx = {
@@ -528,6 +568,7 @@ impl App {
                     let page = self.sessions_list_page_size();
                     self.sessions.selected_idx =
                         (self.sessions.selected_idx + page).min(visible.len() - 1);
+                    return self.auto_load_selected_detail(data);
                 }
                 Action::None
             }
@@ -535,18 +576,21 @@ impl App {
                 if matches!(self.sessions.pane, SessionsPane::List) {
                     let page = self.sessions_list_page_size();
                     self.sessions.selected_idx = self.sessions.selected_idx.saturating_sub(page);
+                    return self.auto_load_selected_detail(data);
                 }
                 Action::None
             }
             KeyCode::Home => {
                 if matches!(self.sessions.pane, SessionsPane::List) {
                     self.sessions.selected_idx = 0;
+                    return self.auto_load_selected_detail(data);
                 }
                 Action::None
             }
             KeyCode::End => {
                 if matches!(self.sessions.pane, SessionsPane::List) && !visible.is_empty() {
                     self.sessions.selected_idx = visible.len() - 1;
+                    return self.auto_load_selected_detail(data);
                 }
                 Action::None
             }

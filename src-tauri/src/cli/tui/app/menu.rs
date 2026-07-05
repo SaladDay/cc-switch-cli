@@ -739,6 +739,21 @@ impl App {
                     Action::None
                 }
             }
+            // Allow session list navigation (Up/Down/PageUp/PageDown/Home/End)
+            // while the filter is active, so users can browse search results
+            // without pressing Enter to exit filter mode first.
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+                if matches!(self.route, Route::Sessions) && !is_daily_memory =>
+            {
+                let action = self.on_sessions_key(key, data);
+                self.clamp_selections(data);
+                action
+            }
             _ => {
                 let Some(edit) = self.active_filter_input_mut().apply_key(key) else {
                     return Action::None;
