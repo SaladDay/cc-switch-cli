@@ -724,7 +724,6 @@ impl App {
                         query: self.filter.input.value.clone(),
                     }
                 } else if matches!(self.route, Route::Sessions) {
-                    // Enter immediately fires the deep search (no debounce wait)
                     let q = self.filter.input.value.trim().to_string();
                     if q.is_empty() {
                         self.sessions.deep_search_query = None;
@@ -732,6 +731,19 @@ impl App {
                         self.sessions.deep_search_pending = None;
                         Action::None
                     } else {
+                        // If deep search has already completed for this query,
+                        // open the selected session's detail directly instead
+                        // of re-triggering the search — saving the user an extra
+                        // Enter press.
+                        let search_completed = self.sessions.deep_search_active.is_none()
+                            && self.sessions.deep_search_query.as_deref() == Some(q.as_str());
+                        if search_completed {
+                            // Return early to skip sync_after_filter_key —
+                            // move_sessions_focus_right calls clamp_selections
+                            // and sets pane to Detail internally.
+                            return self.move_sessions_focus_right(data);
+                        }
+                        // Search not yet done — fire it now.
                         self.sessions.deep_search_pending = None;
                         Action::SessionsDeepSearch { query: q }
                     }
