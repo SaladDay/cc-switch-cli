@@ -5,6 +5,7 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
 use crate::proxy::response::StreamCompletion;
+use crate::proxy::sse::{append_utf8_safe, strip_sse_field, take_sse_block};
 
 #[derive(Debug, Deserialize)]
 struct OpenAIStreamChunk {
@@ -94,6 +95,7 @@ pub fn create_anthropic_sse_stream(
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
+        let mut utf8_remainder: Vec<u8> = Vec::new();
         let mut message_id = None;
         let mut current_model = None;
         let mut next_content_index: u32 = 0;
@@ -117,18 +119,17 @@ pub fn create_anthropic_sse_stream(
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
-                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    // CRLF-delimited SSE and multibyte UTF-8 split across chunks must be
+                    // handled, matching the sibling streaming converters (#323).
+                    append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
 
-                    while let Some(pos) = buffer.find("\n\n") {
-                        let line = buffer[..pos].to_string();
-                        buffer = buffer[pos + 2..].to_string();
-
+                    while let Some(line) = take_sse_block(&mut buffer) {
                         if line.trim().is_empty() {
                             continue;
                         }
 
                         for raw_line in line.lines() {
-                            let Some(data) = raw_line.strip_prefix("data:").map(str::trim_start) else {
+                            let Some(data) = strip_sse_field(raw_line, "data") else {
                                 continue;
                             };
 
@@ -812,6 +813,77 @@ mod tests {
                 Some((event, payload_type))
             })
             .collect()
+    }
+
+    async fn collect_events_from_byte_chunks(chunks: Vec<Vec<u8>>) -> Vec<Value> {
+        let upstream = stream::iter(
+            chunks
+                .into_iter()
+                .map(|chunk| Ok::<_, std::io::Error>(Bytes::from(chunk)))
+                .collect::<Vec<_>>(),
+        );
+        let converted = create_anthropic_sse_stream(upstream, StreamCompletion::default());
+        let collected: Vec<_> = converted.collect().await;
+
+        collected
+            .into_iter()
+            .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
+            .collect::<String>()
+            .split("\n\n")
+            .filter_map(|block| {
+                let data = block.lines().find_map(|line| line.strip_prefix("data: "))?;
+                serde_json::from_str::<Value>(data).ok()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn streaming_parses_crlf_delimited_sse() {
+        // Some OpenAI-compatible upstreams delimit SSE blocks with \r\n\r\n. The parser
+        // must handle both LF and CRLF, otherwise no events are ever emitted (#323).
+        let input = concat!(
+            "data: {\"id\":\"c\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n\r\n",
+            "data: {\"id\":\"c\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\r\n\r\n",
+            "data: [DONE]\r\n\r\n"
+        );
+
+        let events = collect_events(input).await;
+        let text_delta = events
+            .iter()
+            .find(|event| {
+                event["type"] == "content_block_delta" && event["delta"]["type"] == "text_delta"
+            })
+            .expect("text delta from CRLF-delimited stream");
+        assert_eq!(text_delta["delta"]["text"], "hi");
+        assert!(events.iter().any(|event| event["type"] == "message_stop"));
+    }
+
+    #[tokio::test]
+    async fn streaming_preserves_multibyte_utf8_split_across_chunks() {
+        // A multibyte character can straddle a network chunk boundary; the parser must not
+        // corrupt it (the old from_utf8_lossy-per-chunk approach would).
+        let head =
+            "data: {\"id\":\"c\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"";
+        let tail = "\"}}]}\n\ndata: [DONE]\n\n";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(head.as_bytes());
+        bytes.extend_from_slice("你好".as_bytes());
+        bytes.extend_from_slice(tail.as_bytes());
+
+        // Split mid-way through the first multibyte character (你 = 3 bytes).
+        let split_at = head.len() + 1;
+        let first = bytes[..split_at].to_vec();
+        let second = bytes[split_at..].to_vec();
+
+        let events = collect_events_from_byte_chunks(vec![first, second]).await;
+        let text: String = events
+            .iter()
+            .filter(|event| {
+                event["type"] == "content_block_delta" && event["delta"]["type"] == "text_delta"
+            })
+            .filter_map(|event| event["delta"]["text"].as_str())
+            .collect();
+        assert_eq!(text, "你好");
     }
 
     #[tokio::test]
