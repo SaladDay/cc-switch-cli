@@ -2041,11 +2041,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                         app.sessions.deep_search_seq
                     };
                     let sessions_snapshot = app.sessions.rows.clone();
-                    let _ = sessions_sys.req_tx.send(runtime_systems::SessionReq::Search {
-                        request_id,
-                        query,
-                        sessions: sessions_snapshot,
-                    });
+                    let _ = sessions_sys
+                        .req_tx
+                        .send(runtime_systems::SessionReq::Search {
+                            request_id,
+                            query,
+                            sessions: sessions_snapshot,
+                        });
                 }
             }
 
@@ -2371,11 +2373,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 app.sessions.deep_search_active = Some(app.sessions.deep_search_seq);
                 let request_id = app.sessions.deep_search_seq;
                 let sessions_snapshot = app.sessions.rows.clone();
-                let _ = sessions_sys.req_tx.send(runtime_systems::SessionReq::Search {
-                    request_id,
-                    query,
-                    sessions: sessions_snapshot,
-                });
+                let _ = sessions_sys
+                    .req_tx
+                    .send(runtime_systems::SessionReq::Search {
+                        request_id,
+                        query,
+                        sessions: sessions_snapshot,
+                    });
             }
         }
 

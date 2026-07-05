@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::session_manager::{SessionMessage, SessionMeta, SessionSearchHit, SearchSnippet};
+use crate::session_manager::{SearchSnippet, SessionMessage, SessionMeta, SessionSearchHit};
 
 use super::utils::{build_snippet, parse_timestamp_to_ms, truncate_summary};
 
@@ -131,26 +131,39 @@ pub fn search_session(meta: &SessionMeta, needle: &str) -> Option<SessionSearchH
         };
         let mut content = match msg.get("content") {
             Some(Value::String(s)) => s.to_string(),
-            Some(Value::Array(items)) => items.iter()
+            Some(Value::Array(items)) => items
+                .iter()
                 .filter_map(|item| item.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>().join("\n"),
+                .collect::<Vec<_>>()
+                .join("\n"),
             _ => String::new(),
         };
         if let Some(Value::Array(calls)) = msg.get("toolCalls") {
             for call in calls {
                 if let Some(name) = call.get("name").and_then(Value::as_str) {
-                    if !content.is_empty() { content.push('\n'); }
+                    if !content.is_empty() {
+                        content.push('\n');
+                    }
                     content.push_str(&format!("[Tool: {name}]"));
                 }
             }
         }
-        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) { continue; }
+        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) {
+            continue;
+        }
         if let Some(snippet) = build_snippet(&content, needle) {
-            snippets.push(SearchSnippet { role: role.to_string(), snippet });
-            if snippets.len() >= MAX_SNIPPETS { break; }
+            snippets.push(SearchSnippet {
+                role: role.to_string(),
+                snippet,
+            });
+            if snippets.len() >= MAX_SNIPPETS {
+                break;
+            }
         }
     }
-    if snippets.is_empty() { return None; }
+    if snippets.is_empty() {
+        return None;
+    }
     Some(SessionSearchHit {
         provider_id: PROVIDER_ID.to_string(),
         session_id: meta.session_id.clone(),

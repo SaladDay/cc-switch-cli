@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::openclaw_config::get_openclaw_dir;
 use crate::{
     config::write_json_file,
-    session_manager::{SessionMessage, SessionMeta, SessionSearchHit, SearchSnippet},
+    session_manager::{SearchSnippet, SessionMessage, SessionMeta, SessionSearchHit},
 };
 
 use super::utils::{
@@ -133,20 +133,43 @@ pub fn search_session(meta: &SessionMeta, needle: &str) -> Option<SessionSearchH
     const MAX_SNIPPETS: usize = 5;
 
     for line in reader.lines() {
-        let line = match line { Ok(l) => l, Err(_) => continue };
-        let value: Value = match serde_json::from_str(&line) { Ok(v) => v, Err(_) => continue };
-        if value.get("type").and_then(Value::as_str) != Some("message") { continue; }
-        let message = match value.get("message") { Some(m) => m, None => continue };
-        let raw_role = message.get("role").and_then(Value::as_str).unwrap_or("unknown");
-        let role = match raw_role { "toolResult" => "tool".to_string(), other => other.to_string() };
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let value: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if value.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let message = match value.get("message") {
+            Some(m) => m,
+            None => continue,
+        };
+        let raw_role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let role = match raw_role {
+            "toolResult" => "tool".to_string(),
+            other => other.to_string(),
+        };
         let content = message.get("content").map(extract_text).unwrap_or_default();
-        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) { continue; }
+        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) {
+            continue;
+        }
         if let Some(snippet) = build_snippet(&content, needle) {
             snippets.push(SearchSnippet { role, snippet });
-            if snippets.len() >= MAX_SNIPPETS { break; }
+            if snippets.len() >= MAX_SNIPPETS {
+                break;
+            }
         }
     }
-    if snippets.is_empty() { return None; }
+    if snippets.is_empty() {
+        return None;
+    }
     Some(SessionSearchHit {
         provider_id: PROVIDER_ID.to_string(),
         session_id: meta.session_id.clone(),

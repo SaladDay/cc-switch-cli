@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::hermes_config::get_hermes_dir;
-use crate::session_manager::{SessionMessage, SessionMeta, SessionSearchHit, SearchSnippet};
+use crate::session_manager::{SearchSnippet, SessionMessage, SessionMeta, SessionSearchHit};
 
 use super::utils::{
     build_snippet, extract_text, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary,
@@ -510,25 +510,45 @@ fn search_session_jsonl(meta: &SessionMeta, needle: &str) -> Option<SessionSearc
     const MAX_SNIPPETS: usize = 5;
 
     for line in reader.lines() {
-        let line = match line { Ok(l) => l, Err(_) => continue };
-        if line.trim().is_empty() { continue; }
-        let value: Value = match serde_json::from_str(&line) { Ok(v) => v, Err(_) => continue };
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         let (role_val, content_val) =
             if value.get("type").and_then(Value::as_str) == Some("message") {
-                let msg = match value.get("message") { Some(m) => m, None => continue };
+                let msg = match value.get("message") {
+                    Some(m) => m,
+                    None => continue,
+                };
                 (msg.get("role"), msg.get("content"))
             } else {
                 (value.get("role"), value.get("content"))
             };
-        let role = match role_val.and_then(Value::as_str) { Some(r) => r.to_string(), None => continue };
+        let role = match role_val.and_then(Value::as_str) {
+            Some(r) => r.to_string(),
+            None => continue,
+        };
         let content = content_val.map(extract_text).unwrap_or_default();
-        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) { continue; }
+        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) {
+            continue;
+        }
         if let Some(snippet) = build_snippet(&content, needle) {
             snippets.push(SearchSnippet { role, snippet });
-            if snippets.len() >= MAX_SNIPPETS { break; }
+            if snippets.len() >= MAX_SNIPPETS {
+                break;
+            }
         }
     }
-    if snippets.is_empty() { return None; }
+    if snippets.is_empty() {
+        return None;
+    }
     Some(SessionSearchHit {
         provider_id: PROVIDER_ID.to_string(),
         session_id: meta.session_id.clone(),
@@ -543,13 +563,17 @@ fn search_session_sqlite(meta: &SessionMeta, needle: &str) -> Option<SessionSear
     let conn = Connection::open_with_flags(
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ).ok()?;
+    )
+    .ok()?;
+    // Fetch all messages for the session without a LIKE prefilter, because
+    // SQLite's LIKE is case-insensitive only for ASCII and would miss Unicode
+    // matches (e.g. "Éclair" vs "éclair"). The Rust to_lowercase().contains()
+    // check below handles full Unicode case-insensitive matching.
     let mut stmt = conn
-        .prepare("SELECT role, content FROM messages WHERE session_id = ?1 AND content LIKE ?2 ORDER BY created_at ASC")
+        .prepare("SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY created_at ASC")
         .ok()?;
-    let like_pattern = format!("%{needle}%");
     let rows = stmt
-        .query_map(rusqlite::params![session_id.as_str(), like_pattern.as_str()], |row| {
+        .query_map(rusqlite::params![session_id.as_str()], |row| {
             let role: String = row.get(0)?;
             let content: String = row.get(1)?;
             Ok((role, content))
@@ -560,13 +584,19 @@ fn search_session_sqlite(meta: &SessionMeta, needle: &str) -> Option<SessionSear
     const MAX_SNIPPETS: usize = 5;
     for row in rows.flatten() {
         let (role, content) = row;
-        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) { continue; }
+        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) {
+            continue;
+        }
         if let Some(snippet) = build_snippet(&content, needle) {
             snippets.push(SearchSnippet { role, snippet });
-            if snippets.len() >= MAX_SNIPPETS { break; }
+            if snippets.len() >= MAX_SNIPPETS {
+                break;
+            }
         }
     }
-    if snippets.is_empty() { return None; }
+    if snippets.is_empty() {
+        return None;
+    }
     Some(SessionSearchHit {
         provider_id: PROVIDER_ID.to_string(),
         session_id: meta.session_id.clone(),

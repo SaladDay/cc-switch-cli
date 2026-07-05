@@ -50,7 +50,14 @@ pub(super) fn render_sessions(
                 ("R", texts::tui_key_restore()),
                 ("d", texts::tui_key_delete()),
                 ("r", texts::tui_key_refresh()),
-                ("a", if app.sessions.show_all_providers { "全部 (Esc返回)" } else { "全部" }),
+                (
+                    "a",
+                    if app.sessions.show_all_providers {
+                        "全部 (Esc返回)"
+                    } else {
+                        "全部"
+                    },
+                ),
             ],
         );
     }

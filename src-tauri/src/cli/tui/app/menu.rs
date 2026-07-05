@@ -749,7 +749,11 @@ impl App {
                 if edit.changed && matches!(self.route, Route::Sessions) {
                     let q = self.filter.input.value.trim().to_string();
                     // Only re-trigger if the query string actually changed
-                    let current_query = self.sessions.deep_search_pending.as_ref().map(|(q, _)| q.as_str())
+                    let current_query = self
+                        .sessions
+                        .deep_search_pending
+                        .as_ref()
+                        .map(|(q, _)| q.as_str())
                         .or(self.sessions.deep_search_query.as_deref());
                     if q == current_query.unwrap_or("") {
                         // Query didn't change (just cursor moved), don't reset pending

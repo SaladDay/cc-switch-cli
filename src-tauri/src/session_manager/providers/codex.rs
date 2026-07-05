@@ -7,7 +7,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::codex_config::get_codex_config_dir;
-use crate::session_manager::{SessionMessage, SessionMeta, SessionSearchHit, SearchSnippet};
+use crate::session_manager::{SearchSnippet, SessionMessage, SessionMeta, SessionSearchHit};
 
 use super::utils::{
     build_snippet, extract_text, parse_timestamp_to_ms, path_basename, read_head_tail_lines,
@@ -114,34 +114,62 @@ pub fn search_session(meta: &SessionMeta, needle: &str) -> Option<SessionSearchH
     const MAX_SNIPPETS: usize = 5;
 
     for line in reader.lines() {
-        let line = match line { Ok(l) => l, Err(_) => continue };
-        let value: Value = match serde_json::from_str(&line) { Ok(v) => v, Err(_) => continue };
-        if value.get("type").and_then(Value::as_str) != Some("response_item") { continue; }
-        let payload = match value.get("payload") { Some(p) => p, None => continue };
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let value: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if value.get("type").and_then(Value::as_str) != Some("response_item") {
+            continue;
+        }
+        let payload = match value.get("payload") {
+            Some(p) => p,
+            None => continue,
+        };
         let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
         let (role, content) = match payload_type {
             "message" => {
-                let role = payload.get("role").and_then(Value::as_str).unwrap_or("unknown").to_string();
+                let role = payload
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
                 let content = payload.get("content").map(extract_text).unwrap_or_default();
                 (role, content)
             }
             "function_call" => {
-                let name = payload.get("name").and_then(Value::as_str).unwrap_or("unknown");
+                let name = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
                 ("assistant".to_string(), format!("[Tool: {name}]"))
             }
             "function_call_output" => {
-                let output = payload.get("output").and_then(Value::as_str).unwrap_or("").to_string();
+                let output = payload
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 ("tool".to_string(), output)
             }
             _ => continue,
         };
-        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) { continue; }
+        if content.trim().is_empty() || !content.to_lowercase().contains(&lower_needle) {
+            continue;
+        }
         if let Some(snippet) = build_snippet(&content, needle) {
             snippets.push(SearchSnippet { role, snippet });
-            if snippets.len() >= MAX_SNIPPETS { break; }
+            if snippets.len() >= MAX_SNIPPETS {
+                break;
+            }
         }
     }
-    if snippets.is_empty() { return None; }
+    if snippets.is_empty() {
+        return None;
+    }
     Some(SessionSearchHit {
         provider_id: PROVIDER_ID.to_string(),
         session_id: meta.session_id.clone(),

@@ -144,9 +144,7 @@ pub fn execute(cmd: SessionsCommand, app: Option<AppType>) -> Result<(), AppErro
             all,
             yes,
         } => delete_session(app, provider, all, &selector, yes),
-        SessionsCommand::Search { query, json } => {
-            search_sessions_cmd(&query, json)
-        }
+        SessionsCommand::Search { query, json } => search_sessions_cmd(&query, json),
         SessionsCommand::SyncUsage {
             provider,
             all,
@@ -379,10 +377,18 @@ fn search_sessions_cmd(query: &str, json: bool) -> Result<(), AppError> {
         println!();
         println!(
             "{}",
-            info(&format!("=== {} / {} ===", hit.provider_id, short_session_id(&hit.session_id)))
+            info(&format!(
+                "=== {} / {} ===",
+                hit.provider_id,
+                short_session_id(&hit.session_id)
+            ))
         );
         for snippet in &hit.snippets {
-            println!("  [{}] {}", snippet.role, truncate_chars(&snippet.snippet, 200));
+            println!(
+                "  [{}] {}",
+                snippet.role,
+                truncate_chars(&snippet.snippet, 200)
+            );
         }
     }
 
