@@ -18,7 +18,7 @@ const DRACULA_FG: (u8, u8, u8) = (248, 248, 242);
 // Light-background palette: the same hue family, darkened for contrast
 // against white terminals.
 const LIGHT_GREEN: (u8, u8, u8) = (24, 138, 66);
-const LIGHT_CYAN: (u8, u8, u8) = (7, 122, 150);
+const LIGHT_CYAN: (u8, u8, u8) = (7, 122, 168);
 const LIGHT_PINK: (u8, u8, u8) = (186, 36, 120);
 const LIGHT_ORANGE: (u8, u8, u8) = (182, 98, 16);
 const LIGHT_YELLOW: (u8, u8, u8) = (146, 124, 8);
@@ -674,6 +674,30 @@ mod tests {
         assert_eq!(theme.accent, Color::Rgb(139, 233, 253));
         assert_eq!(theme.surface, Color::Rgb(68, 71, 90));
         assert!(!theme.no_color);
+    }
+
+    /// Terminals without a truecolor signal (Xshell-style, issue #60) end
+    /// up on the ansi256 path; the light palette and the new semantic
+    /// foregrounds must degrade to sensible indices there too.
+    #[test]
+    fn ansi256_mapping_keeps_curated_indices_for_light_palette() {
+        // Light accents stay chromatic and dark enough for white paper.
+        assert_eq!(rgb_to_ansi256(LIGHT_CYAN.0, LIGHT_CYAN.1, LIGHT_CYAN.2), 31);
+        // Neutral roles stay neutral: chip surface a light gray, borders a
+        // mid gray, ink a near-black.
+        assert_eq!(
+            rgb_to_ansi256(LIGHT_SURFACE.0, LIGHT_SURFACE.1, LIGHT_SURFACE.2),
+            254
+        );
+        assert_eq!(rgb_to_ansi256(LIGHT_DIM.0, LIGHT_DIM.1, LIGHT_DIM.2), 145);
+        assert_eq!(rgb_to_ansi256(LIGHT_FG.0, LIGHT_FG.1, LIGHT_FG.2), 236);
+        // Semantic foregrounds in dark mode: strong text bright, text on
+        // accent chips near-black.
+        assert_eq!(
+            rgb_to_ansi256(DRACULA_FG.0, DRACULA_FG.1, DRACULA_FG.2),
+            255
+        );
+        assert_eq!(rgb_to_ansi256(10, 10, 10), 232);
     }
 
     #[test]
