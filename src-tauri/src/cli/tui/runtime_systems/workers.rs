@@ -668,6 +668,10 @@ fn session_worker_loop(rx: mpsc::Receiver<SessionReq>, tx: mpsc::Sender<SessionM
             match (&req, &next) {
                 (SessionReq::Refresh { .. }, SessionReq::Refresh { .. }) => req = next,
                 (SessionReq::LoadMessages { .. }, SessionReq::LoadMessages { .. }) => req = next,
+                // Drop a superseded search: only the latest query matters, and
+                // stale results are ignored by request id anyway, so skip the
+                // wasted full scan.
+                (SessionReq::Search { .. }, SessionReq::Search { .. }) => req = next,
                 _ => {
                     let _ = handle_session_req(req, &tx);
                     req = next;

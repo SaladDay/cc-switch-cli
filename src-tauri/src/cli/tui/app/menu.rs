@@ -711,6 +711,9 @@ impl App {
                     self.sessions.deep_search_query = None;
                     self.sessions.deep_search_results.clear();
                     self.sessions.deep_search_pending = None;
+                    // Drop any in-flight search too, so its result is ignored on
+                    // arrival and the "searching" spinner stops immediately.
+                    self.sessions.deep_search_active = None;
                 }
                 if is_daily_memory {
                     self.openclaw_daily_memory_search_results.clear();
@@ -734,6 +737,7 @@ impl App {
                         self.sessions.deep_search_query = None;
                         self.sessions.deep_search_results.clear();
                         self.sessions.deep_search_pending = None;
+                        self.sessions.deep_search_active = None;
                         Action::None
                     } else {
                         // If deep search has already completed for this query,
@@ -793,8 +797,13 @@ impl App {
                         self.sessions.deep_search_pending = None;
                         self.sessions.deep_search_query = None;
                         self.sessions.deep_search_results.clear();
+                        self.sessions.deep_search_active = None;
                     } else {
                         self.sessions.deep_search_pending = Some((q, 0));
+                        // The query changed, so any in-flight search is now
+                        // stale: invalidate it so its result is not accepted
+                        // under the new query text.
+                        self.sessions.deep_search_active = None;
                     }
                 }
                 if is_daily_memory && edit.changed && self.filter.input.value.is_empty() {
