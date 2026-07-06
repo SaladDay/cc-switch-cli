@@ -223,7 +223,14 @@ pub(crate) fn handle_action(
                 );
                 return Ok(());
             };
-            let provider_id = ctx.app.app_type.as_str().to_string();
+            // In "show all providers" mode, refresh must rescan every provider
+            // (the virtual "all" id), otherwise `r` would only refresh the
+            // current app and the stale "all" cache would be restored afterward.
+            let provider_id = if ctx.app.sessions.show_all_providers {
+                "all".to_string()
+            } else {
+                ctx.app.app_type.as_str().to_string()
+            };
             let request_id = ctx.app.sessions.start_scan(provider_id.clone());
             if let Err(err) = tx.send(SessionReq::Refresh {
                 request_id,

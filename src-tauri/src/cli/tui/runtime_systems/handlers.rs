@@ -128,6 +128,14 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                     } else {
                         app.sessions.selected_idx = app.sessions.selected_idx.min(visible_len - 1);
                     }
+                    // If a deep search is active, the freshly-scanned rows may
+                    // contain sessions the previous search snapshot missed (e.g.
+                    // the scan was still in flight when the search fired, or the
+                    // user entered "all providers" mode). Re-run the search over
+                    // the new rows via the debounce/firing path.
+                    if app.sessions.deep_search_query.is_some() {
+                        app.pending_deep_search = app.sessions.deep_search_query.clone();
+                    }
                 }
             }
             Err(error) => {

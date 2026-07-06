@@ -220,10 +220,14 @@ pub fn build_snippet(haystack: &str, needle: &str) -> Option<String> {
         let window: String = chars[i..i + needle_len].iter().collect();
         window.to_lowercase() == lower_needle
     })?;
-    let _match_end = (start + needle_len).min(chars.len());
-    let half = SNIPPET_MAX_CHARS.saturating_sub(needle_len) / 2;
+    // Ensure the context window is always wide enough to contain the whole
+    // needle; otherwise a query longer than SNIPPET_MAX_CHARS would produce a
+    // snippet that fails the final `contains` guard and the hit would be
+    // silently dropped even though the content genuinely matches.
+    let window_len = SNIPPET_MAX_CHARS.max(needle_len);
+    let half = window_len.saturating_sub(needle_len) / 2;
     let ctx_start = start.saturating_sub(half);
-    let ctx_end = (ctx_start + SNIPPET_MAX_CHARS).min(chars.len());
+    let ctx_end = (ctx_start + window_len).min(chars.len());
     let mut snippet: String = chars[ctx_start..ctx_end].iter().collect();
     snippet = snippet.trim().to_string();
     if ctx_start > 0 {
@@ -272,6 +276,16 @@ mod tests {
             "这是一段关于浙江移动的对话内容，后面还有很多其他文字用于测试截断逻辑是否正确工作。";
         let s = build_snippet(haystack, "浙江移动").expect("should find CJK");
         assert!(s.contains("浙江移动"));
+    }
+
+    #[test]
+    fn build_snippet_finds_needle_longer_than_max_chars() {
+        // A query longer than SNIPPET_MAX_CHARS must still produce a snippet
+        // that contains the whole match, not silently drop the hit.
+        let needle: String = "a".repeat(SNIPPET_MAX_CHARS + 40);
+        let haystack = format!("prefix {needle} suffix");
+        let s = build_snippet(&haystack, &needle).expect("should find long needle");
+        assert!(s.contains(&needle));
     }
 
     #[test]
