@@ -438,23 +438,33 @@ impl App {
     }
 
     pub(crate) fn on_prompts_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        use crate::cli::tui::keymap::prompts::Intent;
+
         let visible = visible_prompts(&self.filter, data);
         match key.code {
-            KeyCode::Char('a') => {
-                self.open_prompt_create_form(data);
-                Action::None
-            }
             KeyCode::Up => {
                 self.prompt_idx = self.prompt_idx.saturating_sub(1);
-                Action::None
+                return Action::None;
             }
             KeyCode::Down => {
                 if !visible.is_empty() {
                     self.prompt_idx = (self.prompt_idx + 1).min(visible.len() - 1);
                 }
+                return Action::None;
+            }
+            _ => {}
+        }
+
+        let Some(intent) = crate::cli::tui::keymap::prompts::intent_for(key.code) else {
+            return Action::None;
+        };
+
+        match intent {
+            Intent::Add => {
+                self.open_prompt_create_form(data);
                 Action::None
             }
-            KeyCode::Enter => {
+            Intent::View => {
                 let Some(row) = visible.get(self.prompt_idx) else {
                     return Action::None;
                 };
@@ -466,7 +476,7 @@ impl App {
                 });
                 Action::None
             }
-            KeyCode::Char(' ') => {
+            Intent::Toggle => {
                 let Some(row) = visible.get(self.prompt_idx) else {
                     return Action::None;
                 };
@@ -476,7 +486,7 @@ impl App {
                     Action::PromptActivate { id: row.id.clone() }
                 }
             }
-            KeyCode::Char('d') => {
+            Intent::Delete => {
                 let Some(row) = visible.get(self.prompt_idx) else {
                     return Action::None;
                 };
@@ -494,7 +504,7 @@ impl App {
                 });
                 Action::None
             }
-            KeyCode::Char('e') => {
+            Intent::Edit => {
                 let Some(row) = visible.get(self.prompt_idx) else {
                     return Action::None;
                 };
@@ -506,7 +516,6 @@ impl App {
                 )));
                 Action::None
             }
-            _ => Action::None,
         }
     }
 
