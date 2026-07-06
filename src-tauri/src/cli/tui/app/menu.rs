@@ -702,10 +702,15 @@ impl App {
                 filter_changed = !self.active_filter_input_mut().value.is_empty();
                 self.filter.active = false;
                 self.active_filter_input_mut().set("");
-                // Clear deep search when filter is cleared
-                if matches!(self.route, Route::Sessions) {
+                // Clear deep search when the session list filter is cleared.
+                // Scope to the Global (list) filter so clearing an in-detail
+                // message filter does not wipe list-level search state, and
+                // also drop any queued (debounced) search so it doesn't revive
+                // after Esc.
+                if matches!(self.route, Route::Sessions) && matches!(scope, FilterScope::Global) {
                     self.sessions.deep_search_query = None;
                     self.sessions.deep_search_results.clear();
+                    self.sessions.deep_search_pending = None;
                 }
                 if is_daily_memory {
                     self.openclaw_daily_memory_search_results.clear();

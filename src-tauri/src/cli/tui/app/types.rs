@@ -428,10 +428,14 @@ impl SessionsState {
             return false;
         }
         self.selected_idx = self.selected_idx.min(self.rows.len().saturating_sub(1));
-        if let Some(provider_id) = self.provider_id.clone() {
-            if let Some(cached) = self.scan_cache.get_mut(&provider_id) {
-                cached.rows = self.rows.clone();
-            }
+        // Drop the deleted session from every cached bucket (current provider,
+        // the virtual "all" bucket, and any other provider bucket) so it cannot
+        // resurrect as a phantom row when the list is restored from cache after
+        // switching provider/all views.
+        for cached in self.scan_cache.values_mut() {
+            cached
+                .rows
+                .retain(|session| crate::cli::tui::app::session_key(session) != key);
         }
         if self.detail_key.as_deref() == Some(key) {
             self.clear_detail();
