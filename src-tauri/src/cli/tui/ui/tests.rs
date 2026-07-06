@@ -93,10 +93,12 @@ fn tui_usage_empty_state_renders_dashboard_shell() {
     assert!(all.contains("7 days"), "{all}");
     assert!(all.contains("30 days"), "{all}");
     assert!(all.contains("custom range"), "{all}");
-    assert!(all.contains("switch panel"), "{all}");
+    // Tab cycles the trend metric on this page; "switch panel" belongs to
+    // the UsageLogs route only.
+    assert!(all.contains("switch metric"), "{all}");
+    assert!(!all.contains("switch panel"), "{all}");
     assert!(all.contains("details"), "{all}");
     assert!(all.contains("pricing"), "{all}");
-    assert!(!all.contains("metric"), "{all}");
     assert!(!all.contains("Provider Stats"), "{all}");
 }
 
@@ -8911,7 +8913,9 @@ fn failover_queue_overlay_renders_enabled_state_and_toggle_hint() {
     let all = all_text(&render(&app, &data));
 
     assert!(all.contains("Automatic failover: enabled"), "{all}");
-    assert!(all.contains("f enable/disable"), "{all}");
+    assert!(all.contains("f auto failover"), "{all}");
+    // The reorder hint must survive the width-degrade logic in English.
+    assert!(all.contains("</>/K/J move"), "{all}");
     assert!(
         all.contains("Auto failover uses only checked providers"),
         "{all}"
@@ -8933,7 +8937,7 @@ fn failover_queue_overlay_renders_disabled_state_and_toggle_hint() {
     let all = all_text(&render(&app, &data));
 
     assert!(all.contains("Automatic failover: disabled"), "{all}");
-    assert!(all.contains("f enable/disable"), "{all}");
+    assert!(all.contains("f auto failover"), "{all}");
     assert!(all.contains("Direct provider selection is used"), "{all}");
 }
 

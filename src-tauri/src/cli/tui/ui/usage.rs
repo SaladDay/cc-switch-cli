@@ -38,8 +38,10 @@ pub(super) fn render_usage(
             ("1", usage_text("Today", "今日")),
             ("2", usage_text("7 days", "7天")),
             ("3", usage_text("30 days", "30天")),
-            ("C", usage_text("custom range", "自定义区间")),
-            ("Tab", texts::tui_key_pane()),
+            ("c", usage_text("custom range", "自定义区间")),
+            // Tab cycles the trend metric here; pane switching only exists
+            // on the UsageLogs route.
+            ("Tab", usage_text("switch metric", "切换指标")),
             ("L", usage_text("details", "详情")),
             ("P", usage_text("pricing", "模型定价")),
             ("r", texts::tui_key_refresh()),

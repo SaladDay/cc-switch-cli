@@ -1063,10 +1063,13 @@ pub(super) fn render_failover_queue_manager_overlay(
         frame,
         chunks[0],
         theme,
+        // The overlay is fixed at 70 cols; keep these chips short enough
+        // that the reorder hint always fits (Enter still toggles as a
+        // hidden Space alias).
         &[
             ("↑↓", texts::tui_key_select()),
-            ("f", crate::t!("enable/disable", "启用/禁用")),
-            ("Space/Enter", texts::tui_key_toggle()),
+            ("f", crate::t!("auto failover", "自动故障转移")),
+            ("Space", texts::tui_key_toggle()),
             ("</>/K/J", texts::tui_key_move()),
             ("Esc", texts::tui_key_close()),
         ],
