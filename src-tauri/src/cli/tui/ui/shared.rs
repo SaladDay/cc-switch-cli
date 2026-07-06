@@ -507,6 +507,49 @@ pub(super) fn key_bar_line(theme: &super::theme::Theme, items: &[(&str, &str)]) 
     Line::from(spans)
 }
 
+fn key_bar_chip_width(key: &str, value: &str) -> usize {
+    UnicodeWidthStr::width(key) + 1 + UnicodeWidthStr::width(value)
+}
+
+/// How many leading chips fit into `width`, mirroring key_bar_line's
+/// layout: 1-column padding on each side, 2 columns between chips.
+fn key_bar_fit_count(items: &[(&str, &str)], width: u16) -> usize {
+    let width = width as usize;
+    let mut used = 2usize;
+    let mut count = 0usize;
+    for (idx, (key, value)) in items.iter().enumerate() {
+        let mut chip = key_bar_chip_width(key, value);
+        if idx > 0 {
+            chip += 2;
+        }
+        if used + chip > width {
+            break;
+        }
+        used += chip;
+        count += 1;
+    }
+    count
+}
+
+/// Key bars are single-row: chips past the available width used to be
+/// silently cut off mid-list. Keep the leading (highest-priority) chips
+/// that fit and close with a "? more" hint pointing at the help sheet.
+fn key_bar_items_for_width<'a>(
+    items: &'a [(&'a str, &'a str)],
+    width: u16,
+) -> Vec<(&'a str, &'a str)> {
+    if key_bar_fit_count(items, width) == items.len() {
+        return items.to_vec();
+    }
+
+    let more = texts::tui_key_more();
+    let reserved = (key_bar_chip_width("?", more) + 2) as u16;
+    let count = key_bar_fit_count(items, width.saturating_sub(reserved));
+    let mut fitted = items[..count].to_vec();
+    fitted.push(("?", more));
+    fitted
+}
+
 /// Render a left-aligned key bar. Used for main-screen footers where keys
 /// are read left-to-right in priority order.
 pub(super) fn render_key_bar(
@@ -515,10 +558,9 @@ pub(super) fn render_key_bar(
     theme: &super::theme::Theme,
     items: &[(&str, &str)],
 ) {
+    let fitted = key_bar_items_for_width(items, area.width);
     frame.render_widget(
-        Paragraph::new(key_bar_line(theme, items))
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(key_bar_line(theme, &fitted)).alignment(Alignment::Left),
         area,
     );
 }
@@ -531,10 +573,9 @@ pub(super) fn render_key_bar_center(
     theme: &super::theme::Theme,
     items: &[(&str, &str)],
 ) {
+    let fitted = key_bar_items_for_width(items, area.width);
     frame.render_widget(
-        Paragraph::new(key_bar_line(theme, items))
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(key_bar_line(theme, &fitted)).alignment(Alignment::Center),
         area,
     );
 }

@@ -4156,6 +4156,32 @@ fn help_text_shows_space_as_the_mcp_toggle_key() {
 }
 
 #[test]
+fn key_bar_shows_more_hint_when_chips_overflow() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let prev = std::env::var("NO_COLOR").ok();
+    std::env::set_var("NO_COLOR", "1");
+    let _restore_no_color = EnvGuard {
+        key: "NO_COLOR",
+        prev,
+    };
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+
+    // At 80 columns the Usage key bar cannot hold all chips; it used to be
+    // cut mid-chip. It must now end with a "? more" hint instead.
+    let buf = render_with_size(&app, &data, 80, 35);
+    let all = all_text(&buf);
+    assert!(
+        all.contains("?=more"),
+        "overflowing key bar should end with a more-hint: {all}"
+    );
+}
+
+#[test]
 fn mcp_page_shows_summary_bar() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");

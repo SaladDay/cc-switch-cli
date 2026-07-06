@@ -3504,6 +3504,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_more() -> &'static str {
+        if is_chinese() {
+            "更多"
+        } else {
+            "more"
+        }
+    }
+
     pub fn tui_key_unmanaged() -> &'static str {
         if is_chinese() {
             "已有"
