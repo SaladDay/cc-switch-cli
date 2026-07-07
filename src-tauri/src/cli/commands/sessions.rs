@@ -456,6 +456,10 @@ fn sync_usage_for_provider(
     db: &Database,
     app_type: AppType,
 ) -> Result<SessionSyncResult, AppError> {
+    // 与 sync_all_session_usage 相同的导入作用域：进度可见 + 本连接（本
+    // 命令独占）在导入期间临时 synchronous=NORMAL，结束恢复 FULL。
+    let _progress = crate::services::session_usage::sync_progress::begin();
+    let _durability = db.bulk_import_durability_guard();
     match app_type {
         AppType::Claude => crate::services::session_usage::sync_claude_session_logs(db),
         AppType::Codex => crate::services::session_usage_codex::sync_codex_usage(db),
