@@ -265,9 +265,9 @@ pub mod texts {
     // Welcome & Headers
     pub fn welcome_title() -> &'static str {
         if is_chinese() {
-            "    🎯 CC-Switch 交互模式"
+            "🎯 CC-Switch 交互模式"
         } else {
-            "    🎯 CC-Switch Interactive Mode"
+            "🎯 CC-Switch Interactive Mode"
         }
     }
 
