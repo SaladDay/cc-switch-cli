@@ -70,6 +70,14 @@ pub(crate) struct JsonlScanOutcome {
 }
 
 /// 基础校验：提示与主库权威行完全一致、且文件未被截断。
+///
+/// 普通提示要求已越过至少一个换行边界（`last_offset > 0` 且 `byte_offset > 0`）。
+/// 但"边界=0 + 有待确认尾部"是单行无换行 JSONL 的合法状态：首轮记录
+/// `(last_line_offset=0, byte_offset=0, pending_tail)`，权威快照本就是 0，若一律
+/// 以 `last_offset <= 0` 把它拒之门外，提示永远无法命中 → 每轮全文件重读且
+/// 永远 mtime-1、不收敛。故提示携带 pending_tail（`pending_tail_len > 0`）时放行
+/// `0/0` 快照，让尾部收敛路径可达（`decide_resume` 对 `byte_offset == 0` 走空窗口
+/// 指纹即可）；无 pending_tail 的普通提示仍走原有的非零校验，语义不放宽。
 fn load_matching_resume_hint(
     resume: Option<&ScanCacheStore>,
     file_path: &str,
@@ -77,15 +85,22 @@ fn load_matching_resume_hint(
     last_offset: i64,
 ) -> Option<SyncResumeHint> {
     let store = resume?;
-    // 首次同步（无权威进度）没有可续传的位置
-    if last_offset <= 0 {
+    let hint = store.load_sync_resume(file_path).ok().flatten()?;
+    // 快照必须与主库权威行完全一致
+    if hint.last_modified != last_modified || hint.last_line_offset != last_offset {
         return None;
     }
-    let hint = store.load_sync_resume(file_path).ok().flatten()?;
-    (hint.last_modified == last_modified
-        && hint.last_line_offset == last_offset
-        && hint.byte_offset > 0)
-        .then_some(hint)
+    let has_pending_tail = matches!(
+        (hint.pending_tail_len, hint.pending_tail_hash),
+        (Some(len), Some(_)) if len > 0
+    );
+    if has_pending_tail {
+        // 携带待确认尾部：允许 last_offset == 0 与 byte_offset == 0 的单行无换行提示
+        Some(hint)
+    } else {
+        // 普通提示：要求已越过换行边界（首次同步无权威进度时无处可续）
+        (last_offset > 0 && hint.byte_offset > 0).then_some(hint)
+    }
 }
 
 /// 续传决策：区分"能续传"、"文件身份失效需全量重扫"、"沿用行 offset 跳过"。
@@ -207,13 +222,23 @@ where
 
     // mtime：优先使用 walk 阶段的值，回退到一次 metadata 读取，
     // 保留“元数据不可读即报错”语义。
-    let file_modified = if file_mtime > 0 {
+    let mut file_modified = if file_mtime > 0 {
         file_mtime
     } else {
         let metadata = fs::metadata(file_path)
             .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
         metadata_modified_nanos(&metadata)
     };
+
+    // walk 阶段取得的 mtime 可能在长同步期间过期：文件在 walk 之后、处理之前被
+    // 追加时，据陈旧的 walk 值会误判"未变化"而跳过本轮刚追加的内容。将要跳过
+    // 前重取一次新鲜 mtime 再判定，关闭 walk→处理之间的窗口。重取失败（文件
+    // 可能刚被删除）按原值跳过即可，不报错。
+    if file_mtime > 0 && file_modified <= last_modified {
+        if let Ok(metadata) = fs::metadata(file_path) {
+            file_modified = metadata_modified_nanos(&metadata);
+        }
+    }
 
     // 文件未变化则跳过
     if file_modified <= last_modified {
@@ -346,7 +371,13 @@ where
     // 下一轮必然复查（借助提示从边界 seek，只重读尾部，代价极小）。复查时
     // 若尾部两轮不变（永远无换行的最终行），驱动会走 try_converge_stable_tail
     // 收敛：改记真实 mtime、清空 pending_tail，从此走 mtime skip 不再复查。
-    let recorded_modified = if saw_incomplete_tail {
+    // 关键前提：mtime-1 复查依赖 sidecar 提示才能收敛（下轮借提示从边界 seek、
+    // 只重读尾部，尾部两轮稳定时收敛为真实 mtime）。sidecar 不可用（resume 为
+    // None）时没有提示可续，一律 -1 会让末行无换行的文件每轮从旧进度全量重读、
+    // 永不收敛，反而更糟。故仅在有 sidecar 时才 -1；无 sidecar 时记录真实 mtime，
+    // 回到 pending_tail 机制引入前的旧语义——同一 mtime tick 内补全该行的竞态
+    // 窗口不再被关闭，这是 sidecar 不可用时可接受的退化。
+    let recorded_modified = if saw_incomplete_tail && resume.is_some() {
         log::debug!("[SYNC-DRIVER] 末尾存在不完整行，记录 mtime-1 以便下轮复查: {file_path_str}");
         file_modified - 1
     } else {
@@ -469,6 +500,13 @@ mod tests {
         }
     }
 
+    /// 读取文件当前真实 mtime（纳秒）。fix 3 在"将跳过"时会重取新鲜 mtime 复查，
+    /// 因此涉及跳过路径的测试须让 walk mtime 与真实 mtime 一致：写文件后不再改动，
+    /// 真实 mtime 恒定，用它作为 walk mtime 即可让复查确认而非误判。
+    fn real_mtime(path: &std::path::Path) -> i64 {
+        metadata_modified_nanos(&std::fs::metadata(path).expect("metadata"))
+    }
+
     /// `file_mtime` 显式传入（模拟 walk 阶段取得的值）：测试不依赖真实文件
     /// 系统时间戳在两次写入之间前进，避免时间粒度导致的偶发跳过。
     fn scan_at(
@@ -513,8 +551,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, "l1\n").expect("write");
-        // mtime 未超过已记录的 last_modified → 跳过
-        assert!(scan_at(&path, 5, 5, 1, None).outcome.is_none());
+        // fix 3 会在"将跳过"时重取新鲜 mtime 复查，故 walk mtime 与权威进度都用
+        // 文件真实 mtime：复查读到相同的真实 mtime，仍判定未变化 → 跳过。
+        let real = real_mtime(&path);
+        assert!(scan_at(&path, real, real, 1, None).outcome.is_none());
     }
 
     #[test]
@@ -597,16 +637,19 @@ mod tests {
         // 末行永远不带换行符（写满的最终行）
         std::fs::write(&path, "l1\nl2").expect("write");
         let store = ScanCacheStore::in_memory().expect("store");
+        // 文件写后三轮都不改动：真实 mtime 恒定。fix 3 的复查读到的就是它，故各轮
+        // 都用真实 mtime 作为 walk mtime，收敛后的第三轮复查仍判定未变化而跳过。
+        let real = real_mtime(&path);
 
         // 首轮：不完整尾行进回调，进度停边界，mtime 回退 1ns，记录 pending 提示
-        let first = scan_at(&path, 1_000, 0, 0, Some(&store));
+        let first = scan_at(&path, real, 0, 0, Some(&store));
         assert_eq!(
             first.seen,
             vec![("l1".to_string(), true), ("l2".to_string(), true)]
         );
         assert_eq!(first.out().line_offset, 1);
         assert_eq!(first.out().byte_pos, 3);
-        assert_eq!(first.out().file_modified, 999);
+        assert_eq!(first.out().file_modified, real - 1);
         save_resume_hint(Some(&store), &path.to_string_lossy(), first.out());
 
         // sidecar 应记下待确认尾部（"l2" = 2 字节）
@@ -617,11 +660,11 @@ mod tests {
         assert_eq!(hint.pending_tail_len, Some(2));
         assert!(hint.pending_tail_hash.is_some());
 
-        // 次轮：文件未变（传真实 mtime 1000 触发复查：> recorded 999）。尾部
+        // 次轮：文件未变（传真实 mtime 触发复查：> recorded real-1）。尾部
         // 两轮稳定 → 收敛：回调无行、进度停边界、记录真实 mtime、pending 清空
         let second = scan_at(
             &path,
-            1_000,
+            real,
             first.out().file_modified,
             first.out().line_offset,
             Some(&store),
@@ -629,7 +672,69 @@ mod tests {
         assert!(second.seen.is_empty(), "收敛不应重放任何行");
         assert_eq!(second.out().line_offset, 1);
         assert_eq!(second.out().byte_pos, 3);
-        assert_eq!(second.out().file_modified, 1_000, "记录真实 mtime，不再 -1");
+        assert_eq!(second.out().file_modified, real, "记录真实 mtime，不再 -1");
+        save_resume_hint(Some(&store), &path.to_string_lossy(), second.out());
+
+        let hint = store
+            .load_sync_resume(&path.to_string_lossy())
+            .expect("load")
+            .expect("hint");
+        assert_eq!(hint.pending_tail_len, None, "pending 已清空");
+
+        // 第三轮：真实 mtime 相等（fix 3 复查读到相同真实 mtime）→ 正常 mtime skip
+        let third = scan_at(
+            &path,
+            real,
+            second.out().file_modified,
+            second.out().line_offset,
+            Some(&store),
+        );
+        assert!(third.outcome.is_none(), "收敛后走正常 mtime skip");
+    }
+
+    /// fix 1a：单行、永远不带换行的 JSONL + sidecar。首轮 pending 记录
+    /// （line_offset=0、byte_pos=0、mtime-1）；次轮 offset=0 的 pending 提示必须被
+    /// 接纳（原 `load_matching_resume_hint` 的 `last_offset <= 0` 早退会拒收它，
+    /// 导致每轮全文件重读、永远 mtime-1、不收敛）→ 尾部两轮稳定即收敛（真实
+    /// mtime、回调零行）；三轮 mtime 相等跳过。
+    #[test]
+    fn single_line_unterminated_file_converges_with_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("s.jsonl");
+        // 只有一行，且永远不带换行符：换行边界落在 byte 0
+        std::fs::write(&path, "only").expect("write");
+        let store = ScanCacheStore::in_memory().expect("store");
+        let real = real_mtime(&path);
+
+        // 首轮：不完整尾行进回调，边界停在 0（无任何换行），mtime 回退 1ns
+        let first = scan_at(&path, real, 0, 0, Some(&store));
+        assert_eq!(first.seen, vec![("only".to_string(), true)]);
+        assert_eq!(first.out().line_offset, 0);
+        assert_eq!(first.out().byte_pos, 0);
+        assert_eq!(first.out().file_modified, real - 1);
+        save_resume_hint(Some(&store), &path.to_string_lossy(), first.out());
+
+        // sidecar 记下 offset=0/byte=0 的待确认尾部（"only" = 4 字节）
+        let hint = store
+            .load_sync_resume(&path.to_string_lossy())
+            .expect("load")
+            .expect("hint");
+        assert_eq!(hint.last_line_offset, 0);
+        assert_eq!(hint.byte_offset, 0);
+        assert_eq!(hint.pending_tail_len, Some(4));
+
+        // 次轮：offset=0 提示被接纳（修复点），空窗口指纹 + 尾部两轮稳定 → 收敛
+        let second = scan_at(
+            &path,
+            real,
+            first.out().file_modified,
+            first.out().line_offset,
+            Some(&store),
+        );
+        assert!(second.seen.is_empty(), "收敛不应重放任何行");
+        assert_eq!(second.out().line_offset, 0);
+        assert_eq!(second.out().byte_pos, 0);
+        assert_eq!(second.out().file_modified, real, "记录真实 mtime，不再 -1");
         save_resume_hint(Some(&store), &path.to_string_lossy(), second.out());
 
         let hint = store
@@ -641,12 +746,70 @@ mod tests {
         // 第三轮：mtime 相等 → 正常 mtime skip
         let third = scan_at(
             &path,
-            1_000,
+            real,
             second.out().file_modified,
             second.out().line_offset,
             Some(&store),
         );
         assert!(third.outcome.is_none(), "收敛后走正常 mtime skip");
+    }
+
+    /// fix 1b：末行无换行、resume=None（sidecar 不可用）。无提示可续，一律 -1 会
+    /// 让文件每轮从旧进度全量重读、永不收敛，故降级为记录真实 mtime（不 -1），
+    /// 下轮 mtime 相等直接跳过。同一 tick 补全该行的竞态窗口作为无 sidecar 的降级
+    /// 被接受。
+    #[test]
+    fn unterminated_tail_without_sidecar_records_real_mtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "l1\nl2\nl3").expect("write");
+        let real = real_mtime(&path);
+
+        // 首轮：全部行导入；无 sidecar → 记录真实 mtime（不 -1）
+        let first = scan_at(&path, real, 0, 0, None);
+        assert_eq!(
+            first.seen,
+            vec![
+                ("l1".to_string(), true),
+                ("l2".to_string(), true),
+                ("l3".to_string(), true)
+            ]
+        );
+        assert_eq!(first.out().line_offset, 2);
+        assert_eq!(first.out().byte_pos, 6);
+        assert_eq!(
+            first.out().file_modified,
+            real,
+            "无 sidecar 时记录真实 mtime，不 -1"
+        );
+
+        // 次轮：mtime 相等（fix 3 复查读到相同真实 mtime）→ 直接跳过
+        let second = scan_at(
+            &path,
+            real,
+            first.out().file_modified,
+            first.out().line_offset,
+            None,
+        );
+        assert!(second.outcome.is_none());
+    }
+
+    /// fix 3：walk 阶段的 mtime 已过期（<= last_modified），但文件真实 mtime 更新。
+    /// 驱动应重取新鲜 mtime 后继续扫描，而非据陈旧的 walk 值误跳，关闭
+    /// walk→处理之间文件被追加的窗口。
+    #[test]
+    fn stale_walk_mtime_rechecks_fresh_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "l1\nl2\n").expect("write");
+
+        // 传入一个过期的 walk mtime（1000 <= last_modified 2000）：据此本应跳过。
+        // 但文件真实 mtime 是"刚写入"（远大于 2000），复查后不跳过，读到全部行。
+        let observed = scan_at(&path, 1_000, 2_000, 1, None);
+        assert_eq!(
+            observed.seen,
+            vec![("l1".to_string(), false), ("l2".to_string(), true)]
+        );
     }
 
     #[test]
