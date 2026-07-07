@@ -40,7 +40,14 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 
 /// Cache-aware scan across the active and archived session directories.
 pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<SessionMeta> {
-    cache::scan_provider_cached(store, PROVIDER_ID, scan_targets(), force, parse_session)
+    cache::scan_provider_cached(
+        store,
+        PROVIDER_ID,
+        scan_targets(),
+        force,
+        parse_session,
+        |_| true,
+    )
 }
 
 fn scan_targets() -> Vec<FileScanTarget> {

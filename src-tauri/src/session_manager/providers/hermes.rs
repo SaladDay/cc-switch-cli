@@ -41,6 +41,7 @@ pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<S
         scan_targets(),
         force,
         parse_jsonl_session,
+        |_| true,
     );
     merge_sqlite_jsonl(scan_sessions_sqlite(), jsonl_sessions)
 }

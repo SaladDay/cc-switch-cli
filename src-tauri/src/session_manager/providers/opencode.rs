@@ -54,6 +54,11 @@ pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<S
         scan_targets(&storage),
         force,
         move |path| parse_session(&storage_for_parse, path),
+        // 有显式 title 的会话可安全缓存；无 title 的 summary 派生自旁路的
+        // part/ 正文文件（另一棵树），其晚到/变化不改变 session JSON 与
+        // message 目录 stat，缓存会长期返回旧 summary——故禁用其缓存，每轮
+        // 重新解析。代价小（无 title 会话通常是少数）且保证正确。
+        |meta| meta.title.is_some(),
     );
     merge_json_sqlite(json_sessions, scan_sessions_sqlite())
 }
@@ -88,8 +93,10 @@ fn merge_json_sqlite(
 fn scan_targets(storage: &Path) -> Vec<FileScanTarget> {
     let mut targets = Vec::new();
     cache::collect_targets_recursive(&storage.join("session"), "json", &mut targets);
-    // 无显式 title 时 summary 派生自旁路的 message/part 文件：混入该会话
-    // message 目录的指纹（目录 mtime 随条目增删变化），它变化时缓存失效
+    // message 目录指纹只服务于**有 title** 的会话行的常规失效（例如会话新增
+    // 消息 → 目录 mtime 变 → 缓存重解析拿到更新的 last_active）。无 title 的
+    // 行由上面的 cacheable 判定直接不缓存、每轮重解析，不依赖这里的指纹；两
+    // 者分工互补。有 title 的会话混入此指纹无害，故保留。
     let message_root = storage.join("message");
     for target in &mut targets {
         if let Some(stem) = target.path.file_stem().and_then(|s| s.to_str()) {

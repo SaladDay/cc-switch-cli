@@ -61,6 +61,11 @@ pub struct ScanDelta {
     pub upserts: Vec<SessionScanCacheEntry>,
     /// Cache keys to remove (files that disappeared or no longer parse).
     pub deletes: Vec<String>,
+    /// Number of sessions returned this round that were deliberately not cached
+    /// (the `cacheable` predicate rejected them, e.g. OpenCode no-title sessions
+    /// whose summary derives from sibling `part/` files the fingerprint cannot
+    /// track). They re-parse every scan; surfaced only for observability logging.
+    pub uncacheable: usize,
 }
 
 /// `stat` a single path, returning its `(mtime_ns, size)`. Returns `None` when the
@@ -138,15 +143,25 @@ pub fn collect_targets_recursive(root: &Path, ext: &str, out: &mut Vec<FileScanT
 /// unchanged and the stored JSON still deserializes; otherwise it is re-parsed.
 /// Cached keys that no longer keep a live session — the file vanished, or a
 /// re-parse yielded nothing — are collected for deletion.
-pub fn revalidate<F>(
+///
+/// `cacheable` gates whether a parsed [`SessionMeta`] may be cached at all. Most
+/// providers pass `|_| true`; OpenCode passes `|m| m.title.is_some()` because a
+/// no-title session's summary is derived from sibling `part/` files that the
+/// `(mtime_ns, size)` fingerprint cannot observe — such a row would otherwise
+/// serve a stale summary indefinitely. An uncacheable row still enters the
+/// returned list but is never upserted, and any pre-existing cached row for its
+/// path is deleted so the next scan re-parses it instead of hitting a stale row.
+pub fn revalidate<F, C>(
     provider: &str,
     targets: Vec<FileScanTarget>,
     cached: HashMap<String, CachedScanRow>,
     force: bool,
     parse: F,
+    cacheable: C,
 ) -> ScanDelta
 where
     F: Fn(&Path) -> Option<SessionMeta> + Sync,
+    C: Fn(&SessionMeta) -> bool + Sync,
 {
     let mut sessions = Vec::new();
     let mut keep: HashSet<String> = HashSet::new();
@@ -161,9 +176,14 @@ where
                     && row.size == target.size
                 {
                     if let Ok(meta) = serde_json::from_str::<SessionMeta>(&row.meta_json) {
-                        sessions.push(meta);
-                        keep.insert(key);
-                        continue;
+                        // 命中捷径仅对可缓存行有效：升级前遗留的不可缓存行
+                        // （如曾被误缓存的无 title 会话）不走捷径，落到重新
+                        // 解析，随后旧行走 deletes 被清除。
+                        if cacheable(&meta) {
+                            sessions.push(meta);
+                            keep.insert(key);
+                            continue;
+                        }
                     }
                 }
             }
@@ -175,11 +195,19 @@ where
     // first-ever run (empty cache → every file parses) keeps today's throughput.
     let parsed = parse_targets_parallel(&to_parse, &parse);
     let mut upserts = Vec::new();
+    let mut uncacheable = 0usize;
     for (target, meta) in to_parse.into_iter().zip(parsed) {
         let key = target.path.to_string_lossy().to_string();
         let Some(meta) = meta else {
             continue; // not a session file; leave it out of `keep` so any stale row is deleted
         };
+        // 不可缓存行：进返回列表但不落缓存、不进 keep（若缓存里有同 key 旧行
+        // 会走 deletes 删除），保证下轮继续重新解析而非命中过期行。
+        if !cacheable(&meta) {
+            uncacheable += 1;
+            sessions.push(meta);
+            continue;
+        }
         let Ok(meta_json) = serde_json::to_string(&meta) else {
             continue;
         };
@@ -204,6 +232,7 @@ where
         sessions,
         upserts,
         deletes,
+        uncacheable,
     }
 }
 
@@ -245,15 +274,17 @@ where
 /// the (unsorted) session list. Store errors degrade gracefully — a failed load
 /// behaves like an empty cache (full parse) and failed writes are logged — so a
 /// cache hiccup never breaks scanning.
-pub fn scan_provider_cached<F>(
+pub fn scan_provider_cached<F, C>(
     store: &ScanCacheStore,
     provider: &str,
     targets: Vec<FileScanTarget>,
     force: bool,
     parse: F,
+    cacheable: C,
 ) -> Vec<SessionMeta>
 where
     F: Fn(&Path) -> Option<SessionMeta> + Sync,
+    C: Fn(&SessionMeta) -> bool + Sync,
 {
     let started = std::time::Instant::now();
     let cached = store.load_for_provider(provider).unwrap_or_else(|err| {
@@ -263,12 +294,13 @@ where
 
     let target_count = targets.len();
     let cached_count = cached.len();
-    let delta = revalidate(provider, targets, cached, force, parse);
+    let delta = revalidate(provider, targets, cached, force, parse, cacheable);
     log::debug!(
         "[SESSION-SCAN] provider={provider} targets={target_count} cached={cached_count} \
-         reparsed={} deleted={} force={force} elapsed={:?}",
+         reparsed={} deleted={} uncacheable={} force={force} elapsed={:?}",
         delta.upserts.len(),
         delta.deletes.len(),
+        delta.uncacheable,
         started.elapsed()
     );
 
@@ -326,8 +358,14 @@ mod tests {
         let counter = AtomicUsize::new(0);
 
         // 1. First scan seeds the cache and parses the one file.
-        let first =
-            scan_provider_cached(&store, "claude", targets(), false, counting_parse(&counter));
+        let first = scan_provider_cached(
+            &store,
+            "claude",
+            targets(),
+            false,
+            counting_parse(&counter),
+            |_| true,
+        );
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].session_id, "id-001");
@@ -345,8 +383,14 @@ mod tests {
             .set_modified(original_mtime)
             .expect("restore mtime");
 
-        let second =
-            scan_provider_cached(&store, "claude", targets(), false, counting_parse(&counter));
+        let second = scan_provider_cached(
+            &store,
+            "claude",
+            targets(),
+            false,
+            counting_parse(&counter),
+            |_| true,
+        );
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -363,8 +407,14 @@ mod tests {
             writeln!(f, "extra").unwrap();
         }
         // The first line is still "id-XXX" from step 2's rewrite.
-        let third =
-            scan_provider_cached(&store, "claude", targets(), false, counting_parse(&counter));
+        let third = scan_provider_cached(
+            &store,
+            "claude",
+            targets(),
+            false,
+            counting_parse(&counter),
+            |_| true,
+        );
         assert_eq!(
             counter.load(Ordering::SeqCst),
             2,
@@ -374,8 +424,14 @@ mod tests {
 
         // 4. Delete the file → its cache row is removed and the list is empty.
         std::fs::remove_file(&path).expect("delete");
-        let fourth =
-            scan_provider_cached(&store, "claude", targets(), false, counting_parse(&counter));
+        let fourth = scan_provider_cached(
+            &store,
+            "claude",
+            targets(),
+            false,
+            counting_parse(&counter),
+            |_| true,
+        );
         assert!(fourth.is_empty());
         assert!(store.load_for_provider("claude").expect("load").is_empty());
     }
@@ -393,10 +449,24 @@ mod tests {
         };
         let counter = AtomicUsize::new(0);
 
-        scan_provider_cached(&store, "claude", targets(), false, counting_parse(&counter));
+        scan_provider_cached(
+            &store,
+            "claude",
+            targets(),
+            false,
+            counting_parse(&counter),
+            |_| true,
+        );
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         // A forced reload re-parses the unchanged file (mtime/size ignored).
-        scan_provider_cached(&store, "claude", targets(), true, counting_parse(&counter));
+        scan_provider_cached(
+            &store,
+            "claude",
+            targets(),
+            true,
+            counting_parse(&counter),
+            |_| true,
+        );
         assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
@@ -469,10 +539,17 @@ mod tests {
         );
 
         let parsed = std::sync::atomic::AtomicUsize::new(0);
-        let delta = revalidate("claude", vec![unchanged, changed], cached, false, |path| {
-            parsed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Some(sample_meta(path.file_stem().unwrap().to_str().unwrap()))
-        });
+        let delta = revalidate(
+            "claude",
+            vec![unchanged, changed],
+            cached,
+            false,
+            |path| {
+                parsed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(sample_meta(path.file_stem().unwrap().to_str().unwrap()))
+            },
+            |_| true,
+        );
 
         // Only the changed file is parsed; the unchanged one is a cache hit.
         assert_eq!(parsed.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -499,9 +576,14 @@ mod tests {
             cached_row(&present, &sample_meta("gone"), SCAN_CACHE_VERSION),
         );
 
-        let delta = revalidate("claude", vec![present], cached, false, |_| {
-            Some(sample_meta("a"))
-        });
+        let delta = revalidate(
+            "claude",
+            vec![present],
+            cached,
+            false,
+            |_| Some(sample_meta("a")),
+            |_| true,
+        );
 
         assert_eq!(delta.deletes, vec!["/tmp/gone.jsonl".to_string()]);
         assert_eq!(delta.sessions.len(), 1);
@@ -522,10 +604,17 @@ mod tests {
         );
 
         let parsed = std::sync::atomic::AtomicUsize::new(0);
-        let delta = revalidate("claude", vec![target], cached, false, |_| {
-            parsed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Some(sample_meta("a"))
-        });
+        let delta = revalidate(
+            "claude",
+            vec![target],
+            cached,
+            false,
+            |_| {
+                parsed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(sample_meta("a"))
+            },
+            |_| true,
+        );
 
         assert_eq!(parsed.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(delta.upserts.len(), 1);
@@ -547,13 +636,115 @@ mod tests {
         );
 
         let parsed = std::sync::atomic::AtomicUsize::new(0);
-        let delta = revalidate("claude", vec![target], cached, true, |_| {
-            parsed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Some(sample_meta("a"))
-        });
+        let delta = revalidate(
+            "claude",
+            vec![target],
+            cached,
+            true,
+            |_| {
+                parsed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(sample_meta("a"))
+            },
+            |_| true,
+        );
 
         // Even an mtime/size match is ignored under `force`.
         assert_eq!(parsed.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(delta.upserts.len(), 1);
+    }
+
+    /// cacheable=false 的行每轮都重新解析且不落缓存（OpenCode 无 title 会话
+    /// 语义）：文件未变，counter 仍逐轮递增，缓存始终为空。
+    #[test]
+    fn uncacheable_rows_reparse_every_round_and_are_not_cached() {
+        let store = ScanCacheStore::in_memory().expect("memory store");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "id-001\n").expect("write");
+
+        let targets = || {
+            let mut out = Vec::new();
+            collect_targets_recursive(dir.path(), "jsonl", &mut out);
+            out
+        };
+        let counter = AtomicUsize::new(0);
+
+        let first = scan_provider_cached(
+            &store,
+            "opencode",
+            targets(),
+            false,
+            counting_parse(&counter),
+            |_| false,
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(first.len(), 1);
+        assert!(
+            store
+                .load_for_provider("opencode")
+                .expect("load")
+                .is_empty(),
+            "不可缓存行不落缓存"
+        );
+
+        // 文件完全未变，但仍每轮重新解析（无命中捷径），缓存依旧为空。
+        let second = scan_provider_cached(
+            &store,
+            "opencode",
+            targets(),
+            false,
+            counting_parse(&counter),
+            |_| false,
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 2, "未变文件仍每轮重新解析");
+        assert_eq!(second.len(), 1);
+        assert!(store
+            .load_for_provider("opencode")
+            .expect("load")
+            .is_empty());
+    }
+
+    /// 升级前遗留的缓存行本轮判定为不可缓存：不走命中捷径 → 重新解析、不
+    /// upsert，且旧行进 deletes 被清除，避免命中过期行。
+    #[test]
+    fn revalidate_deletes_stale_row_when_now_uncacheable() {
+        let target = FileScanTarget {
+            path: PathBuf::from("/tmp/a.jsonl"),
+            mtime_ns: 100,
+            size: 10,
+        };
+        // (mtime,size) 与当前 target 完全吻合的遗留缓存行。
+        let mut cached = HashMap::new();
+        cached.insert(
+            "/tmp/a.jsonl".to_string(),
+            cached_row(&target, &sample_meta("a"), SCAN_CACHE_VERSION),
+        );
+
+        let parsed = AtomicUsize::new(0);
+        let delta = revalidate(
+            "opencode",
+            vec![target],
+            cached,
+            false,
+            |_| {
+                parsed.fetch_add(1, Ordering::SeqCst);
+                Some(sample_meta("a"))
+            },
+            |_| false,
+        );
+
+        assert_eq!(
+            parsed.load(Ordering::SeqCst),
+            1,
+            "命中捷径被禁用 → 重新解析"
+        );
+        assert!(delta.upserts.is_empty(), "不可缓存行不落缓存");
+        assert_eq!(
+            delta.deletes,
+            vec!["/tmp/a.jsonl".to_string()],
+            "旧行被删除以便下轮重新解析"
+        );
+        assert_eq!(delta.sessions.len(), 1, "仍进返回列表");
+        assert_eq!(delta.uncacheable, 1, "观测计数");
     }
 }

@@ -58,7 +58,14 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 
 /// Cache-aware scan over `tmp/<project>/chats/*.json`.
 pub(crate) fn scan_sessions_cached(store: &ScanCacheStore, force: bool) -> Vec<SessionMeta> {
-    cache::scan_provider_cached(store, PROVIDER_ID, scan_targets(), force, parse_meta)
+    cache::scan_provider_cached(
+        store,
+        PROVIDER_ID,
+        scan_targets(),
+        force,
+        parse_meta,
+        |_| true,
+    )
 }
 
 fn scan_targets() -> Vec<FileScanTarget> {
