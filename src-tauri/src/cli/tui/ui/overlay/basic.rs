@@ -270,3 +270,70 @@ fn render_scrolling_lines(frame: &mut Frame<'_>, area: Rect, lines: &[String], s
 
     frame.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), area);
 }
+
+pub(super) fn render_model_route_provider_picker(
+    frame: &mut Frame<'_>,
+    data: &UiData,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+) {
+    use crate::app_config::AppType;
+    use crate::cli::tui::data::provider_display_name;
+    use ratatui::widgets::{Clear, List, ListItem, ListState};
+    use unicode_width::UnicodeWidthStr;
+
+    let area = centered_rect(OVERLAY_LG.0, OVERLAY_LG.1, content_area);
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(overlay_border_style(theme, false))
+        .title(crate::t!("Select provider", "选择供应商"));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_key_bar_center(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("Enter", crate::t!("Confirm", "确认")),
+            ("Esc", crate::t!("Back", "返回")),
+        ],
+    );
+
+    let body_area = inset_top(chunks[1], 1);
+    let items: Vec<ListItem> = data
+        .providers
+        .rows
+        .iter()
+        .map(|row| {
+            let display = provider_display_name(&AppType::Claude, row);
+            let extra = if row.is_current { " (*)" } else { "" };
+            let mut text = format!("{display}{extra}");
+            if UnicodeWidthStr::width(text.as_str()) as u16 > body_area.width.saturating_sub(2) {
+                text = text
+                    .chars()
+                    .take(body_area.width.saturating_sub(5) as usize)
+                    .collect::<String>()
+                    + "…";
+            }
+            ListItem::new(Line::from(Span::raw(text)))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    frame.render_stateful_widget(list, body_area, &mut state);
+}

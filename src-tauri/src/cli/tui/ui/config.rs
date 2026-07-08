@@ -21,6 +21,7 @@ pub(super) fn webdav_config_item_label(item: &WebDavConfigItem) -> &'static str 
 
 pub(super) fn local_proxy_settings_item_label(item: &LocalProxySettingsItem) -> &'static str {
     match item {
+        LocalProxySettingsItem::ProxySwitch => crate::t!("Proxy enabled", "代理开关"),
         LocalProxySettingsItem::ListenAddress => texts::tui_settings_proxy_listen_address_label(),
         LocalProxySettingsItem::ListenPort => texts::tui_settings_proxy_listen_port_label(),
         LocalProxySettingsItem::AutoFailover => crate::t!("Automatic failover", "自动故障转移"),
@@ -56,19 +57,24 @@ pub(super) fn render_config(
         .iter()
         .map(|item| Row::new(vec![Cell::from(config_item_label(item))]));
 
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(format!(" {} ", texts::tui_config_title()));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
     let mut keys = vec![("Enter", texts::tui_key_select())];
     if matches!(items.get(app.config_idx), Some(ConfigItem::CommonSnippet)) {
         keys.push(("e", texts::tui_key_edit_snippet()));
     }
-    let body = render_page_frame(
-        frame,
-        area,
-        theme,
-        app,
-        texts::tui_config_title(),
-        &keys,
-        None,
-    );
+    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
 
     let table = Table::new(rows, [Constraint::Min(10)])
         .block(Block::default().borders(Borders::NONE))
@@ -77,7 +83,7 @@ pub(super) fn render_config(
 
     let mut state = TableState::default();
     state.select(Some(app.config_idx));
-    frame.render_stateful_widget(table, inset_left(body, CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
 }
 
 pub(super) fn render_config_webdav(
@@ -92,6 +98,22 @@ pub(super) fn render_config_webdav(
         .iter()
         .map(|item| Row::new(vec![Cell::from(webdav_config_item_label(item))]));
 
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(breadcrumb_title(&[
+            texts::tui_config_title(),
+            texts::tui_config_webdav_title(),
+        ]));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
     let mut keys = vec![("Enter", texts::tui_key_select())];
     if matches!(
         items.get(app.config_webdav_idx),
@@ -99,15 +121,7 @@ pub(super) fn render_config_webdav(
     ) {
         keys.push(("e", texts::tui_key_edit()));
     }
-    let body = render_page_frame(
-        frame,
-        area,
-        theme,
-        app,
-        &breadcrumb_path(&[texts::tui_config_title(), texts::tui_config_webdav_title()]),
-        &keys,
-        None,
-    );
+    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
 
     let table = Table::new(rows, [Constraint::Min(10)])
         .block(Block::default().borders(Borders::NONE))
@@ -116,7 +130,7 @@ pub(super) fn render_config_webdav(
 
     let mut state = TableState::default();
     state.select(Some(app.config_webdav_idx));
-    frame.render_stateful_widget(table, inset_left(body, CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
 }
 
 pub(super) fn render_config_openclaw_route(
@@ -2516,89 +2530,94 @@ pub(super) fn render_settings(
     let claude_plugin_integration = crate::settings::get_enable_claude_plugin_integration();
     let codex_unified_session_history = crate::settings::unify_codex_session_history();
 
-    let rows_data = super::app::SettingsItem::ALL
-        .iter()
-        .map(|item| match item {
-            super::app::SettingsItem::Language => (
-                texts::tui_settings_header_language().to_string(),
-                language.display_name().to_string(),
-            ),
-            super::app::SettingsItem::Theme => {
-                (
+    let rows_data =
+        super::app::SettingsItem::ALL
+            .iter()
+            .map(|item| match item {
+                super::app::SettingsItem::Language => (
+                    texts::tui_settings_header_language().to_string(),
+                    language.display_name().to_string(),
+                ),
+                super::app::SettingsItem::Theme => (
                     texts::tui_settings_theme_label().to_string(),
                     texts::tui_settings_theme_mode_name(
                         crate::cli::tui::theme::configured_theme_mode(),
                     )
                     .to_string(),
-                )
-            }
-            super::app::SettingsItem::Icons => (
-                texts::tui_settings_icons_label().to_string(),
-                texts::tui_settings_icon_mode_name(crate::cli::tui::icons::configured_icon_mode())
-                    .to_string(),
-            ),
-            super::app::SettingsItem::VisibleAppsMode => (
-                texts::tui_settings_visible_apps_mode_label().to_string(),
-                match visible_apps_mode {
-                    crate::settings::VisibleAppsMode::Auto => {
-                        texts::tui_settings_visible_apps_mode_auto().to_string()
-                    }
-                    crate::settings::VisibleAppsMode::Manual => {
-                        texts::tui_settings_visible_apps_mode_manual().to_string()
-                    }
-                },
-            ),
-            super::app::SettingsItem::VisibleApps => (
-                texts::tui_settings_visible_apps_label().to_string(),
-                visible_apps_summary(&visible_apps),
-            ),
-            super::app::SettingsItem::OpenClawConfigDir => (
-                texts::tui_settings_openclaw_config_dir_label().to_string(),
-                openclaw_config_dir.clone().unwrap_or_else(|| {
-                    texts::tui_settings_openclaw_config_dir_default_value().to_string()
-                }),
-            ),
-            super::app::SettingsItem::ManagedAccounts => (
-                texts::tui_settings_managed_accounts_title().to_string(),
-                managed_accounts_summary(app),
-            ),
-            super::app::SettingsItem::SkipClaudeOnboarding => (
-                texts::skip_claude_onboarding_label().to_string(),
-                if skip_claude_onboarding {
-                    texts::enabled().to_string()
-                } else {
-                    texts::disabled().to_string()
-                },
-            ),
-            super::app::SettingsItem::ClaudePluginIntegration => (
-                texts::enable_claude_plugin_integration_label().to_string(),
-                if claude_plugin_integration {
-                    texts::enabled().to_string()
-                } else {
-                    texts::disabled().to_string()
-                },
-            ),
-            super::app::SettingsItem::CodexUnifiedSessionHistory => (
-                texts::codex_unified_session_history_label().to_string(),
-                if codex_unified_session_history {
-                    texts::enabled().to_string()
-                } else {
-                    texts::disabled().to_string()
-                },
-            ),
-            super::app::SettingsItem::Proxy => (
-                texts::tui_config_item_proxy().to_string(),
-                format!(
-                    "{}:{}",
-                    data.proxy.configured_listen_address, data.proxy.configured_listen_port,
                 ),
-            ),
-            super::app::SettingsItem::CheckForUpdates => (
-                texts::tui_settings_check_for_updates().to_string(),
-                format!("v{}", env!("CARGO_PKG_VERSION")),
-            ),
-        })
-        .collect::<Vec<_>>();
+                super::app::SettingsItem::Icons => (
+                    texts::tui_settings_icons_label().to_string(),
+                    texts::tui_settings_icon_mode_name(
+                        crate::cli::tui::icons::configured_icon_mode(),
+                    )
+                    .to_string(),
+                ),
+                super::app::SettingsItem::VisibleAppsMode => (
+                    texts::tui_settings_visible_apps_mode_label().to_string(),
+                    match visible_apps_mode {
+                        crate::settings::VisibleAppsMode::Auto => {
+                            texts::tui_settings_visible_apps_mode_auto().to_string()
+                        }
+                        crate::settings::VisibleAppsMode::Manual => {
+                            texts::tui_settings_visible_apps_mode_manual().to_string()
+                        }
+                    },
+                ),
+                super::app::SettingsItem::VisibleApps => (
+                    texts::tui_settings_visible_apps_label().to_string(),
+                    visible_apps_summary(&visible_apps),
+                ),
+                super::app::SettingsItem::OpenClawConfigDir => (
+                    texts::tui_settings_openclaw_config_dir_label().to_string(),
+                    openclaw_config_dir.clone().unwrap_or_else(|| {
+                        texts::tui_settings_openclaw_config_dir_default_value().to_string()
+                    }),
+                ),
+                super::app::SettingsItem::ManagedAccounts => (
+                    texts::tui_settings_managed_accounts_title().to_string(),
+                    managed_accounts_summary(app),
+                ),
+                super::app::SettingsItem::SkipClaudeOnboarding => (
+                    texts::skip_claude_onboarding_label().to_string(),
+                    if skip_claude_onboarding {
+                        texts::enabled().to_string()
+                    } else {
+                        texts::disabled().to_string()
+                    },
+                ),
+                super::app::SettingsItem::ClaudePluginIntegration => (
+                    texts::enable_claude_plugin_integration_label().to_string(),
+                    if claude_plugin_integration {
+                        texts::enabled().to_string()
+                    } else {
+                        texts::disabled().to_string()
+                    },
+                ),
+                super::app::SettingsItem::CodexUnifiedSessionHistory => (
+                    texts::codex_unified_session_history_label().to_string(),
+                    if codex_unified_session_history {
+                        texts::enabled().to_string()
+                    } else {
+                        texts::disabled().to_string()
+                    },
+                ),
+                super::app::SettingsItem::Proxy => (
+                    texts::tui_config_item_proxy().to_string(),
+                    format!(
+                        "{}:{}",
+                        data.proxy.configured_listen_address, data.proxy.configured_listen_port,
+                    ),
+                ),
+                super::app::SettingsItem::ModelRoutes => (
+                    "模型路由".to_string(),
+                    format!("{} 条规则", data.model_routes.rows.len()),
+                ),
+                super::app::SettingsItem::CheckForUpdates => (
+                    texts::tui_settings_check_for_updates().to_string(),
+                    format!("v{}", env!("CARGO_PKG_VERSION")),
+                ),
+            })
+            .collect::<Vec<_>>();
 
     let label_col_width = field_label_column_width(
         rows_data
@@ -2618,14 +2637,25 @@ pub(super) fn render_settings(
         .iter()
         .map(|(label, value)| Row::new(vec![Cell::from(label.clone()), Cell::from(value.clone())]));
 
-    let body = render_page_frame(
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(format!(" {} ", texts::menu_settings()));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    render_page_key_bar(
         frame,
-        area,
+        chunks[0],
         theme,
-        app,
-        texts::menu_settings(),
         &[("Enter", texts::tui_key_apply())],
-        None,
+        app.focus == Focus::Content,
     );
 
     let table = Table::new(
@@ -2639,7 +2669,7 @@ pub(super) fn render_settings(
 
     let mut state = TableState::default();
     state.select(Some(app.settings_idx));
-    frame.render_stateful_widget(table, inset_left(body, CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
 }
 
 fn managed_accounts_summary(app: &App) -> String {
@@ -2663,24 +2693,35 @@ pub(super) fn render_settings_managed_accounts(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let keys = managed_account_key_items(app);
-    let body = render_page_frame(
-        frame,
-        area,
-        theme,
-        app,
-        &breadcrumb_path(&[
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(breadcrumb_title(&[
             texts::menu_settings(),
             texts::tui_settings_managed_accounts_title(),
-        ]),
-        &keys,
-        Some(managed_accounts_page_summary(app)),
-    );
+        ]));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let keys = managed_account_key_items(app);
+    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
+
+    render_summary_bar(frame, chunks[1], theme, managed_accounts_page_summary(app));
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
-        .split(body);
+        .split(chunks[2]);
 
     render_managed_account_list(frame, app, columns[0], theme);
     render_managed_account_details(frame, app, columns[1], theme);
@@ -3112,6 +3153,14 @@ pub(super) fn render_settings_proxy(
     let rows_data = LocalProxySettingsItem::ALL
         .iter()
         .map(|item| match item {
+            LocalProxySettingsItem::ProxySwitch => (
+                local_proxy_settings_item_label(item).to_string(),
+                if data.proxy.enabled {
+                    texts::enabled().to_string()
+                } else {
+                    texts::disabled().to_string()
+                },
+            ),
             LocalProxySettingsItem::ListenAddress => (
                 local_proxy_settings_item_label(item).to_string(),
                 data.proxy.configured_listen_address.clone(),

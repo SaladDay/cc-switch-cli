@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn render_sessions(
     frame: &mut Frame<'_>,
     app: &App,
-    data: &UiData,
+    _data: &UiData,
     area: Rect,
     theme: &super::theme::Theme,
 ) {
@@ -21,14 +21,22 @@ pub(super) fn render_sessions(
         &app.sessions.deep_search_results,
     );
 
-    // Pane/list navigation is handled globally (arrows, h/l, Tab), so it is
-    // hinted here as a static prefix; the action chips are generated from the
-    // same table the handler dispatches through.
-    let mut keys = vec![
+    let keys = [
         ("↑↓", texts::tui_key_select()),
         ("←→/h/l", texts::tui_key_pane()),
+        ("Enter", texts::tui_key_view()),
+        ("R", texts::tui_key_restore()),
+        ("d", texts::tui_key_delete()),
+        ("r", texts::tui_key_refresh()),
+        (
+            "a",
+            if app.sessions.show_all_providers {
+                texts::tui_key_sessions_all_active()
+            } else {
+                texts::tui_key_sessions_all()
+            },
+        ),
     ];
-    keys.extend(crate::cli::tui::keymap::sessions::key_bar_items(app, data));
     let summary = if app.sessions.loading && !app.sessions.loaded_once {
         texts::tui_sessions_loading_summary().to_string()
     } else if app.sessions.deep_search_active.is_some() {
@@ -88,10 +96,7 @@ fn render_session_list(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(session_pane_border_style(app, SessionsPane::List, theme))
-        .title(format!(
-            " {} ",
-            icons::strip_icon(texts::menu_manage_sessions())
-        ));
+        .title(format!(" {} ", texts::menu_manage_sessions()));
     frame.render_widget(block.clone(), area);
     let inner = block.inner(area);
 

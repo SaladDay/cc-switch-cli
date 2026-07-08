@@ -1241,6 +1241,56 @@ mod tests {
     }
 
     #[test]
+    fn proxy_provider_activity_aligns_with_main_samples_on_first_tick() {
+        let mut app = App::new(Some(AppType::Claude));
+
+        // 首 tick：主样本 push 一个 0，provider 样本必须同长（修复前会因
+        // 静默 return 而落后一列，导致点阵图颜色栈错位退化为单色）。
+        app.reset_proxy_activity(10, 20);
+        app.observe_proxy_token_activity(10, 20);
+        let mut map = HashMap::new();
+        map.insert("p1".to_string(), 5);
+        app.observe_proxy_provider_activity(&map);
+
+        assert_eq!(app.proxy_input_activity_samples.len(), 1);
+        assert_eq!(
+            app.proxy_provider_activity_samples
+                .get("p1")
+                .map(|s| s.len()),
+            Some(1),
+            "provider samples must align with main samples from the first tick"
+        );
+    }
+
+    #[test]
+    fn proxy_provider_activity_resyncs_after_proxy_restart() {
+        let mut app = App::new(Some(AppType::Claude));
+
+        // 正常积累几个 tick
+        app.reset_proxy_activity(0, 0);
+        for i in 1..=3 {
+            app.observe_proxy_token_activity(i * 10, i * 20);
+            let mut map = HashMap::new();
+            map.insert("p1".to_string(), i * 5);
+            app.observe_proxy_provider_activity(&map);
+        }
+        assert_eq!(app.proxy_input_activity_samples.len(), 3);
+        assert_eq!(app.proxy_provider_activity_samples["p1"].len(), 3);
+
+        // proxy 重启：主计数回退触发主样本清空，provider 样本必须同步清空
+        app.observe_proxy_token_activity(1, 2);
+        assert_eq!(app.proxy_input_activity_samples, vec![0]);
+        let mut map = HashMap::new();
+        map.insert("p1".to_string(), 1);
+        app.observe_proxy_provider_activity(&map);
+        assert_eq!(
+            app.proxy_provider_activity_samples["p1"].len(),
+            1,
+            "provider samples must resync after proxy restart realigns main samples"
+        );
+    }
+
+    #[test]
     fn proxy_transition_starts_when_proxy_route_state_changes() {
         let mut app = App::new(Some(AppType::Claude));
 
@@ -9443,37 +9493,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_icons_row_toggles_and_persists_mode() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = TestEnvGuard::isolated(temp_home.path());
-        // The CC_SWITCH_ICONS override would short-circuit the persisted
-        // value, so clear it to exercise the Settings path deterministically.
-        let saved_icons = std::env::var_os("CC_SWITCH_ICONS");
-        std::env::remove_var("CC_SWITCH_ICONS");
-
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::Settings;
-        app.focus = Focus::Content;
-        app.settings_idx = SettingsItem::ALL
-            .iter()
-            .position(|item| matches!(item, SettingsItem::Icons))
-            .expect("Icons missing from SettingsItem::ALL");
-
-        // No persisted value is Auto; Enter cycles Auto -> Emoji -> Ascii -> Auto.
-        assert!(matches!(
-            app.on_key(key(KeyCode::Enter), &UiData::default()),
-            Action::None
-        ));
-        assert_eq!(crate::settings::get_icon_mode().as_deref(), Some("emoji"));
-        app.on_key(key(KeyCode::Enter), &UiData::default());
-        assert_eq!(crate::settings::get_icon_mode().as_deref(), Some("ascii"));
-        app.on_key(key(KeyCode::Enter), &UiData::default());
-        assert_eq!(crate::settings::get_icon_mode().as_deref(), Some("auto"));
-
-        crate::test_support::restore_env("CC_SWITCH_ICONS", &saved_icons);
-    }
-
-    #[test]
     fn settings_openclaw_config_dir_text_submit_emits_action() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Settings;
@@ -13379,23 +13398,6 @@ mod tests {
         assert!(!text.contains("Provider Detail:"), "{text}");
         assert!(!text.contains("点在哪"), "{text}");
         assert!(!text.contains("显示/关闭帮助"), "{text}");
-    }
-
-    #[test]
-    fn fullwidth_question_mark_toggles_the_help_overlay() {
-        let _lang = use_test_language(Language::English);
-        let mut app = App::new(Some(AppType::Claude));
-
-        // The full-width Chinese '？' opens help, same as ASCII '?'.
-        let action = app.on_key(key(KeyCode::Char('？')), &UiData::default());
-        assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::Help(_)));
-        assert!(help_text(&app).contains("?   toggle help"));
-
-        // Pressing it again toggles the overlay closed.
-        let action = app.on_key(key(KeyCode::Char('？')), &UiData::default());
-        assert!(matches!(action, Action::None));
-        assert!(!app.overlay.is_active(), "help overlay should close");
     }
 
     #[test]

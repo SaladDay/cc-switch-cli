@@ -9,6 +9,7 @@ use crate::cli::ui::{create_table, info, success, to_json, warning};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::services::session_usage::SessionSyncResult;
+#[allow(unused_imports)]
 use crate::session_manager::{self, SessionMessage, SessionMeta, SessionSearchHit};
 
 #[derive(Subcommand, Debug, Clone)]

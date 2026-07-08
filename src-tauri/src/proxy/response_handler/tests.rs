@@ -16,8 +16,8 @@ use crate::{
     database::Database,
     provider::Provider,
     proxy::{
-        provider_router::ProviderRouter, providers::gemini_shadow::GeminiShadowStore,
-        types::ProxyConfig,
+        model_router::ModelRouter, provider_router::ProviderRouter,
+        providers::gemini_shadow::GeminiShadowStore, types::ProxyConfig,
     },
     test_support::TestEnvGuard,
 };
@@ -52,9 +52,11 @@ fn test_state_with_db(db: Arc<Database>) -> ProxyServerState {
         status: Arc::new(RwLock::new(crate::proxy::types::ProxyStatus::default())),
         start_time: Arc::new(RwLock::new(None)),
         current_providers: Arc::new(RwLock::new(HashMap::new())),
-        provider_router: Arc::new(ProviderRouter::new(db)),
+        provider_router: Arc::new(ProviderRouter::new(db.clone())),
+        model_router: Arc::new(ModelRouter::new(db)),
         codex_chat_history: Arc::new(Default::default()),
         gemini_shadow: Arc::new(GeminiShadowStore::default()),
+        provider_token_map: Arc::new(RwLock::new(HashMap::new())),
     }
 }
 
@@ -105,6 +107,61 @@ async fn buffered_failures_still_accumulate_output_tokens() {
     let snapshot = state.snapshot_status().await;
     assert_eq!(snapshot.failed_requests, 1);
     assert_eq!(snapshot.estimated_output_tokens_total, 9);
+}
+
+#[tokio::test]
+async fn buffered_success_records_input_and_output_tokens_per_provider() {
+    // provider_token_map 应同时累积 input + output token（按服务 provider 归类），
+    // 让点阵图 input/output 波形都能正确按 provider 着色。
+    let state = test_state();
+    state.record_request_start().await;
+
+    let provider = test_provider_with_settings(
+        "zhipu",
+        "Zhipu",
+        json!({"apiKey": "zhipu-key", "base_url": "https://zhipu.example"}),
+    );
+    let estimated_input_tokens: u64 = 4_000u64;
+    let estimated_output_tokens: u64 = 600u64;
+
+    let response = PreparedResponse {
+        response: Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from("ok response body"))
+            .expect("response"),
+        stream_completion: None,
+        estimated_output_tokens,
+        upstream_error_summary: None,
+        body_bytes: Some(Bytes::from_static(b"ok response body")),
+    };
+
+    let _ = ResponseHandler::finish_buffered(
+        &state,
+        Ok(response),
+        reqwest::StatusCode::OK,
+        Some(SuccessSyncInfo {
+            app_type: AppType::Claude,
+            provider: provider.clone(),
+            current_provider_id_at_start: provider.id.clone(),
+            is_model_routed: false,
+            estimated_input_tokens,
+        }),
+        None,
+    )
+    .await;
+    settle_tasks().await;
+
+    let snapshot = state.snapshot_status().await;
+    let recorded = snapshot
+        .provider_token_map
+        .get(&provider.id)
+        .copied()
+        .unwrap_or(0);
+    assert!(
+        recorded >= estimated_input_tokens.saturating_add(estimated_output_tokens),
+        "provider_token_map should record input+output tokens (>= {}), got {recorded}",
+        estimated_input_tokens.saturating_add(estimated_output_tokens)
+    );
 }
 
 #[tokio::test]
@@ -273,6 +330,8 @@ async fn streaming_success_syncs_failover_state_after_body_drains() {
             app_type: AppType::Claude,
             provider: failover.clone(),
             current_provider_id_at_start: current.id.clone(),
+            is_model_routed: false,
+            estimated_input_tokens: 0,
         }),
         None,
     )

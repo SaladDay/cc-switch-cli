@@ -788,6 +788,7 @@ pub(crate) fn visible_sessions<'a>(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn visible_sessions_for_state<'a>(
     filter: &FilterState,
     app_type: &AppType,
@@ -808,16 +809,12 @@ pub(crate) fn visible_sessions_for_state<'a>(
     // If deep search is active, only show sessions that appear in search hits
     // (merged with metadata matches).
     let deep_search_source_paths: Option<std::collections::HashSet<&str>> =
-        if let Some(_q) = deep_search_query {
-            Some(
-                deep_search_results
-                    .iter()
-                    .map(|h| h.source_path.as_str())
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        deep_search_query.map(|_q| {
+            deep_search_results
+                .iter()
+                .map(|h| h.source_path.as_str())
+                .collect()
+        });
 
     rows.iter()
         .filter(|row| show_all || row.provider_id == provider_id)

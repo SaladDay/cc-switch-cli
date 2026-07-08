@@ -23,7 +23,7 @@ use crate::{
             Focus, Overlay, TextInputState, TextSubmit, UsagePane,
         },
         data::{
-            ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot,
+            ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot, ModelRouteSnapshot,
             OpenClawWorkspaceSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
             ProxySnapshot, SkillsSnapshot, UiData, UsageLogRow, UsageProviderStatsRow,
             UsageRangePreset, UsageSnapshot, UsageSummarySnapshot, UsageTrendBucket,
@@ -1582,6 +1582,7 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
         usage: UsageSnapshot::default(),
         pricing: Default::default(),
         quota: Default::default(),
+        model_routes: ModelRouteSnapshot::default(),
         reload_token: Default::default(),
     }
 }
@@ -2651,9 +2652,6 @@ fn header_keeps_proxy_visible_and_truncates_long_provider_name() {
 fn nav_icons_have_left_padding_from_border() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
-    // This test is specifically about the emoji icon column, so pin emoji
-    // mode rather than depend on the ambient locale (auto-detection).
-    let _icons = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
 
     let app = App::new(Some(AppType::Claude));
     let data = minimal_data(&app.app_type);
@@ -4157,37 +4155,13 @@ fn mcp_page_uses_import_existing_label() {
     assert!(all.contains(texts::tui_mcp_action_import_existing()));
 }
 
-fn global_help_text(app_type: AppType) -> String {
-    let app = App::new(Some(app_type));
-    let data = minimal_data(&app.app_type);
-    crate::cli::tui::help::context_help_for_app(&app, &data)
-        .lines
-        .join("\n")
-}
-
 #[test]
 fn help_text_mentions_import_existing_for_mcp() {
-    let _lock = lock_env();
-    let _lang = use_test_language(Language::English);
-    // MCP and Skills both generate their import line from the same label
-    // (tui_*_action_import_existing); assert the wording on BOTH lines so a
-    // regression on either page is caught, not just its presence somewhere.
-    let help = global_help_text(AppType::Claude);
-    let mcp_line = help
-        .lines()
-        .find(|line| line.starts_with("- MCP:"))
-        .unwrap_or_else(|| panic!("no MCP help line: {help}"));
-    let skills_line = help
-        .lines()
-        .find(|line| line.starts_with("- Skills:"))
-        .unwrap_or_else(|| panic!("no Skills help line: {help}"));
+    let help = texts::tui_help_text();
+
     assert!(
-        mcp_line.contains("i Import Existing"),
-        "MCP help line missing shared import wording: {mcp_line}"
-    );
-    assert!(
-        skills_line.contains("i Import Existing"),
-        "Skills help line missing shared import wording: {skills_line}"
+        help.contains("i import existing") || help.contains("i 导入已有"),
+        "help text should use the same import wording for MCP and Skills"
     );
 }
 
@@ -4197,7 +4171,7 @@ fn help_text_shows_space_as_the_mcp_toggle_key() {
     for lang in [Language::English, Language::Chinese] {
         let _lang = use_test_language(lang);
         for app_type in [AppType::Claude, AppType::Hermes] {
-            let help = global_help_text(app_type.clone());
+            let help = texts::tui_help_text_for_app(&app_type);
             // The MCP toggle handler listens for Space (content_entities.rs);
             // the help sheet used to claim `x` here.
             assert!(
@@ -4210,34 +4184,6 @@ fn help_text_shows_space_as_the_mcp_toggle_key() {
             );
         }
     }
-}
-
-#[test]
-fn generated_help_swaps_prompts_for_memory_on_hermes() {
-    let _lock = lock_env();
-    let _lang = use_test_language(Language::English);
-
-    let claude = global_help_text(AppType::Claude);
-    assert!(claude.contains("- Prompts: "), "{claude}");
-    assert!(!claude.contains("- Memory:"), "{claude}");
-    assert!(claude.contains("- Config: "), "{claude}");
-
-    let hermes = global_help_text(AppType::Hermes);
-    assert!(hermes.contains("- Memory: "), "{hermes}");
-    assert!(!hermes.contains("- Prompts:"), "{hermes}");
-    // Hermes has no Config route, so no Config line in its help sheet.
-    assert!(!hermes.contains("- Config:"), "{hermes}");
-}
-
-#[test]
-fn generated_usage_help_omits_the_hidden_reverse_tab_alias() {
-    let _lock = lock_env();
-    let _lang = use_test_language(Language::English);
-    let help = global_help_text(AppType::Claude);
-    // Shift+Tab (reverse metric) is a never-shown alias, so it is skipped in
-    // the generated help even though Tab (forward) is listed.
-    assert!(help.contains("Tab switch metric"), "{help}");
-    assert!(!help.contains("Shift+Tab"), "{help}");
 }
 
 #[test]

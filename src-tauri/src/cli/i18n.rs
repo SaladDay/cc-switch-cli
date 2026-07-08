@@ -265,9 +265,9 @@ pub mod texts {
     // Welcome & Headers
     pub fn welcome_title() -> &'static str {
         if is_chinese() {
-            "🎯 CC-Switch 交互模式"
+            "    🎯 CC-Switch 交互模式"
         } else {
-            "🎯 CC-Switch Interactive Mode"
+            "    🎯 CC-Switch Interactive Mode"
         }
     }
 
@@ -571,60 +571,23 @@ pub mod texts {
         }
     }
 
-    /// The static top of the help sheet: global keys, the text-input line,
-    /// and the "Page keys" header. The per-page key lines below it are
-    /// generated from the keymap registry (see `cli::tui::help`), except the
-    /// static bullets returned by the `tui_help_line_*` functions.
-    pub fn tui_help_prelude() -> &'static str {
+    pub fn tui_help_text() -> &'static str {
         if is_chinese() {
-            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓ 或 h/j/k/l  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n文本输入：Ctrl+A/E 行首/行尾，Ctrl+U/K 删除行片段，Ctrl+W 删除前词，Alt+B/F 按词移动\n\n页面快捷键（在页面内容区顶部显示）："
+            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓ 或 h/j/k/l  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n文本输入：Ctrl+A/E 行首/行尾，Ctrl+U/K 删除行片段，Ctrl+W 删除前词，Alt+B/F 按词移动\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Space 切换，Enter/e 编辑，a 新增，c 复制，d 删除，t 测试，r 刷新，o 临时启动(Claude/Codex)，f 管理故障转移(Claude/Codex/Gemini)，x 设为默认(OpenClaw)\n- MCP：Space 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：Space 启用/禁用，a 新增，Enter 查看，e 编辑，d 删除\n- 会话：Enter 查看，R 恢复，d 删除，r 刷新，a 全部供应商\n- 技能：Enter 详情，Space 启用/禁用(当前应用)，m 选择应用，f 发现，i 导入已有，d 卸载\n- 使用统计：1/2/3 时间范围，c 自定义范围，Tab 切换指标，L 明细，P 价格，r 刷新\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
         } else {
-            "[ ]  switch app\n←→  focus menu/content\n↑↓ or h/j/k/l  move\n/   filter\nEsc  back\n?   toggle help\n\nText input: Ctrl+A/E move line, Ctrl+U/K delete line parts, Ctrl+W delete word, Alt+B/F move word\n\nPage keys (shown at the top of each page):"
+            "[ ]  switch app\n←→  focus menu/content\n↑↓ or h/j/k/l  move\n/   filter\nEsc  back\n?   toggle help\n\nText input: Ctrl+A/E move line, Ctrl+U/K delete line parts, Ctrl+W delete word, Alt+B/F move word\n\nPage keys (shown at the top of each page):\n- Providers: Space switch, Enter/e edit, a add, c copy, d delete, t test, r refresh, o launch temp (Claude/Codex), f manage failover (Claude/Codex/Gemini), x set default (OpenClaw)\n- MCP: Space toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: Space toggle, a add, Enter view, e edit, d delete\n- Sessions: Enter view, R restore, d delete, r refresh, a all providers\n- Skills: Enter details, Space toggle current, m select apps, f discover, i import existing, d uninstall\n- Usage: 1/2/3 range, c custom range, Tab switch metric, L details, P pricing, r reload\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
         }
     }
 
-    /// The Providers help line (without the leading "- "). Kept hand-written
-    /// because it carries app-scope annotations ("(OpenClaw)" etc.) that the
-    /// keymap labels do not, and its keys are app-conditional.
-    pub fn tui_help_line_providers(app_type: &crate::app_config::AppType) -> &'static str {
+    pub fn tui_help_text_for_app(app_type: &crate::app_config::AppType) -> &'static str {
         if matches!(app_type, crate::app_config::AppType::Hermes) {
             if is_chinese() {
-                "供应商：Space 添加/移除，Enter/e 编辑，a 新增，c 复制，d 删除，t 测试，r 刷新，x 启用"
+                "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓ 或 h/j/k/l  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n文本输入：Ctrl+A/E 行首/行尾，Ctrl+U/K 删除行片段，Ctrl+W 删除前词，Alt+B/F 按词移动\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Space 添加/移除，Enter/e 编辑，a 新增，c 复制，d 删除，t 测试，r 刷新，x 启用\n- MCP：Space 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 记忆管理：Enter 编辑，Space/x 启用/禁用，o 打开目录\n- 会话：Enter 查看，R 恢复，d 删除，r 刷新，a 全部供应商\n- 技能：Enter 详情，Space 启用/禁用(当前应用)，m 选择应用，f 发现，i 导入已有，d 卸载\n- 使用统计：1/2/3 时间范围，c 自定义范围，Tab 切换指标，L 明细，P 价格，r 刷新\n- 设置：Enter 应用"
             } else {
-                "Providers: Space add/remove, Enter/e edit, a add, c copy, d delete, t test, r refresh, x enable"
+                "[ ]  switch app\n←→  focus menu/content\n↑↓ or h/j/k/l  move\n/   filter\nEsc  back\n?   toggle help\n\nText input: Ctrl+A/E move line, Ctrl+U/K delete line parts, Ctrl+W delete word, Alt+B/F move word\n\nPage keys (shown at the top of each page):\n- Providers: Space add/remove, Enter/e edit, a add, c copy, d delete, t test, r refresh, x enable\n- MCP: Space toggle current, m select apps, a add, e edit, i import existing, d delete\n- Memory: Enter edit, Space/x toggle, o open directory\n- Sessions: Enter view, R restore, d delete, r refresh, a all providers\n- Skills: Enter details, Space toggle current, m select apps, f discover, i import existing, d uninstall\n- Usage: 1/2/3 range, c custom range, Tab switch metric, L details, P pricing, r reload\n- Settings: Enter apply"
             }
-        } else if is_chinese() {
-            "供应商：Space 切换，Enter/e 编辑，a 新增，c 复制，d 删除，t 测试，r 刷新，o 临时启动(Claude/Codex)，f 管理故障转移(Claude/Codex/Gemini)，x 设为默认(OpenClaw)"
         } else {
-            "Providers: Space switch, Enter/e edit, a add, c copy, d delete, t test, r refresh, o launch temp (Claude/Codex), f manage failover (Claude/Codex/Gemini), x set default (OpenClaw)"
-        }
-    }
-
-    /// The Hermes-only Memory help line (without the leading "- ").
-    pub fn tui_help_line_memory() -> &'static str {
-        if is_chinese() {
-            "记忆管理：Enter 编辑，Space/x 启用/禁用，o 打开目录"
-        } else {
-            "Memory: Enter edit, Space/x toggle, o open directory"
-        }
-    }
-
-    /// The Config help line (without the leading "- "). Config has no keymap
-    /// module yet, so it stays static.
-    pub fn tui_help_line_config() -> &'static str {
-        if is_chinese() {
-            "配置：Enter 打开/执行，e 编辑片段"
-        } else {
-            "Config: Enter open/run, e edit snippet"
-        }
-    }
-
-    /// The Settings help line (without the leading "- ").
-    pub fn tui_help_line_settings() -> &'static str {
-        if is_chinese() {
-            "设置：Enter 应用"
-        } else {
-            "Settings: Enter apply"
+            tui_help_text()
         }
     }
 
@@ -4445,6 +4408,150 @@ pub mod texts {
             "跟随默认账号"
         } else {
             "Follow default"
+        }
+    }
+
+    pub fn tui_settings_model_routes_title() -> &'static str {
+        if is_chinese() {
+            "模型路由"
+        } else {
+            "Model Routes"
+        }
+    }
+
+    pub fn tui_toast_model_route_added() -> &'static str {
+        if is_chinese() {
+            "已添加模型路由"
+        } else {
+            "Model route added"
+        }
+    }
+
+    pub fn tui_toast_model_route_updated() -> &'static str {
+        if is_chinese() {
+            "已更新模型路由"
+        } else {
+            "Model route updated"
+        }
+    }
+
+    pub fn tui_toast_model_route_deleted() -> &'static str {
+        if is_chinese() {
+            "已删除模型路由"
+        } else {
+            "Model route deleted"
+        }
+    }
+
+    pub fn tui_model_route_add_pattern_title() -> &'static str {
+        if is_chinese() {
+            "添加模型路由 — 模型模式"
+        } else {
+            "Add Model Route — Pattern"
+        }
+    }
+
+    pub fn tui_model_route_add_pattern_prompt() -> &'static str {
+        if is_chinese() {
+            "输入模型名称模式（如 *-sonnet, gpt-4*）"
+        } else {
+            "Enter model name pattern (e.g. *-sonnet, gpt-4*)"
+        }
+    }
+
+    pub fn tui_model_route_add_provider_title() -> &'static str {
+        if is_chinese() {
+            "添加模型路由 — 供应商"
+        } else {
+            "Add Model Route — Provider"
+        }
+    }
+
+    pub fn tui_model_route_add_provider_prompt() -> &'static str {
+        if is_chinese() {
+            "输入供应商 ID"
+        } else {
+            "Enter provider ID"
+        }
+    }
+
+    pub fn tui_model_route_add_priority_title() -> &'static str {
+        if is_chinese() {
+            "添加模型路由 — 优先级"
+        } else {
+            "Add Model Route — Priority"
+        }
+    }
+
+    pub fn tui_model_route_add_priority_prompt() -> &'static str {
+        if is_chinese() {
+            "输入优先级（数值越小越优先，默认 0）"
+        } else {
+            "Enter priority (lower = higher priority, default 0)"
+        }
+    }
+
+    pub fn tui_model_route_edit_pattern_title() -> &'static str {
+        if is_chinese() {
+            "编辑模型路由 — 模型模式"
+        } else {
+            "Edit Model Route — Pattern"
+        }
+    }
+
+    pub fn tui_model_route_edit_pattern_prompt() -> &'static str {
+        if is_chinese() {
+            "输入模型名称模式"
+        } else {
+            "Enter model name pattern"
+        }
+    }
+
+    pub fn tui_model_route_edit_provider_title() -> &'static str {
+        if is_chinese() {
+            "编辑模型路由 — 供应商"
+        } else {
+            "Edit Model Route — Provider"
+        }
+    }
+
+    pub fn tui_model_route_edit_provider_prompt() -> &'static str {
+        if is_chinese() {
+            "输入供应商 ID"
+        } else {
+            "Enter provider ID"
+        }
+    }
+
+    pub fn tui_model_route_edit_priority_title() -> &'static str {
+        if is_chinese() {
+            "编辑模型路由 — 优先级"
+        } else {
+            "Edit Model Route — Priority"
+        }
+    }
+
+    pub fn tui_model_route_edit_priority_prompt() -> &'static str {
+        if is_chinese() {
+            "输入优先级"
+        } else {
+            "Enter priority"
+        }
+    }
+
+    pub fn tui_model_route_confirm_delete_message(pattern: &str) -> String {
+        if is_chinese() {
+            format!("确认删除模型路由 \"{pattern}\"？此操作不可撤销。")
+        } else {
+            format!("Delete model route \"{pattern}\"? This cannot be undone.")
+        }
+    }
+
+    pub fn tui_model_route_confirm_delete_title() -> &'static str {
+        if is_chinese() {
+            "删除模型路由"
+        } else {
+            "Delete Model Route"
         }
     }
 
@@ -11868,22 +11975,20 @@ mod tests {
         assert_eq!(texts::skills_management(), "技能管理");
         assert_eq!(texts::menu_manage_mcp(), "🔌 MCP 服务器");
 
-        // The per-page bullets for MCP/Prompts/Sessions/Skills/Usage are now
-        // generated from the keymap registry (covered in cli::tui::help
-        // tests); here we pin the static Chinese pieces the help sheet still
-        // owns: the prelude and the hand-written Providers/Config/Settings
-        // lines.
-        let prelude = texts::tui_help_prelude();
-        assert!(prelude.contains("文本输入：Ctrl+A/E 行首/行尾"));
-        assert!(!prelude.contains("Text input:"));
-        let providers = texts::tui_help_line_providers(&crate::app_config::AppType::Claude);
-        assert!(providers.contains("供应商：Space 切换"));
-        assert!(!providers.contains("供应商详情："));
-        assert!(!providers.contains("Providers:"));
-        assert!(texts::tui_help_line_config().contains("配置：Enter 打开/执行"));
-        assert!(!texts::tui_help_line_config().contains("Config:"));
-        assert!(texts::tui_help_line_settings().contains("设置：Enter 应用"));
-        assert!(!texts::tui_help_line_settings().contains("Settings:"));
+        let help = texts::tui_help_text();
+        assert!(help.contains("文本输入：Ctrl+A/E 行首/行尾"));
+        assert!(help.contains("供应商：Space 切换"));
+        assert!(!help.contains("供应商详情："));
+        assert!(help.contains("提示词：Space 启用/禁用"));
+        assert!(help.contains("技能：Enter 详情"));
+        assert!(help.contains("配置：Enter 打开/执行"));
+        assert!(help.contains("设置：Enter 应用"));
+        assert!(!help.contains("Text input:"));
+        assert!(!help.contains("Providers:"));
+        assert!(!help.contains("Provider Detail:"));
+        assert!(!help.contains("Skills:"));
+        assert!(!help.contains("Config:"));
+        assert!(!help.contains("Settings:"));
     }
 
     #[test]

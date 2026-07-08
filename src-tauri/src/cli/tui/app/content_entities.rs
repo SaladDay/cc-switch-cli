@@ -520,8 +520,6 @@ impl App {
     }
 
     pub(crate) fn on_sessions_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
-        use crate::cli::tui::keymap::sessions::Intent;
-
         let visible = visible_sessions_for_state(
             &self.filter,
             &self.app_type,
@@ -622,99 +620,91 @@ impl App {
                 }
                 Action::None
             }
-            _ => {
-                let Some(intent) = crate::cli::tui::keymap::sessions::intent_for(key.code) else {
+            KeyCode::Enter => match self.sessions.pane {
+                SessionsPane::List => self.open_selected_session_detail(data),
+                SessionsPane::Detail => {
+                    let messages = visible_session_messages(&self.sessions);
+                    let message = messages
+                        .iter()
+                        .find(|(index, _)| *index == self.sessions.message_idx)
+                        .or_else(|| messages.first())
+                        .map(|(_, message)| *message);
+                    let Some(message) = message else {
+                        return Action::None;
+                    };
+                    self.overlay = Overlay::TextView(TextViewState {
+                        title: texts::tui_sessions_message_detail_title(&message.role),
+                        lines: message
+                            .content
+                            .lines()
+                            .map(|line| line.to_string())
+                            .collect(),
+                        scroll: 0,
+                        action: None,
+                    });
+                    Action::None
+                }
+            },
+            KeyCode::Char('R') => {
+                let Some(session) = self.selected_session_from_visible(&visible) else {
                     return Action::None;
                 };
-                match intent {
-                    Intent::View => match self.sessions.pane {
-                        SessionsPane::List => self.open_selected_session_detail(data),
-                        SessionsPane::Detail => {
-                            let messages = visible_session_messages(&self.sessions);
-                            let message = messages
-                                .iter()
-                                .find(|(index, _)| *index == self.sessions.message_idx)
-                                .or_else(|| messages.first())
-                                .map(|(_, message)| *message);
-                            let Some(message) = message else {
-                                return Action::None;
-                            };
-                            self.overlay = Overlay::TextView(TextViewState {
-                                title: texts::tui_sessions_message_detail_title(&message.role),
-                                lines: message
-                                    .content
-                                    .lines()
-                                    .map(|line| line.to_string())
-                                    .collect(),
-                                scroll: 0,
-                                action: None,
-                            });
-                            Action::None
-                        }
-                    },
-                    Intent::Restore => {
-                        let Some(session) = self.selected_session_from_visible(&visible) else {
-                            return Action::None;
-                        };
-                        let Some(command) = session
-                            .resume_command
-                            .clone()
-                            .filter(|value| !value.trim().is_empty())
-                        else {
-                            self.push_toast(
-                                texts::tui_sessions_toast_action_unavailable(),
-                                ToastKind::Info,
-                            );
-                            return Action::None;
-                        };
-                        Action::SessionResume {
-                            command,
-                            cwd: session.project_dir.clone(),
-                        }
-                    }
-                    Intent::Delete => {
-                        let Some(session) = self.selected_session_from_visible(&visible) else {
-                            return Action::None;
-                        };
-                        let Some(source_path) = session
-                            .source_path
-                            .clone()
-                            .filter(|value| !value.trim().is_empty())
-                        else {
-                            self.push_toast(
-                                texts::tui_sessions_toast_source_missing(),
-                                ToastKind::Warning,
-                            );
-                            return Action::None;
-                        };
-                        let key = session_key(session);
-                        self.overlay = Overlay::Confirm(ConfirmOverlay {
-                            title: texts::tui_sessions_delete_confirm_title().to_string(),
-                            message: texts::tui_sessions_delete_confirm_message(&session_title(
-                                session,
-                            )),
-                            action: ConfirmAction::SessionDelete {
-                                key,
-                                provider_id: session.provider_id.clone(),
-                                session_id: session.session_id.clone(),
-                                source_path,
-                            },
-                        });
-                        Action::None
-                    }
-                    Intent::Refresh => Action::SessionsRefresh,
-                    Intent::ShowAll => {
-                        // Enter "show all providers" mode (the "全部" tab)
-                        if !self.sessions.show_all_providers {
-                            self.sessions.show_all_providers = true;
-                            self.sessions.loaded_once = false;
-                            self.sessions.selected_idx = 0;
-                            self.sessions.clear_detail();
-                        }
-                        Action::None
-                    }
+                let Some(command) = session
+                    .resume_command
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                else {
+                    self.push_toast(
+                        texts::tui_sessions_toast_action_unavailable(),
+                        ToastKind::Info,
+                    );
+                    return Action::None;
+                };
+                Action::SessionResume {
+                    command,
+                    cwd: session.project_dir.clone(),
                 }
             }
+            KeyCode::Char('d') => {
+                let Some(session) = self.selected_session_from_visible(&visible) else {
+                    return Action::None;
+                };
+                let Some(source_path) = session
+                    .source_path
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                else {
+                    self.push_toast(
+                        texts::tui_sessions_toast_source_missing(),
+                        ToastKind::Warning,
+                    );
+                    return Action::None;
+                };
+                let key = session_key(session);
+                self.overlay = Overlay::Confirm(ConfirmOverlay {
+                    title: texts::tui_sessions_delete_confirm_title().to_string(),
+                    message: texts::tui_sessions_delete_confirm_message(&session_title(session)),
+                    action: ConfirmAction::SessionDelete {
+                        key,
+                        provider_id: session.provider_id.clone(),
+                        session_id: session.session_id.clone(),
+                        source_path,
+                    },
+                });
+                Action::None
+            }
+            KeyCode::Char('r') => Action::SessionsRefresh,
+            KeyCode::Char('a') => {
+                // Enter "show all providers" mode (the "全部" tab)
+                if !self.sessions.show_all_providers {
+                    self.sessions.show_all_providers = true;
+                    self.sessions.loaded_once = false;
+                    self.sessions.selected_idx = 0;
+                    self.sessions.clear_detail();
+                }
+                Action::None
+            }
+            _ => Action::None,
         }
     }
 

@@ -3,7 +3,6 @@ use crate::cli::i18n;
 use crate::cli::i18n::texts;
 
 use super::app::{App, Overlay};
-use super::data::UiData;
 use super::form::{
     CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, FormFocus, FormMode,
     FormState, LocalProxySettingsField, ProviderAddField, ProviderFormPage, UsageQueryField,
@@ -78,8 +77,8 @@ enum HelpTarget {
     Empty,
 }
 
-pub fn context_help_for_app(app: &App, data: &UiData) -> HelpContent {
-    help_for_target(current_help_target(app), app, data)
+pub fn context_help_for_app(app: &App) -> HelpContent {
+    help_for_target(current_help_target(app), app.app_type.clone())
 }
 
 fn current_help_target(app: &App) -> HelpTarget {
@@ -221,11 +220,9 @@ fn current_help_target(app: &App) -> HelpTarget {
     }
 }
 
-fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent {
+fn help_for_target(target: HelpTarget, app_type: AppType) -> HelpContent {
     match target {
-        HelpTarget::Global => {
-            HelpContent::new(texts::tui_help_title(), global_help_lines(app, data))
-        }
+        HelpTarget::Global => HelpContent::new(texts::tui_help_title(), global_help_lines(&app_type)),
         HelpTarget::ProviderTemplate => HelpContent::new(
             tr("供应商模板", "Provider templates"),
             help_lines(
@@ -248,66 +245,11 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
     }
 }
 
-/// The global help sheet: the static prelude, then one key line per page.
-/// The generated pages (MCP/Prompts/Sessions/Skills/Usage) come from the
-/// keymap registry so their hints track dispatch; Providers/Config/Settings
-/// (and the Hermes-only Memory line) stay hand-written for their app-scope
-/// prose. Order matches the previous static sheet.
-fn global_help_lines(app: &App, data: &UiData) -> Vec<String> {
-    use super::keymap;
-
-    let hermes = matches!(app.app_type, AppType::Hermes);
-    let mut lines: Vec<String> = texts::tui_help_prelude()
+fn global_help_lines(app_type: &AppType) -> Vec<String> {
+    texts::tui_help_text_for_app(app_type)
         .lines()
         .map(str::to_string)
-        .collect();
-
-    lines.push(format!(
-        "- {}",
-        texts::tui_help_line_providers(&app.app_type)
-    ));
-    lines.push(keymap_bullet("MCP", keymap::mcp::help_items(app, data)));
-    if hermes {
-        lines.push(format!("- {}", texts::tui_help_line_memory()));
-    } else {
-        lines.push(keymap_bullet(
-            crate::t!("Prompts", "提示词"),
-            keymap::prompts::help_items(app, data),
-        ));
-    }
-    lines.push(keymap_bullet(
-        crate::t!("Sessions", "会话"),
-        keymap::sessions::help_items(app, data),
-    ));
-    lines.push(keymap_bullet(
-        crate::t!("Skills", "技能"),
-        keymap::skills_installed::help_items(app, data),
-    ));
-    lines.push(keymap_bullet(
-        crate::t!("Usage", "使用统计"),
-        keymap::usage::help_items(app, data),
-    ));
-    if !hermes {
-        lines.push(format!("- {}", texts::tui_help_line_config()));
-    }
-    lines.push(format!("- {}", texts::tui_help_line_settings()));
-    lines
-}
-
-/// Render one generated page-key bullet: `- <name>: <k1> <label1>, ...`,
-/// with the locale's list punctuation.
-fn keymap_bullet(name: &str, items: Vec<(&'static str, &'static str)>) -> String {
-    let (colon, sep) = if i18n::is_chinese() {
-        ("：", "，")
-    } else {
-        (": ", ", ")
-    };
-    let keys = items
-        .iter()
-        .map(|(display, label)| format!("{display} {label}"))
-        .collect::<Vec<_>>()
-        .join(sep);
-    format!("- {name}{colon}{keys}")
+        .collect()
 }
 
 fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpContent {

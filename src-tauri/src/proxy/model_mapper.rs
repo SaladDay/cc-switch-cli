@@ -70,6 +70,60 @@ impl ModelMapping {
 
         original_model.to_string()
     }
+
+    pub fn map_explicit_role_model(&self, original_model: &str) -> Option<String> {
+        let model_lower = original_model.to_lowercase();
+
+        if model_lower.contains("haiku") {
+            return self.haiku_model.clone();
+        }
+        if model_lower.contains("opus") {
+            return self.opus_model.clone();
+        }
+        if model_lower.contains("sonnet") {
+            return self.sonnet_model.clone();
+        }
+
+        None
+    }
+}
+
+pub fn provider_has_explicit_role_mapping(provider: &Provider, original_model: &str) -> bool {
+    let Some(mapped) =
+        ModelMapping::from_provider(provider).map_explicit_role_model(original_model)
+    else {
+        return false;
+    };
+
+    maps_to_different_role_family(original_model, &mapped)
+}
+
+fn maps_to_different_role_family(original_model: &str, mapped_model: &str) -> bool {
+    let Some(original_role) = claude_role_family(original_model) else {
+        return false;
+    };
+
+    let Some(mapped_role) = claude_role_family(mapped_model) else {
+        return true;
+    };
+
+    original_role != mapped_role
+}
+
+fn claude_role_family(model: &str) -> Option<&'static str> {
+    let normalized = strip_one_m_suffix_for_upstream(model)
+        .trim()
+        .to_ascii_lowercase();
+
+    if normalized.contains("haiku") {
+        Some("haiku")
+    } else if normalized.contains("opus") {
+        Some("opus")
+    } else if normalized.contains("sonnet") {
+        Some("sonnet")
+    } else {
+        None
+    }
 }
 
 pub fn apply_model_mapping(
@@ -127,12 +181,16 @@ mod tests {
     use serde_json::json;
 
     fn provider_with_mapping(mapped_model: &str) -> Provider {
+        provider_with_role_mapping("ANTHROPIC_DEFAULT_SONNET_MODEL", mapped_model)
+    }
+
+    fn provider_with_role_mapping(key: &str, mapped_model: &str) -> Provider {
         Provider {
             id: "test".to_string(),
             name: "Test".to_string(),
             settings_config: json!({
                 "env": {
-                    "ANTHROPIC_DEFAULT_SONNET_MODEL": mapped_model
+                    key: mapped_model
                 }
             }),
             website_url: None,
@@ -185,5 +243,41 @@ mod tests {
         let body = json!({"model": "deepseek-v4-pro"});
         let result = strip_one_m_suffix_for_upstream_from_body(body);
         assert_eq!(result["model"], "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn detects_explicit_role_mapping_without_using_default_model() {
+        let mut provider = provider_with_mapping("deepseek-v4-pro [1M]");
+        provider.settings_config["env"]["ANTHROPIC_MODEL"] = json!("default-model");
+
+        assert!(provider_has_explicit_role_mapping(
+            &provider,
+            "claude-sonnet-4-6[1M]"
+        ));
+        assert!(!provider_has_explicit_role_mapping(
+            &provider,
+            "some-custom-model"
+        ));
+    }
+
+    #[test]
+    fn standard_claude_role_mapping_does_not_count_as_manual_override() {
+        let provider =
+            provider_with_role_mapping("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-8[1M]");
+
+        assert!(!provider_has_explicit_role_mapping(
+            &provider,
+            "claude-opus-4-8"
+        ));
+    }
+
+    #[test]
+    fn non_claude_role_mapping_counts_as_manual_override() {
+        let provider = provider_with_role_mapping("ANTHROPIC_DEFAULT_OPUS_MODEL", "glm-5.1");
+
+        assert!(provider_has_explicit_role_mapping(
+            &provider,
+            "claude-opus-4-8"
+        ));
     }
 }

@@ -1248,6 +1248,10 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ProviderImportLiveConfig
         | Action::ProviderDelete { .. }
         | Action::ProviderSetFailoverQueue { .. }
+        | Action::ModelRouteAdd { .. }
+        | Action::ModelRouteEdit { .. }
+        | Action::ModelRouteDelete { .. }
+        | Action::ModelRouteToggle { .. }
         | Action::ProviderMoveFailoverQueue { .. }
         | Action::EditorSubmit {
             submit: EditorSubmit::ProviderAdd | EditorSubmit::ProviderEdit { .. },
