@@ -265,6 +265,14 @@ fn sync_opencode_sessions_from_conn(
     // 跨 flush 存续的会话级插入错误集合：会话任一 chunk 出错即记入，其 finalize
     // 据此跳过状态推进（下次整会话重试）。
     let mut session_errors: HashSet<String> = HashSet::new();
+    // fix 4：本轮是否见到任何 has_incomplete_usage 的会话。incomplete 消息不推进
+    // 会话级 state（advance_state=false），但文件级 state 原先只要 !has_sync_errors
+    // 就推进（incomplete 不算 error）。若某 incomplete 消息随后完成、而 db/wal
+    // mtime 未超过已记录的文件级 mtime（同 tick / 低精度 fs），入口的
+    // `file_modified <= last_modified` 会跳过整库、完成的消息漏导。故本轮存在任何
+    // incomplete 时不推进文件级 state，强制下轮复查整库（未变会话仍由会话级 sync
+    // state 跳过，重扫成本主要是 query_sessions 的 watermark 查询，可接受）。
+    let mut saw_incomplete = false;
 
     for (session_id, time_updated) in &sessions {
         // 检查会话是否需要重新同步（从预载快照读取）
@@ -276,6 +284,7 @@ fn sync_opencode_sessions_from_conn(
 
         match query_assistant_messages(opencode_conn, session_id) {
             Ok(query_result) => {
+                saw_incomplete |= query_result.has_incomplete_usage;
                 let advance_state = !query_result.has_incomplete_usage;
                 // 逐消息平铺入批；每凑满 SESSION_LOG_COMMIT_BATCH 条即 flush 一个短
                 // 事务，单会话消息量再大也按 chunk 切齐，主库写锁窗口只覆盖单个批次。
@@ -326,8 +335,10 @@ fn sync_opencode_sessions_from_conn(
         &mut session_errors,
     )?;
 
-    // 仅在本轮完全成功时推进文件级状态；否则保留下次重试入口。
-    if !has_sync_errors {
+    // 仅在本轮完全成功且无 incomplete 会话时推进文件级状态；否则保留下次重试
+    // 入口（fix 4：incomplete 会话可能在同一 mtime tick 内完成，不推进文件级
+    // mtime 才能保证下轮不会 mtime-skip 整库而漏掉补全的消息）。
+    if !has_sync_errors && !saw_incomplete {
         let mut guard = lock_conn!(db.conn);
         let tx = guard
             .transaction()
@@ -890,6 +901,79 @@ mod tests {
         let result2 =
             sync_opencode_sessions_from_conn(&db, &src, db_path_str, 999, &states, &mut cache)?;
         assert_eq!((result2.imported, result2.skipped), (0, 0), "全 skip");
+
+        Ok(())
+    }
+
+    /// fix 4：本轮存在 has_incomplete_usage 的会话时，文件级 state 不推进——否则
+    /// incomplete 消息随后在同一 mtime tick 内完成，会因 `file_modified <=
+    /// last_modified` 被整库 mtime-skip 而漏导。构造一条已完成 + 一条未完成
+    /// （无 time.completed）的会话，断言文件级 state 未写入（下轮不会 mtime-skip
+    /// 整库）；会话级 state 亦不推进（advance_state=false）。
+    #[test]
+    fn test_sync_opencode_incomplete_usage_does_not_advance_file_state() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let src = rusqlite::Connection::open_in_memory().unwrap();
+        src.execute_batch(
+            "CREATE TABLE session (id TEXT, time_updated INTEGER);
+             CREATE TABLE message (
+                 id TEXT,
+                 session_id TEXT,
+                 time_created INTEGER,
+                 time_updated INTEGER,
+                 data TEXT
+             );
+             INSERT INTO session VALUES ('s1', 100);",
+        )
+        .unwrap();
+
+        // done：带 time.completed → 已完成，导入；wip：无 completed → incomplete。
+        let done = serde_json::json!({
+            "role": "assistant",
+            "tokens": { "input": 10, "output": 5 },
+            "modelID": "m",
+            "time": { "created": 1, "completed": 2 }
+        })
+        .to_string();
+        let wip = serde_json::json!({
+            "role": "assistant",
+            "tokens": { "input": 7, "output": 0 },
+            "modelID": "m",
+            "time": { "created": 3 }
+        })
+        .to_string();
+        src.execute(
+            "INSERT INTO message VALUES ('done','s1',1,50,?1),('wip','s1',2,50,?2)",
+            rusqlite::params![done, wip],
+        )
+        .unwrap();
+
+        let db_path_str = "/tmp/opencode-incomplete-test.db";
+        let empty_states: HashMap<String, (i64, i64)> = HashMap::new();
+        let mut cache = PricingCache::new();
+
+        let result = sync_opencode_sessions_from_conn(
+            &db,
+            &src,
+            db_path_str,
+            999,
+            &empty_states,
+            &mut cache,
+        )?;
+        assert_eq!(result.imported, 1, "只导入已完成的消息");
+        assert!(result.errors.is_empty());
+
+        let states = get_all_sync_states(&db)?;
+        assert_eq!(
+            states.get(&format!("{db_path_str}:s1")).copied(),
+            None,
+            "incomplete 会话级 state 不推进（advance_state=false）"
+        );
+        assert_eq!(
+            states.get(db_path_str).copied(),
+            None,
+            "存在 incomplete 时文件级 state 不推进 → 下轮不会 mtime-skip 整库"
+        );
 
         Ok(())
     }
