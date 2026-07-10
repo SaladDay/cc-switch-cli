@@ -952,6 +952,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_provider_launch_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "--app",
+            "codex",
+            "provider",
+            "launch",
+            "demo",
+            "--dry-run",
+            "--",
+            "--model",
+            "gpt-5.4",
+        ]);
+
+        assert_eq!(cli.app, Some(AppType::Codex));
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Launch {
+                selector,
+                dry_run,
+                native_args,
+            })) => {
+                assert_eq!(selector, "demo");
+                assert!(dry_run);
+                assert_eq!(
+                    native_args,
+                    vec![OsString::from("--model"), OsString::from("gpt-5.4")]
+                );
+            }
+            _ => panic!("expected provider launch command"),
+        }
+    }
+
+    #[test]
+    fn provider_launch_help_mentions_passthrough_examples() {
+        let mut cmd = Cli::command();
+        let provider = cmd
+            .find_subcommand_mut("provider")
+            .expect("provider subcommand should exist");
+        let launch = provider
+            .find_subcommand_mut("launch")
+            .expect("provider launch subcommand should exist");
+        let help = launch.render_long_help().to_string();
+
+        assert!(help.contains("--dry-run"));
+        assert!(help.contains("Native app CLI arguments to pass through after `--`"));
+        assert!(help.contains("cc-switch --app codex provider launch demo -- --model gpt-5.4"));
+    }
+
+    #[test]
     fn parses_provider_add_template_option() {
         let cli = Cli::parse_from(["cc-switch", "provider", "add", "--template", "codex-oauth"]);
 

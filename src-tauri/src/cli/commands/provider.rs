@@ -1,7 +1,7 @@
 use clap::{Subcommand, ValueEnum};
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, ffi::OsString, path::PathBuf};
 
-use super::{provider_inspect, provider_usage_query};
+use super::{provider_inspect, provider_usage_query, start};
 use crate::app_config::AppType;
 use crate::cli::commands::provider_input::{
     build_claude_settings_config_from_prompt, build_codex_settings_config_from_prompt,
@@ -37,6 +37,11 @@ const CODEX_API_FORMAT_CHOICES: [&str; 2] = [
     CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     CLAUDE_API_FORMAT_OPENAI_CHAT,
 ];
+const PROVIDER_LAUNCH_AFTER_LONG_HELP: &str = "\
+Examples:
+  cc-switch provider launch demo
+  cc-switch provider launch demo --dry-run
+  cc-switch --app codex provider launch demo -- --model gpt-5.4";
 
 fn is_claude_official_provider(provider: &Provider) -> bool {
     provider
@@ -552,6 +557,18 @@ pub enum ProviderCommand {
         /// Provider ID to switch to
         id: String,
     },
+    /// Launch a temporary agent with a provider without switching the current provider
+    #[command(after_long_help = PROVIDER_LAUNCH_AFTER_LONG_HELP)]
+    Launch {
+        /// Provider selector: exact ID first, then exact Name
+        selector: String,
+        /// Preview the resolved launch without starting the app
+        #[arg(long)]
+        dry_run: bool,
+        /// Native app CLI arguments to pass through after `--`
+        #[arg(last = true, value_name = "NATIVE_ARGS")]
+        native_args: Vec<OsString>,
+    },
     /// Add a new provider (non-interactive; use the TUI for interactive add)
     Add {
         /// Provider template to apply before creation
@@ -690,6 +707,11 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
         ProviderCommand::List => provider_inspect::list_providers(app_type),
         ProviderCommand::Current => provider_inspect::show_current(app_type),
         ProviderCommand::Switch { id } => switch_provider(app_type, &id),
+        ProviderCommand::Launch {
+            selector,
+            dry_run,
+            native_args,
+        } => start::launch_provider(app_type, &selector, dry_run, &native_args),
         ProviderCommand::Add {
             template,
             name,

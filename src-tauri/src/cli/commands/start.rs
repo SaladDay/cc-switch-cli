@@ -66,12 +66,35 @@ pub fn execute(cmd: StartCommand) -> Result<(), AppError> {
             selector,
             dry_run,
             native_args,
-        } => start_claude(&selector, dry_run, &native_args),
+        } => launch_provider(AppType::Claude, &selector, dry_run, &native_args),
         StartCommand::Codex {
             selector,
             dry_run,
             native_args,
-        } => start_codex(&selector, dry_run, &native_args),
+        } => launch_provider(AppType::Codex, &selector, dry_run, &native_args),
+    }
+}
+
+pub(crate) fn launch_provider(
+    app_type: AppType,
+    selector: &str,
+    dry_run: bool,
+    native_args: &[OsString],
+) -> Result<(), AppError> {
+    match app_type {
+        AppType::Claude => start_claude(selector, dry_run, native_args),
+        AppType::Codex => start_codex(selector, dry_run, native_args),
+        other => Err(AppError::localized(
+            "cli.start.unsupported_app",
+            format!(
+                "当前暂不支持为 {} 临时启动 agent；目前仅支持 claude 和 codex。",
+                other
+            ),
+            format!(
+                "Temporary agent launch is not supported for {}; currently only claude and codex are supported.",
+                other
+            ),
+        )),
     }
 }
 
