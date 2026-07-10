@@ -776,6 +776,7 @@ impl ProviderService {
                     action.app_type.as_str(),
                     &action.provider,
                     action.previous_provider.as_ref(),
+                    action.common_config_snippet.as_deref(),
                 ))
                 .map_err(AppError::Message)?;
             PreparedPostCommitEffect::ProxyLiveBackup(backup_snapshot)
@@ -822,6 +823,16 @@ impl ProviderService {
                         .save_live_backup_snapshot(prepared.action.app_type.as_str(), snapshot),
                 )
                 .map_err(AppError::Message)?;
+
+                // Refresh active live settings under takeover
+                if matches!(prepared.action.app_type, AppType::Claude) {
+                    futures::executor::block_on(
+                        state.proxy_service.sync_claude_live_from_provider_while_proxy_active(
+                            &prepared.action.provider,
+                        ),
+                    )
+                    .map_err(AppError::Message)?;
+                }
             }
         }
 
