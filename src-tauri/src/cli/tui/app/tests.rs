@@ -358,6 +358,27 @@ mod tests {
         }
     }
 
+    fn open_local_proxy_settings_page() -> App {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+        select_provider_field(&mut app, ProviderAddField::LocalProxySettings);
+        app.on_key(key(KeyCode::Enter), &data());
+        app
+    }
+
+    fn select_local_proxy_settings_field(app: &mut App, field: form::LocalProxySettingsField) {
+        let Some(FormState::ProviderAdd(provider)) = app.form.as_mut() else {
+            panic!("expected ProviderAdd form");
+        };
+        provider.local_proxy_settings_field_idx = provider
+            .local_proxy_settings_fields()
+            .iter()
+            .position(|candidate| *candidate == field)
+            .unwrap_or_else(|| panic!("{field:?} local proxy settings field should exist"));
+    }
+
     fn select_usage_query_field(app: &mut App, field: UsageQueryField) {
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
             form.focus = FormFocus::Fields;
@@ -1447,6 +1468,254 @@ mod tests {
     }
 
     #[test]
+    fn provider_local_proxy_settings_row_opens_page_and_escape_returns_to_main() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = Some(FormState::ProviderAdd(ProviderAddFormState::new(
+            AppType::Claude,
+        )));
+        select_provider_field(&mut app, ProviderAddField::LocalProxySettings);
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data()),
+            Action::None
+        ));
+        let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert!(matches!(
+            provider.page,
+            form::ProviderFormPage::LocalProxySettings
+        ));
+        assert_eq!(
+            provider.selected_local_proxy_settings_field(),
+            Some(form::LocalProxySettingsField::UserAgent)
+        );
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Esc), &data()),
+            Action::None
+        ));
+        let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert!(matches!(provider.page, form::ProviderFormPage::Main));
+        assert!(matches!(provider.focus, FormFocus::Fields));
+    }
+
+    #[test]
+    fn provider_local_proxy_user_agent_enter_opens_picker() {
+        let mut app = open_local_proxy_settings_page();
+
+        app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(app.overlay, Overlay::UserAgentPicker { .. }));
+    }
+
+    #[test]
+    fn provider_local_proxy_user_agent_u_shortcut_is_not_bound() {
+        let mut app = open_local_proxy_settings_page();
+        select_local_proxy_settings_field(&mut app, form::LocalProxySettingsField::BodyOverrides);
+
+        app.on_key(key(KeyCode::Char('u')), &data());
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            app.form,
+            Some(FormState::ProviderAdd(ref provider))
+                if provider.selected_local_proxy_settings_field()
+                    == Some(form::LocalProxySettingsField::BodyOverrides)
+        ));
+    }
+
+    #[test]
+    fn provider_local_proxy_user_agent_picker_help_restores_picker() {
+        let _lang = use_test_language(Language::English);
+        let mut app = open_local_proxy_settings_page();
+
+        app.on_key(key(KeyCode::Enter), &data());
+        let selected = match &app.overlay {
+            Overlay::UserAgentPicker { selected } => *selected,
+            overlay => panic!("expected UserAgentPicker, got {overlay:?}"),
+        };
+
+        app.on_key(key(KeyCode::Char('?')), &data());
+        let text = help_text(&app);
+        assert!(text.contains("local proxy"), "{text}");
+        assert!(matches!(
+            app.pending_overlay,
+            Some(Overlay::UserAgentPicker {
+                selected: pending_selected
+            }) if pending_selected == selected
+        ));
+
+        app.on_key(key(KeyCode::Char('?')), &data());
+        assert!(matches!(
+            app.overlay,
+            Overlay::UserAgentPicker {
+                selected: restored_selected
+            } if restored_selected == selected
+        ));
+        assert!(app.pending_overlay.is_none());
+    }
+
+    #[test]
+    fn provider_local_proxy_user_agent_custom_choice_opens_prefilled_input_and_applies() {
+        let mut app = open_local_proxy_settings_page();
+        let Some(FormState::ProviderAdd(provider)) = app.form.as_mut() else {
+            panic!("expected ProviderAdd form");
+        };
+        provider.custom_user_agent.set("existing-agent/1.0");
+
+        app.on_key(key(KeyCode::Enter), &data());
+        app.on_key(key(KeyCode::Enter), &data());
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                ref input,
+                submit: TextSubmit::ProviderCustomUserAgent,
+                secret: false,
+                ..
+            }) if input.value == "existing-agent/1.0"
+        ));
+
+        let Overlay::TextInput(input) = &mut app.overlay else {
+            panic!("expected custom User-Agent input");
+        };
+        input.input.set("cc-switch-cli/1.0");
+        app.on_key(key(KeyCode::Enter), &data());
+
+        let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert_eq!(provider.custom_user_agent.value, "cc-switch-cli/1.0");
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_local_proxy_user_agent_no_override_choice_clears_value() {
+        let mut app = open_local_proxy_settings_page();
+        let Some(FormState::ProviderAdd(provider)) = app.form.as_mut() else {
+            panic!("expected ProviderAdd form");
+        };
+        provider.custom_user_agent.set("existing-agent/1.0");
+
+        app.on_key(key(KeyCode::Enter), &data());
+        for _ in 0..6 {
+            app.on_key(key(KeyCode::Down), &data());
+        }
+        app.on_key(key(KeyCode::Enter), &data());
+
+        let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert!(provider.custom_user_agent.value.is_empty());
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_local_proxy_user_agent_preset_choice_applies_value() {
+        let mut app = open_local_proxy_settings_page();
+        let Some(FormState::ProviderAdd(provider)) = app.form.as_mut() else {
+            panic!("expected ProviderAdd form");
+        };
+        provider.custom_user_agent.set("custom-agent/1.0");
+
+        app.on_key(key(KeyCode::Enter), &data());
+        for _ in 0..2 {
+            app.on_key(key(KeyCode::Down), &data());
+        }
+        app.on_key(key(KeyCode::Enter), &data());
+
+        let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() else {
+            panic!("expected ProviderAdd form");
+        };
+        assert_eq!(
+            provider.custom_user_agent.value,
+            form::USER_AGENT_PRESETS[1]
+        );
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            provider.page,
+            form::ProviderFormPage::LocalProxySettings
+        ));
+    }
+
+    #[test]
+    fn provider_local_proxy_header_overrides_open_json_editor_with_current_value() {
+        let mut app = open_local_proxy_settings_page();
+        let Some(FormState::ProviderAdd(provider)) = app.form.as_mut() else {
+            panic!("expected ProviderAdd form");
+        };
+        provider
+            .local_proxy_header_overrides
+            .insert("x-client-name".to_string(), "cc-switch".to_string());
+        select_local_proxy_settings_field(&mut app, form::LocalProxySettingsField::HeaderOverrides);
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data()),
+            Action::None
+        ));
+        let editor = app.editor.as_ref().expect("JSON editor should open");
+        assert!(matches!(editor.kind, EditorKind::Json));
+        assert!(matches!(
+            editor.submit,
+            EditorSubmit::ProviderFormApplyLocalProxyHeaders
+        ));
+        assert_eq!(editor.text(), "{\n  \"x-client-name\": \"cc-switch\"\n}");
+    }
+
+    #[test]
+    fn provider_local_proxy_body_overrides_open_json_editor_with_current_value() {
+        let mut app = open_local_proxy_settings_page();
+        let Some(FormState::ProviderAdd(provider)) = app.form.as_mut() else {
+            panic!("expected ProviderAdd form");
+        };
+        provider.local_proxy_body_override = Some(json!({ "temperature": 0.4 }));
+        select_local_proxy_settings_field(&mut app, form::LocalProxySettingsField::BodyOverrides);
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &data()),
+            Action::None
+        ));
+        let editor = app.editor.as_ref().expect("JSON editor should open");
+        assert!(matches!(editor.kind, EditorKind::Json));
+        assert!(matches!(
+            editor.submit,
+            EditorSubmit::ProviderFormApplyLocalProxyBody
+        ));
+        assert_eq!(editor.text(), "{\n  \"temperature\": 0.4\n}");
+    }
+
+    #[test]
+    fn provider_local_proxy_explanations_live_in_context_help() {
+        let _lang = use_test_language(Language::English);
+        let mut app = open_local_proxy_settings_page();
+
+        app.on_key(key(KeyCode::Char('?')), &data());
+        let user_agent_help = help_text(&app);
+        assert!(user_agent_help.contains("local proxy"), "{user_agent_help}");
+        assert!(
+            user_agent_help.contains("Control characters"),
+            "{user_agent_help}"
+        );
+
+        app.on_key(key(KeyCode::Char('?')), &data());
+        select_local_proxy_settings_field(&mut app, form::LocalProxySettingsField::HeaderOverrides);
+        app.on_key(key(KeyCode::Char('?')), &data());
+        let header_help = help_text(&app);
+        assert!(header_help.contains("JSON object"), "{header_help}");
+        assert!(
+            header_help.contains("cannot be overridden"),
+            "{header_help}"
+        );
+
+        app.on_key(key(KeyCode::Char('?')), &data());
+        select_local_proxy_settings_field(&mut app, form::LocalProxySettingsField::BodyOverrides);
+        app.on_key(key(KeyCode::Char('?')), &data());
+        let body_help = help_text(&app);
+        assert!(body_help.contains("store: false"), "{body_help}");
+        assert!(body_help.contains("top-level stream"), "{body_help}");
+    }
+
+    #[test]
     fn claude_fallback_model_edit_persists_anthropic_model() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
@@ -1703,6 +1972,7 @@ mod tests {
             form.focus = FormFocus::Fields;
             form.hermes_base_url.set("https://api.example.com/v1");
             form.hermes_api_key.set("sk-hermes");
+            form.custom_user_agent.set("hermes-client/test");
             form.open_hermes_models_picker();
         }
         app.overlay = Overlay::HermesModelsPicker { editing: false };
@@ -1713,11 +1983,14 @@ mod tests {
             Action::ProviderModelFetch {
                 base_url,
                 api_key: Some(api_key),
+                custom_user_agent: Some(custom_user_agent),
                 codex_oauth: false,
                 codex_oauth_account_id: None,
                 field: ProviderAddField::HermesModels,
                 claude_idx: None,
-            } if base_url == "https://api.example.com/v1" && api_key == "sk-hermes"
+            } if base_url == "https://api.example.com/v1"
+                && api_key == "sk-hermes"
+                && custom_user_agent == "hermes-client/test"
         ));
     }
 

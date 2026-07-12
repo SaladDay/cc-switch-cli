@@ -6,7 +6,8 @@ use super::app::{App, Overlay};
 use super::data::UiData;
 use super::form::{
     CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, FormFocus, FormMode,
-    FormState, ProviderAddField, ProviderFormPage, UsageQueryField, UsageQueryTemplate,
+    FormState, LocalProxySettingsField, ProviderAddField, ProviderFormPage, UsageQueryField,
+    UsageQueryTemplate,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +65,9 @@ enum HelpTarget {
     CodexLocalRoutingField {
         field: CodexLocalRoutingField,
     },
+    LocalProxySettingsField {
+        field: LocalProxySettingsField,
+    },
     CodexModelCatalogField {
         field: CodexModelCatalogField,
     },
@@ -87,6 +91,9 @@ fn current_help_target(app: &App) -> HelpTarget {
             }
             Overlay::ClaudeApiFormatPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::ClaudeApiFormat)
+            }
+            Overlay::UserAgentPicker { .. } => {
+                provider_local_proxy_overlay_target(app, LocalProxySettingsField::UserAgent)
             }
             Overlay::ClaudeModelPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::ClaudeModelConfig)
@@ -136,6 +143,17 @@ fn current_help_target(app: &App) -> HelpTarget {
                 .selected_codex_local_routing_field()
                 .map_or(HelpTarget::Empty, |field| {
                     HelpTarget::CodexLocalRoutingField { field }
+                }),
+            _ => HelpTarget::Empty,
+        };
+    }
+
+    if matches!(provider.page, ProviderFormPage::LocalProxySettings) {
+        return match provider.focus {
+            FormFocus::Fields => provider
+                .selected_local_proxy_settings_field()
+                .map_or(HelpTarget::Empty, |field| {
+                    HelpTarget::LocalProxySettingsField { field }
                 }),
             _ => HelpTarget::Empty,
         };
@@ -219,6 +237,7 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
         HelpTarget::ProviderPreview { app_type, section } => provider_preview_help(app_type, section),
         HelpTarget::UsageQueryField { template, field } => usage_query_field_help(template, field),
         HelpTarget::CodexLocalRoutingField { field } => codex_local_routing_field_help(field),
+        HelpTarget::LocalProxySettingsField { field } => local_proxy_settings_field_help(field),
         HelpTarget::CodexModelCatalogField { field } => codex_model_catalog_field_help(field),
         HelpTarget::UsageQueryExtractor { template } => usage_query_extractor_help(template),
         HelpTarget::UsageQueryInstructions => HelpContent::new(
@@ -362,6 +381,13 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
             help_lines(
                 "打开模型映射二级页面。填了才生成模型目录：Chat Completions 会生成兼容路由（走本地代理转换），原生 Responses 会生成 model-catalogs.json 供 Codex 直连显示。留空则不生成。\n使用 Chat 格式时，这里还会显示「思考能力」开关。",
                 "Opens the model mapping page. A catalog is generated only when filled: Chat Completions produces compatibility routing (via the local proxy), while native Responses generates model-catalogs.json for Codex direct-connect. Left empty, nothing is generated.\nWith the Chat format, reasoning-capability toggles also appear here.",
+            ),
+        ),
+        ProviderAddField::LocalProxySettings => HelpContent::new(
+            texts::tui_label_local_proxy_settings(),
+            help_lines(
+                "配置仅由本地路由或代理接管使用的出站请求选项，包括自定义 User-Agent、Header 覆盖和 Body 覆盖。直连客户端配置不会受影响。",
+                "Configures outbound request options used only by local routing or proxy takeover, including a custom User-Agent plus header and body overrides. Direct client configuration is unaffected.",
             ),
         ),
         ProviderAddField::ClaudeModelConfig => HelpContent::new(
@@ -608,6 +634,32 @@ fn codex_local_routing_field_help(field: CodexLocalRoutingField) -> HelpContent 
     }
 }
 
+fn local_proxy_settings_field_help(field: LocalProxySettingsField) -> HelpContent {
+    match field {
+        LocalProxySettingsField::UserAgent => HelpContent::new(
+            texts::tui_label_custom_user_agent(),
+            help_lines(
+                "替换本地代理转发给供应商 API 的 User-Agent。可选用兼容 Claude Code 的预设，也可以手动填写；留空表示不覆盖。控制字符会被标记为无效，但不会阻止保存。",
+                "Replaces the User-Agent forwarded to the provider API by the local proxy. Choose a Claude Code-compatible preset or enter a custom value; leave blank for no override. Control characters are flagged as invalid but do not block saving.",
+            ),
+        ),
+        LocalProxySettingsField::HeaderOverrides => HelpContent::new(
+            texts::tui_label_local_proxy_header_overrides(),
+            help_lines(
+                "以 JSON 对象配置协议转换后的上游 Header。名称保存为小写，值必须是字符串；认证、内容类型、连接、转发和追踪等由代理管理的 Header 不能覆盖。",
+                "Uses a JSON object to override upstream headers after protocol conversion. Names are stored lowercase and values must be strings; proxy-managed authentication, content, connection, forwarding, and tracing headers cannot be overridden.",
+            ),
+        ),
+        LocalProxySettingsField::BodyOverrides => HelpContent::new(
+            texts::tui_label_local_proxy_body_overrides(),
+            help_lines(
+                "以 JSON 对象覆盖协议转换后的最终上游 Body。适合补充 store: false 等供应商专用字段；顶层 stream 由代理控制，不能覆盖。",
+                "Uses a JSON object to override the final upstream body after protocol conversion. This is suitable for provider-specific fields such as store: false; top-level stream is controlled by the proxy and cannot be overridden.",
+            ),
+        ),
+    }
+}
+
 fn codex_model_catalog_field_help(field: CodexModelCatalogField) -> HelpContent {
     match field {
         CodexModelCatalogField::Model => HelpContent::new(
@@ -782,6 +834,13 @@ fn provider_field_overlay_target(app: &App, field: ProviderAddField) -> HelpTarg
         app_type: provider.app_type.clone(),
         field,
     }
+}
+
+fn provider_local_proxy_overlay_target(app: &App, field: LocalProxySettingsField) -> HelpTarget {
+    if !matches!(app.form.as_ref(), Some(FormState::ProviderAdd(_))) {
+        return HelpTarget::Global;
+    }
+    HelpTarget::LocalProxySettingsField { field }
 }
 
 fn provider_usage_query_overlay_target(app: &App, field: UsageQueryField) -> HelpTarget {

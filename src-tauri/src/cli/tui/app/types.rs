@@ -662,6 +662,7 @@ pub enum TextSubmit {
         field: OpenClawAgentsRuntimeField,
     },
     UsageCustomRange,
+    ProviderCustomUserAgent,
     CodexModelCatalogField {
         row: Option<usize>,
         field: form::CodexModelCatalogField,
@@ -776,6 +777,9 @@ pub enum Overlay {
         editing: bool,
     },
     ClaudeApiFormatPicker {
+        selected: usize,
+    },
+    UserAgentPicker {
         selected: usize,
     },
     UsageQueryTemplatePicker {
@@ -897,6 +901,7 @@ impl Overlay {
                 | Overlay::ProviderTestMenu { .. }
                 | Overlay::FailoverQueueManager { .. }
                 | Overlay::ClaudeApiFormatPicker { .. }
+                | Overlay::UserAgentPicker { .. }
                 | Overlay::UsageQueryTemplatePicker { .. }
                 | Overlay::ManagedAccountPicker { .. }
                 | Overlay::ManagedAccountActionPicker { .. }
@@ -936,6 +941,7 @@ impl Overlay {
             | Overlay::ProviderTestMenu { .. }
             | Overlay::FailoverQueueManager { .. }
             | Overlay::ClaudeApiFormatPicker { .. }
+            | Overlay::UserAgentPicker { .. }
             | Overlay::UsageQueryTemplatePicker { .. }
             | Overlay::ManagedAccountPicker { .. }
             | Overlay::ManagedAccountActionPicker { .. }

@@ -10,7 +10,7 @@ use std::{
 use axum::{
     body::Body,
     extract::State,
-    http::{StatusCode, Uri},
+    http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::any,
     Json, Router,
@@ -28,6 +28,7 @@ mod request_building;
 struct UpstreamHits {
     count: Arc<AtomicUsize>,
     paths: Arc<Mutex<Vec<String>>>,
+    headers: Arc<Mutex<Vec<HeaderMap>>>,
 }
 
 #[derive(Clone)]
@@ -104,10 +105,12 @@ async fn spawn_mock_upstream(
 async fn handle_scripted_upstream(
     State(mock): State<ScriptedUpstream>,
     uri: Uri,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     mock.hits.count.fetch_add(1, Ordering::SeqCst);
     mock.hits.paths.lock().await.push(uri.path().to_string());
+    mock.hits.headers.lock().await.push(headers);
     mock.bodies.lock().await.push(body);
 
     let (status, body) = mock.responses.lock().await.pop_front().unwrap_or((

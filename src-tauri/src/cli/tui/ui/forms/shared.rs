@@ -44,6 +44,7 @@ pub(crate) fn add_form_key_items(
                         | ProviderAddField::CodexQuickConfig
                         | ProviderAddField::CodexOAuthAccount
                         | ProviderAddField::CodexLocalRouting
+                        | ProviderAddField::LocalProxySettings
                         | ProviderAddField::CommonSnippet
                         | ProviderAddField::UsageQuery
                         | ProviderAddField::OpenClawModels
@@ -64,11 +65,10 @@ pub(crate) fn add_form_key_items(
                     ) => texts::tui_key_toggle(),
                     _ => texts::tui_key_edit_mode(),
                 };
-                keys.extend([
-                    ("↑↓", texts::tui_key_select()),
-                    ("Enter", enter_action),
-                    ("Space", texts::tui_key_toggle()),
-                ]);
+                keys.extend([("↑↓", texts::tui_key_select()), ("Enter", enter_action)]);
+                if !matches!(selected_field, Some(ProviderAddField::LocalProxySettings)) {
+                    keys.push(("Space", texts::tui_key_toggle()));
+                }
             }
         }
         FormFocus::JsonPreview => {
@@ -120,6 +120,27 @@ pub(crate) fn codex_local_routing_form_key_items(
         ("↑↓", texts::tui_key_select()),
         ("Enter", texts::tui_key_toggle()),
     ]
+}
+
+pub(crate) fn local_proxy_settings_form_key_items(
+    selected_field: Option<super::form::LocalProxySettingsField>,
+) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![
+        ("Esc", texts::tui_key_no()),
+        ("↑↓", texts::tui_key_select()),
+    ];
+    match selected_field {
+        Some(super::form::LocalProxySettingsField::UserAgent) => {
+            keys.push(("Enter", texts::tui_key_select()));
+        }
+        Some(
+            super::form::LocalProxySettingsField::HeaderOverrides
+            | super::form::LocalProxySettingsField::BodyOverrides,
+        ) => keys.push(("Enter", texts::tui_key_open())),
+        None => {}
+    }
+    keys.push(("?", texts::tui_help_title()));
+    keys
 }
 
 pub(crate) fn codex_model_catalog_form_key_items(

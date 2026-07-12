@@ -34,6 +34,7 @@ enum ModelFetchSource {
 struct ModelFetchTarget {
     base_url: String,
     auth_value: Option<String>,
+    custom_user_agent: Option<String>,
     strategy: ProviderModelFetchStrategy,
 }
 
@@ -329,6 +330,7 @@ fn fetch_models_from_source(source: &ModelFetchSource) -> Result<Vec<String>, Ap
             crate::cli::tui::fetch_provider_models_for_tui(
                 &target.base_url,
                 target.auth_value.as_deref(),
+                target.custom_user_agent.as_deref(),
                 to_tui_strategy(target.strategy),
             )
             .await
@@ -751,6 +753,10 @@ fn model_fetch_target(
             provider.id
         )));
     }
+    let custom_user_agent = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.custom_user_agent.clone());
 
     match app_type {
         AppType::Claude => {
@@ -766,6 +772,7 @@ fn model_fetch_target(
             Ok(ModelFetchTarget {
                 base_url,
                 auth_value: Some(auth_value),
+                custom_user_agent,
                 strategy,
             })
         }
@@ -775,6 +782,7 @@ fn model_fetch_target(
                 auth_value: Some(StreamCheckService::extract_codex_key(provider).ok_or_else(
                     || AppError::Message(format!("Missing API key for provider '{}'", provider.id)),
                 )?),
+                custom_user_agent,
                 strategy: ProviderModelFetchStrategy::Bearer,
             })
         }
@@ -783,6 +791,7 @@ fn model_fetch_target(
             Ok(ModelFetchTarget {
                 base_url,
                 auth_value: Some(auth_value),
+                custom_user_agent,
                 strategy,
             })
         }
@@ -801,6 +810,7 @@ fn model_fetch_target(
                         AppError::Message(format!("Missing API key for provider '{}'", provider.id))
                     })?,
             ),
+            custom_user_agent,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::Hermes => Ok(ModelFetchTarget {
@@ -818,6 +828,7 @@ fn model_fetch_target(
                         AppError::Message(format!("Missing API key for provider '{}'", provider.id))
                     })?,
             ),
+            custom_user_agent,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::OpenClaw => Ok(ModelFetchTarget {
@@ -834,6 +845,7 @@ fn model_fetch_target(
                         AppError::Message(format!("Missing API key for provider '{}'", provider.id))
                     })?,
             ),
+            custom_user_agent,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
     }
@@ -860,6 +872,7 @@ fn one_off_model_fetch_target(
     Ok(ModelFetchTarget {
         base_url,
         auth_value,
+        custom_user_agent: None,
         strategy,
     })
 }
@@ -1238,6 +1251,33 @@ mod tests {
     }
 
     #[test]
+    fn saved_provider_model_fetch_target_keeps_custom_user_agent() {
+        let mut provider = Provider::with_id(
+            "demo".to_string(),
+            "Demo".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://claude.example.com",
+                    "ANTHROPIC_API_KEY": "sk-claude"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            custom_user_agent: Some("cc-switch-model-fetch/test".to_string()),
+            ..Default::default()
+        });
+
+        let target = model_fetch_target(&provider, &AppType::Claude)
+            .expect("saved provider should resolve fetch target");
+
+        assert_eq!(
+            target.custom_user_agent.as_deref(),
+            Some("cc-switch-model-fetch/test")
+        );
+    }
+
+    #[test]
     fn model_fetch_target_for_claude_supports_openrouter_bearer_mode() {
         let provider = Provider::with_id(
             "demo".to_string(),
@@ -1361,6 +1401,7 @@ mod tests {
 
         assert_eq!(target.base_url, "https://gemini.example.com");
         assert_eq!(target.auth_value.as_deref(), Some("sk-gemini"));
+        assert_eq!(target.custom_user_agent, None);
         assert_eq!(target.strategy, ProviderModelFetchStrategy::GoogleApiKey);
     }
 

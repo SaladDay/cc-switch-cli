@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::{Method, StatusCode, Uri},
+    http::{header::USER_AGENT, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     response::IntoResponse,
     routing::get,
     Router,
@@ -49,15 +49,18 @@ async fn bind_test_listener() -> tokio::net::TcpListener {
 struct ReachabilityState {
     request_method: Arc<Mutex<Option<Method>>>,
     request_uri: Arc<Mutex<Option<Uri>>>,
+    request_user_agent: Arc<Mutex<Option<HeaderValue>>>,
 }
 
 async fn handle_reachability_probe(
     State(state): State<ReachabilityState>,
     method: Method,
     uri: Uri,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     *state.request_method.lock().await = Some(method);
     *state.request_uri.lock().await = Some(uri);
+    *state.request_user_agent.lock().await = headers.get(USER_AGENT).cloned();
     StatusCode::NOT_FOUND
 }
 
@@ -163,6 +166,7 @@ async fn stream_check_codex_openai_chat_uses_base_url_reachability_probe() {
     );
     provider.meta = Some(ProviderMeta {
         api_format: Some("openai_chat".to_string()),
+        custom_user_agent: Some("  cc-switch-cli/stream-check  ".to_string()),
         ..ProviderMeta::default()
     });
 
@@ -190,6 +194,52 @@ async fn stream_check_codex_openai_chat_uses_base_url_reachability_probe() {
             .as_ref()
             .map(Uri::path),
         Some("/")
+    );
+    assert_eq!(
+        upstream_state.request_user_agent.lock().await.as_ref(),
+        Some(&HeaderValue::from_static("cc-switch-cli/stream-check"))
+    );
+
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn stream_check_ignores_invalid_custom_user_agent() {
+    let upstream_state = ReachabilityState::default();
+    let upstream_router = Router::new()
+        .route("/", get(handle_reachability_probe))
+        .with_state(upstream_state.clone());
+    let upstream_listener = bind_test_listener().await;
+    let upstream_addr = upstream_listener
+        .local_addr()
+        .expect("read upstream address");
+    let upstream_handle = tokio::spawn(async move {
+        let _ = axum::serve(upstream_listener, upstream_router).await;
+    });
+
+    let mut provider = Provider::with_id(
+        "openclaw-invalid-user-agent".to_string(),
+        "OpenClaw Invalid User-Agent".to_string(),
+        json!({"baseUrl": format!("http://{}", upstream_addr)}),
+        None,
+    );
+    provider.meta = Some(ProviderMeta {
+        custom_user_agent: Some("invalid\nuser-agent".to_string()),
+        ..ProviderMeta::default()
+    });
+
+    let result = StreamCheckService::check_with_retry(
+        &AppType::OpenClaw,
+        &provider,
+        &StreamCheckConfig::default(),
+    )
+    .await
+    .expect("invalid custom User-Agent should not fail reachability check");
+
+    assert!(result.success);
+    assert_eq!(
+        upstream_state.request_user_agent.lock().await.as_ref(),
+        None
     );
 
     upstream_handle.abort();

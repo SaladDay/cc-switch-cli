@@ -11,8 +11,9 @@ use super::provider_state_loading::populate_form_from_provider;
 use super::{
     ClaudeApiFormat, CodexLocalRoutingField, CodexModelCatalogField, CodexModelCatalogRow,
     CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType, HermesModelField,
-    ProviderAddField, ProviderAddFormState, ProviderFormPage, TextInput, UsageQueryField,
-    UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE, OPENCLAW_DEFAULT_API_PROTOCOL,
+    LocalProxySettingsField, ProviderAddField, ProviderAddFormState, ProviderFormPage, TextInput,
+    UsageQueryField, UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE,
+    OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
 fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
@@ -124,6 +125,7 @@ impl ProviderAddFormState {
             usage_query_field_idx: 0,
             usage_query_editing: false,
             codex_local_routing_field_idx: 0,
+            local_proxy_settings_field_idx: 0,
             codex_model_catalog_idx: 0,
             codex_model_catalog_field: CodexModelCatalogField::Model,
             extra: json!({}),
@@ -177,6 +179,9 @@ impl ProviderAddFormState {
             codex_chat_reasoning: CodexChatReasoningConfig::default(),
             codex_model_catalog: Vec::new(),
             codex_local_routing_enabled: false,
+            custom_user_agent: TextInput::new(""),
+            local_proxy_header_overrides: Default::default(),
+            local_proxy_body_override: None,
             gemini_auth_type: GeminiAuthType::ApiKey,
             gemini_api_key: TextInput::new(""),
             gemini_base_url: TextInput::new("https://generativelanguage.googleapis.com"),
@@ -374,6 +379,7 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::ClaudeAdvancedDivider);
                     fields.push(ProviderAddField::ClaudeModelConfig);
                     fields.push(ProviderAddField::ClaudeFallbackModel);
+                    fields.push(ProviderAddField::LocalProxySettings);
                 } else if !self.is_claude_official_provider() {
                     fields.push(ProviderAddField::ClaudeBaseUrl);
                     fields.push(ProviderAddField::ClaudeApiKey);
@@ -381,6 +387,9 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::ClaudeApiFormat);
                     fields.push(ProviderAddField::ClaudeModelConfig);
                     fields.push(ProviderAddField::ClaudeFallbackModel);
+                    if self.supports_local_proxy_settings() {
+                        fields.push(ProviderAddField::LocalProxySettings);
+                    }
                 }
             }
             AppType::Codex => {
@@ -395,6 +404,7 @@ impl ProviderAddFormState {
                     // model mapping is decoupled from it.
                     fields.push(ProviderAddField::ClaudeApiFormat);
                     fields.push(ProviderAddField::CodexLocalRouting);
+                    fields.push(ProviderAddField::LocalProxySettings);
                 }
             }
             AppType::Gemini => {
@@ -544,6 +554,7 @@ impl ProviderAddFormState {
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
             | ProviderAddField::CodexLocalRouting
+            | ProviderAddField::LocalProxySettings
             | ProviderAddField::CodexQuickConfig
             | ProviderAddField::CodexGoalMode
             | ProviderAddField::CodexRemoteCompaction
@@ -606,6 +617,7 @@ impl ProviderAddFormState {
             ProviderAddField::CodexOAuthAccount
             | ProviderAddField::CodexFastMode
             | ProviderAddField::CodexLocalRouting
+            | ProviderAddField::LocalProxySettings
             | ProviderAddField::CodexQuickConfig
             | ProviderAddField::CodexGoalMode
             | ProviderAddField::CodexRemoteCompaction
@@ -769,6 +781,99 @@ impl ProviderAddFormState {
         self.page = ProviderFormPage::Main;
         self.focus = FormFocus::Fields;
         self.editing = false;
+    }
+
+    pub fn supports_local_proxy_settings(&self) -> bool {
+        match self.app_type {
+            AppType::Claude => {
+                !self.is_claude_official_provider() && !self.is_claude_github_copilot_provider()
+            }
+            AppType::Codex => !self.is_codex_official_provider(),
+            AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+        }
+    }
+
+    pub fn local_proxy_settings_fields(&self) -> &'static [LocalProxySettingsField] {
+        &LocalProxySettingsField::ALL
+    }
+
+    pub fn selected_local_proxy_settings_field(&self) -> Option<LocalProxySettingsField> {
+        self.local_proxy_settings_fields()
+            .get(
+                self.local_proxy_settings_field_idx
+                    .min(self.local_proxy_settings_fields().len().saturating_sub(1)),
+            )
+            .copied()
+    }
+
+    pub fn open_local_proxy_settings_page(&mut self) {
+        if !self.supports_local_proxy_settings() {
+            return;
+        }
+        self.page = ProviderFormPage::LocalProxySettings;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        self.local_proxy_settings_field_idx = self
+            .local_proxy_settings_field_idx
+            .min(self.local_proxy_settings_fields().len().saturating_sub(1));
+    }
+
+    pub fn close_local_proxy_settings_page(&mut self) {
+        self.page = ProviderFormPage::Main;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+    }
+
+    pub fn local_proxy_body_field_count(&self) -> usize {
+        self.local_proxy_body_override
+            .as_ref()
+            .and_then(Value::as_object)
+            .map_or(0, serde_json::Map::len)
+    }
+
+    pub fn local_proxy_settings_summary(&self) -> String {
+        texts::tui_local_proxy_settings_summary(
+            !self.custom_user_agent.is_blank(),
+            self.local_proxy_header_overrides.len(),
+            self.local_proxy_body_field_count(),
+        )
+    }
+
+    pub fn local_proxy_header_overrides_summary(&self) -> String {
+        texts::tui_local_proxy_headers_summary(self.local_proxy_header_overrides.len())
+    }
+
+    pub fn local_proxy_body_override_summary(&self) -> String {
+        texts::tui_local_proxy_body_summary(self.local_proxy_body_field_count())
+    }
+
+    pub fn custom_user_agent_is_valid(&self) -> bool {
+        super::provider_request_overrides::is_valid_custom_user_agent(&self.custom_user_agent.value)
+    }
+
+    pub fn set_custom_user_agent_preset(&mut self, preset: &str) {
+        self.custom_user_agent.set(preset);
+    }
+
+    pub fn apply_local_proxy_header_overrides(
+        &mut self,
+        overrides: std::collections::BTreeMap<String, String>,
+    ) {
+        self.local_proxy_header_overrides = overrides;
+    }
+
+    pub fn apply_local_proxy_body_override(&mut self, override_value: Option<Value>) {
+        self.local_proxy_body_override = override_value;
+    }
+
+    pub(super) fn reset_local_proxy_settings_state(&mut self) {
+        self.custom_user_agent.set("");
+        self.local_proxy_header_overrides.clear();
+        self.local_proxy_body_override = None;
+        self.local_proxy_settings_field_idx = 0;
+        if matches!(self.page, ProviderFormPage::LocalProxySettings) {
+            self.page = ProviderFormPage::Main;
+        }
     }
 
     pub fn open_usage_query_page(&mut self) {
@@ -1530,6 +1635,22 @@ impl ProviderAddFormState {
             .is_some_and(|value| value == "codex_oauth")
     }
 
+    pub fn is_claude_github_copilot_provider(&self) -> bool {
+        if !matches!(self.app_type, AppType::Claude) {
+            return false;
+        }
+
+        let provider_type_matches = self
+            .extra
+            .get("meta")
+            .and_then(|meta| meta.get("providerType"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "github_copilot");
+        let endpoint_matches = self.claude_base_url.value.contains("githubcopilot.com");
+
+        provider_type_matches || endpoint_matches
+    }
+
     pub fn is_claude_official_provider(&self) -> bool {
         if !matches!(self.app_type, AppType::Claude) {
             return false;
@@ -1597,6 +1718,7 @@ impl ProviderAddFormState {
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
         let previous_codex_local_routing_field_idx = self.codex_local_routing_field_idx;
+        let previous_local_proxy_settings_field_idx = self.local_proxy_settings_field_idx;
         let previous_codex_model_catalog_field = self.codex_model_catalog_field;
         let previous_hermes_models_field_idx = self.hermes_models_field_idx;
         let previous_json_scroll = self.json_scroll;
@@ -1657,6 +1779,8 @@ impl ProviderAddFormState {
         } else {
             previous_codex_local_routing_field_idx.min(codex_local_routing_fields_len - 1)
         };
+        next.local_proxy_settings_field_idx = previous_local_proxy_settings_field_idx
+            .min(next.local_proxy_settings_fields().len().saturating_sub(1));
         let hermes_model_fields_len = next.hermes_model_fields().len();
         next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
             0
@@ -1686,6 +1810,7 @@ impl ProviderAddFormState {
         let previous_field_idx = self.field_idx;
         let previous_usage_query_field_idx = self.usage_query_field_idx;
         let previous_codex_local_routing_field_idx = self.codex_local_routing_field_idx;
+        let previous_local_proxy_settings_field_idx = self.local_proxy_settings_field_idx;
         let previous_codex_model_catalog_field = self.codex_model_catalog_field;
         let previous_hermes_models_field_idx = self.hermes_models_field_idx;
         let previous_json_scroll = self.json_scroll;
@@ -1757,6 +1882,8 @@ impl ProviderAddFormState {
         } else {
             previous_codex_local_routing_field_idx.min(codex_local_routing_fields_len - 1)
         };
+        next.local_proxy_settings_field_idx = previous_local_proxy_settings_field_idx
+            .min(next.local_proxy_settings_fields().len().saturating_sub(1));
         let hermes_model_fields_len = next.hermes_model_fields().len();
         next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
             0

@@ -250,6 +250,12 @@ pub(super) fn submit(
         EditorSubmit::ProviderFormApplyOpenClawModels => {
             submit_provider_form_apply_openclaw_models(ctx, content)
         }
+        EditorSubmit::ProviderFormApplyLocalProxyHeaders => {
+            submit_provider_form_apply_local_proxy_headers(ctx, content)
+        }
+        EditorSubmit::ProviderFormApplyLocalProxyBody => {
+            submit_provider_form_apply_local_proxy_body(ctx, content)
+        }
         EditorSubmit::ProviderFormApplyUsageScriptCode => {
             submit_provider_form_apply_usage_script_code(ctx, content)
         }
@@ -608,6 +614,44 @@ fn submit_provider_form_apply_openclaw_models(
         return Ok(());
     }
 
+    ctx.app.editor = None;
+    Ok(())
+}
+
+fn submit_provider_form_apply_local_proxy_headers(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    let overrides = match crate::cli::tui::form::parse_local_proxy_header_overrides(&content) {
+        Ok(overrides) => overrides,
+        Err(error) => {
+            ctx.app.push_toast(error, ToastKind::Error);
+            return Ok(());
+        }
+    };
+
+    if let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_mut() {
+        form.apply_local_proxy_header_overrides(overrides);
+    }
+    ctx.app.editor = None;
+    Ok(())
+}
+
+fn submit_provider_form_apply_local_proxy_body(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    let override_value = match crate::cli::tui::form::parse_local_proxy_body_override(&content) {
+        Ok(override_value) => override_value,
+        Err(error) => {
+            ctx.app.push_toast(error, ToastKind::Error);
+            return Ok(());
+        }
+    };
+
+    if let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_mut() {
+        form.apply_local_proxy_body_override(override_value);
+    }
     ctx.app.editor = None;
     Ok(())
 }
@@ -1225,6 +1269,203 @@ mod tests {
             proxy_loading: RequestTracker::default(),
             webdav_loading: RequestTracker::default(),
             update_check: RequestTracker::default(),
+        }
+    }
+
+    fn runtime_action_ctx(fixture: &mut RuntimeCtxFixture) -> RuntimeActionContext<'_> {
+        RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_local_proxy_headers_normalizes_applies_and_closes_editor() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+        fixture.app.form = Some(FormState::ProviderAdd(
+            crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        fixture.app.open_editor(
+            "Header overrides",
+            crate::cli::tui::app::EditorKind::Json,
+            "{}",
+            EditorSubmit::ProviderFormApplyLocalProxyHeaders,
+        );
+
+        let mut ctx = runtime_action_ctx(&mut fixture);
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ProviderFormApplyLocalProxyHeaders,
+            r#"{" X-Custom-Trace ":"trace-1","USER-Agent":"agent/1.0"}"#.to_string(),
+        )
+        .expect("valid header overrides should apply");
+
+        assert!(
+            ctx.app.editor.is_none(),
+            "successful apply should close editor"
+        );
+        let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert_eq!(
+            form.local_proxy_header_overrides,
+            std::collections::BTreeMap::from([
+                ("user-agent".to_string(), "agent/1.0".to_string()),
+                ("x-custom-trace".to_string(), "trace-1".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_local_proxy_headers_keeps_editor_and_previous_state_on_invalid_input() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+        let previous =
+            std::collections::BTreeMap::from([("x-existing".to_string(), "keep-me".to_string())]);
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+        form.local_proxy_header_overrides = previous.clone();
+        fixture.app.form = Some(FormState::ProviderAdd(form));
+
+        let mut ctx = runtime_action_ctx(&mut fixture);
+        for (case, content) in [
+            ("invalid JSON", r#"{"x-test":"unterminated"#),
+            ("protected header", r#"{"Authorization":"secret"}"#),
+            ("non-string value", r#"{"x-test":42}"#),
+        ] {
+            ctx.app.open_editor(
+                "Header overrides",
+                crate::cli::tui::app::EditorKind::Json,
+                content,
+                EditorSubmit::ProviderFormApplyLocalProxyHeaders,
+            );
+
+            super::submit(
+                &mut ctx,
+                EditorSubmit::ProviderFormApplyLocalProxyHeaders,
+                content.to_string(),
+            )
+            .unwrap_or_else(|error| panic!("{case} should be reported in the editor: {error}"));
+
+            assert!(ctx.app.editor.is_some(), "{case} should keep editor open");
+            let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+                panic!("expected provider form");
+            };
+            assert_eq!(
+                form.local_proxy_header_overrides, previous,
+                "{case} should not replace previous header overrides"
+            );
+            assert!(matches!(
+                ctx.app.toast.as_ref(),
+                Some(Toast {
+                    kind: ToastKind::Error,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_local_proxy_body_applies_nested_object_and_closes_editor() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+        fixture.app.form = Some(FormState::ProviderAdd(
+            crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        fixture.app.open_editor(
+            "Body override",
+            crate::cli::tui::app::EditorKind::Json,
+            "{}",
+            EditorSubmit::ProviderFormApplyLocalProxyBody,
+        );
+
+        let mut ctx = runtime_action_ctx(&mut fixture);
+        super::submit(
+            &mut ctx,
+            EditorSubmit::ProviderFormApplyLocalProxyBody,
+            r#"{"store":false,"nested":{"stream":true,"mode":"fast"}}"#.to_string(),
+        )
+        .expect("valid body override should apply");
+
+        assert!(
+            ctx.app.editor.is_none(),
+            "successful apply should close editor"
+        );
+        let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+            panic!("expected provider form");
+        };
+        assert_eq!(
+            form.local_proxy_body_override,
+            Some(json!({
+                "store": false,
+                "nested": {
+                    "stream": true,
+                    "mode": "fast"
+                }
+            }))
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_local_proxy_body_keeps_editor_and_previous_state_on_protected_or_non_object_input() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+        let previous = Some(json!({"existing": {"enabled": true}}));
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+        form.local_proxy_body_override = previous.clone();
+        fixture.app.form = Some(FormState::ProviderAdd(form));
+
+        let mut ctx = runtime_action_ctx(&mut fixture);
+        for (case, content) in [
+            (
+                "top-level stream",
+                r#"{"stream":false,"nested":{"stream":true}}"#,
+            ),
+            ("non-object JSON", r#"["store",false]"#),
+        ] {
+            ctx.app.open_editor(
+                "Body override",
+                crate::cli::tui::app::EditorKind::Json,
+                content,
+                EditorSubmit::ProviderFormApplyLocalProxyBody,
+            );
+
+            super::submit(
+                &mut ctx,
+                EditorSubmit::ProviderFormApplyLocalProxyBody,
+                content.to_string(),
+            )
+            .unwrap_or_else(|error| panic!("{case} should be reported in the editor: {error}"));
+
+            assert!(ctx.app.editor.is_some(), "{case} should keep editor open");
+            let Some(FormState::ProviderAdd(form)) = ctx.app.form.as_ref() else {
+                panic!("expected provider form");
+            };
+            assert_eq!(
+                form.local_proxy_body_override, previous,
+                "{case} should not replace previous body override"
+            );
+            assert!(matches!(
+                ctx.app.toast.as_ref(),
+                Some(Toast {
+                    kind: ToastKind::Error,
+                    ..
+                })
+            ));
         }
     }
 

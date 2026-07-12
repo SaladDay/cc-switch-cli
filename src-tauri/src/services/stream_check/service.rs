@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use reqwest::header::{HeaderValue, USER_AGENT};
+
 use crate::{app_config::AppType, error::AppError, provider::Provider};
 
 use super::types::{HealthStatus, StreamCheckConfig, StreamCheckResult};
@@ -82,8 +84,9 @@ impl StreamCheckService {
         let base_url = Self::extract_base_url(provider, app_type)?;
         let client = Self::build_client_for_provider(provider)?;
         let timeout = std::time::Duration::from_secs(config.timeout_secs);
+        let custom_user_agent = Self::custom_user_agent(provider);
 
-        let result = Self::probe_reachability(&client, &base_url, timeout).await;
+        let result = Self::probe_reachability(&client, &base_url, timeout, custom_user_agent).await;
         let response_time = start.elapsed().as_millis() as u64;
 
         Ok(Self::build_result(
@@ -100,20 +103,23 @@ impl StreamCheckService {
         client: &reqwest::Client,
         base_url: &str,
         timeout: std::time::Duration,
+        custom_user_agent: Option<HeaderValue>,
     ) -> Result<u16, AppError> {
         let url = base_url.trim();
         if url.is_empty() {
             return Err(AppError::Message("base_url 为空".to_string()));
         }
 
-        let response = client
+        let mut request = client
             .get(url)
             .timeout(timeout)
             .header("accept", "*/*")
-            .header("accept-encoding", "identity")
-            .send()
-            .await
-            .map_err(Self::map_request_error)?;
+            .header("accept-encoding", "identity");
+        if let Some(user_agent) = custom_user_agent {
+            request = request.header(USER_AGENT, user_agent);
+        }
+
+        let response = request.send().await.map_err(Self::map_request_error)?;
 
         Ok(response.status().as_u16())
     }
@@ -171,5 +177,12 @@ impl StreamCheckService {
         } else {
             AppError::Message(err.to_string())
         }
+    }
+
+    fn custom_user_agent(provider: &Provider) -> Option<HeaderValue> {
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.custom_user_agent_header().ok().flatten())
     }
 }

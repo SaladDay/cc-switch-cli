@@ -8,9 +8,9 @@ use super::codex_config::{
     build_codex_provider_config_toml, clean_codex_provider_key, update_codex_config_snippet,
 };
 use super::{
-    parse_codex_model_catalog_context_window, ClaudeApiFormat, GeminiAuthType,
-    ProviderAddFormState, UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
-    OPENCLAW_DEFAULT_USER_AGENT,
+    normalize_local_proxy_header_overrides, parse_codex_model_catalog_context_window,
+    ClaudeApiFormat, GeminiAuthType, ProviderAddFormState, UsageQueryTemplate,
+    OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
 };
 
 impl ProviderAddFormState {
@@ -580,12 +580,21 @@ impl ProviderAddFormState {
             && !self.is_claude_codex_oauth_provider()
             && self.claude_api_key_field == ClaudeApiKeyField::ApiKey;
         let is_codex_oauth = self.is_claude_codex_oauth_provider();
+        let local_proxy_body_override = self
+            .local_proxy_body_override
+            .as_ref()
+            .filter(|value| value.as_object().is_none_or(|object| !object.is_empty()));
+        let should_write_local_proxy_settings = self.supports_local_proxy_settings()
+            && (!self.custom_user_agent.is_blank()
+                || !self.local_proxy_header_overrides.is_empty()
+                || local_proxy_body_override.is_some());
 
         if !should_write_common_config_meta
             && !should_write_claude_api_format
             && !should_write_codex_api_format
             && !should_write_claude_api_key_field
             && !is_codex_oauth
+            && !should_write_local_proxy_settings
             && !self.has_usage_script_meta()
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
@@ -669,6 +678,40 @@ impl ProviderAddFormState {
                     meta_obj.remove("codexChatReasoning");
                 }
             }
+        }
+
+        if self.supports_local_proxy_settings() {
+            let custom_user_agent = self.custom_user_agent.value.trim();
+            if custom_user_agent.is_empty() {
+                meta_obj.remove("customUserAgent");
+            } else {
+                meta_obj.insert("customUserAgent".to_string(), json!(custom_user_agent));
+            }
+
+            let mut overrides = serde_json::Map::new();
+            if !self.local_proxy_header_overrides.is_empty() {
+                let headers = normalize_local_proxy_header_overrides(
+                    self.local_proxy_header_overrides
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone())),
+                )
+                .unwrap_or_else(|_| self.local_proxy_header_overrides.clone());
+                overrides.insert("headers".to_string(), json!(headers));
+            }
+            if let Some(body) = local_proxy_body_override {
+                overrides.insert("body".to_string(), body.clone());
+            }
+            if overrides.is_empty() {
+                meta_obj.remove("localProxyRequestOverrides");
+            } else {
+                meta_obj.insert(
+                    "localProxyRequestOverrides".to_string(),
+                    Value::Object(overrides),
+                );
+            }
+        } else if !self.is_claude_github_copilot_provider() {
+            meta_obj.remove("customUserAgent");
+            meta_obj.remove("localProxyRequestOverrides");
         }
 
         if is_codex_oauth {

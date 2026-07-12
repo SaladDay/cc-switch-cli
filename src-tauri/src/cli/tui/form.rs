@@ -1,6 +1,7 @@
 use crate::app_config::{AppType, McpApps};
 use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use super::app::EditorState;
 
@@ -8,6 +9,7 @@ mod codex_config;
 mod mcp;
 mod prompt;
 mod provider_json;
+mod provider_request_overrides;
 mod provider_state;
 mod provider_state_loading;
 mod provider_templates;
@@ -26,6 +28,13 @@ pub(crate) use provider_json::claude_teammates_enabled;
 pub(crate) use provider_json::claude_tool_search_enabled;
 pub(crate) use provider_json::strip_common_config_from_settings;
 pub(crate) use provider_json::{normalize_usage_interval, normalize_usage_timeout};
+pub(crate) use provider_request_overrides::{
+    format_local_proxy_body_override, format_local_proxy_header_overrides,
+    normalize_local_proxy_header_overrides, parse_local_proxy_body_override,
+    parse_local_proxy_header_overrides, user_agent_picker_option_count,
+    user_agent_picker_selection, USER_AGENT_PICKER_CUSTOM_INDEX,
+    USER_AGENT_PICKER_NO_OVERRIDE_INDEX, USER_AGENT_PICKER_PRESET_OFFSET, USER_AGENT_PRESETS,
+};
 pub(crate) use provider_state::resolve_provider_id_for_submit;
 pub(crate) use provider_state::{
     detect_balance_provider_for_usage_query, detect_coding_plan_provider_for_usage_query,
@@ -216,6 +225,7 @@ pub enum ProviderAddField {
     #[allow(dead_code)]
     CodexEnvKey,
     CodexApiKey,
+    LocalProxySettings,
     GeminiAuthType,
     GeminiApiKey,
     GeminiBaseUrl,
@@ -250,7 +260,19 @@ pub enum ProviderFormPage {
     CodexQuickConfig,
     CodexLocalRouting,
     CodexModelCatalog,
+    LocalProxySettings,
     UsageQuery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalProxySettingsField {
+    UserAgent,
+    HeaderOverrides,
+    BodyOverrides,
+}
+
+impl LocalProxySettingsField {
+    pub const ALL: [Self; 3] = [Self::UserAgent, Self::HeaderOverrides, Self::BodyOverrides];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,6 +446,7 @@ pub struct ProviderAddFormState {
     pub usage_query_field_idx: usize,
     pub usage_query_editing: bool,
     pub codex_local_routing_field_idx: usize,
+    pub local_proxy_settings_field_idx: usize,
     pub codex_model_catalog_idx: usize,
     pub codex_model_catalog_field: CodexModelCatalogField,
     pub extra: Value,
@@ -479,6 +502,10 @@ pub struct ProviderAddFormState {
     /// display and persistence; no dedicated stored field — initialized from
     /// whether the provider already carries a catalog.
     pub codex_local_routing_enabled: bool,
+
+    pub custom_user_agent: TextInput,
+    pub local_proxy_header_overrides: BTreeMap<String, String>,
+    pub local_proxy_body_override: Option<Value>,
 
     pub gemini_auth_type: GeminiAuthType,
     pub gemini_api_key: TextInput,

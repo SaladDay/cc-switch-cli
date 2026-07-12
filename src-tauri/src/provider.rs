@@ -1,4 +1,5 @@
 use indexmap::IndexMap;
+use reqwest::header::{HeaderValue, InvalidHeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -343,6 +344,21 @@ pub struct CodexChatReasoningConfig {
     pub output_format: Option<String>,
 }
 
+/// Local proxy request overrides applied after route/protocol transforms.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalProxyRequestOverrides {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<Value>,
+}
+
+impl LocalProxyRequestOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty() && self.body.is_none()
+    }
+}
+
 /// 供应商元数据
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderMeta {
@@ -407,6 +423,15 @@ pub struct ProviderMeta {
     /// Codex OAuth FAST mode: inject `service_tier = "priority"` for ChatGPT Codex requests.
     #[serde(rename = "codexFastMode", skip_serializing_if = "Option::is_none")]
     pub codex_fast_mode: Option<bool>,
+    /// Custom User-Agent for local proxy routing.
+    #[serde(rename = "customUserAgent", skip_serializing_if = "Option::is_none")]
+    pub custom_user_agent: Option<String>,
+    /// Local proxy request overrides applied to the transformed upstream request.
+    #[serde(
+        rename = "localProxyRequestOverrides",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub local_proxy_request_overrides: Option<LocalProxyRequestOverrides>,
     /// 通用认证绑定（provider_config / managed_account）
     #[serde(rename = "authBinding", skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<AuthBinding>,
@@ -430,9 +455,23 @@ pub struct ProviderMeta {
     pub github_account_id: Option<String>,
 }
 
+/// Parse the provider-level User-Agent used by proxy-related requests.
+pub fn parse_custom_user_agent(
+    raw: Option<&str>,
+) -> Result<Option<HeaderValue>, InvalidHeaderValue> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value.parse::<HeaderValue>().map(Some),
+        None => Ok(None),
+    }
+}
+
 impl ProviderMeta {
     pub fn codex_fast_mode_enabled(&self) -> bool {
         self.codex_fast_mode.unwrap_or(false)
+    }
+
+    pub fn custom_user_agent_header(&self) -> Result<Option<HeaderValue>, InvalidHeaderValue> {
+        parse_custom_user_agent(self.custom_user_agent.as_deref())
     }
 
     pub fn managed_account_id_for(&self, auth_provider: &str) -> Option<String> {
@@ -562,7 +601,11 @@ pub struct OpenClawModelCost {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthBinding, AuthBindingSource, OpenCodeProviderConfig, Provider, ProviderMeta};
+    use super::{
+        parse_custom_user_agent, AuthBinding, AuthBindingSource, LocalProxyRequestOverrides,
+        OpenCodeProviderConfig, Provider, ProviderMeta,
+    };
+    use std::collections::HashMap;
 
     #[test]
     fn provider_meta_serializes_upstream_common_config_key_and_accepts_legacy_alias() {
@@ -595,6 +638,87 @@ mod tests {
         assert_eq!(meta.is_full_url, Some(true));
         let serialized = serde_json::to_value(&meta).expect("serialize provider meta");
         assert_eq!(serialized["isFullUrl"], true);
+    }
+
+    #[test]
+    fn provider_meta_round_trips_local_proxy_request_metadata_exactly() {
+        let value = serde_json::json!({
+            "customUserAgent": "Mozilla/5.0 (compatible; CC-Switch/1.0)",
+            "localProxyRequestOverrides": {
+                "headers": {
+                    "x-tenant": "tenant-a",
+                    "x-trace-mode": "verbose"
+                },
+                "body": {
+                    "metadata": {
+                        "source": "cc-switch"
+                    },
+                    "temperature": 0.2
+                }
+            }
+        });
+
+        let meta: ProviderMeta =
+            serde_json::from_value(value.clone()).expect("deserialize proxy request metadata");
+        assert_eq!(
+            meta.custom_user_agent.as_deref(),
+            Some("Mozilla/5.0 (compatible; CC-Switch/1.0)")
+        );
+        assert!(!meta
+            .local_proxy_request_overrides
+            .as_ref()
+            .expect("local proxy request overrides")
+            .is_empty());
+
+        let serialized = serde_json::to_value(&meta).expect("serialize proxy request metadata");
+        assert_eq!(serialized, value);
+    }
+
+    #[test]
+    fn proxy_request_metadata_omits_empty_fields_exactly() {
+        let empty_overrides = LocalProxyRequestOverrides::default();
+        assert!(empty_overrides.is_empty());
+        assert_eq!(
+            serde_json::to_value(&empty_overrides).expect("serialize empty overrides"),
+            serde_json::json!({})
+        );
+
+        let empty_meta = ProviderMeta::default();
+        assert_eq!(
+            serde_json::to_value(&empty_meta).expect("serialize empty provider meta"),
+            serde_json::json!({})
+        );
+
+        let headers_only = LocalProxyRequestOverrides {
+            headers: HashMap::from([("x-feature".to_string(), "enabled".to_string())]),
+            body: None,
+        };
+        assert_eq!(
+            serde_json::to_value(headers_only).expect("serialize headers-only overrides"),
+            serde_json::json!({
+                "headers": {
+                    "x-feature": "enabled"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn custom_user_agent_parser_trims_and_validates_header_values() {
+        assert!(parse_custom_user_agent(None)
+            .expect("missing user agent")
+            .is_none());
+        assert!(parse_custom_user_agent(Some("   "))
+            .expect("blank user agent")
+            .is_none());
+        assert_eq!(
+            parse_custom_user_agent(Some("  cc-switch-cli/1.0  "))
+                .expect("valid user agent")
+                .and_then(|value| value.to_str().ok().map(str::to_string))
+                .as_deref(),
+            Some("cc-switch-cli/1.0")
+        );
+        assert!(parse_custom_user_agent(Some("invalid\nuser-agent")).is_err());
     }
 
     #[test]

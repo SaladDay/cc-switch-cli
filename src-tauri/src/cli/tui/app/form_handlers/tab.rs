@@ -33,6 +33,13 @@ impl App {
                     provider.focus = FormFocus::Fields;
                     return true;
                 }
+                if matches!(provider.page, form::ProviderFormPage::LocalProxySettings) {
+                    if is_backtab {
+                        return false;
+                    }
+                    provider.focus = FormFocus::Fields;
+                    return true;
+                }
                 if matches!(provider.page, form::ProviderFormPage::CodexModelCatalog) {
                     if is_backtab {
                         return false;

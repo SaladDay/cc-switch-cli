@@ -20,6 +20,8 @@ pub enum EditorSubmit {
     },
     ProviderFormApplyJson,
     ProviderFormApplyOpenClawModels,
+    ProviderFormApplyLocalProxyHeaders,
+    ProviderFormApplyLocalProxyBody,
     ProviderFormApplyUsageScriptCode,
     ProviderFormApplyCodexAuth,
     ProviderFormApplyCodexConfigToml,

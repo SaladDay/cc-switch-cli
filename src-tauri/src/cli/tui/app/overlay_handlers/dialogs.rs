@@ -365,6 +365,12 @@ impl App {
                     Action::None
                 }
             },
+            TextSubmit::ProviderCustomUserAgent => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.custom_user_agent.set(raw);
+                }
+                Action::None
+            }
             TextSubmit::CodexModelCatalogField { row, field } => {
                 self.handle_codex_model_catalog_field_submit(row, field, raw)
             }

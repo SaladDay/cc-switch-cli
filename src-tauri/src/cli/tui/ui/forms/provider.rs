@@ -175,6 +175,14 @@ pub(crate) fn render_provider_add_form(
         return;
     }
 
+    if matches!(
+        provider.page,
+        super::form::ProviderFormPage::LocalProxySettings
+    ) {
+        render_local_proxy_settings_form(frame, app, provider, area, theme);
+        return;
+    }
+
     if matches!(provider.page, super::form::ProviderFormPage::UsageQuery) {
         render_usage_query_form(frame, app, provider, area, theme);
         return;
@@ -590,6 +598,118 @@ fn render_quick_config_form(
         state.select(Some(selected_idx.min(fields.len() - 1)));
     }
     frame.render_stateful_widget(table, fields_inner, &mut state);
+}
+
+fn render_local_proxy_settings_form(
+    frame: &mut Frame<'_>,
+    app: &App,
+    provider: &super::form::ProviderAddFormState,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(format!(" {} ", texts::tui_label_local_proxy_settings()));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let fields = provider.local_proxy_settings_fields();
+    let selected = provider.selected_local_proxy_settings_field();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    render_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &local_proxy_settings_form_key_items(selected),
+    );
+
+    let fields_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(focus_block_style(true, theme))
+        .title(format!(" {} ", texts::tui_form_fields_title()));
+    frame.render_widget(fields_block.clone(), chunks[1]);
+    let fields_inner = fields_block.inner(chunks[1]);
+    let rows_data = fields
+        .iter()
+        .map(|field| local_proxy_settings_field_label_and_value(provider, *field))
+        .collect::<Vec<_>>();
+    let label_col_width = field_label_column_width(
+        rows_data
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .chain(std::iter::once(texts::tui_header_field())),
+        1,
+    );
+    let header = Row::new(vec![
+        Cell::from(cell_pad(texts::tui_header_field())),
+        Cell::from(texts::tui_header_value()),
+    ])
+    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+    let highlight_width = unicode_width::UnicodeWidthStr::width(highlight_symbol(theme)) as u16;
+    let value_width = fields_inner
+        .width
+        .saturating_sub(highlight_width)
+        .saturating_sub(label_col_width)
+        .saturating_sub(1);
+    let rows = fields.iter().zip(rows_data.iter()).map(|(field, row)| {
+        let value_style = if matches!(field, super::form::LocalProxySettingsField::UserAgent)
+            && !provider.custom_user_agent_is_valid()
+        {
+            Style::default().fg(theme.err)
+        } else {
+            Style::default()
+        };
+        let value = truncate_to_display_width(&row.1, value_width);
+        Row::new(vec![
+            Cell::from(cell_pad(&row.0)),
+            Cell::from(value).style(value_style),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [Constraint::Length(label_col_width), Constraint::Min(8)],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::NONE))
+    .row_highlight_style(selection_style(theme))
+    .highlight_symbol(highlight_symbol(theme));
+    let mut state = TableState::default();
+    state.select(Some(
+        provider
+            .local_proxy_settings_field_idx
+            .min(fields.len().saturating_sub(1)),
+    ));
+    frame.render_stateful_widget(table, fields_inner, &mut state);
+}
+
+pub(crate) fn local_proxy_settings_field_label_and_value(
+    provider: &super::form::ProviderAddFormState,
+    field: super::form::LocalProxySettingsField,
+) -> (String, String) {
+    match field {
+        super::form::LocalProxySettingsField::UserAgent => (
+            texts::tui_label_custom_user_agent().to_string(),
+            if provider.custom_user_agent.is_blank() {
+                texts::tui_na().to_string()
+            } else {
+                provider.custom_user_agent.value.trim().to_string()
+            },
+        ),
+        super::form::LocalProxySettingsField::HeaderOverrides => (
+            texts::tui_label_local_proxy_header_overrides().to_string(),
+            provider.local_proxy_header_overrides_summary(),
+        ),
+        super::form::LocalProxySettingsField::BodyOverrides => (
+            texts::tui_label_local_proxy_body_overrides().to_string(),
+            provider.local_proxy_body_override_summary(),
+        ),
+    }
 }
 
 fn render_codex_local_routing_form(
@@ -1396,6 +1516,7 @@ pub(crate) fn provider_field_label_and_value(
             strip_trailing_colon(texts::codex_env_key_label()).to_string()
         }
         ProviderAddField::CodexApiKey => texts::tui_label_api_key().to_string(),
+        ProviderAddField::LocalProxySettings => texts::tui_label_local_proxy_settings().to_string(),
         ProviderAddField::GeminiAuthType => {
             strip_trailing_colon(texts::auth_type_label()).to_string()
         }
@@ -1506,6 +1627,7 @@ pub(crate) fn provider_field_label_and_value(
             }
         }
         ProviderAddField::CodexLocalRouting => String::new(),
+        ProviderAddField::LocalProxySettings => provider.local_proxy_settings_summary(),
         ProviderAddField::IncludeCommonConfig => {
             if provider.include_common_config {
                 format!("[{}]", texts::tui_marker_active())
@@ -1557,6 +1679,7 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::CommonSnippet
             | ProviderAddField::UsageQuery
             | ProviderAddField::CodexLocalRouting
+            | ProviderAddField::LocalProxySettings
     );
 
     (
@@ -1667,6 +1790,7 @@ pub(crate) fn provider_field_editor_line(
                 format!("codex_fast_mode = {}", provider.codex_fast_mode)
             }
             ProviderAddField::CodexLocalRouting => texts::tui_form_open_page_hint().to_string(),
+            ProviderAddField::LocalProxySettings => texts::tui_form_open_page_hint().to_string(),
             ProviderAddField::CommonSnippet => texts::tui_form_open_editor_hint().to_string(),
             ProviderAddField::UsageQuery => texts::tui_form_open_page_hint().to_string(),
             ProviderAddField::CommonConfigDivider => String::new(),

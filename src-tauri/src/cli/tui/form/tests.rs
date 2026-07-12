@@ -905,6 +905,436 @@ fn provider_add_form_fields_include_notes() {
 }
 
 #[test]
+fn provider_add_form_local_proxy_settings_visibility_matches_provider_support() {
+    for app_type in [AppType::Claude, AppType::Codex] {
+        let form = ProviderAddFormState::new(app_type.clone());
+        assert!(
+            form.fields()
+                .contains(&ProviderAddField::LocalProxySettings),
+            "third-party {app_type:?} providers should expose local proxy settings"
+        );
+        assert!(form.supports_local_proxy_settings());
+    }
+
+    let mut claude_official = ProviderAddFormState::new(AppType::Claude);
+    claude_official.apply_template(
+        template_index_by_label(AppType::Claude, "Claude Official"),
+        &[],
+    );
+    assert!(!claude_official
+        .fields()
+        .contains(&ProviderAddField::LocalProxySettings));
+    assert!(!claude_official.supports_local_proxy_settings());
+
+    let mut codex_official = ProviderAddFormState::new(AppType::Codex);
+    codex_official.apply_template(
+        template_index_by_label(AppType::Codex, "OpenAI Official"),
+        &[],
+    );
+    assert!(!codex_official
+        .fields()
+        .contains(&ProviderAddField::LocalProxySettings));
+    assert!(!codex_official.supports_local_proxy_settings());
+
+    let mut codex_oauth = ProviderAddFormState::new(AppType::Claude);
+    codex_oauth.apply_template(template_index_by_label(AppType::Claude, "Codex"), &[]);
+    assert!(codex_oauth.is_claude_codex_oauth_provider());
+    assert!(codex_oauth
+        .fields()
+        .contains(&ProviderAddField::LocalProxySettings));
+    assert!(codex_oauth.supports_local_proxy_settings());
+
+    for provider in [
+        json!({
+            "id": "copilot-type",
+            "name": "GitHub Copilot",
+            "settingsConfig": {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://example.com"
+                }
+            },
+            "meta": {
+                "providerType": "github_copilot"
+            }
+        }),
+        json!({
+            "id": "copilot-endpoint",
+            "name": "GitHub Copilot Enterprise",
+            "settingsConfig": {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.githubcopilot.com"
+                }
+            }
+        }),
+    ] {
+        let provider: Provider =
+            serde_json::from_value(provider).expect("Copilot provider should deserialize");
+        let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+        assert!(form.is_claude_github_copilot_provider());
+        assert!(!form
+            .fields()
+            .contains(&ProviderAddField::LocalProxySettings));
+        assert!(!form.supports_local_proxy_settings());
+    }
+
+    for app_type in [
+        AppType::Gemini,
+        AppType::OpenCode,
+        AppType::Hermes,
+        AppType::OpenClaw,
+    ] {
+        let form = ProviderAddFormState::new(app_type.clone());
+        assert!(
+            !form
+                .fields()
+                .contains(&ProviderAddField::LocalProxySettings),
+            "{app_type:?} providers should not expose Claude/Codex proxy settings"
+        );
+        assert!(!form.supports_local_proxy_settings());
+    }
+}
+
+#[test]
+fn provider_add_form_local_proxy_metadata_round_trips_exact_camel_case_shape() {
+    let request_meta = json!({
+        "customUserAgent": "cc-switch-cli/test",
+        "localProxyRequestOverrides": {
+            "headers": {
+                "x-client-id": "client-42",
+                "x-region": "us-east"
+            },
+            "body": {
+                "metadata": {
+                    "tenant": "acme",
+                    "trace": {
+                        "enabled": true
+                    }
+                },
+                "temperature": 0.2
+            }
+        }
+    });
+
+    for (app_type, settings_config, expected_meta) in [
+        (
+            AppType::Claude,
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-test",
+                    "ANTHROPIC_BASE_URL": "https://relay.example"
+                }
+            }),
+            request_meta.clone(),
+        ),
+        (
+            AppType::Codex,
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "sk-test"
+                },
+                "config": "model = \"gpt-5.4\"\nmodel_provider = \"relay\"\n\n[model_providers.relay]\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+            }),
+            json!({
+                "apiFormat": "openai_responses",
+                "customUserAgent": "cc-switch-cli/test",
+                "localProxyRequestOverrides": {
+                    "headers": {
+                        "x-client-id": "client-42",
+                        "x-region": "us-east"
+                    },
+                    "body": {
+                        "metadata": {
+                            "tenant": "acme",
+                            "trace": {
+                                "enabled": true
+                            }
+                        },
+                        "temperature": 0.2
+                    }
+                }
+            }),
+        ),
+    ] {
+        let provider_value = json!({
+            "id": "relay",
+            "name": "Relay",
+            "settingsConfig": settings_config,
+            "meta": expected_meta
+        });
+        let provider: Provider =
+            serde_json::from_value(provider_value).expect("provider metadata should deserialize");
+
+        let form = ProviderAddFormState::from_provider(app_type.clone(), &provider);
+        assert_eq!(form.custom_user_agent.value, "cc-switch-cli/test");
+        assert_eq!(
+            json!(form.local_proxy_header_overrides),
+            json!({
+                "x-client-id": "client-42",
+                "x-region": "us-east"
+            })
+        );
+        assert_eq!(
+            form.local_proxy_body_override,
+            Some(json!({
+                "metadata": {
+                    "tenant": "acme",
+                    "trace": {
+                        "enabled": true
+                    }
+                },
+                "temperature": 0.2
+            }))
+        );
+
+        let roundtrip = form.to_provider_json_value();
+        assert_eq!(
+            roundtrip["meta"], expected_meta,
+            "{app_type:?} should preserve the upstream metadata shape exactly"
+        );
+        assert!(roundtrip["meta"].get("custom_user_agent").is_none());
+        assert!(roundtrip["meta"]
+            .get("local_proxy_request_overrides")
+            .is_none());
+    }
+}
+
+#[test]
+fn provider_add_form_codex_oauth_preserves_local_proxy_metadata() {
+    let provider: Provider = serde_json::from_value(json!({
+        "id": "codex-oauth",
+        "name": "Codex",
+        "settingsConfig": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex",
+                "ANTHROPIC_AUTH_TOKEN": "PROXY_MANAGED"
+            }
+        },
+        "meta": {
+            "providerType": "codex_oauth",
+            "apiFormat": "openai_responses",
+            "authBinding": {
+                "source": "managed_account",
+                "authProvider": "codex_oauth",
+                "accountId": null
+            },
+            "customUserAgent": "codex-client/test",
+            "localProxyRequestOverrides": {
+                "headers": {
+                    "x-client-mode": "custom"
+                },
+                "body": {
+                    "metadata": {
+                        "source": "tui"
+                    }
+                }
+            }
+        }
+    }))
+    .expect("Codex OAuth provider should deserialize");
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert!(form.is_claude_codex_oauth_provider());
+    assert!(form.supports_local_proxy_settings());
+
+    let roundtrip = form.to_provider_json_value();
+    assert_eq!(roundtrip["meta"]["customUserAgent"], "codex-client/test");
+    assert_eq!(
+        roundtrip["meta"]["localProxyRequestOverrides"],
+        json!({
+            "headers": {
+                "x-client-mode": "custom"
+            },
+            "body": {
+                "metadata": {
+                    "source": "tui"
+                }
+            }
+        })
+    );
+}
+
+#[test]
+fn provider_add_form_copilot_hides_but_preserves_imported_local_proxy_metadata() {
+    let provider: Provider = serde_json::from_value(json!({
+        "id": "copilot",
+        "name": "GitHub Copilot",
+        "settingsConfig": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.githubcopilot.com"
+            }
+        },
+        "meta": {
+            "providerType": "github_copilot",
+            "customUserAgent": "legacy-agent/1.0",
+            "localProxyRequestOverrides": {
+                "headers": {
+                    "x-legacy-route": "copilot"
+                },
+                "body": {
+                    "metadata": {
+                        "source": "legacy"
+                    }
+                }
+            }
+        }
+    }))
+    .expect("Copilot provider should deserialize");
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert!(!form.supports_local_proxy_settings());
+
+    let roundtrip = form.to_provider_json_value();
+    assert_eq!(roundtrip["meta"]["customUserAgent"], "legacy-agent/1.0");
+    assert_eq!(
+        roundtrip["meta"]["localProxyRequestOverrides"],
+        json!({
+            "headers": {
+                "x-legacy-route": "copilot"
+            },
+            "body": {
+                "metadata": {
+                    "source": "legacy"
+                }
+            }
+        })
+    );
+}
+
+#[test]
+fn provider_add_form_normalizes_imported_local_proxy_header_names() {
+    let provider: Provider = serde_json::from_value(json!({
+        "id": "relay",
+        "name": "Relay",
+        "settingsConfig": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://relay.example"
+            }
+        },
+        "meta": {
+            "localProxyRequestOverrides": {
+                "headers": {
+                    " X-Tenant ": "acme",
+                    "User-Agent": "relay-client/1.0"
+                }
+            }
+        }
+    }))
+    .expect("provider should deserialize");
+
+    let form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(
+        form.local_proxy_header_overrides
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["user-agent", "x-tenant"]
+    );
+
+    let roundtrip = form.to_provider_json_value();
+    assert_eq!(
+        roundtrip["meta"]["localProxyRequestOverrides"]["headers"],
+        json!({
+            "user-agent": "relay-client/1.0",
+            "x-tenant": "acme"
+        })
+    );
+}
+
+#[test]
+fn provider_add_form_empty_local_proxy_settings_are_omitted() {
+    for app_type in [AppType::Claude, AppType::Codex] {
+        let mut form = ProviderAddFormState::new(app_type.clone());
+        form.custom_user_agent.set("  \t  ");
+        form.apply_local_proxy_header_overrides(Default::default());
+        form.apply_local_proxy_body_override(Some(json!({})));
+
+        let provider = form.to_provider_json_value();
+        let meta = provider["meta"]
+            .as_object()
+            .expect("new Claude/Codex providers should include form metadata");
+
+        assert!(
+            !meta.contains_key("customUserAgent"),
+            "blank {app_type:?} User-Agent values should be omitted"
+        );
+        assert!(
+            !meta.contains_key("localProxyRequestOverrides"),
+            "empty {app_type:?} request overrides should be omitted"
+        );
+    }
+}
+
+#[test]
+fn provider_add_form_switching_template_clears_local_proxy_settings_state() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.custom_user_agent.set("cc-switch-cli/test");
+    form.local_proxy_header_overrides
+        .insert("x-client-id".to_string(), "client-42".to_string());
+    form.local_proxy_body_override = Some(json!({
+        "metadata": {
+            "tenant": "acme"
+        }
+    }));
+    form.page = ProviderFormPage::LocalProxySettings;
+    form.local_proxy_settings_field_idx = 2;
+
+    form.apply_template(packycode_template_index(AppType::Claude), &[]);
+
+    assert!(form.custom_user_agent.is_blank());
+    assert!(form.local_proxy_header_overrides.is_empty());
+    assert!(form.local_proxy_body_override.is_none());
+    assert_eq!(form.page, ProviderFormPage::Main);
+    assert_eq!(form.local_proxy_settings_field_idx, 0);
+    assert!(form
+        .fields()
+        .contains(&ProviderAddField::LocalProxySettings));
+
+    let provider = form.to_provider_json_value();
+    assert!(provider["meta"].get("customUserAgent").is_none());
+    assert!(provider["meta"].get("localProxyRequestOverrides").is_none());
+}
+
+#[test]
+fn provider_add_form_local_proxy_update_preserves_unknown_meta() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.apply_provider_json_value_to_fields(json!({
+        "id": "relay",
+        "name": "Relay",
+        "settingsConfig": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://relay.example"
+            }
+        },
+        "meta": {
+            "customUserAgent": "before",
+            "localProxyRequestOverrides": {
+                "headers": {
+                    "x-client-id": "client-42"
+                }
+            },
+            "futureProxyPolicy": {
+                "enabled": true,
+                "mode": "strict"
+            }
+        }
+    }))
+    .expect("provider JSON should apply");
+
+    assert_eq!(form.custom_user_agent.value, "before");
+    form.custom_user_agent.set("after");
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["meta"]["customUserAgent"], "after");
+    assert_eq!(
+        provider["meta"]["futureProxyPolicy"],
+        json!({
+            "enabled": true,
+            "mode": "strict"
+        })
+    );
+}
+
+#[test]
 fn provider_add_form_claude_fields_include_model_config_entry() {
     let form = ProviderAddFormState::new(AppType::Claude);
     let fields = form.fields();

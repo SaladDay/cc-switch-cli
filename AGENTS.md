@@ -80,6 +80,12 @@ Commands that normally create startup state call `AppState::try_new_with_startup
 
 OpenClaw workspace helpers live under `src/commands/workspace.rs`, not the Clap command tree. They restrict file access to the OpenClaw workspace allowlist (`AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `MEMORY.md`, `HEARTBEAT.md`, `BOOTSTRAP.md`, `BOOT.md`) and daily memory files, and deliberately reject symlinks/path traversal.
 
+## TUI interaction guidance
+
+- Keep primary TUI surfaces focused on fields, current values/status, and available actions.
+- Put feature explanations, behavioral caveats, validation rules, and other long-form hints in the contextual `?` help for the focused control.
+- Do not add persistent instruction or description panels when the same information can live in `?` help.
+
 ## Proxy architecture
 
 The proxy command surface is in `src/cli/commands/proxy.rs`, orchestration lives in `src/services/proxy.rs`, and the HTTP server is in `src/proxy/server.rs` and `src/proxy/handlers.rs`.

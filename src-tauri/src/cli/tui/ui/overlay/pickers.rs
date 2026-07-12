@@ -281,6 +281,84 @@ pub(super) fn render_usage_query_template_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+pub(super) fn render_user_agent_picker_overlay(
+    frame: &mut Frame<'_>,
+    app: &App,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+) {
+    let body_area = overlay_frame(
+        frame,
+        content_area,
+        theme,
+        texts::tui_user_agent_picker_title(),
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_close()),
+        ],
+        OverlaySize::FitRows {
+            width: 54,
+            body_rows: (crate::cli::tui::form::user_agent_picker_option_count() + 1) as u16,
+        },
+        overlay_border_style(theme, false),
+    );
+
+    let current_selection = app
+        .form
+        .as_ref()
+        .and_then(|form| match form {
+            FormState::ProviderAdd(provider) => {
+                Some(crate::cli::tui::form::user_agent_picker_selection(
+                    &provider.custom_user_agent.value,
+                ))
+            }
+            _ => None,
+        })
+        .unwrap_or(crate::cli::tui::form::USER_AGENT_PICKER_NO_OVERRIDE_INDEX);
+    let option_item = |index: usize, label: &str| {
+        let marker = if current_selection == index {
+            texts::tui_marker_active()
+        } else {
+            texts::tui_marker_inactive()
+        };
+        ListItem::new(Line::raw(format!("{marker}  {label}")))
+    };
+    let mut items = vec![option_item(
+        crate::cli::tui::form::USER_AGENT_PICKER_CUSTOM_INDEX,
+        texts::tui_user_agent_custom_option(),
+    )];
+    items.push(ListItem::new(Line::styled(
+        texts::tui_user_agent_presets_heading(),
+        Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
+    )));
+    items.extend(
+        crate::cli::tui::form::USER_AGENT_PRESETS
+            .iter()
+            .enumerate()
+            .map(|(preset_index, preset)| {
+                option_item(
+                    crate::cli::tui::form::USER_AGENT_PICKER_PRESET_OFFSET + preset_index,
+                    preset,
+                )
+            }),
+    );
+    items.push(option_item(
+        crate::cli::tui::form::USER_AGENT_PICKER_NO_OVERRIDE_INDEX,
+        texts::tui_user_agent_no_override_option(),
+    ));
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+
+    let mut state = ListState::default();
+    let selected =
+        selected.min(crate::cli::tui::form::user_agent_picker_option_count().saturating_sub(1));
+    state.select(Some(if selected == 0 { 0 } else { selected + 1 }));
+    frame.render_stateful_widget(list, body_area, &mut state);
+}
+
 pub(super) fn render_managed_account_picker_overlay(
     frame: &mut Frame<'_>,
     app: &App,

@@ -464,6 +464,7 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
             request_id,
             base_url,
             api_key,
+            custom_user_agent,
             codex_oauth,
             codex_oauth_account_id,
             field,
@@ -478,7 +479,13 @@ fn model_fetch_worker_loop(rx: mpsc::Receiver<ModelFetchReq>, tx: mpsc::Sender<M
         } else {
             let strategy = model_fetch_strategy_for_field(field);
             rt.block_on(async {
-                fetch_provider_models_for_tui(&base_url, api_key.as_deref(), strategy).await
+                fetch_provider_models_for_tui(
+                    &base_url,
+                    api_key.as_deref(),
+                    custom_user_agent.as_deref(),
+                    strategy,
+                )
+                .await
             })
             .map_err(|e| e.to_string())
         };

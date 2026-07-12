@@ -477,6 +477,7 @@ pub(crate) enum ModelFetchReq {
         request_id: u64,
         base_url: String,
         api_key: Option<String>,
+        custom_user_agent: Option<String>,
         codex_oauth: bool,
         codex_oauth_account_id: Option<String>,
         field: ProviderAddField,
@@ -613,6 +614,7 @@ pub(crate) fn parse_model_ids_from_response(payload: &Value) -> Vec<String> {
 pub(crate) async fn fetch_provider_models_for_tui(
     base_url: &str,
     api_key: Option<&str>,
+    custom_user_agent: Option<&str>,
     strategy: ModelFetchStrategy,
 ) -> Result<Vec<String>, String> {
     let candidate_urls = build_model_fetch_candidate_urls(base_url, strategy);
@@ -626,6 +628,9 @@ pub(crate) async fn fetch_provider_models_for_tui(
         .map_err(|e| format!("build http client failed: {e}"))?;
 
     let key = api_key.map(str::trim).filter(|k| !k.is_empty());
+    let custom_user_agent = crate::provider::parse_custom_user_agent(custom_user_agent)
+        .ok()
+        .flatten();
     let mut last_err = String::from("unknown error");
 
     for url in candidate_urls {
@@ -639,6 +644,9 @@ pub(crate) async fn fetch_provider_models_for_tui(
                     .header("anthropic-version", "2023-06-01"),
                 ModelFetchStrategy::GoogleApiKey => req.header("x-goog-api-key", key),
             };
+        }
+        if let Some(user_agent) = &custom_user_agent {
+            req = req.header(reqwest::header::USER_AGENT, user_agent.clone());
         }
 
         match req.send().await {

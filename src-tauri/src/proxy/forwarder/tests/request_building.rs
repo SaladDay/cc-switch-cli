@@ -15,7 +15,9 @@ use super::{
 };
 use crate::{
     app_config::AppType,
-    provider::{AuthBinding, AuthBindingSource, Provider, ProviderMeta},
+    provider::{
+        AuthBinding, AuthBindingSource, LocalProxyRequestOverrides, Provider, ProviderMeta,
+    },
     proxy::{
         forwarder::{ForwardOptions, RequestForwarder},
         providers::copilot_auth::CopilotModel,
@@ -361,6 +363,230 @@ async fn claude_prepare_request_sets_defaults_and_filters_blocked_caller_headers
     assert_eq!(header_value(&request, "x-b3-sampled"), None);
     assert_eq!(header_value(&request, "traceparent"), None);
     assert_eq!(header_value(&request, "tracestate"), None);
+}
+
+#[tokio::test]
+async fn custom_user_agent_replaces_the_caller_header() {
+    let provider = provider_with_request_overrides(
+        claude_provider("p1", "https://example.com", None),
+        Some("  custom-agent/1.0  "),
+        &[],
+        None,
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert("user-agent", HeaderValue::from_static("caller-agent/1.0"));
+
+    let request = build_request(&AppType::Claude, &provider, headers).await;
+
+    assert_eq!(
+        header_value(&request, "user-agent"),
+        Some("custom-agent/1.0")
+    );
+    assert_eq!(request.headers().get_all("user-agent").iter().count(), 1);
+}
+
+#[tokio::test]
+async fn custom_user_agent_is_added_when_the_caller_omits_it() {
+    let provider = provider_with_request_overrides(
+        claude_provider("p1", "https://example.com", None),
+        Some("custom-agent/1.0"),
+        &[],
+        None,
+    );
+
+    let request = build_request(&AppType::Claude, &provider, HeaderMap::new()).await;
+
+    assert_eq!(
+        header_value(&request, "user-agent"),
+        Some("custom-agent/1.0")
+    );
+}
+
+#[tokio::test]
+async fn blank_and_invalid_custom_user_agents_are_ignored() {
+    for custom_user_agent in ["   ", "invalid\nuser-agent"] {
+        let provider = provider_with_request_overrides(
+            claude_provider("p1", "https://example.com", None),
+            Some(custom_user_agent),
+            &[],
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", HeaderValue::from_static("caller-agent/1.0"));
+
+        let request = build_request(&AppType::Claude, &provider, headers).await;
+
+        assert_eq!(
+            header_value(&request, "user-agent"),
+            Some("caller-agent/1.0"),
+            "custom User-Agent {custom_user_agent:?} should be ignored"
+        );
+    }
+}
+
+#[tokio::test]
+async fn local_header_overrides_replace_allowed_headers_but_not_protected_headers() {
+    let provider = provider_with_request_overrides(
+        claude_provider("p1", "https://example.com", None),
+        None,
+        &[
+            (" X-Feature ", "override"),
+            ("X-New-Header", "added"),
+            ("Authorization", "Bearer override"),
+            ("X-Api-Key", "override-key"),
+            ("Content-Type", "text/plain"),
+        ],
+        None,
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert("x-feature", HeaderValue::from_static("caller"));
+
+    let request = build_request(&AppType::Claude, &provider, headers).await;
+
+    assert_eq!(header_value(&request, "x-feature"), Some("override"));
+    assert_eq!(request.headers().get_all("x-feature").iter().count(), 1);
+    assert_eq!(header_value(&request, "x-new-header"), Some("added"));
+    assert_eq!(header_value(&request, "authorization"), None);
+    assert_eq!(header_value(&request, "x-api-key"), Some("key-p1"));
+    assert_eq!(
+        header_value(&request, "content-type"),
+        Some("application/json")
+    );
+}
+
+#[tokio::test]
+async fn local_user_agent_header_override_takes_precedence_over_custom_user_agent() {
+    let provider = provider_with_request_overrides(
+        claude_provider("p1", "https://example.com", None),
+        Some("custom-agent/1.0"),
+        &[("User-Agent", "header-override/2.0")],
+        None,
+    );
+
+    let request = build_request(&AppType::Claude, &provider, HeaderMap::new()).await;
+
+    assert_eq!(
+        header_value(&request, "user-agent"),
+        Some("header-override/2.0")
+    );
+    assert_eq!(request.headers().get_all("user-agent").iter().count(), 1);
+}
+
+#[tokio::test]
+async fn local_body_overrides_deep_merge_and_refilter_the_final_body() {
+    let provider = provider_with_request_overrides(
+        claude_provider("p1", "https://example.com", None),
+        None,
+        &[],
+        Some(json!({
+            "stream": false,
+            "config": {
+                "nested": {
+                    "added": 2,
+                    "stream": false,
+                    "_private_nested": "drop"
+                },
+                "array": ["replacement"],
+                "scalar": 42
+            },
+            "metadata": {
+                "source": "override",
+                "_private_metadata": "drop"
+            },
+            "_private_top_level": "drop"
+        })),
+    );
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &json!({
+                "model": "claude-3-7-sonnet-20250219",
+                "max_tokens": 32,
+                "stream": true,
+                "messages": [{"role": "user", "content": "hello"}],
+                "config": {
+                    "keep": true,
+                    "nested": {"original": 1, "stream": true},
+                    "array": [1, 2],
+                    "scalar": "original"
+                }
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare locally overridden request")
+        .build()
+        .expect("build locally overridden request");
+
+    let body = request_body_json(&request);
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["config"]["keep"], true);
+    assert_eq!(body["config"]["nested"]["original"], 1);
+    assert_eq!(body["config"]["nested"]["added"], 2);
+    assert_eq!(body["config"]["nested"]["stream"], false);
+    assert_eq!(body["config"]["array"], json!(["replacement"]));
+    assert_eq!(body["config"]["scalar"], 42);
+    assert_eq!(body["metadata"]["source"], "override");
+    assert!(body.get("_private_top_level").is_none());
+    assert!(body["config"]["nested"].get("_private_nested").is_none());
+    assert!(body["metadata"].get("_private_metadata").is_none());
+}
+
+#[tokio::test]
+async fn local_body_overrides_apply_after_protocol_conversion() {
+    let provider = provider_with_request_overrides(
+        claude_provider("p1", "https://example.com", Some("openai_chat")),
+        None,
+        &[],
+        Some(json!({
+            "stream": false,
+            "stream_options": {
+                "include_usage": false,
+                "vendor_extension": true
+            }
+        })),
+    );
+    let (_db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    let request = forwarder
+        .prepare_request(
+            &AppType::Claude,
+            &provider,
+            "/v1/messages",
+            &json!({
+                "model": "gpt-4o",
+                "max_tokens": 32,
+                "stream": true,
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            &HeaderMap::new(),
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: true,
+            },
+        )
+        .await
+        .expect("prepare transformed request with local overrides")
+        .build()
+        .expect("build transformed request with local overrides");
+
+    assert_eq!(request.url().path(), "/v1/chat/completions");
+    let body = request_body_json(&request);
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["stream_options"]["include_usage"], false);
+    assert_eq!(body["stream_options"]["vendor_extension"], true);
 }
 
 #[tokio::test]
@@ -864,7 +1090,12 @@ async fn github_copilot_prepare_request_detects_copilot_base_url_without_provide
     )
     .await;
 
-    let provider = claude_provider("copilot-url", "https://api.githubcopilot.com", None);
+    let provider = provider_with_request_overrides(
+        claude_provider("copilot-url", "https://api.githubcopilot.com", None),
+        Some("custom-agent/1.0"),
+        &[("x-local-override", "should-not-appear")],
+        Some(json!({"copilot_override_marker": true})),
+    );
     let (_db, router) = test_router().await;
     let forwarder = RequestForwarder::new(router).expect("create forwarder");
 
@@ -903,6 +1134,14 @@ async fn github_copilot_prepare_request_detects_copilot_base_url_without_provide
     );
     assert_eq!(header_value(&request, "anthropic-beta"), None);
     assert_eq!(header_value(&request, "anthropic-version"), None);
+    assert_ne!(
+        header_value(&request, "user-agent"),
+        Some("custom-agent/1.0")
+    );
+    assert_eq!(header_value(&request, "x-local-override"), None);
+    assert!(request_body_json(&request)
+        .get("copilot_override_marker")
+        .is_none());
 }
 
 #[tokio::test]
@@ -1249,7 +1488,15 @@ async fn github_copilot_prepare_request_overrides_client_fingerprint_headers() {
     )
     .await;
 
-    let provider = github_copilot_provider(Some("fingerprint"));
+    let provider = provider_with_request_overrides(
+        github_copilot_provider(Some("fingerprint")),
+        Some("custom-agent/1.0"),
+        &[
+            ("user-agent", "header-override/2.0"),
+            ("x-local-override", "should-not-appear"),
+        ],
+        Some(json!({"copilot_override_marker": true})),
+    );
     let (_db, router) = test_router().await;
     let forwarder = RequestForwarder::new(router).expect("create forwarder");
     let mut headers = HeaderMap::new();
@@ -1316,6 +1563,10 @@ async fn github_copilot_prepare_request_overrides_client_fingerprint_headers() {
         header_value(&request, "x-request-id"),
         header_value(&request, "x-agent-task-id")
     );
+    assert_eq!(header_value(&request, "x-local-override"), None);
+    assert!(request_body_json(&request)
+        .get("copilot_override_marker")
+        .is_none());
 }
 
 #[tokio::test]
@@ -1708,6 +1959,24 @@ async fn build_request(
         .expect("prepare request")
         .build()
         .expect("build request")
+}
+
+fn provider_with_request_overrides(
+    mut provider: Provider,
+    custom_user_agent: Option<&str>,
+    headers: &[(&str, &str)],
+    body: Option<Value>,
+) -> Provider {
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    meta.custom_user_agent = custom_user_agent.map(str::to_string);
+    meta.local_proxy_request_overrides = Some(LocalProxyRequestOverrides {
+        headers: headers
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect(),
+        body,
+    });
+    provider
 }
 
 fn codex_provider(base_url: &str) -> Provider {

@@ -439,10 +439,15 @@ pub(super) fn stream_check(ctx: &mut RuntimeActionContext<'_>, id: String) -> Re
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "model fetch carries the selected provider draft and result destination"
+)]
 pub(super) fn model_fetch(
     ctx: &mut RuntimeActionContext<'_>,
     base_url: String,
     api_key: Option<String>,
+    custom_user_agent: Option<String>,
     codex_oauth: bool,
     codex_oauth_account_id: Option<String>,
     field: ProviderAddField,
@@ -476,6 +481,7 @@ pub(super) fn model_fetch(
         request_id,
         base_url,
         api_key,
+        custom_user_agent,
         codex_oauth,
         codex_oauth_account_id,
         field,

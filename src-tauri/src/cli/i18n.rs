@@ -1604,6 +1604,229 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_local_proxy_settings() -> &'static str {
+        if is_chinese() {
+            "本地代理设置"
+        } else {
+            "Local Proxy Settings"
+        }
+    }
+
+    pub fn tui_local_proxy_settings_summary(
+        custom_ua: bool,
+        headers: usize,
+        body_fields: usize,
+    ) -> String {
+        let mut parts = Vec::new();
+        if custom_ua {
+            parts.push("User-Agent".to_string());
+        }
+        if headers > 0 {
+            if is_chinese() {
+                parts.push(format!("{headers} 个 Header"));
+            } else if headers == 1 {
+                parts.push("1 header".to_string());
+            } else {
+                parts.push(format!("{headers} headers"));
+            }
+        }
+        if body_fields > 0 {
+            if is_chinese() {
+                parts.push(format!("{body_fields} 个 Body 字段"));
+            } else if body_fields == 1 {
+                parts.push("1 body field".to_string());
+            } else {
+                parts.push(format!("{body_fields} body fields"));
+            }
+        }
+
+        if parts.is_empty() {
+            if is_chinese() {
+                "未配置".to_string()
+            } else {
+                "Not configured".to_string()
+            }
+        } else {
+            parts.join(" · ")
+        }
+    }
+
+    pub fn tui_label_custom_user_agent() -> &'static str {
+        if is_chinese() {
+            "自定义 User-Agent"
+        } else {
+            "Custom User-Agent"
+        }
+    }
+
+    pub fn tui_user_agent_picker_title() -> &'static str {
+        if is_chinese() {
+            "选择 User-Agent"
+        } else {
+            "Select User-Agent"
+        }
+    }
+
+    pub fn tui_user_agent_custom_option() -> &'static str {
+        if is_chinese() {
+            "自定义…"
+        } else {
+            "Custom..."
+        }
+    }
+
+    pub fn tui_user_agent_no_override_option() -> &'static str {
+        if is_chinese() {
+            "不覆盖"
+        } else {
+            "Do not override"
+        }
+    }
+
+    pub fn tui_user_agent_presets_heading() -> &'static str {
+        if is_chinese() {
+            "预设"
+        } else {
+            "Presets"
+        }
+    }
+
+    pub fn tui_user_agent_invalid_hint() -> &'static str {
+        if is_chinese() {
+            "User-Agent 不能包含控制字符（如换行符）"
+        } else {
+            "User-Agent must not contain control characters (e.g. line breaks)"
+        }
+    }
+
+    pub fn tui_label_local_proxy_header_overrides() -> &'static str {
+        if is_chinese() {
+            "Header 覆盖"
+        } else {
+            "Header Overrides"
+        }
+    }
+
+    pub fn tui_label_local_proxy_body_overrides() -> &'static str {
+        if is_chinese() {
+            "Body 覆盖"
+        } else {
+            "Body Overrides"
+        }
+    }
+
+    pub fn tui_local_proxy_headers_summary(count: usize) -> String {
+        if count == 0 {
+            if is_chinese() {
+                "未配置".to_string()
+            } else {
+                "Not configured".to_string()
+            }
+        } else if is_chinese() {
+            format!("{count} 个 Header")
+        } else if count == 1 {
+            "1 header".to_string()
+        } else {
+            format!("{count} headers")
+        }
+    }
+
+    pub fn tui_local_proxy_body_summary(count: usize) -> String {
+        if count == 0 {
+            if is_chinese() {
+                "未配置".to_string()
+            } else {
+                "Not configured".to_string()
+            }
+        } else if is_chinese() {
+            format!("{count} 个字段")
+        } else if count == 1 {
+            "1 field".to_string()
+        } else {
+            format!("{count} fields")
+        }
+    }
+
+    pub fn tui_local_proxy_headers_editor_title() -> &'static str {
+        if is_chinese() {
+            "编辑 Header 覆盖"
+        } else {
+            "Edit Header Overrides"
+        }
+    }
+
+    pub fn tui_local_proxy_body_editor_title() -> &'static str {
+        if is_chinese() {
+            "编辑 Body 覆盖"
+        } else {
+            "Edit Body Overrides"
+        }
+    }
+
+    pub fn tui_override_json_not_object() -> &'static str {
+        if is_chinese() {
+            "JSON 必须是对象"
+        } else {
+            "JSON must be an object"
+        }
+    }
+
+    pub fn tui_override_header_empty_name() -> &'static str {
+        if is_chinese() {
+            "Header 名称不能为空"
+        } else {
+            "Header name must not be empty"
+        }
+    }
+
+    pub fn tui_override_header_invalid_name(name: &str) -> String {
+        if is_chinese() {
+            format!("Header \"{name}\" 的名称不是有效的 HTTP token")
+        } else {
+            format!("Header \"{name}\" name is not a valid HTTP token")
+        }
+    }
+
+    pub fn tui_override_header_non_string(name: &str) -> String {
+        if is_chinese() {
+            format!("Header \"{name}\" 的值必须是字符串")
+        } else {
+            format!("Header \"{name}\" value must be a string")
+        }
+    }
+
+    pub fn tui_override_header_control_chars(name: &str) -> String {
+        if is_chinese() {
+            format!("Header \"{name}\" 的值不能包含控制字符")
+        } else {
+            format!("Header \"{name}\" value must not contain control characters")
+        }
+    }
+
+    pub fn tui_override_header_duplicate(name: &str) -> String {
+        if is_chinese() {
+            format!("Header \"{name}\" 与另一个 Header 规范化后的名称重复")
+        } else {
+            format!("Header \"{name}\" duplicates another header after case normalization")
+        }
+    }
+
+    pub fn tui_override_header_protected(name: &str) -> String {
+        if is_chinese() {
+            format!("Header \"{name}\" 由本地代理管理，不能覆盖")
+        } else {
+            format!("Header \"{name}\" is managed by the local proxy and cannot be overridden")
+        }
+    }
+
+    pub fn tui_override_body_stream_protected() -> &'static str {
+        if is_chinese() {
+            "Body 覆盖不能包含协议字段 \"stream\""
+        } else {
+            "Body override must not include protocol field \"stream\""
+        }
+    }
+
     pub fn tui_label_claude_api_format() -> &'static str {
         if is_chinese() {
             "API 格式"

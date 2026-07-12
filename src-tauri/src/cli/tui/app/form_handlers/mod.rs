@@ -51,6 +51,10 @@ impl App {
                 provider.close_codex_local_routing_page();
                 return Action::None;
             }
+            if matches!(provider.page, form::ProviderFormPage::LocalProxySettings) {
+                provider.close_local_proxy_settings_page();
+                return Action::None;
+            }
             if matches!(provider.page, form::ProviderFormPage::UsageQuery) {
                 provider.close_usage_query_page();
                 return Action::None;

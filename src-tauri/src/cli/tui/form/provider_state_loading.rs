@@ -3,8 +3,9 @@ use super::provider_state::codex_model_catalog_row_from_value;
 use super::{
     claude_disable_auto_upgrade_enabled, claude_hide_attribution_enabled, claude_teammates_enabled,
     claude_tool_search_enabled, detect_balance_provider_for_usage_query,
-    detect_coding_plan_provider_for_usage_query, ClaudeApiFormat, CodexWireApi,
-    ProviderAddFormState, UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
+    detect_coding_plan_provider_for_usage_query, normalize_local_proxy_header_overrides,
+    ClaudeApiFormat, CodexWireApi, ProviderAddFormState, UsageQueryTemplate,
+    OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 use crate::app_config::AppType;
 use crate::provider::Provider;
@@ -23,7 +24,33 @@ pub(super) fn populate_form_from_provider(
         AppType::Hermes => populate_hermes_form(form, provider),
         AppType::OpenClaw => populate_openclaw_form(form, provider),
     }
+    populate_local_proxy_settings_form(form, provider);
     populate_usage_query_form(form, provider);
+}
+
+fn populate_local_proxy_settings_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    let Some(meta) = provider.meta.as_ref() else {
+        return;
+    };
+
+    if let Some(user_agent) = meta.custom_user_agent.as_deref() {
+        form.custom_user_agent.set(user_agent);
+    }
+    if let Some(overrides) = meta.local_proxy_request_overrides.as_ref() {
+        let original_headers = overrides
+            .headers
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        form.local_proxy_header_overrides = normalize_local_proxy_header_overrides(
+            overrides
+                .headers
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        )
+        .unwrap_or(original_headers);
+        form.local_proxy_body_override = overrides.body.clone();
+    }
 }
 
 fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provider) {

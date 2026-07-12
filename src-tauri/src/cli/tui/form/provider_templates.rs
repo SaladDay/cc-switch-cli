@@ -483,6 +483,7 @@ impl ProviderAddFormState {
         let idx = idx.min(total_templates.saturating_sub(1));
         self.template_idx = idx;
         self.id_is_manual = false;
+        self.reset_local_proxy_settings_state();
 
         if idx >= builtin_defs.len() && idx < builtin_defs.len() + sponsor_presets.len() {
             let sponsor_idx = idx.saturating_sub(builtin_defs.len());

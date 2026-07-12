@@ -78,6 +78,13 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
+        Overlay::UserAgentPicker { selected } => super::pickers::render_user_agent_picker_overlay(
+            frame,
+            app,
+            content_area,
+            theme,
+            *selected,
+        ),
         Overlay::UsageQueryTemplatePicker { selected } => {
             super::pickers::render_usage_query_template_picker_overlay(
                 frame,

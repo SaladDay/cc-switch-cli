@@ -2596,6 +2596,60 @@ fn model_fetch_candidate_urls_for_gemini_v1beta_keeps_models_endpoint() {
     );
 }
 
+#[tokio::test]
+async fn model_fetch_sends_trimmed_custom_user_agent() {
+    use std::sync::{Arc, Mutex};
+
+    use axum::{http::HeaderMap, routing::get, Router};
+
+    let observed_user_agent = Arc::new(Mutex::new(None::<String>));
+    let handler_user_agent = Arc::clone(&observed_user_agent);
+    let app = Router::new().route(
+        "/v1/models",
+        get(move |headers: HeaderMap| {
+            let observed_user_agent = Arc::clone(&handler_user_agent);
+            async move {
+                let user_agent = headers
+                    .get(reqwest::header::USER_AGENT)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                *observed_user_agent
+                    .lock()
+                    .expect("capture model fetch user agent") = user_agent;
+                axum::Json(json!({ "data": [{ "id": "model-a" }] }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind model fetch test server");
+    let address = listener.local_addr().expect("model fetch listener address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("model fetch test server should run");
+    });
+
+    let models = fetch_provider_models_for_tui(
+        &format!("http://{address}"),
+        Some("sk-test"),
+        Some("  cc-switch-model-fetch/test  "),
+        ModelFetchStrategy::Bearer,
+    )
+    .await
+    .expect("model fetch should succeed");
+    server.abort();
+
+    assert_eq!(models, vec!["model-a"]);
+    assert_eq!(
+        observed_user_agent
+            .lock()
+            .expect("read model fetch user agent")
+            .as_deref(),
+        Some("cc-switch-model-fetch/test")
+    );
+}
+
 #[test]
 #[serial(home_settings)]
 fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_loading_data() {

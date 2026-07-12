@@ -58,6 +58,9 @@ impl App {
         if matches!(provider.page, form::ProviderFormPage::CodexLocalRouting) {
             return self.handle_codex_local_routing_page_key(key, data);
         }
+        if matches!(provider.page, form::ProviderFormPage::LocalProxySettings) {
+            return self.handle_local_proxy_settings_page_key(key);
+        }
         if matches!(provider.page, form::ProviderFormPage::ClaudeQuickConfig) {
             return self.handle_claude_quick_config_page_key(key, data);
         }
@@ -122,6 +125,27 @@ impl App {
         if let Some(message) = validation_message {
             self.push_toast(message, ToastKind::Warning);
             return Action::None;
+        }
+
+        let local_proxy_validation = self.form.as_ref().and_then(|form| match form {
+            FormState::ProviderAdd(provider) => validate_local_proxy_settings_form(provider),
+            _ => None,
+        });
+        if let Some(message) = local_proxy_validation {
+            self.push_toast(message, ToastKind::Error);
+            return Action::None;
+        }
+
+        let invalid_custom_user_agent = self.form.as_ref().is_some_and(|form| {
+            matches!(
+                form,
+                FormState::ProviderAdd(provider)
+                    if provider.supports_local_proxy_settings()
+                        && !provider.custom_user_agent_is_valid()
+            )
+        });
+        if invalid_custom_user_agent {
+            self.push_toast(texts::tui_user_agent_invalid_hint(), ToastKind::Warning);
         }
 
         let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
@@ -459,6 +483,15 @@ impl App {
                 }
                 Action::None
             }
+            ProviderAddField::LocalProxySettings => {
+                if matches!(key.code, KeyCode::Enter) {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                        return Action::None;
+                    };
+                    provider.open_local_proxy_settings_page();
+                }
+                Action::None
+            }
             ProviderAddField::CodexModel
             | ProviderAddField::GeminiModel
             | ProviderAddField::OpenCodeModelId => {
@@ -617,6 +650,97 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    fn handle_local_proxy_settings_page_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let selected = self.prepare_local_proxy_settings_field_selection()?;
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.close_local_proxy_settings_page();
+                }
+                Action::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.local_proxy_settings_field_idx =
+                        provider.local_proxy_settings_field_idx.saturating_sub(1);
+                }
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.local_proxy_settings_field_idx =
+                        (provider.local_proxy_settings_field_idx + 1).min(
+                            provider
+                                .local_proxy_settings_fields()
+                                .len()
+                                .saturating_sub(1),
+                        );
+                }
+                Action::None
+            }
+            KeyCode::Enter => {
+                match selected {
+                    form::LocalProxySettingsField::UserAgent => {
+                        self.open_user_agent_picker();
+                    }
+                    form::LocalProxySettingsField::HeaderOverrides => {
+                        let initial = self.form.as_ref().and_then(|form| match form {
+                            FormState::ProviderAdd(provider) => {
+                                Some(form::format_local_proxy_header_overrides(
+                                    &provider.local_proxy_header_overrides,
+                                ))
+                            }
+                            _ => None,
+                        });
+                        if let Some(initial) = initial {
+                            self.open_editor(
+                                texts::tui_local_proxy_headers_editor_title(),
+                                EditorKind::Json,
+                                initial,
+                                EditorSubmit::ProviderFormApplyLocalProxyHeaders,
+                            );
+                        }
+                    }
+                    form::LocalProxySettingsField::BodyOverrides => {
+                        let initial = self.form.as_ref().and_then(|form| match form {
+                            FormState::ProviderAdd(provider) => {
+                                Some(form::format_local_proxy_body_override(
+                                    provider.local_proxy_body_override.as_ref(),
+                                ))
+                            }
+                            _ => None,
+                        });
+                        if let Some(initial) = initial {
+                            self.open_editor(
+                                texts::tui_local_proxy_body_editor_title(),
+                                EditorKind::Json,
+                                initial,
+                                EditorSubmit::ProviderFormApplyLocalProxyBody,
+                            );
+                        }
+                    }
+                }
+                Action::None
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn open_user_agent_picker(&mut self) {
+        let selected = self
+            .form
+            .as_ref()
+            .and_then(|form| match form {
+                FormState::ProviderAdd(provider) => Some(form::user_agent_picker_selection(
+                    &provider.custom_user_agent.value,
+                )),
+                _ => None,
+            })
+            .unwrap_or(form::USER_AGENT_PICKER_CUSTOM_INDEX);
+        self.overlay = Overlay::UserAgentPicker { selected };
     }
 
     /// Keys for the inline model-catalog table (when its zone is focused inside
@@ -888,6 +1012,8 @@ impl App {
             base_url: provider.codex_base_url.value.clone(),
             api_key: (!provider.codex_api_key.value.trim().is_empty())
                 .then(|| provider.codex_api_key.value.clone()),
+            custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
+                .then(|| provider.custom_user_agent.value.clone()),
             codex_oauth: false,
             codex_oauth_account_id: None,
             field: ProviderAddField::CodexLocalRouting,
@@ -1108,6 +1234,8 @@ impl App {
         Action::ProviderModelFetch {
             base_url: provider.hermes_base_url.value.clone(),
             api_key: Some(provider.hermes_api_key.value.clone()),
+            custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
+                .then(|| provider.custom_user_agent.value.clone()),
             codex_oauth: false,
             codex_oauth_account_id: None,
             field: ProviderAddField::HermesModels,
@@ -1150,6 +1278,8 @@ impl App {
             Action::ProviderModelFetch {
                 base_url,
                 api_key,
+                custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
+                    .then(|| provider.custom_user_agent.value.clone()),
                 codex_oauth: false,
                 codex_oauth_account_id: None,
                 field: selected,
@@ -1404,6 +1534,27 @@ impl App {
         Some((fields, selected))
     }
 
+    fn prepare_local_proxy_settings_field_selection(
+        &mut self,
+    ) -> Option<form::LocalProxySettingsField> {
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+            return None;
+        };
+        if !matches!(provider.page, form::ProviderFormPage::LocalProxySettings)
+            || !matches!(provider.focus, FormFocus::Fields)
+        {
+            return None;
+        }
+
+        provider.local_proxy_settings_field_idx = provider.local_proxy_settings_field_idx.min(
+            provider
+                .local_proxy_settings_fields()
+                .len()
+                .saturating_sub(1),
+        );
+        provider.selected_local_proxy_settings_field()
+    }
+
     fn finish_provider_input_change(
         &mut self,
         selected: ProviderAddField,
@@ -1580,4 +1731,18 @@ fn validate_usage_query_form(provider: &form::ProviderAddFormState) -> Option<&'
     }
 
     None
+}
+
+fn validate_local_proxy_settings_form(provider: &form::ProviderAddFormState) -> Option<String> {
+    if !provider.supports_local_proxy_settings() {
+        return None;
+    }
+
+    let headers = form::format_local_proxy_header_overrides(&provider.local_proxy_header_overrides);
+    if let Err(error) = form::parse_local_proxy_header_overrides(&headers) {
+        return Some(error);
+    }
+
+    let body = form::format_local_proxy_body_override(provider.local_proxy_body_override.as_ref());
+    form::parse_local_proxy_body_override(&body).err()
 }

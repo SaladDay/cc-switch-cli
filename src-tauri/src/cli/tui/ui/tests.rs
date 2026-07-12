@@ -4846,6 +4846,131 @@ fn claude_api_format_picker_overlay_is_compact_and_padded() {
 }
 
 #[test]
+fn local_proxy_settings_page_is_compact_and_scannable_at_narrow_width() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.name.set("Relay");
+    form.custom_user_agent
+        .set("claude-cli/2.1.161 (external, cli)");
+    form.local_proxy_header_overrides
+        .insert("user-agent".to_string(), "relay-agent".to_string());
+    form.local_proxy_header_overrides
+        .insert("x-provider".to_string(), "cc-switch".to_string());
+    form.local_proxy_body_override = Some(json!({ "store": false }));
+    form.open_local_proxy_settings_page();
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 72, 20);
+    let all = all_text(&buf);
+    for expected in [
+        "Local Proxy Settings",
+        "Custom User-Agent",
+        "Header Overrides",
+        "Body Overrides",
+        "2 headers",
+        "1 field",
+        "claude-cl",
+    ] {
+        assert!(all.contains(expected), "missing {expected:?}: {all}");
+    }
+    assert!(!all.contains("u Custom User-Agent"), "{all}");
+    assert!(!all.contains("[Select]"), "{all}");
+    assert!(!all.contains("[Edit]"), "{all}");
+    assert!(!all.contains(r#"{"user-agent"#), "{all}");
+    assert!(!all.contains("Only takes effect"), "{all}");
+
+    let field_rows = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .filter(|line| {
+            line.contains("Custom User-Agent")
+                || line.contains("Header Overrides")
+                || line.contains("Body Overrides")
+        })
+        .count();
+    assert_eq!(field_rows, 3, "each setting should keep its own row: {all}");
+}
+
+#[test]
+fn local_proxy_user_agent_row_shows_value_without_action_or_detail_panel() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    form.custom_user_agent.set(format!(
+        "{}claude-cli/2.1.161 (external, cli)",
+        "long-prefix-".repeat(8)
+    ));
+    form.open_local_proxy_settings_page();
+    app.form = Some(FormState::ProviderAdd(form));
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 100, 20);
+
+    let user_agent_row = (0..buf.area.height)
+        .find(|y| line_at(&buf, *y).contains("Custom User-Agent"))
+        .expect("User-Agent row should render");
+    let row = line_at(&buf, user_agent_row);
+    assert!(row.contains("long-prefix-"), "{row}");
+    assert!(!row.contains("[Select]"), "{row}");
+    assert!(!all_text(&buf).contains("[Edit]"));
+    assert!(!all_text(&buf).contains("Only takes effect"));
+}
+
+#[test]
+fn user_agent_picker_renders_custom_clear_and_all_upstream_presets() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::ProviderAdd(
+        crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude),
+    ));
+    app.overlay = Overlay::UserAgentPicker { selected: 0 };
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        90,
+        24,
+    ));
+    assert!(all.contains("Select User-Agent"), "{all}");
+    assert!(all.contains("Custom..."), "{all}");
+    assert!(all.contains("Do not override"), "{all}");
+    assert!(all.contains("Presets"), "{all}");
+    assert!(!all.contains("? Help"), "{all}");
+    for preset in crate::cli::tui::form::USER_AGENT_PRESETS {
+        assert!(all.contains(preset), "missing preset {preset:?}: {all}");
+    }
+
+    let custom_pos = all.find("Custom...").expect("custom option should render");
+    let heading_pos = all.find("Presets").expect("preset heading should render");
+    let mut search_from = heading_pos + "Presets".len();
+    for preset in crate::cli::tui::form::USER_AGENT_PRESETS {
+        let relative_position = all[search_from..]
+            .find(preset)
+            .unwrap_or_else(|| panic!("missing preset {preset:?}: {all}"));
+        search_from += relative_position + preset.len();
+    }
+    let clear_pos = all
+        .find("Do not override")
+        .expect("clear option should render");
+    assert!(
+        custom_pos < heading_pos,
+        "custom should precede presets: {all}"
+    );
+    assert!(
+        search_from <= clear_pos,
+        "clear option should follow presets: {all}"
+    );
+}
+
+#[test]
 fn provider_api_format_proxy_notice_overlay_uses_close_actions() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");

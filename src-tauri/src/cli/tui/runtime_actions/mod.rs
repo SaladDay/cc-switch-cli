@@ -448,6 +448,7 @@ pub(crate) fn handle_action(
         Action::ProviderModelFetch {
             base_url,
             api_key,
+            custom_user_agent,
             codex_oauth,
             codex_oauth_account_id,
             field,
@@ -456,6 +457,7 @@ pub(crate) fn handle_action(
             &mut ctx,
             base_url,
             api_key,
+            custom_user_agent,
             codex_oauth,
             codex_oauth_account_id,
             field,

@@ -12,6 +12,9 @@ impl App {
         if let Some(action) = self.handle_claude_api_format_picker_key(key, data) {
             return Some(action);
         }
+        if let Some(action) = self.handle_user_agent_picker_key(key) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_usage_query_template_picker_key(key) {
             return Some(action);
         }
@@ -308,6 +311,68 @@ impl App {
         })
     }
 
+    fn handle_user_agent_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::UserAgentPicker { selected } = &mut self.overlay else {
+            return None;
+        };
+        let max = form::user_agent_picker_option_count().saturating_sub(1);
+        *selected = (*selected).min(max);
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                *selected = (*selected + 1).min(max);
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let selected = *selected;
+                if selected == form::USER_AGENT_PICKER_CUSTOM_INDEX {
+                    let current = self
+                        .form
+                        .as_ref()
+                        .and_then(|form| match form {
+                            FormState::ProviderAdd(provider) => {
+                                Some(provider.custom_user_agent.value.clone())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_label_custom_user_agent().to_string(),
+                        prompt: texts::tui_label_custom_user_agent().to_string(),
+                        input: TextInput::new(current),
+                        submit: TextSubmit::ProviderCustomUserAgent,
+                        secret: false,
+                    });
+                } else if selected == form::USER_AGENT_PICKER_NO_OVERRIDE_INDEX {
+                    if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                        provider.custom_user_agent.set("");
+                    }
+                    self.overlay = Overlay::None;
+                } else {
+                    let preset_index =
+                        selected.saturating_sub(form::USER_AGENT_PICKER_PRESET_OFFSET);
+                    if let (Some(FormState::ProviderAdd(provider)), Some(preset)) = (
+                        self.form.as_mut(),
+                        form::USER_AGENT_PRESETS.get(preset_index),
+                    ) {
+                        provider.set_custom_user_agent_preset(preset);
+                    }
+                    self.overlay = Overlay::None;
+                }
+                Action::None
+            }
+            _ => Action::None,
+        })
+    }
+
     fn handle_managed_account_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
         let Overlay::ManagedAccountPicker {
             auth_provider,
@@ -586,6 +651,8 @@ impl App {
                         base_url: provider.claude_base_url.value.clone(),
                         api_key: (!provider.claude_api_key.value.trim().is_empty())
                             .then(|| provider.claude_api_key.value.clone()),
+                        custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
+                            .then(|| provider.custom_user_agent.value.clone()),
                         codex_oauth,
                         codex_oauth_account_id,
                         field: ProviderAddField::ClaudeModelConfig,

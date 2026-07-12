@@ -10,6 +10,7 @@ use super::{
 };
 use crate::{
     app_config::AppType,
+    provider::{LocalProxyRequestOverrides, ProviderMeta},
     proxy::{
         error::ProxyError,
         forwarder::{ForwardOptions, RequestForwarder, StreamingResponse},
@@ -240,6 +241,95 @@ async fn claude_buffered_failover_uses_second_provider_and_per_provider_endpoint
     assert_eq!(
         secondary_hits.paths.lock().await.as_slice(),
         ["/v1/chat/completions"]
+    );
+
+    primary_server.abort();
+    secondary_server.abort();
+}
+
+#[tokio::test]
+async fn buffered_failover_applies_each_providers_own_request_overrides() {
+    let (primary_url, primary_hits, primary_bodies, primary_server) =
+        spawn_scripted_upstream(vec![(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": {"message": "primary down"}}),
+        )])
+        .await;
+    let (secondary_url, secondary_hits, secondary_bodies, secondary_server) =
+        spawn_scripted_upstream(vec![(StatusCode::OK, json!({"ok": true}))]).await;
+    let mut primary_provider = claude_provider("primary", &primary_url, None);
+    primary_provider.meta = Some(ProviderMeta {
+        custom_user_agent: Some("primary-agent/1.0".to_string()),
+        local_proxy_request_overrides: Some(LocalProxyRequestOverrides {
+            headers: [("x-provider-route".to_string(), "primary".to_string())]
+                .into_iter()
+                .collect(),
+            body: Some(json!({"metadata": {"provider_route": "primary"}})),
+        }),
+        ..Default::default()
+    });
+    let mut secondary_provider = claude_provider("secondary", &secondary_url, None);
+    secondary_provider.meta = Some(ProviderMeta {
+        custom_user_agent: Some("secondary-agent/2.0".to_string()),
+        local_proxy_request_overrides: Some(LocalProxyRequestOverrides {
+            headers: [("x-provider-route".to_string(), "secondary".to_string())]
+                .into_iter()
+                .collect(),
+            body: Some(json!({"metadata": {"provider_route": "secondary"}})),
+        }),
+        ..Default::default()
+    });
+    let (db, router) = test_router().await;
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
+
+    db.save_provider("claude", &primary_provider)
+        .expect("save primary provider for health tracking");
+    db.save_provider("claude", &secondary_provider)
+        .expect("save secondary provider for health tracking");
+
+    let result = forwarder
+        .forward_buffered_response(
+            &AppType::Claude,
+            "/v1/messages",
+            claude_request_body(),
+            &HeaderMap::new(),
+            vec![primary_provider, secondary_provider],
+            ForwardOptions {
+                max_retries: 0,
+                request_timeout: Some(Duration::from_secs(2)),
+                bypass_circuit_breaker: false,
+            },
+            RectifierConfig::default(),
+        )
+        .await
+        .expect("secondary provider should succeed after primary failure");
+
+    assert_eq!(result.provider.id, "secondary");
+    assert_eq!(primary_hits.count.load(Ordering::SeqCst), 1);
+    assert_eq!(secondary_hits.count.load(Ordering::SeqCst), 1);
+
+    let primary_headers = primary_hits.headers.lock().await;
+    assert_eq!(primary_headers.len(), 1);
+    assert_eq!(primary_headers[0]["user-agent"], "primary-agent/1.0");
+    assert_eq!(primary_headers[0]["x-provider-route"], "primary");
+    drop(primary_headers);
+
+    let secondary_headers = secondary_hits.headers.lock().await;
+    assert_eq!(secondary_headers.len(), 1);
+    assert_eq!(secondary_headers[0]["user-agent"], "secondary-agent/2.0");
+    assert_eq!(secondary_headers[0]["x-provider-route"], "secondary");
+    drop(secondary_headers);
+
+    let primary_bodies = primary_bodies.lock().await;
+    assert_eq!(primary_bodies.len(), 1);
+    assert_eq!(primary_bodies[0]["metadata"]["provider_route"], "primary");
+    drop(primary_bodies);
+
+    let secondary_bodies = secondary_bodies.lock().await;
+    assert_eq!(secondary_bodies.len(), 1);
+    assert_eq!(
+        secondary_bodies[0]["metadata"]["provider_route"],
+        "secondary"
     );
 
     primary_server.abort();

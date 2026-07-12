@@ -2,7 +2,10 @@ use axum::http::HeaderMap;
 use serde_json::Value;
 
 use crate::services::{CodexOAuthService, CopilotAuthService};
-use crate::{app_config::AppType, provider::Provider};
+use crate::{
+    app_config::AppType,
+    provider::{LocalProxyRequestOverrides, Provider},
+};
 
 use super::super::{
     body_filter::filter_private_params_with_whitelist,
@@ -254,7 +257,18 @@ impl RequestForwarder {
         } else {
             mapped_body
         };
-        let filtered_body = prepare_upstream_request_body(request_body);
+        let mut filtered_body = prepare_upstream_request_body(request_body);
+        if !is_copilot {
+            if let Some(overrides) = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+            {
+                if apply_local_proxy_body_overrides(&mut filtered_body, overrides) {
+                    filtered_body = prepare_upstream_request_body(filtered_body);
+                }
+            }
+        }
         let force_identity_encoding = needs_transform
             || codex_responses_to_chat
             || is_streaming_request(&upstream_endpoint, &filtered_body, headers);
@@ -549,6 +563,26 @@ async fn build_request(
         request = request.header("anthropic-version", version);
     }
 
+    let mut replacements = reqwest::header::HeaderMap::new();
+    if !is_copilot {
+        if let Some(user_agent) = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.custom_user_agent_header().ok().flatten())
+        {
+            replacements.insert(reqwest::header::USER_AGENT, user_agent);
+        }
+
+        apply_local_proxy_header_overrides(
+            &mut replacements,
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
+        );
+    }
+    request = request.headers(replacements);
+
     reject_proxy_placeholder_for_managed_account_upstream(&request)?;
     Ok(request.json(request_body))
 }
@@ -722,6 +756,144 @@ fn append_endpoint_to_base_url(base_url: &str, endpoint: &str) -> String {
         "{}/{}",
         base_url.trim_end_matches('/'),
         endpoint.trim_start_matches('/')
+    )
+}
+
+fn apply_local_proxy_body_overrides(
+    body: &mut Value,
+    overrides: &LocalProxyRequestOverrides,
+) -> bool {
+    let Some(override_body) = overrides.body.as_ref() else {
+        return false;
+    };
+
+    if !override_body.is_object() {
+        log::warn!("[LocalProxyOverrides] Ignoring body override because it is not an object");
+        return false;
+    }
+
+    merge_json_override_inner(body, override_body, true)
+}
+
+fn merge_json_override_inner(target: &mut Value, patch: &Value, is_top_level: bool) -> bool {
+    match (target, patch) {
+        (Value::Object(target_map), Value::Object(patch_map)) => {
+            let mut changed = false;
+            for (key, patch_value) in patch_map {
+                if is_top_level && key == "stream" {
+                    log::warn!(
+                        "[LocalProxyOverrides] Ignoring body override for protected field: stream"
+                    );
+                    continue;
+                }
+
+                match target_map.get_mut(key) {
+                    Some(target_value) => {
+                        changed |= merge_json_override_inner(target_value, patch_value, false);
+                    }
+                    None => {
+                        target_map.insert(key.clone(), patch_value.clone());
+                        changed = true;
+                    }
+                }
+            }
+            changed
+        }
+        (target_value, patch_value) => {
+            if target_value == patch_value {
+                false
+            } else {
+                *target_value = patch_value.clone();
+                true
+            }
+        }
+    }
+}
+
+fn apply_local_proxy_header_overrides(
+    headers: &mut reqwest::header::HeaderMap,
+    overrides: Option<&LocalProxyRequestOverrides>,
+) {
+    let Some(header_overrides) = overrides.map(|overrides| &overrides.headers) else {
+        return;
+    };
+
+    for (raw_name, raw_value) in header_overrides {
+        let normalized_name = raw_name.trim().to_ascii_lowercase();
+        if normalized_name.is_empty() {
+            log::warn!("[LocalProxyOverrides] Ignoring header override with empty name");
+            continue;
+        }
+
+        let Ok(name) = reqwest::header::HeaderName::from_bytes(normalized_name.as_bytes()) else {
+            log::warn!("[LocalProxyOverrides] Ignoring invalid header override name: {raw_name}");
+            continue;
+        };
+        if is_protected_local_proxy_override_header(&name) {
+            log::debug!(
+                "[LocalProxyOverrides] Ignoring protected header override: {}",
+                name.as_str()
+            );
+            continue;
+        }
+
+        let Ok(value) = raw_value.parse::<reqwest::header::HeaderValue>() else {
+            log::warn!(
+                "[LocalProxyOverrides] Ignoring invalid header override value for {}",
+                name.as_str()
+            );
+            continue;
+        };
+        headers.insert(name, value);
+    }
+}
+
+fn is_protected_local_proxy_override_header(name: &reqwest::header::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "te"
+            | "trailer"
+            | "upgrade"
+            | "accept-encoding"
+            | "content-type"
+            | "authorization"
+            | "x-api-key"
+            | "x-goog-api-key"
+            | "chatgpt-account-id"
+            | "session_id"
+            | "x-client-request-id"
+            | "x-codex-window-id"
+            | "x-forwarded-host"
+            | "x-forwarded-port"
+            | "x-forwarded-proto"
+            | "forwarded"
+            | "cf-connecting-ip"
+            | "cf-ipcountry"
+            | "cf-ray"
+            | "cf-visitor"
+            | "true-client-ip"
+            | "fastly-client-ip"
+            | "x-azure-clientip"
+            | "x-azure-fdid"
+            | "x-azure-ref"
+            | "akamai-origin-hop"
+            | "x-akamai-config-log-detail"
+            | "x-request-id"
+            | "x-correlation-id"
+            | "x-trace-id"
+            | "x-amzn-trace-id"
+            | "x-b3-traceid"
+            | "x-b3-spanid"
+            | "x-b3-parentspanid"
+            | "x-b3-sampled"
+            | "traceparent"
+            | "tracestate"
     )
 }
 
