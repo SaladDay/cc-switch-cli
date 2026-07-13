@@ -28,6 +28,7 @@ use super::{
         CodexPreviewSection, FormFocus, FormState, GeminiAuthType, McpAddField, PromptMetaField,
         ProviderAddField,
     },
+    icons,
     route::{NavItem, Route},
     theme,
     theme::theme_for,

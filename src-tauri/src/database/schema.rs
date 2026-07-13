@@ -429,11 +429,6 @@ impl Database {
                         Self::migrate_v10_to_v11(conn)?;
                         Self::set_user_version(conn, 11)?;
                     }
-                    11 => {
-                        log::info!("迁移数据库从 v11 到 v12（添加模型路由表和命中统计字段）");
-                        Self::migrate_v11_to_v12(conn)?;
-                        Self::set_user_version(conn, 12)?;
-                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -1363,13 +1358,6 @@ impl Database {
         .map_err(|e| AppError::Database(format!("创建故障转移 Live 配置快照表失败: {e}")))?;
 
         log::info!("v10 -> v11 迁移完成：已添加故障转移 Live 配置快照表");
-        Ok(())
-    }
-
-    /// v11 -> v12 迁移：添加模型路由表和命中统计字段。
-    fn migrate_v11_to_v12(conn: &Connection) -> Result<(), AppError> {
-        Self::create_model_routes_table(conn)?;
-        log::info!("v11 -> v12 迁移完成：已添加模型路由表和命中统计字段");
         Ok(())
     }
 

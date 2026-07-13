@@ -2530,94 +2530,93 @@ pub(super) fn render_settings(
     let claude_plugin_integration = crate::settings::get_enable_claude_plugin_integration();
     let codex_unified_session_history = crate::settings::unify_codex_session_history();
 
-    let rows_data =
-        super::app::SettingsItem::ALL
-            .iter()
-            .map(|item| match item {
-                super::app::SettingsItem::Language => (
-                    texts::tui_settings_header_language().to_string(),
-                    language.display_name().to_string(),
-                ),
-                super::app::SettingsItem::Theme => (
+    let rows_data = super::app::SettingsItem::ALL
+        .iter()
+        .map(|item| match item {
+            super::app::SettingsItem::Language => (
+                texts::tui_settings_header_language().to_string(),
+                language.display_name().to_string(),
+            ),
+            super::app::SettingsItem::Theme => {
+                (
                     texts::tui_settings_theme_label().to_string(),
                     texts::tui_settings_theme_mode_name(
                         crate::cli::tui::theme::configured_theme_mode(),
                     )
                     .to_string(),
-                ),
-                super::app::SettingsItem::Icons => (
-                    texts::tui_settings_icons_label().to_string(),
-                    texts::tui_settings_icon_mode_name(
-                        crate::cli::tui::icons::configured_icon_mode(),
-                    )
+                )
+            }
+            super::app::SettingsItem::Icons => (
+                texts::tui_settings_icons_label().to_string(),
+                texts::tui_settings_icon_mode_name(crate::cli::tui::icons::configured_icon_mode())
                     .to_string(),
+            ),
+            super::app::SettingsItem::VisibleAppsMode => (
+                texts::tui_settings_visible_apps_mode_label().to_string(),
+                match visible_apps_mode {
+                    crate::settings::VisibleAppsMode::Auto => {
+                        texts::tui_settings_visible_apps_mode_auto().to_string()
+                    }
+                    crate::settings::VisibleAppsMode::Manual => {
+                        texts::tui_settings_visible_apps_mode_manual().to_string()
+                    }
+                },
+            ),
+            super::app::SettingsItem::VisibleApps => (
+                texts::tui_settings_visible_apps_label().to_string(),
+                visible_apps_summary(&visible_apps),
+            ),
+            super::app::SettingsItem::OpenClawConfigDir => (
+                texts::tui_settings_openclaw_config_dir_label().to_string(),
+                openclaw_config_dir.clone().unwrap_or_else(|| {
+                    texts::tui_settings_openclaw_config_dir_default_value().to_string()
+                }),
+            ),
+            super::app::SettingsItem::ManagedAccounts => (
+                texts::tui_settings_managed_accounts_title().to_string(),
+                managed_accounts_summary(app),
+            ),
+            super::app::SettingsItem::SkipClaudeOnboarding => (
+                texts::skip_claude_onboarding_label().to_string(),
+                if skip_claude_onboarding {
+                    texts::enabled().to_string()
+                } else {
+                    texts::disabled().to_string()
+                },
+            ),
+            super::app::SettingsItem::ClaudePluginIntegration => (
+                texts::enable_claude_plugin_integration_label().to_string(),
+                if claude_plugin_integration {
+                    texts::enabled().to_string()
+                } else {
+                    texts::disabled().to_string()
+                },
+            ),
+            super::app::SettingsItem::CodexUnifiedSessionHistory => (
+                texts::codex_unified_session_history_label().to_string(),
+                if codex_unified_session_history {
+                    texts::enabled().to_string()
+                } else {
+                    texts::disabled().to_string()
+                },
+            ),
+            super::app::SettingsItem::Proxy => (
+                texts::tui_config_item_proxy().to_string(),
+                format!(
+                    "{}:{}",
+                    data.proxy.configured_listen_address, data.proxy.configured_listen_port,
                 ),
-                super::app::SettingsItem::VisibleAppsMode => (
-                    texts::tui_settings_visible_apps_mode_label().to_string(),
-                    match visible_apps_mode {
-                        crate::settings::VisibleAppsMode::Auto => {
-                            texts::tui_settings_visible_apps_mode_auto().to_string()
-                        }
-                        crate::settings::VisibleAppsMode::Manual => {
-                            texts::tui_settings_visible_apps_mode_manual().to_string()
-                        }
-                    },
-                ),
-                super::app::SettingsItem::VisibleApps => (
-                    texts::tui_settings_visible_apps_label().to_string(),
-                    visible_apps_summary(&visible_apps),
-                ),
-                super::app::SettingsItem::OpenClawConfigDir => (
-                    texts::tui_settings_openclaw_config_dir_label().to_string(),
-                    openclaw_config_dir.clone().unwrap_or_else(|| {
-                        texts::tui_settings_openclaw_config_dir_default_value().to_string()
-                    }),
-                ),
-                super::app::SettingsItem::ManagedAccounts => (
-                    texts::tui_settings_managed_accounts_title().to_string(),
-                    managed_accounts_summary(app),
-                ),
-                super::app::SettingsItem::SkipClaudeOnboarding => (
-                    texts::skip_claude_onboarding_label().to_string(),
-                    if skip_claude_onboarding {
-                        texts::enabled().to_string()
-                    } else {
-                        texts::disabled().to_string()
-                    },
-                ),
-                super::app::SettingsItem::ClaudePluginIntegration => (
-                    texts::enable_claude_plugin_integration_label().to_string(),
-                    if claude_plugin_integration {
-                        texts::enabled().to_string()
-                    } else {
-                        texts::disabled().to_string()
-                    },
-                ),
-                super::app::SettingsItem::CodexUnifiedSessionHistory => (
-                    texts::codex_unified_session_history_label().to_string(),
-                    if codex_unified_session_history {
-                        texts::enabled().to_string()
-                    } else {
-                        texts::disabled().to_string()
-                    },
-                ),
-                super::app::SettingsItem::Proxy => (
-                    texts::tui_config_item_proxy().to_string(),
-                    format!(
-                        "{}:{}",
-                        data.proxy.configured_listen_address, data.proxy.configured_listen_port,
-                    ),
-                ),
-                super::app::SettingsItem::ModelRoutes => (
-                    "模型路由".to_string(),
-                    format!("{} 条规则", data.model_routes.rows.len()),
-                ),
-                super::app::SettingsItem::CheckForUpdates => (
-                    texts::tui_settings_check_for_updates().to_string(),
-                    format!("v{}", env!("CARGO_PKG_VERSION")),
-                ),
-            })
-            .collect::<Vec<_>>();
+            ),
+            super::app::SettingsItem::ModelRoutes => (
+                "模型路由".to_string(),
+                format!("{} 条规则", data.model_routes.rows.len()),
+            ),
+            super::app::SettingsItem::CheckForUpdates => (
+                texts::tui_settings_check_for_updates().to_string(),
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+            ),
+        })
+        .collect::<Vec<_>>();
 
     let label_col_width = field_label_column_width(
         rows_data
