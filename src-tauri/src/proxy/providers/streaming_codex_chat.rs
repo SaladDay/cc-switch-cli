@@ -426,10 +426,14 @@ impl ChatToResponsesState {
         {
             let state = self.tools.entry(chat_index).or_default();
             if let Some(id) = id_delta {
-                state.call_id = id;
+                if !id.is_empty() {
+                    state.call_id = id;
+                }
             }
             if let Some(name) = name_delta {
-                state.name = name;
+                if !name.is_empty() {
+                    state.name = name;
+                }
             }
             if !args_delta.is_empty() {
                 state.arguments.push_str(&args_delta);
