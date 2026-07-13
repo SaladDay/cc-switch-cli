@@ -40,6 +40,8 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
 const TOOL_SEARCH_PROXY_NAME: &str = "tool_search";
 const CUSTOM_TOOL_INPUT_FIELD: &str = "input";
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
+const CUSTOM_TOOL_INPUT_DESCRIPTION: &str = "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.";
+const CUSTOM_TOOL_PRESERVED_METADATA_HEADING: &str = "Original tool definition:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CodexToolKind {
@@ -132,10 +134,7 @@ impl CodexToolContext {
         let Some(name) = responses_tool_name(tool) else {
             return;
         };
-        let description = tool
-            .get("description")
-            .cloned()
-            .unwrap_or_else(|| json!("Custom Codex tool."));
+        let description = json!(responses_custom_tool_description(tool));
         let chat_tool = json!({
             "type": "function",
             "function": {
@@ -146,7 +145,7 @@ impl CodexToolContext {
                     "properties": {
                         CUSTOM_TOOL_INPUT_FIELD: {
                             "type": "string",
-                            "description": "Input to pass to the custom Codex tool."
+                            "description": CUSTOM_TOOL_INPUT_DESCRIPTION
                         }
                     },
                     "required": [CUSTOM_TOOL_INPUT_FIELD]
@@ -1013,6 +1012,20 @@ fn responses_tool_name(tool: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn responses_custom_tool_description(tool: &Value) -> String {
+    let mut description = String::new();
+    description.push_str(CUSTOM_TOOL_PRESERVED_METADATA_HEADING);
+    description.push_str("\n```json\n");
+    description.push_str(&serialize_tool_definition_for_description(tool));
+    description.push_str("\n```");
+    description
+}
+
+fn serialize_tool_definition_for_description(tool: &Value) -> String {
+    // Keep the embedded definition compact and stable across map storage order.
+    canonical_json_string(tool)
 }
 
 fn responses_function_tool_to_chat_tool(tool: &Value, chat_name: &str) -> Option<Value> {
@@ -1883,6 +1896,34 @@ mod tests {
             result["messages"][0]["tool_calls"][0]["function"]["arguments"],
             r#"{"input":"*** Begin Patch\n*** End Patch"}"#
         );
+    }
+
+    #[test]
+    fn responses_request_to_chat_preserves_custom_tool_metadata_in_description() {
+        let input = json!({
+            "model": "gpt-5.4",
+            "tools": [{
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: begin_patch hunk+ end_patch"
+                }
+            }]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let description = result["tools"][0]["function"]["description"]
+            .as_str()
+            .unwrap();
+
+        assert!(description.starts_with("Original tool definition:"));
+        assert!(!description.contains("Original Codex tool definition"));
+        assert!(description.contains("\"type\":\"custom\""));
+        assert!(description.contains("\"format\":"));
+        assert!(description.contains("\"syntax\":\"lark\""));
     }
 
     #[test]
