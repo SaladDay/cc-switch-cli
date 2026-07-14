@@ -2,9 +2,7 @@ use std::io::{self, Stdout};
 use std::sync::Arc;
 
 use crossterm::{
-    cursor,
-    event::{DisableMouseCapture, EnableMouseCapture},
-    execute,
+    cursor, execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 #[cfg(test)]
@@ -83,12 +81,7 @@ fn restore_stdout_best_effort(stdout: &mut Stdout) -> Result<(), AppError> {
         record_err(&mut first_err, e);
     }
 
-    if let Err(e) = execute!(
-        stdout,
-        cursor::Show,
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    ) {
+    if let Err(e) = execute!(stdout, cursor::Show, LeaveAlternateScreen) {
         record_err(&mut first_err, e);
     }
 
@@ -111,12 +104,7 @@ impl TuiTerminal {
     pub fn new() -> Result<Self, AppError> {
         let mut stdout = io::stdout();
         enable_raw_mode().map_err(terminal_error)?;
-        if let Err(e) = execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            cursor::Hide
-        ) {
+        if let Err(e) = execute!(stdout, EnterAlternateScreen, cursor::Hide) {
             let _ = restore_stdout_best_effort(&mut stdout);
             return Err(terminal_error(e));
         }
@@ -251,12 +239,8 @@ impl TuiTerminal {
 
         match &mut self.terminal {
             TerminalHandle::Stdout(terminal) => {
-                if let Err(e) = execute!(
-                    terminal.backend_mut(),
-                    cursor::Show,
-                    LeaveAlternateScreen,
-                    DisableMouseCapture
-                ) {
+                if let Err(e) = execute!(terminal.backend_mut(), cursor::Show, LeaveAlternateScreen)
+                {
                     record_err(&mut first_err, e);
                 }
                 let _ = terminal.show_cursor();
@@ -296,12 +280,8 @@ impl TuiTerminal {
 
         match &mut self.terminal {
             TerminalHandle::Stdout(terminal) => {
-                if let Err(e) = execute!(
-                    terminal.backend_mut(),
-                    EnterAlternateScreen,
-                    EnableMouseCapture,
-                    cursor::Hide
-                ) {
+                if let Err(e) = execute!(terminal.backend_mut(), EnterAlternateScreen, cursor::Hide)
+                {
                     record_err(&mut first_err, e);
                 }
 
