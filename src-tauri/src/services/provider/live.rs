@@ -26,6 +26,9 @@ pub(super) enum LiveSnapshot {
     OpenCode {
         config: Option<Value>,
     },
+    Hermes {
+        config_source: Option<String>,
+    },
     OpenClaw {
         config_source: Option<String>,
     },
@@ -84,6 +87,14 @@ impl LiveSnapshot {
                 let path = crate::opencode_config::get_opencode_config_path();
                 if let Some(value) = config {
                     write_json_file(&path, value)?;
+                } else if path.exists() {
+                    delete_file(&path)?;
+                }
+            }
+            LiveSnapshot::Hermes { config_source } => {
+                let path = crate::hermes_config::get_hermes_config_path();
+                if let Some(source) = config_source {
+                    crate::hermes_config::write_hermes_config_source(source)?;
                 } else if path.exists() {
                     delete_file(&path)?;
                 }
@@ -155,11 +166,63 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
             };
             Ok(LiveSnapshot::OpenCode { config })
         }
+        AppType::Hermes => {
+            let config_source = crate::hermes_config::read_hermes_config_source()?;
+            Ok(LiveSnapshot::Hermes { config_source })
+        }
         AppType::OpenClaw => {
             let config_source = crate::openclaw_config::read_openclaw_config_source()?;
             Ok(LiveSnapshot::OpenClaw { config_source })
         }
     }
+}
+
+pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+    let providers = crate::hermes_config::get_providers()?;
+    if providers.is_empty() {
+        return Ok(0);
+    }
+
+    let mut imported = 0usize;
+    let existing_ids = state.db.get_provider_ids("hermes")?;
+
+    for (id, settings_config) in providers {
+        if id.trim().is_empty() {
+            log::warn!("Skipping Hermes provider with empty id");
+            continue;
+        }
+        if existing_ids.contains(&id) {
+            log::debug!("Hermes provider '{id}' already exists in database, skipping");
+            continue;
+        }
+        if !settings_config.is_object() {
+            log::warn!("Skipping Hermes provider '{id}': config is not an object");
+            continue;
+        }
+
+        let display_name = settings_config
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&id)
+            .to_string();
+        let mut provider = Provider::with_id(id.clone(), display_name, settings_config, None);
+        provider.meta = Some(ProviderMeta {
+            live_config_managed: Some(true),
+            ..Default::default()
+        });
+
+        if let Err(err) = state.db.save_provider("hermes", &provider) {
+            log::warn!("Failed to import Hermes provider '{id}': {err}");
+            continue;
+        }
+
+        imported += 1;
+        log::info!("Imported Hermes provider '{id}' from live config");
+    }
+
+    Ok(imported)
 }
 
 pub fn sync_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
@@ -220,11 +283,9 @@ pub fn sync_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppE
                     existing.id = id.clone();
                     provider_changed = true;
                 }
-                if is_auto_mirrored_openclaw_snapshot(existing) {
-                    if existing.name != id {
-                        existing.name = id.clone();
-                        provider_changed = true;
-                    }
+                if is_auto_mirrored_openclaw_snapshot(existing) && existing.name != id {
+                    existing.name = id.clone();
+                    provider_changed = true;
                 }
                 if existing.settings_config != live_provider {
                     existing.settings_config = live_provider;
@@ -260,7 +321,7 @@ pub(super) fn is_auto_mirrored_openclaw_snapshot(provider: &Provider) -> bool {
         && provider
             .meta
             .as_ref()
-            .map_or(true, is_default_openclaw_common_config_marker)
+            .is_none_or(is_default_openclaw_common_config_marker)
         && provider.icon.is_none()
         && provider.icon_color.is_none()
         && !provider.in_failover_queue
@@ -286,5 +347,107 @@ fn is_default_openclaw_common_config_marker(meta: &ProviderMeta) -> bool {
 }
 
 pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
-    sync_openclaw_providers_from_live(state)
+    let providers = crate::openclaw_config::get_typed_providers()?;
+    if providers.is_empty() {
+        return Ok(0);
+    }
+
+    let mut imported = 0usize;
+    let existing_ids = state.db.get_provider_ids("openclaw")?;
+
+    for (id, config) in providers {
+        if id.trim().is_empty() {
+            log::warn!("Skipping OpenClaw provider with empty id");
+            continue;
+        }
+        if config.models.is_empty() {
+            log::warn!("Skipping OpenClaw provider '{id}': no models defined");
+            continue;
+        }
+        if existing_ids.contains(&id) {
+            log::debug!("OpenClaw provider '{id}' already exists in database, skipping");
+            continue;
+        }
+
+        let settings_config = match serde_json::to_value(&config) {
+            Ok(value) => value,
+            Err(err) => {
+                log::warn!("Failed to serialize OpenClaw provider '{id}': {err}");
+                continue;
+            }
+        };
+        let display_name = config
+            .models
+            .first()
+            .and_then(|model| model.name.clone())
+            .unwrap_or_else(|| id.clone());
+        let mut provider = Provider::with_id(id.clone(), display_name, settings_config, None);
+        provider.meta = Some(ProviderMeta {
+            live_config_managed: Some(true),
+            ..Default::default()
+        });
+
+        if let Err(err) = state.db.save_provider("openclaw", &provider) {
+            log::warn!("Failed to import OpenClaw provider '{id}': {err}");
+            continue;
+        }
+
+        {
+            let mut config = state.config.write().map_err(AppError::from)?;
+            config.ensure_app(&AppType::OpenClaw);
+            if let Some(manager) = config.get_manager_mut(&AppType::OpenClaw) {
+                manager.providers.insert(id.clone(), provider);
+            }
+        }
+
+        imported += 1;
+        log::info!("Imported OpenClaw provider '{id}' from live config");
+    }
+
+    Ok(imported)
+}
+
+pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+    let providers = crate::opencode_config::get_typed_providers()?;
+    if providers.is_empty() {
+        return Ok(0);
+    }
+
+    let mut imported = 0usize;
+    let existing_ids = state.db.get_provider_ids("opencode")?;
+
+    for (id, config) in providers {
+        if existing_ids.contains(&id) {
+            log::debug!("OpenCode provider '{id}' already exists in database, skipping");
+            continue;
+        }
+
+        let settings_config = match serde_json::to_value(&config) {
+            Ok(value) => value,
+            Err(err) => {
+                log::warn!("Failed to serialize OpenCode provider '{id}': {err}");
+                continue;
+            }
+        };
+        let mut provider = Provider::with_id(
+            id.clone(),
+            config.name.clone().unwrap_or_else(|| id.clone()),
+            settings_config,
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            live_config_managed: Some(true),
+            ..Default::default()
+        });
+
+        if let Err(err) = state.db.save_provider("opencode", &provider) {
+            log::warn!("Failed to import OpenCode provider '{id}': {err}");
+            continue;
+        }
+
+        imported += 1;
+        log::info!("Imported OpenCode provider '{id}' from live config");
+    }
+
+    Ok(imported)
 }

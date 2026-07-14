@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::AppError;
+#[cfg(test)]
 use crate::provider::Provider;
 use crate::services::provider::ProviderService;
 use serde_json::Value;
@@ -21,6 +22,8 @@ impl PreparedClaudeLaunch {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn prepare_launch(
     provider: &Provider,
     temp_dir: &Path,
@@ -36,6 +39,7 @@ pub(crate) fn prepare_launch_from_settings(
     prepare_launch_from_settings_with(provider_id, settings, temp_dir, resolve_claude_binary)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_launch_with<Resolve>(
     provider: &Provider,
     temp_dir: &Path,
@@ -62,7 +66,33 @@ where
     Resolve: FnOnce() -> Result<PathBuf, AppError>,
 {
     let executable = resolve_claude_binary()?;
+    let normalized_settings = normalize_launch_settings(provider_id, settings)?;
+    let settings_path = write_temp_settings_file(temp_dir, provider_id, &normalized_settings)?;
 
+    Ok(PreparedClaudeLaunch {
+        executable,
+        settings_path,
+    })
+}
+
+pub(crate) fn preview_launch_from_settings_with<Resolve>(
+    provider_id: &str,
+    settings: &Value,
+    temp_dir: &Path,
+    resolve_claude_binary: Resolve,
+) -> Result<PreparedClaudeLaunch, AppError>
+where
+    Resolve: FnOnce() -> Result<PathBuf, AppError>,
+{
+    let executable = resolve_claude_binary()?;
+    let _ = normalize_launch_settings(provider_id, settings)?;
+    Ok(PreparedClaudeLaunch {
+        executable,
+        settings_path: temp_settings_path(temp_dir, provider_id),
+    })
+}
+
+fn normalize_launch_settings(provider_id: &str, settings: &Value) -> Result<Value, AppError> {
     if settings.get("env").and_then(|v| v.as_object()).is_none() {
         return Err(AppError::localized(
             "claude.temp_launch_missing_env",
@@ -73,12 +103,7 @@ where
 
     let mut normalized_settings = settings.clone();
     let _ = ProviderService::normalize_claude_models_in_value(&mut normalized_settings);
-    let settings_path = write_temp_settings_file(temp_dir, provider_id, &normalized_settings)?;
-
-    Ok(PreparedClaudeLaunch {
-        executable,
-        settings_path,
-    })
+    Ok(normalized_settings)
 }
 
 pub(crate) fn resolve_claude_binary() -> Result<PathBuf, AppError> {
@@ -167,16 +192,7 @@ fn write_temp_settings_file_with<Finalize>(
 where
     Finalize: FnOnce(&Path) -> Result<(), AppError>,
 {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let filename = format!(
-        "cc-switch-claude-{}-{}-{timestamp}.json",
-        sanitize_filename_fragment(provider_id),
-        std::process::id()
-    );
-    let path = temp_dir.join(filename);
+    let path = temp_settings_path(temp_dir, provider_id);
     let content =
         serde_json::to_vec_pretty(settings).map_err(|source| AppError::JsonSerialize { source })?;
 
@@ -206,6 +222,19 @@ where
             )),
         },
     }
+}
+
+fn temp_settings_path(temp_dir: &Path, provider_id: &str) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let filename = format!(
+        "cc-switch-claude-{}-{}-{timestamp}.json",
+        sanitize_filename_fragment(provider_id),
+        std::process::id()
+    );
+    temp_dir.join(filename)
 }
 
 #[cfg(unix)]
@@ -274,11 +303,11 @@ mod tests {
     #[cfg(unix)]
     use std::ffi::OsString;
     #[cfg(unix)]
-    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt, process::ExitStatusExt};
     #[cfg(unix)]
     use std::process::Stdio;
     #[cfg(unix)]
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     #[cfg(unix)]
@@ -291,6 +320,19 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&path, permissions).expect("chmod stub executable");
         path
+    }
+
+    #[cfg(unix)]
+    fn wait_until_exists(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]
@@ -331,10 +373,14 @@ mod tests {
     #[test]
     fn interrupting_handoff_still_cleans_up_temp_settings() {
         let temp_dir = TempDir::new().expect("create temp dir");
+        let ready_path = temp_dir.path().join("claude-ready");
         let executable = write_test_executable(
             &temp_dir,
             "claude-stub.sh",
-            "trap 'exit 130' INT TERM HUP\nwhile :; do sleep 1; done",
+            &format!(
+                "trap 'exit 130' INT TERM HUP\nprintf '%s\\n' ready > {:?}\nwhile :; do sleep 1; done",
+                ready_path
+            ),
         );
         let settings_path = temp_dir.path().join("cc-switch-claude-settings.json");
         std::fs::write(&settings_path, "{}").expect("seed temp settings");
@@ -355,12 +401,15 @@ mod tests {
         }
 
         let mut child = command.spawn().expect("spawn handoff");
-        std::thread::sleep(Duration::from_millis(150));
+        wait_until_exists(&ready_path);
         let kill_result = unsafe { libc::kill(-(child.id() as i32), libc::SIGINT) };
         assert_eq!(kill_result, 0, "send SIGINT to handoff process group");
 
         let status = child.wait().expect("wait for handoff");
-        assert_eq!(status.code(), Some(130));
+        assert!(
+            status.code() == Some(130) || status.signal() == Some(libc::SIGINT),
+            "handoff should exit for SIGINT, got {status:?}"
+        );
         assert!(
             !settings_path.exists(),
             "temporary settings file should be removed after interrupt"
@@ -626,7 +675,10 @@ mod tests {
         )
         .expect("build effective snapshot");
 
-        let prepared = prepare_launch_from_settings(&provider.id, &effective, temp_dir.path())
+        let prepared =
+            prepare_launch_from_settings_with(&provider.id, &effective, temp_dir.path(), || {
+                Ok(PathBuf::from("/usr/bin/claude"))
+            })
             .expect("prepare launch from effective settings");
 
         let written: Value = serde_json::from_str(

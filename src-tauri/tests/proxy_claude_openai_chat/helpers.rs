@@ -29,6 +29,11 @@ pub(crate) async fn bind_test_listener() -> tokio::net::TcpListener {
     );
 }
 
+pub(crate) async fn set_claude_proxy_port_to_ephemeral(db: &Arc<Database>) {
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct UpstreamState {
     pub(crate) request_body: Arc<Mutex<Option<Value>>>,
@@ -94,6 +99,32 @@ pub(crate) async fn handle_chat_completions(
                 "prompt_tokens": 11,
                 "completion_tokens": 7,
                 "total_tokens": 18
+            }
+        })),
+    )
+}
+
+pub(crate) async fn handle_chat_completions_empty_choices(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    record_upstream_request(&state, &headers, body).await;
+
+    // Mirrors NVIDIA NIM's z-ai/glm-5.2 usage-only tail body (#325).
+    (
+        StatusCode::OK,
+        [("x-upstream-trace", "claude-openai-chat")],
+        Json(json!({
+            "id": "chatcmpl-empty",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "z-ai/glm-5.2",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 42,
+                "completion_tokens": 0,
+                "total_tokens": 42
             }
         })),
     )
@@ -312,15 +343,15 @@ pub(crate) async fn capture_openai_chat_upstream_body(
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(

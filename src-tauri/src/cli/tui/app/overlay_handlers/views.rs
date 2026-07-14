@@ -13,14 +13,11 @@ impl App {
         match &self.overlay {
             Overlay::CommonSnippetPicker { selected } => {
                 let app_type = snippet_picker_app_type(*selected);
-                self.open_common_snippet_editor(app_type, data, None);
-                Some(Action::None)
-            }
-            Overlay::CommonSnippetView { app_type, view } => {
                 self.open_common_snippet_editor(
-                    app_type.clone(),
+                    app_type,
                     data,
-                    Some(view.lines.join("\n")),
+                    None,
+                    CommonSnippetViewSource::Global,
                 );
                 Some(Action::None)
             }
@@ -45,9 +42,6 @@ impl App {
         if let Some(action) = self.handle_common_snippet_picker_key(key, data) {
             return Some(action);
         }
-        if let Some(action) = self.handle_common_snippet_view_key(key) {
-            return Some(action);
-        }
         if let Some(action) = self.handle_loading_overlay_key(key) {
             return Some(action);
         }
@@ -64,12 +58,26 @@ impl App {
     }
 
     fn handle_help_overlay_key(&mut self, key: KeyEvent) -> Option<Action> {
-        if !matches!(self.overlay, Overlay::Help) {
+        if !matches!(self.overlay, Overlay::Help(_)) {
             return None;
         }
         Some(match key.code {
-            KeyCode::Esc | KeyCode::Char('?') => {
-                self.overlay = Overlay::None;
+            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('？') => {
+                self.close_overlay();
+                Action::None
+            }
+            KeyCode::Up => {
+                if let Overlay::Help(help) = &mut self.overlay {
+                    help.scroll = help.scroll.saturating_sub(1);
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                if let Overlay::Help(help) = &mut self.overlay {
+                    if !help.content.lines.is_empty() {
+                        help.scroll = (help.scroll + 1).min(help.content.lines.len() - 1);
+                    }
+                }
                 Action::None
             }
             _ => Action::None,
@@ -127,7 +135,7 @@ impl App {
                 let has_action = matches!(
                     &self.overlay,
                     Overlay::TextView(TextViewState {
-                        action: Some(TextViewAction::ProxyToggleTakeover { .. }),
+                        action: Some(TextViewAction::ProxyToggleManagedRoute),
                         ..
                     })
                 );
@@ -175,37 +183,12 @@ impl App {
             }
             KeyCode::Enter => {
                 let app_type = snippet_picker_app_type(*selected);
-                self.open_common_snippet_view(app_type, data);
-                Action::None
-            }
-            _ => Action::None,
-        })
-    }
-
-    fn handle_common_snippet_view_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let Overlay::CommonSnippetView { app_type, view } = &mut self.overlay else {
-            return None;
-        };
-
-        Some(match key.code {
-            KeyCode::Char('a') => Action::ConfigCommonSnippetApply {
-                app_type: app_type.clone(),
-            },
-            KeyCode::Char('c') => Action::ConfigCommonSnippetClear {
-                app_type: app_type.clone(),
-            },
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.overlay = Overlay::None;
-                Action::None
-            }
-            KeyCode::Up => {
-                view.scroll = view.scroll.saturating_sub(1);
-                Action::None
-            }
-            KeyCode::Down => {
-                if !view.lines.is_empty() {
-                    view.scroll = (view.scroll + 1).min(view.lines.len() - 1);
-                }
+                self.open_common_snippet_editor(
+                    app_type,
+                    data,
+                    None,
+                    CommonSnippetViewSource::Global,
+                );
                 Action::None
             }
             _ => Action::None,

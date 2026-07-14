@@ -9,10 +9,11 @@ use crate::settings::{
 use super::super::app::{App, ConfirmAction, ConfirmOverlay, LoadingKind, Overlay, ToastKind};
 use super::super::data::{load_state, UiData};
 use super::super::runtime_actions::app_display_name;
+use super::super::CacheInvalidation;
 use super::types::{
-    build_stream_check_result_lines, LocalEnvMsg, ModelFetchMsg, ProxyMsg, QuotaMsg,
-    RequestTracker, SkillsMsg, SpeedtestMsg, StreamCheckMsg, UpdateMsg, WebDavDone, WebDavErr,
-    WebDavMsg, WebDavReqKind,
+    build_stream_check_result_lines, LocalEnvMsg, ManagedAuthMsg, ModelFetchMsg, ProxyMsg,
+    QuotaMsg, RequestTracker, SessionMsg, SkillsMsg, SpeedtestMsg, StreamCheckMsg, UpdateMsg,
+    WebDavDone, WebDavErr, WebDavMsg, WebDavReqKind,
 };
 
 pub(crate) fn handle_stream_check_msg(app: &mut App, msg: StreamCheckMsg) {
@@ -105,6 +106,188 @@ pub(crate) fn handle_local_env_msg(app: &mut App, msg: LocalEnvMsg) {
     }
 }
 
+pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
+    match msg {
+        SessionMsg::ScanCachedSnapshot { request_id, rows } => {
+            // Stale first paint: show the cached list immediately while the
+            // revalidating scan continues. Keep the refresh indicator on.
+            if app.sessions.apply_cached_snapshot(request_id, rows) {
+                let visible_len = crate::cli::tui::app::visible_sessions_for_state(
+                    &app.filter,
+                    &app.app_type,
+                    app.sessions.show_all_providers,
+                    &app.sessions.rows,
+                    app.sessions.detail_key.as_deref(),
+                    app.sessions.messages_loaded,
+                    &app.sessions.messages,
+                    app.sessions.deep_search_query.as_deref(),
+                    &app.sessions.deep_search_results,
+                )
+                .len();
+                if visible_len == 0 {
+                    app.sessions.selected_idx = 0;
+                } else {
+                    app.sessions.selected_idx = app.sessions.selected_idx.min(visible_len - 1);
+                }
+                if app.sessions.deep_search_query.is_some() {
+                    app.pending_deep_search = app.sessions.deep_search_query.clone();
+                }
+            }
+        }
+        SessionMsg::ScanPartial {
+            request_id,
+            provider_id,
+            rows,
+        } => {
+            // Progressive fill: one provider's fresh list replaces its rows
+            // while the scan continues; the refresh indicator stays on.
+            if app
+                .sessions
+                .apply_partial_scan(request_id, &provider_id, rows)
+            {
+                let visible_len = crate::cli::tui::app::visible_sessions_for_state(
+                    &app.filter,
+                    &app.app_type,
+                    app.sessions.show_all_providers,
+                    &app.sessions.rows,
+                    app.sessions.detail_key.as_deref(),
+                    app.sessions.messages_loaded,
+                    &app.sessions.messages,
+                    app.sessions.deep_search_query.as_deref(),
+                    &app.sessions.deep_search_results,
+                )
+                .len();
+                if visible_len == 0 {
+                    app.sessions.selected_idx = 0;
+                } else {
+                    app.sessions.selected_idx = app.sessions.selected_idx.min(visible_len - 1);
+                }
+            }
+        }
+        SessionMsg::ScanFinished { request_id, result } => match result {
+            Ok(rows) => {
+                if app.sessions.finish_scan(request_id, rows) {
+                    let visible_len = crate::cli::tui::app::visible_sessions_for_state(
+                        &app.filter,
+                        &app.app_type,
+                        app.sessions.show_all_providers,
+                        &app.sessions.rows,
+                        app.sessions.detail_key.as_deref(),
+                        app.sessions.messages_loaded,
+                        &app.sessions.messages,
+                        app.sessions.deep_search_query.as_deref(),
+                        &app.sessions.deep_search_results,
+                    )
+                    .len();
+                    if visible_len == 0 {
+                        app.sessions.selected_idx = 0;
+                    } else {
+                        app.sessions.selected_idx = app.sessions.selected_idx.min(visible_len - 1);
+                    }
+                    // If a deep search is active, the freshly-scanned rows may
+                    // contain sessions the previous search snapshot missed (e.g.
+                    // the scan was still in flight when the search fired, or the
+                    // user entered "all providers" mode). Re-run the search over
+                    // the new rows via the debounce/firing path.
+                    if app.sessions.deep_search_query.is_some() {
+                        app.pending_deep_search = app.sessions.deep_search_query.clone();
+                    }
+                }
+            }
+            Err(error) => {
+                app.sessions.fail_scan(request_id, error.clone());
+                app.push_toast(
+                    texts::tui_sessions_toast_refresh_failed(&error),
+                    ToastKind::Warning,
+                );
+            }
+        },
+        SessionMsg::MessagesLoaded {
+            request_id,
+            key,
+            result,
+        } => match result {
+            Ok(messages) => {
+                if app.sessions.finish_message_load(request_id, &key, messages) {
+                    crate::cli::tui::app::clamp_session_message_selection(&mut app.sessions);
+                }
+            }
+            Err(error) => {
+                app.sessions
+                    .fail_message_load(request_id, &key, error.clone());
+                app.push_toast(
+                    texts::tui_sessions_toast_messages_failed(&error),
+                    ToastKind::Warning,
+                );
+            }
+        },
+        SessionMsg::DeleteFinished {
+            request_id,
+            key,
+            result,
+        } => match result {
+            Ok(()) => {
+                // 删除与在途扫描竞态：删除成功（文件已落盘删除）时若仍有扫描在跑，
+                // 登记 UI tombstone。扫描线程可能在删除前就读到了该会话，其后到达
+                // 的 partial/finished 会带着旧列表把它放回；tombstone 让 apply_*/
+                // finish_scan 过滤掉该行（finish_scan 终态清空 tombstone）。
+                // 注：在途 revalidate 仍可能把我们刚 purge 的 sidecar 行重新 upsert
+                // 回去，不跨线程强行阻止——(a) 此 tombstone 保证该行不渲染；(b) 下一轮
+                // revalidate 发现文件缺失会走 deletes 自愈 sidecar。
+                if app.sessions.scan_active.is_some() {
+                    app.sessions.scan_tombstones.insert(key.clone());
+                }
+                if app.sessions.finish_delete(request_id, &key) {
+                    let visible_len = crate::cli::tui::app::visible_sessions_for_state(
+                        &app.filter,
+                        &app.app_type,
+                        app.sessions.show_all_providers,
+                        &app.sessions.rows,
+                        app.sessions.detail_key.as_deref(),
+                        app.sessions.messages_loaded,
+                        &app.sessions.messages,
+                        app.sessions.deep_search_query.as_deref(),
+                        &app.sessions.deep_search_results,
+                    )
+                    .len();
+                    if visible_len == 0 {
+                        app.sessions.selected_idx = 0;
+                    } else {
+                        app.sessions.selected_idx = app.sessions.selected_idx.min(visible_len - 1);
+                    }
+                    app.push_toast(
+                        texts::tui_sessions_toast_delete_finished(),
+                        ToastKind::Success,
+                    );
+                }
+            }
+            Err(error) => {
+                app.sessions.fail_delete(request_id);
+                app.push_toast(
+                    texts::tui_sessions_toast_delete_failed(&error),
+                    ToastKind::Warning,
+                );
+            }
+        },
+        SessionMsg::SearchFinished { request_id, result } => {
+            // Only apply if this is the latest search request
+            if app.sessions.deep_search_active != Some(request_id) {
+                return;
+            }
+            app.sessions.deep_search_active = None;
+            match result {
+                Ok(hits) => {
+                    app.sessions.deep_search_results = hits;
+                    app.sessions.selected_idx = 0;
+                }
+                Err(_) => {
+                    app.sessions.deep_search_results.clear();
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn handle_quota_msg(app: &mut App, data: &mut UiData, msg: QuotaMsg) {
     match msg {
         QuotaMsg::Finished { target, result } => {
@@ -178,25 +361,223 @@ pub(crate) fn handle_model_fetch_msg(app: &mut App, msg: ModelFetchMsg) {
     }
 }
 
+pub(crate) fn handle_managed_auth_msg(app: &mut App, msg: ManagedAuthMsg) {
+    match msg {
+        ManagedAuthMsg::Status {
+            auth_provider,
+            result,
+        } => {
+            app.managed_auth_loading = false;
+            match result {
+                Ok(status) => {
+                    app.managed_auth_status = Some(status);
+                }
+                Err(err) => {
+                    app.push_toast(
+                        texts::tui_toast_managed_auth_refresh_failed(&err),
+                        ToastKind::Warning,
+                    );
+                    if app
+                        .managed_auth_status
+                        .as_ref()
+                        .is_none_or(|status| status.provider != auth_provider)
+                    {
+                        app.managed_auth_status = None;
+                    }
+                }
+            }
+        }
+        ManagedAuthMsg::LoginStarted {
+            auth_provider,
+            result,
+        } => {
+            app.managed_auth_loading = false;
+            match result {
+                Ok(device) => {
+                    let now = app.tick;
+                    let expires_ticks = seconds_to_tui_ticks(device.expires_in).max(1);
+                    let interval_ticks = seconds_to_tui_ticks(device.interval).max(1);
+                    let user_code = device.user_code.clone();
+                    let verification_uri = device.verification_uri.clone();
+                    app.managed_auth_login = Some(crate::cli::tui::app::ManagedAuthLoginState {
+                        auth_provider,
+                        device_code: device.device_code,
+                        expires_at_tick: now.saturating_add(expires_ticks),
+                        poll_interval_ticks: interval_ticks,
+                        next_poll_tick: now,
+                    });
+                    app.push_persistent_toast(
+                        texts::tui_toast_managed_auth_login_in_progress(
+                            &user_code,
+                            &verification_uri,
+                        ),
+                        ToastKind::Info,
+                    );
+                }
+                Err(err) => {
+                    app.managed_auth_login = None;
+                    app.clear_managed_auth_login_toast();
+                    app.clear_managed_auth_cancel_confirm();
+                    app.push_toast(
+                        texts::tui_toast_managed_auth_login_failed(&err),
+                        ToastKind::Error,
+                    );
+                }
+            }
+        }
+        ManagedAuthMsg::LoginPolled {
+            auth_provider,
+            device_code,
+            result,
+        } => match result {
+            Ok(Some(account)) => {
+                if app
+                    .managed_auth_login
+                    .as_ref()
+                    .is_none_or(|login| login.device_code != device_code)
+                {
+                    return;
+                }
+                app.managed_auth_login = None;
+                app.managed_auth_loading = false;
+                app.clear_managed_auth_login_toast();
+                app.clear_managed_auth_cancel_confirm();
+                if let Some(status) = app.managed_auth_status.as_mut() {
+                    if status.provider == auth_provider {
+                        status.authenticated = true;
+                        if status.default_account_id.is_none() {
+                            status.default_account_id = Some(account.id.clone());
+                        }
+                        status.accounts.retain(|row| row.id != account.id);
+                        status.accounts.insert(0, account.clone());
+                    }
+                } else {
+                    app.managed_auth_status = Some(crate::services::ManagedAuthStatus {
+                        provider: auth_provider,
+                        authenticated: true,
+                        default_account_id: Some(account.id.clone()),
+                        migration_error: None,
+                        accounts: vec![account.clone()],
+                    });
+                }
+                app.settings_managed_accounts_idx = 0;
+                app.push_toast(
+                    texts::tui_toast_managed_auth_login_finished(&account.login),
+                    ToastKind::Success,
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                if app
+                    .managed_auth_login
+                    .as_ref()
+                    .is_none_or(|login| login.device_code != device_code)
+                {
+                    return;
+                }
+                app.managed_auth_login = None;
+                app.managed_auth_loading = false;
+                app.clear_managed_auth_login_toast();
+                app.clear_managed_auth_cancel_confirm();
+                app.push_toast(
+                    texts::tui_toast_managed_auth_login_failed(&err),
+                    ToastKind::Error,
+                );
+            }
+        },
+        ManagedAuthMsg::DefaultSet {
+            auth_provider: _,
+            account_id: _,
+            result,
+        } => {
+            app.managed_auth_loading = false;
+            match result {
+                Ok(status) => {
+                    app.managed_auth_status = Some(status);
+                    app.push_toast(
+                        texts::tui_toast_managed_auth_default_updated(),
+                        ToastKind::Success,
+                    );
+                }
+                Err(err) => {
+                    app.push_toast(
+                        texts::tui_toast_managed_auth_default_failed(&err),
+                        ToastKind::Error,
+                    );
+                }
+            }
+        }
+        ManagedAuthMsg::Removed {
+            auth_provider: _,
+            account_id,
+            result,
+        } => {
+            app.managed_auth_loading = false;
+            match result {
+                Ok(status) => {
+                    app.clear_codex_oauth_binding_if_removed(&account_id);
+                    app.managed_auth_status = Some(status);
+                    app.push_toast(
+                        texts::tui_toast_managed_auth_account_removed(),
+                        ToastKind::Success,
+                    );
+                }
+                Err(err) => {
+                    app.push_toast(
+                        texts::tui_toast_managed_auth_remove_failed(&err),
+                        ToastKind::Error,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn seconds_to_tui_ticks(seconds: u64) -> u64 {
+    let millis = seconds.saturating_mul(1000);
+    millis.div_ceil(crate::cli::tui::TUI_TICK_RATE.as_millis() as u64)
+}
+
 pub(crate) fn handle_skills_msg(
     app: &mut App,
     data: &mut UiData,
     msg: SkillsMsg,
-) -> Result<(), AppError> {
+) -> Result<CacheInvalidation, AppError> {
+    let mut invalidation = CacheInvalidation::None;
     match msg {
-        SkillsMsg::DiscoverFinished { query, result } => match result {
+        SkillsMsg::DiscoverFinished {
+            request_id,
+            query,
+            source,
+            result,
+        } => match result {
             Ok(skills) => {
+                if app.skills_discover_active_request_id != Some(request_id) {
+                    return Ok(invalidation);
+                }
                 app.overlay = Overlay::None;
+                app.skills_discover_loading = false;
+                app.skills_discover_active_request_id = None;
                 app.skills_discover_results = skills;
                 app.skills_discover_idx = 0;
                 app.skills_discover_query = query.clone();
+                app.skills_discover_source = source;
+                app.skills_discover_cache.insert(
+                    (source, query.trim().to_lowercase()),
+                    app.skills_discover_results.clone(),
+                );
                 app.push_toast(
                     texts::tui_toast_skills_discover_finished(app.skills_discover_results.len()),
                     ToastKind::Success,
                 );
             }
             Err(err) => {
+                if app.skills_discover_active_request_id != Some(request_id) {
+                    return Ok(invalidation);
+                }
                 app.overlay = Overlay::None;
+                app.skills_discover_loading = false;
+                app.skills_discover_active_request_id = None;
                 app.push_toast(
                     texts::tui_toast_skills_discover_failed(&err),
                     ToastKind::Error,
@@ -207,10 +588,22 @@ pub(crate) fn handle_skills_msg(
             Ok(installed) => {
                 app.overlay = Overlay::None;
                 *data = UiData::load(&app.app_type)?;
+                invalidation = CacheInvalidation::DataReloaded;
 
                 for row in app.skills_discover_results.iter_mut() {
-                    if row.directory.eq_ignore_ascii_case(&installed.directory) {
+                    if row.key == installed.id
+                        || row.directory.eq_ignore_ascii_case(&installed.directory)
+                    {
                         row.installed = true;
+                    }
+                }
+                for rows in app.skills_discover_cache.values_mut() {
+                    for row in rows.iter_mut() {
+                        if row.key == installed.id
+                            || row.directory.eq_ignore_ascii_case(&installed.directory)
+                        {
+                            row.installed = true;
+                        }
                     }
                 }
 
@@ -229,7 +622,7 @@ pub(crate) fn handle_skills_msg(
         },
     }
 
-    Ok(())
+    Ok(invalidation)
 }
 
 fn is_webdav_loading_overlay(app: &App) -> bool {
@@ -247,7 +640,7 @@ pub(crate) fn handle_webdav_msg(
     data: &mut UiData,
     webdav_loading: &mut RequestTracker,
     msg: WebDavMsg,
-) -> Result<(), AppError> {
+) -> Result<CacheInvalidation, AppError> {
     match msg {
         WebDavMsg::Finished {
             request_id,
@@ -256,12 +649,22 @@ pub(crate) fn handle_webdav_msg(
         } => match result {
             Ok(done) => {
                 if webdav_loading.is_stale(request_id) {
-                    return Ok(());
+                    return Ok(CacheInvalidation::None);
                 }
 
                 if webdav_loading.finish_if_active(request_id) && is_webdav_loading_overlay(app) {
                     app.overlay = Overlay::None;
                 }
+
+                let done_invalidation = match &done {
+                    WebDavDone::Downloaded { decision, .. }
+                        if !matches!(decision, SyncDecision::V1MigrationNeeded) =>
+                    {
+                        CacheInvalidation::AppStateRecreated
+                    }
+                    WebDavDone::V1Migrated { .. } => CacheInvalidation::AppStateRecreated,
+                    _ => CacheInvalidation::DataReloaded,
+                };
 
                 match done {
                     WebDavDone::ConnectionChecked => {
@@ -325,10 +728,11 @@ pub(crate) fn handle_webdav_msg(
                     }
                 }
                 *data = UiData::load(&app.app_type)?;
+                Ok(done_invalidation)
             }
             Err(err) => {
                 if webdav_loading.is_stale(request_id) {
-                    return Ok(());
+                    return Ok(CacheInvalidation::None);
                 }
 
                 if webdav_loading.finish_if_active(request_id) && is_webdav_loading_overlay(app) {
@@ -399,18 +803,20 @@ pub(crate) fn handle_webdav_msg(
                 };
                 *data = UiData::load(&app.app_type)?;
                 app.push_toast(msg, ToastKind::Error);
+                Ok(CacheInvalidation::DataReloaded)
             }
         },
     }
-    Ok(())
 }
 
 pub(crate) fn handle_proxy_msg(
     app: &mut App,
     data: &mut UiData,
     proxy_loading: &mut RequestTracker,
+    proxy_snapshot_refresh: &mut RequestTracker,
     msg: ProxyMsg,
-) -> Result<(), AppError> {
+) -> Result<CacheInvalidation, AppError> {
+    let mut invalidation = CacheInvalidation::None;
     match msg {
         ProxyMsg::ManagedSessionFinished {
             request_id,
@@ -419,7 +825,7 @@ pub(crate) fn handle_proxy_msg(
             result,
         } => {
             if !proxy_loading.finish_if_active(request_id) {
-                return Ok(());
+                return Ok(CacheInvalidation::None);
             }
 
             if matches!(
@@ -435,6 +841,8 @@ pub(crate) fn handle_proxy_msg(
             match result {
                 Ok(()) => {
                     *data = UiData::load(&app.app_type)?;
+                    proxy_snapshot_refresh.cancel();
+                    invalidation = CacheInvalidation::DataReloaded;
                     app.reset_proxy_activity(
                         data.proxy.estimated_input_tokens_total,
                         data.proxy.estimated_output_tokens_total,
@@ -452,11 +860,37 @@ pub(crate) fn handle_proxy_msg(
                 }
             }
         }
+        ProxyMsg::SnapshotRefreshed {
+            request_id,
+            app_type,
+            result,
+        } => {
+            if !proxy_snapshot_refresh.finish_if_active(request_id) {
+                return Ok(CacheInvalidation::None);
+            }
+            if app.app_type != app_type {
+                return Ok(CacheInvalidation::None);
+            }
+
+            match result {
+                Ok(proxy) => {
+                    data.proxy = proxy;
+                    app.observe_proxy_token_activity(
+                        data.proxy.estimated_input_tokens_total,
+                        data.proxy.estimated_output_tokens_total,
+                    );
+                }
+                Err(err) => {
+                    log::debug!("refresh proxy snapshot failed: {err}");
+                }
+            }
+        }
     }
 
-    Ok(())
+    Ok(invalidation)
 }
 
+#[allow(dead_code)]
 pub(crate) fn apply_webdav_jianguoyun_quick_setup<FSave, FCheck>(
     username: &str,
     password: &str,
@@ -508,6 +942,15 @@ pub(crate) fn handle_update_msg(app: &mut App, update_check: &mut RequestTracker
                         app.push_toast(
                             texts::tui_toast_already_latest(&info.current_version),
                             ToastKind::Success,
+                        );
+                    } else if info.is_homebrew_managed {
+                        app.overlay = Overlay::None;
+                        app.push_toast(
+                            texts::tui_toast_update_homebrew_required(
+                                &info.current_version,
+                                &info.target_tag,
+                            ),
+                            ToastKind::Info,
                         );
                     } else if info.is_downgrade {
                         app.overlay = Overlay::None;
@@ -563,7 +1006,7 @@ pub(crate) fn handle_update_msg(app: &mut App, update_check: &mut RequestTracker
 mod tests {
     use super::*;
     use crate::app_config::AppType;
-    use crate::cli::tui::data::{QuotaTarget, QuotaTargetKind};
+    use crate::cli::tui::data::{ProviderUsageQuota, QuotaTarget, QuotaTargetKind};
     use crate::services::{CredentialStatus, SubscriptionQuota};
 
     fn quota_target() -> QuotaTarget {
@@ -602,7 +1045,7 @@ mod tests {
             &mut data,
             QuotaMsg::Finished {
                 target: target.clone(),
-                result: Ok(quota_result()),
+                result: Ok(ProviderUsageQuota::Subscription(quota_result())),
             },
         );
 
@@ -630,7 +1073,7 @@ mod tests {
             &mut data,
             QuotaMsg::Finished {
                 target,
-                result: Ok(quota_result()),
+                result: Ok(ProviderUsageQuota::Subscription(quota_result())),
             },
         );
 
@@ -638,5 +1081,157 @@ mod tests {
             app.toast.is_none(),
             "automatic background quota refresh should not interrupt the user"
         );
+    }
+
+    #[test]
+    fn session_scan_result_updates_runtime_state_without_ui_data() {
+        let mut app = App::new(Some(AppType::Claude));
+        let request_id = app.sessions.start_scan("claude".to_string());
+
+        handle_session_msg(
+            &mut app,
+            SessionMsg::ScanFinished {
+                request_id,
+                result: Ok(vec![crate::session_manager::SessionMeta {
+                    provider_id: "claude".to_string(),
+                    session_id: "session-1".to_string(),
+                    title: Some("Refactor".to_string()),
+                    summary: None,
+                    project_dir: None,
+                    created_at: Some(1),
+                    last_active_at: Some(2),
+                    source_path: Some("/tmp/session.jsonl".to_string()),
+                    resume_command: Some("claude --resume session-1".to_string()),
+                }]),
+            },
+        );
+
+        assert!(app.sessions.loaded_once);
+        assert!(!app.sessions.loading);
+        assert_eq!(app.sessions.rows.len(), 1);
+        assert_eq!(app.sessions.rows[0].provider_id, "claude");
+    }
+
+    #[test]
+    fn stale_session_scan_result_is_ignored() {
+        let mut app = App::new(Some(AppType::Claude));
+        let stale_id = app.sessions.start_scan("claude".to_string());
+        let _current_id = app.sessions.start_scan("claude".to_string());
+
+        handle_session_msg(
+            &mut app,
+            SessionMsg::ScanFinished {
+                request_id: stale_id,
+                result: Ok(vec![crate::session_manager::SessionMeta {
+                    provider_id: "codex".to_string(),
+                    session_id: "stale".to_string(),
+                    title: None,
+                    summary: None,
+                    project_dir: None,
+                    created_at: None,
+                    last_active_at: None,
+                    source_path: None,
+                    resume_command: None,
+                }]),
+            },
+        );
+
+        assert!(app.sessions.rows.is_empty());
+        assert!(app.sessions.loading);
+    }
+
+    #[test]
+    fn session_scan_result_clears_missing_detail() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.sessions.rows = vec![crate::session_manager::SessionMeta {
+            provider_id: "claude".to_string(),
+            session_id: "old".to_string(),
+            title: Some("Old".to_string()),
+            summary: None,
+            project_dir: None,
+            created_at: None,
+            last_active_at: None,
+            source_path: Some("/tmp/old.jsonl".to_string()),
+            resume_command: None,
+        }];
+        app.sessions
+            .open_detail(crate::cli::tui::app::session_key(&app.sessions.rows[0]));
+        app.sessions.messages_loaded = true;
+        app.sessions.messages = vec![crate::session_manager::SessionMessage {
+            role: "assistant".to_string(),
+            content: "stale detail".to_string(),
+            ts: None,
+        }];
+        let request_id = app.sessions.start_scan("claude".to_string());
+
+        handle_session_msg(
+            &mut app,
+            SessionMsg::ScanFinished {
+                request_id,
+                result: Ok(vec![crate::session_manager::SessionMeta {
+                    provider_id: "claude".to_string(),
+                    session_id: "new".to_string(),
+                    title: Some("New".to_string()),
+                    summary: None,
+                    project_dir: None,
+                    created_at: None,
+                    last_active_at: None,
+                    source_path: Some("/tmp/new.jsonl".to_string()),
+                    resume_command: None,
+                }]),
+            },
+        );
+
+        assert_eq!(app.sessions.rows.len(), 1);
+        assert_eq!(app.sessions.rows[0].session_id, "new");
+        assert!(app.sessions.detail_key.is_none());
+        assert!(app.sessions.messages.is_empty());
+        assert!(!app.sessions.messages_loaded);
+    }
+
+    #[test]
+    fn session_delete_result_clamps_selection_against_current_filter() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.sessions.rows = vec![
+            crate::session_manager::SessionMeta {
+                provider_id: "claude".to_string(),
+                session_id: "alpha".to_string(),
+                title: Some("Alpha".to_string()),
+                summary: None,
+                project_dir: None,
+                created_at: None,
+                last_active_at: None,
+                source_path: Some("/tmp/alpha.jsonl".to_string()),
+                resume_command: None,
+            },
+            crate::session_manager::SessionMeta {
+                provider_id: "claude".to_string(),
+                session_id: "beta".to_string(),
+                title: Some("Beta".to_string()),
+                summary: None,
+                project_dir: None,
+                created_at: None,
+                last_active_at: None,
+                source_path: Some("/tmp/beta.jsonl".to_string()),
+                resume_command: None,
+            },
+        ];
+        app.filter.input.set("beta");
+        app.sessions.selected_idx = 1;
+        let key = crate::cli::tui::app::session_key(&app.sessions.rows[1]);
+        let request_id = app.sessions.start_delete();
+
+        handle_session_msg(
+            &mut app,
+            SessionMsg::DeleteFinished {
+                request_id,
+                key,
+                result: Ok(()),
+            },
+        );
+
+        assert_eq!(app.sessions.selected_idx, 0);
+        assert_eq!(app.sessions.rows.len(), 1);
+        assert_eq!(app.sessions.rows[0].session_id, "alpha");
     }
 }

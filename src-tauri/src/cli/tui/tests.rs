@@ -7,7 +7,9 @@ use serde_json::json;
 use serial_test::serial;
 use tempfile::TempDir;
 
-use super::app::{App, LoadingKind, Overlay, ToastKind};
+use super::app::{
+    App, ConfirmAction, ConfirmOverlay, EditorSubmit, LoadingKind, Overlay, ToastKind,
+};
 use super::data::UiData;
 use super::form::ProviderAddField;
 use super::*;
@@ -16,11 +18,41 @@ use crate::test_support::{
     lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
 };
 use crate::{AppError, AppType};
+use runtime_systems::ProxyMsg;
+
+fn pending_snapshot_app_data(request_id: u64) -> PendingAppDataLoad {
+    PendingAppDataLoad {
+        kind: AppDataLoadKind::Snapshot,
+        request_id,
+        generation: 0,
+        app_state_epoch: 0,
+    }
+}
+
+fn pending_full_app_data(request_id: u64) -> PendingAppDataLoad {
+    pending_full_app_data_with_epoch(request_id, 0, 0)
+}
+
+fn pending_full_app_data_with_epoch(
+    request_id: u64,
+    generation: u64,
+    app_state_epoch: u64,
+) -> PendingAppDataLoad {
+    PendingAppDataLoad {
+        kind: AppDataLoadKind::Full,
+        request_id,
+        generation,
+        app_state_epoch,
+    }
+}
 
 struct EnvGuard {
     _lock: TestHomeSettingsLock,
     old_home: Option<OsString>,
     old_userprofile: Option<OsString>,
+    old_cc_switch_config_dir: Option<OsString>,
+    old_claude_config_dir: Option<OsString>,
+    old_codex_home: Option<OsString>,
 }
 
 impl EnvGuard {
@@ -28,14 +60,23 @@ impl EnvGuard {
         let lock = lock_test_home_and_settings();
         let old_home = std::env::var_os("HOME");
         let old_userprofile = std::env::var_os("USERPROFILE");
+        let old_cc_switch_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+        let old_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let old_codex_home = std::env::var_os("CODEX_HOME");
         std::env::set_var("HOME", home);
         std::env::set_var("USERPROFILE", home);
+        std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
+        std::env::set_var("CODEX_HOME", home.join(".codex"));
         set_test_home_override(Some(home));
         crate::settings::reload_test_settings();
         Self {
             _lock: lock,
             old_home,
             old_userprofile,
+            old_cc_switch_config_dir,
+            old_claude_config_dir,
+            old_codex_home,
         }
     }
 }
@@ -50,32 +91,1713 @@ impl Drop for EnvGuard {
             Some(value) => std::env::set_var("USERPROFILE", value),
             None => std::env::remove_var("USERPROFILE"),
         }
+        match &self.old_cc_switch_config_dir {
+            Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
+            None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+        }
+        match &self.old_claude_config_dir {
+            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        match &self.old_codex_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
         set_test_home_override(self.old_home.as_deref().map(Path::new));
         crate::settings::reload_test_settings();
     }
 }
 
 #[test]
-fn mcp_import_uses_info_toast_kind() {
-    let mut app = App::new(Some(AppType::OpenCode));
+fn mcp_import_uses_supported_apps_import_and_info_toast_kind() {
+    let mut app = App::new(Some(AppType::OpenClaw));
     let mut data = UiData::default();
 
-    import_mcp_for_current_app_with(
+    import_mcp_from_supported_apps_with(
         &mut app,
         &mut data,
-        |_app_type| Ok(0),
+        || Ok(2),
         |_app_type| Ok(UiData::default()),
     )
     .expect("mcp import should work");
 
     let toast = app.toast.as_ref().expect("mcp import should show toast");
     assert_eq!(toast.kind, ToastKind::Info);
-    assert_eq!(toast.message, texts::tui_toast_mcp_imported(0));
+    assert_eq!(toast.message, texts::tui_toast_mcp_imported(2));
 }
 
 #[test]
 fn tui_tick_rate_returns_to_200ms() {
     assert_eq!(TUI_TICK_RATE, std::time::Duration::from_millis(200));
+}
+
+#[test]
+fn app_switch_cache_miss_queues_background_load_without_blocking() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.config.common_snippets.codex = Some("codex shared config".to_string());
+
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    cache
+        .switch_to(&mut app, &mut data, Some(&tx), AppType::Codex)
+        .expect("switch should not synchronously load app data");
+
+    assert_eq!(app.app_type, AppType::Codex);
+    assert!(data.providers.rows.is_empty());
+    assert_eq!(data.config.common_snippet, "codex shared config");
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Codex).copied(),
+        Some(pending_snapshot_app_data(1))
+    );
+    assert!(cache.by_app.contains_key(&AppType::Claude));
+
+    let req = rx.recv().expect("app data request should be queued");
+    assert!(matches!(
+        req,
+        AppDataReq::Load {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+        }
+    ));
+}
+
+#[test]
+fn app_data_send_failure_does_not_block_retry() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+    drop(rx);
+
+    cache
+        .switch_to(&mut app, &mut data, Some(&tx), AppType::Codex)
+        .expect("switch should still use loading projection on send failure");
+
+    assert!(!cache.pending_by_app.contains_key(&AppType::Codex));
+    assert!(cache.incomplete_by_app.contains(&AppType::Codex));
+
+    let mut back_data = UiData::default();
+    cache
+        .switch_to(&mut app, &mut back_data, None, AppType::Claude)
+        .expect("switch back should work");
+
+    let (retry_tx, retry_rx) = mpsc::channel();
+    cache
+        .switch_to(&mut app, &mut back_data, Some(&retry_tx), AppType::Codex)
+        .expect("retry switch should queue another load");
+
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Codex).copied(),
+        Some(pending_snapshot_app_data(2))
+    );
+    assert!(matches!(
+        retry_rx.recv().expect("retry should send request"),
+        AppDataReq::Load {
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+        }
+    ));
+}
+
+#[test]
+fn initial_load_preseeds_extra_visible_apps_for_instant_switch() {
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    let pending = cache
+        .queue_initial_app_data_load(&tx, &AppType::Claude, &[AppType::Codex])
+        .expect("queue initial load");
+
+    // Both the active app and every extra visible app get a pending Initial entry.
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Claude).copied(),
+        Some(pending)
+    );
+    let codex_pending = cache
+        .pending_by_app
+        .get(&AppType::Codex)
+        .copied()
+        .expect("codex should have a pre-seed pending entry");
+    assert_eq!(codex_pending.kind, AppDataLoadKind::Initial);
+
+    // A single InitialLoad request carries the extras as (app, request_id) pairs.
+    let req = rx.recv().expect("initial request should be queued");
+    let extras = match req {
+        AppDataReq::InitialLoad {
+            app_type: AppType::Claude,
+            extras,
+            ..
+        } => extras,
+        other => panic!("unexpected initial request: {other:?}"),
+    };
+    assert_eq!(extras, vec![(AppType::Codex, codex_pending.request_id)]);
+
+    // Worker reply for the (non-active) Codex snapshot seeds by_app with real rows.
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut startup_overlay = Some(Overlay::None);
+
+    let mut codex_data = UiData::default();
+    codex_data.providers.rows.push(super::data::ProviderRow {
+        id: "codex-default".to_string(),
+        provider: crate::provider::Provider::with_id(
+            "codex-default".to_string(),
+            "Codex Default".to_string(),
+            json!({}),
+            None,
+        ),
+        api_url: None,
+        is_current: true,
+        is_in_config: true,
+        is_saved: true,
+        is_default_model: false,
+        primary_model_id: None,
+        default_model_id: None,
+    });
+
+    let handled = handle_initial_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut startup_overlay,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Initial,
+            request_id: codex_pending.request_id,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Ok(codex_data),
+        },
+    )
+    .expect("handling the codex pre-seed should succeed");
+    assert!(handled);
+    assert!(cache.by_app.contains_key(&AppType::Codex));
+    assert!(!cache.pending_by_app.contains_key(&AppType::Codex));
+    assert!(!cache.incomplete_by_app.contains(&AppType::Codex));
+
+    // Switching to Codex now hits the cache: real providers render immediately,
+    // no background load is queued, and the empty placeholder never shows.
+    let (switch_tx, switch_rx) = mpsc::channel();
+    cache
+        .switch_to(&mut app, &mut data, Some(&switch_tx), AppType::Codex)
+        .expect("switch to codex should use the pre-seeded cache");
+    assert_eq!(app.app_type, AppType::Codex);
+    assert!(
+        !data.providers.rows.is_empty(),
+        "pre-seeded providers should render on the first switch"
+    );
+    assert!(
+        switch_rx.try_recv().is_err(),
+        "a cache hit must not queue a background load"
+    );
+}
+
+#[test]
+fn initial_load_extra_app_failure_does_not_abort_startup() {
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    cache
+        .queue_initial_app_data_load(&tx, &AppType::Claude, &[AppType::Codex])
+        .expect("queue initial load");
+    let codex_request_id = cache
+        .pending_by_app
+        .get(&AppType::Codex)
+        .copied()
+        .expect("codex pending")
+        .request_id;
+    let _ = rx.recv().expect("initial request");
+
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut startup_overlay = Some(Overlay::None);
+
+    // A failed pre-seed for a non-active app is swallowed (no Err propagation),
+    // leaving it uncached so the first switch falls back to a lazy load.
+    let handled = handle_initial_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut startup_overlay,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Initial,
+            request_id: codex_request_id,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Err("boom".to_string()),
+        },
+    )
+    .expect("a non-active pre-seed failure must not abort startup");
+    assert!(handled);
+    assert!(!cache.by_app.contains_key(&AppType::Codex));
+    assert!(!cache.pending_by_app.contains_key(&AppType::Codex));
+}
+
+#[test]
+fn lightweight_preseed_excludes_additive_apps() {
+    // Pure in-memory snapshot apps are eager-seeded at startup.
+    for app in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+        assert!(
+            is_lightweight_preseed_app(&app),
+            "{app:?} should be eagerly pre-seeded"
+        );
+    }
+    // Additive apps read live config files even in SnapshotOnly mode, so they
+    // lazy-load on first switch instead of paying that I/O at startup.
+    for app in [AppType::OpenCode, AppType::Hermes, AppType::OpenClaw] {
+        assert!(
+            !is_lightweight_preseed_app(&app),
+            "{app:?} should lazy-load, not pre-seed"
+        );
+    }
+}
+
+#[test]
+fn current_app_reloaded_keeps_other_apps_cache() {
+    let app = App::new(Some(AppType::Claude));
+    let data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+
+    // A cold app (Codex) is pre-seeded; the active app (Claude) reloads fresh.
+    cache.by_app.insert(AppType::Codex, UiData::default());
+    cache.handle_data_reloaded(&app, &data, CacheInvalidation::CurrentAppReloaded);
+    assert!(
+        cache.by_app.contains_key(&AppType::Codex),
+        "current-app reload must not wipe other apps' pre-seed"
+    );
+    assert!(cache.by_app.contains_key(&AppType::Claude));
+
+    // A genuine cross-app invalidation still clears everything (then re-remembers
+    // the active app), so stale cross-app data can't linger.
+    cache.by_app.insert(AppType::Codex, UiData::default());
+    cache.handle_data_reloaded(&app, &data, CacheInvalidation::DataReloaded);
+    assert!(!cache.by_app.contains_key(&AppType::Codex));
+    assert!(cache.by_app.contains_key(&AppType::Claude));
+}
+
+#[test]
+fn app_switch_projection_marks_providers_loading() {
+    let data = UiData::default();
+    let projection = data.app_switch_loading_projection(&AppType::Codex);
+    assert!(
+        projection.providers.loading,
+        "cold-switch projection must flag loading so the empty CTA isn't shown"
+    );
+    assert!(projection.providers.rows.is_empty());
+}
+
+#[test]
+fn stale_app_data_result_does_not_overwrite_current_app() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "claude-current".to_string();
+
+    let mut cache = UiDataByAppCache::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(1));
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "codex-loaded".to_string();
+
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Snapshot,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(app.app_type, AppType::Claude);
+    assert_eq!(data.providers.current_id, "claude-current");
+    assert_eq!(
+        cache
+            .by_app
+            .get(&AppType::Codex)
+            .map(|cached| cached.providers.current_id.as_str()),
+        Some("codex-loaded")
+    );
+}
+
+#[test]
+fn app_data_result_preserves_usage_pricing_that_finished_first() {
+    let mut app = App::new(Some(AppType::Codex));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(2));
+    cache.pending_usage_pricing_by_key.insert(
+        (AppType::Codex, data::UsageRangePreset::SevenDays),
+        PendingDataLoad {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+
+    let mut usage = data::UsageSnapshot::default();
+    usage.summary_7d.total_cost_usd = 12.5;
+    let pricing = data::ModelPricingSnapshot {
+        rows: vec![data::ModelPricingRow {
+            model_id: "gpt-5.4".to_string(),
+            display_name: "GPT 5.4".to_string(),
+            recent_total_cost_usd: 12.5,
+            ..data::ModelPricingRow::default()
+        }],
+        ..data::ModelPricingSnapshot::default()
+    };
+
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            range: data::UsageRangePreset::SevenDays,
+            result: Ok(data::UsagePricingData {
+                usage,
+                pricing: Some(pricing),
+            }),
+        },
+    );
+
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 12.5);
+    assert!(
+        !cache.by_app.contains_key(&AppType::Codex),
+        "pending base data should not be cached as a complete app snapshot"
+    );
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "codex-base".to_string();
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Snapshot,
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(data.providers.current_id, "codex-base");
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 12.5);
+    assert_eq!(data.pricing.rows.len(), 1);
+}
+
+#[test]
+fn current_app_data_changed_queues_full_load_without_caching_stale_data() {
+    let mut app = App::new(Some(AppType::Codex));
+    let mut data = UiData::default();
+    data.providers.current_id = "stale-current".to_string();
+    data.usage.summary_7d.total_cost_usd = 7.5;
+    data.pricing.rows.push(data::ModelPricingRow {
+        model_id: "gpt-stale".to_string(),
+        display_name: "GPT Stale".to_string(),
+        recent_total_cost_usd: 7.5,
+        ..data::ModelPricingRow::default()
+    });
+
+    let mut cached = UiData::default();
+    cached.providers.current_id = "cached-stale".to_string();
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Codex, cached);
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(99));
+    cache.incomplete_by_app.insert(AppType::Codex);
+    let (tx, rx) = mpsc::channel();
+
+    apply_cache_invalidation(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&tx),
+        None,
+        CacheInvalidation::CurrentAppDataChanged,
+    )
+    .expect("current app refresh should be queued");
+
+    assert_eq!(data.providers.current_id, "stale-current");
+    assert!(!cache.by_app.contains_key(&AppType::Codex));
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Codex).copied(),
+        Some(pending_full_app_data(1))
+    );
+    assert!(cache.incomplete_by_app.contains(&AppType::Codex));
+    assert!(!cache
+        .usage_pricing_by_key
+        .contains_key(&(AppType::Codex, data::UsageRangePreset::SevenDays)));
+    assert!(matches!(
+        rx.recv().expect("app data request should be queued"),
+        AppDataReq::FullLoad {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+        }
+    ));
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "fresh-current".to_string();
+    loaded.usage.summary_7d.total_cost_usd = 9.0;
+    loaded.pricing.rows.push(data::ModelPricingRow {
+        model_id: "gpt-fresh".to_string(),
+        display_name: "GPT Fresh".to_string(),
+        recent_total_cost_usd: 9.0,
+        ..data::ModelPricingRow::default()
+    });
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Full,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(data.providers.current_id, "fresh-current");
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 9.0);
+    assert_eq!(data.pricing.rows.len(), 1);
+    assert_eq!(data.pricing.rows[0].model_id, "gpt-fresh");
+    assert!(!cache.pending_by_app.contains_key(&AppType::Codex));
+    assert!(!cache.incomplete_by_app.contains(&AppType::Codex));
+    assert_eq!(
+        cache
+            .by_app
+            .get(&AppType::Codex)
+            .map(|cached| cached.providers.current_id.as_str()),
+        Some("fresh-current")
+    );
+}
+
+#[test]
+fn current_app_data_changed_full_load_requeues_custom_usage_and_invalidates_old_usage_loads() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let custom_range =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid range");
+    app.usage.range = data::UsageRangePreset::Custom(custom_range);
+    app.usage.start_loading(
+        AppType::Claude,
+        data::UsageRangePreset::Custom(custom_range),
+    );
+    data.usage.custom_range = Some(custom_range);
+    data.usage.summary_7d.total_requests = 10;
+    data.usage.summary_custom.total_requests = 5;
+    data.usage.recent_logs.push(data::UsageLogRow {
+        request_id: "fixed-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    data.usage.logs_total = 10;
+    data.usage.recent_logs_custom.push(data::UsageLogRow {
+        request_id: "custom-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    data.usage.logs_total_custom = 5;
+
+    let mut cache = UiDataByAppCache::default();
+    cache.usage_pricing_by_key.insert(
+        (AppType::Claude, data::UsageRangePreset::SevenDays),
+        data::UsagePricingData {
+            usage: data.usage.clone(),
+            pricing: Some(data.pricing.clone()),
+        },
+    );
+    cache.pending_usage_pricing_by_key.insert(
+        (AppType::Claude, data::UsageRangePreset::SevenDays),
+        PendingDataLoad {
+            request_id: 3,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+    let (app_tx, app_rx) = mpsc::channel();
+    let (usage_tx, usage_rx) = mpsc::channel();
+
+    apply_cache_invalidation(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&app_tx),
+        None,
+        CacheInvalidation::CurrentAppDataChanged,
+    )
+    .expect("current app refresh should be queued");
+
+    assert!(!cache
+        .pending_usage_pricing_by_key
+        .contains_key(&(AppType::Claude, data::UsageRangePreset::SevenDays)));
+    assert!(!cache
+        .usage_pricing_by_key
+        .contains_key(&(AppType::Claude, data::UsageRangePreset::SevenDays)));
+    assert!(app.usage.is_loading_for(
+        &AppType::Claude,
+        data::UsageRangePreset::Custom(custom_range)
+    ));
+    assert!(matches!(
+        app_rx.recv().expect("app data request should be queued"),
+        AppDataReq::FullLoad { request_id: 1, .. }
+    ));
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "fresh-current".to_string();
+    loaded.usage.summary_7d.total_requests = 11;
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        Some(&usage_tx),
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Full,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(data.providers.current_id, "fresh-current");
+    assert_eq!(data.usage.summary_7d.total_requests, 11);
+    assert_eq!(data.usage.summary_custom.total_requests, 0);
+    assert!(data.usage.recent_logs_custom.is_empty());
+    assert!(app.usage.is_loading_for(
+        &AppType::Claude,
+        data::UsageRangePreset::Custom(custom_range)
+    ));
+    assert!(matches!(
+        usage_rx
+            .recv()
+            .expect("custom usage/pricing request should be queued"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::Custom(range),
+            ..
+        } if range == custom_range
+    ));
+}
+
+#[test]
+#[serial(home_settings)]
+fn current_app_data_changed_falls_back_to_sync_load_when_worker_unavailable() {
+    use crate::provider::Provider;
+    use crate::services::ProviderService;
+
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    let state = data::load_state().expect("load isolated state");
+    ProviderService::add(
+        &state,
+        AppType::Claude,
+        Provider::with_id(
+            "fresh-provider".to_string(),
+            "Fresh Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://fallback.example.com",
+                    "ANTHROPIC_AUTH_TOKEN": "test-token"
+                }
+            }),
+            None,
+        ),
+    )
+    .expect("add provider to isolated state");
+
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "stale-current".to_string();
+    let mut cache = UiDataByAppCache::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Claude, pending_snapshot_app_data(9));
+    cache.incomplete_by_app.insert(AppType::Claude);
+
+    apply_cache_invalidation(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        CacheInvalidation::CurrentAppDataChanged,
+    )
+    .expect("fallback reload should succeed");
+
+    assert!(data
+        .providers
+        .rows
+        .iter()
+        .any(|row| row.id == "fresh-provider"));
+    assert!(!cache.pending_by_app.contains_key(&AppType::Claude));
+    assert!(!cache.incomplete_by_app.contains(&AppType::Claude));
+    assert_eq!(
+        cache
+            .by_app
+            .get(&AppType::Claude)
+            .map(|cached| cached.providers.rows.len()),
+        Some(data.providers.rows.len())
+    );
+}
+
+#[test]
+fn app_data_result_after_cache_invalidation_is_ignored() {
+    let mut app = App::new(Some(AppType::Codex));
+    let mut data = UiData::default();
+    data.providers.current_id = "current-after-reload".to_string();
+    let mut cache = UiDataByAppCache::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(4));
+
+    cache.handle_data_reloaded(&app, &data, CacheInvalidation::DataReloaded);
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "stale-worker-result".to_string();
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Snapshot,
+            request_id: 4,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(data.providers.current_id, "current-after-reload");
+    assert!(cache.pending_by_app.is_empty());
+    assert_eq!(cache.data_generation, 1);
+}
+
+#[test]
+fn stale_app_data_result_after_background_sync_requeues_current_app_refresh() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "current-after-sync".to_string();
+    let mut cache = UiDataByAppCache::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Claude, pending_full_app_data(2));
+    cache.incomplete_by_app.insert(AppType::Claude);
+    cache.clear_usage_pricing_after_external_usage_sync();
+    let (tx, rx) = mpsc::channel();
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "stale-full-load".to_string();
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&tx),
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Full,
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            result: Ok(loaded),
+        },
+    );
+
+    assert_eq!(data.providers.current_id, "current-after-sync");
+    assert!(cache.incomplete_by_app.contains(&AppType::Claude));
+    assert!(matches!(
+        rx.recv()
+            .expect("fresh app data request should be queued after stale result"),
+        AppDataReq::FullLoad {
+            request_id: 1,
+            generation: 1,
+            app_state_epoch: 1,
+            app_type: AppType::Claude,
+        }
+    ));
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Claude).copied(),
+        Some(pending_full_app_data_with_epoch(1, 1, 1))
+    );
+}
+
+#[test]
+fn no_op_reload_candidate_preserves_pending_app_data_load() {
+    let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut webdav_loading = RequestTracker::default();
+    let mut update_check = RequestTracker::default();
+    cache
+        .pending_by_app
+        .insert(AppType::Codex, pending_snapshot_app_data(7));
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        None,
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        None,
+        Action::EditorSubmit {
+            submit: EditorSubmit::ProviderAdd,
+            content: "{".to_string(),
+        },
+    )
+    .expect("invalid submit should be handled as a no-op");
+
+    assert_eq!(
+        cache.pending_by_app.get(&AppType::Codex).copied(),
+        Some(pending_snapshot_app_data(7))
+    );
+    assert_eq!(cache.data_generation, 0);
+}
+
+#[test]
+fn switch_to_sessions_queues_scan_without_waiting_for_next_tick() {
+    let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+    let mut app = App::new(Some(AppType::Codex));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut webdav_loading = RequestTracker::default();
+    let mut update_check = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        Some(&tx),
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        None,
+        Action::SwitchRoute(route::Route::Sessions),
+    )
+    .expect("switching to sessions should queue a scan");
+
+    assert!(matches!(app.route, route::Route::Sessions));
+    assert!(app.sessions.loading);
+    assert_eq!(app.sessions.provider_id.as_deref(), Some("codex"));
+    let request_id = app.sessions.scan_active.expect("scan should be active");
+    match rx.try_recv().expect("scan request should be queued") {
+        SessionReq::Refresh {
+            request_id: queued_request_id,
+            provider_id,
+            ..
+        } => {
+            assert_eq!(queued_request_id, request_id);
+            assert_eq!(provider_id, "codex");
+        }
+        other => panic!("unexpected sessions request: {other:?}"),
+    }
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        Some(&tx),
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        None,
+        Action::SwitchRoute(route::Route::Sessions),
+    )
+    .expect("switching to an already-loading sessions route should not queue another scan");
+
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn switching_app_on_sessions_route_queues_scan_for_next_app() {
+    let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Sessions;
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Codex, UiData::default());
+    let mut proxy_loading = RequestTracker::default();
+    let mut webdav_loading = RequestTracker::default();
+    let mut update_check = RequestTracker::default();
+    let (session_tx, session_rx) = mpsc::channel();
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        Some(&session_tx),
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        None,
+        Action::SetAppType(AppType::Codex),
+    )
+    .expect("switching app on sessions route should queue a scan");
+
+    assert_eq!(app.app_type, AppType::Codex);
+    assert!(matches!(app.route, route::Route::Sessions));
+    assert!(app.sessions.loading);
+    assert_eq!(app.sessions.provider_id.as_deref(), Some("codex"));
+    let request_id = app.sessions.scan_active.expect("scan should be active");
+    match session_rx
+        .try_recv()
+        .expect("scan request should be queued")
+    {
+        SessionReq::Refresh {
+            request_id: queued_request_id,
+            provider_id,
+            ..
+        } => {
+            assert_eq!(queued_request_id, request_id);
+            assert_eq!(provider_id, "codex");
+        }
+        other => panic!("unexpected sessions request: {other:?}"),
+    }
+}
+
+#[test]
+fn initial_app_data_result_restores_startup_overlay_and_caches_loaded_data() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    cache.pending_by_app.insert(
+        AppType::Claude,
+        PendingAppDataLoad {
+            kind: AppDataLoadKind::Initial,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+    cache.incomplete_by_app.insert(AppType::Claude);
+    app.overlay = Overlay::Confirm(ConfirmOverlay {
+        title: "Visible apps".to_string(),
+        message: "Review detected apps".to_string(),
+        action: ConfirmAction::VisibleAppsAutoDetection,
+    });
+    let mut startup_overlay = Some(Overlay::Confirm(ConfirmOverlay {
+        title: "Visible apps".to_string(),
+        message: "Review detected apps".to_string(),
+        action: ConfirmAction::VisibleAppsAutoDetection,
+    }));
+
+    let mut loaded = UiData::default();
+    loaded.providers.current_id = "loaded-current".to_string();
+    loaded.proxy.running = true;
+    loaded.proxy.estimated_input_tokens_total = 10;
+    loaded.proxy.estimated_output_tokens_total = 20;
+
+    let handled = handle_initial_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut startup_overlay,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Initial,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            result: Ok(loaded),
+        },
+    )
+    .expect("initial app data result should be handled");
+
+    assert!(handled);
+    assert_eq!(data.providers.current_id, "loaded-current");
+    assert_eq!(
+        cache
+            .by_app
+            .get(&AppType::Claude)
+            .map(|cached| cached.providers.current_id.as_str()),
+        Some("loaded-current")
+    );
+    assert!(cache.pending_by_app.is_empty());
+    assert!(!cache.incomplete_by_app.contains(&AppType::Claude));
+    assert!(startup_overlay.is_none());
+    assert!(matches!(
+        app.overlay,
+        Overlay::Confirm(ConfirmOverlay {
+            action: ConfirmAction::VisibleAppsAutoDetection,
+            ..
+        })
+    ));
+    assert_eq!(app.proxy_visual_state, Some(true));
+    assert!(app.proxy_visual_transition.is_none());
+    assert_eq!(app.proxy_activity_last_input_tokens, Some(10));
+    assert_eq!(app.proxy_activity_last_output_tokens, Some(20));
+}
+
+#[test]
+fn initial_app_data_error_returns_before_empty_shell_is_marked_loaded() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "empty-shell".to_string();
+    let mut cache = UiDataByAppCache::default();
+    cache.pending_by_app.insert(
+        AppType::Claude,
+        PendingAppDataLoad {
+            kind: AppDataLoadKind::Initial,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+    cache.incomplete_by_app.insert(AppType::Claude);
+    let mut startup_overlay = None;
+
+    let err = handle_initial_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut startup_overlay,
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Initial,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            result: Err("boom".to_string()),
+        },
+    )
+    .expect_err("initial load failure should be returned");
+
+    assert_eq!(err.to_string(), "boom");
+    assert_eq!(data.providers.current_id, "empty-shell");
+    assert!(cache.by_app.is_empty());
+    assert!(cache.incomplete_by_app.contains(&AppType::Claude));
+}
+
+#[test]
+fn initial_app_data_drain_prioritizes_error_before_quit_input() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    cache.pending_by_app.insert(
+        AppType::Claude,
+        PendingAppDataLoad {
+            kind: AppDataLoadKind::Initial,
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+    cache.incomplete_by_app.insert(AppType::Claude);
+    let mut startup_overlay = None;
+    let (_tx, rx) = mpsc::channel();
+    _tx.send(AppDataMsg::Loaded {
+        kind: AppDataLoadKind::Initial,
+        request_id: 1,
+        generation: 0,
+        app_state_epoch: 0,
+        app_type: AppType::Claude,
+        result: Err("boom".to_string()),
+    })
+    .expect("queue initial load error");
+
+    let quit_key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    assert!(is_initial_loading_quit_key(&quit_key));
+    let err = drain_initial_app_data_messages(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut startup_overlay,
+        None,
+        &rx,
+    )
+    .expect_err("initial load error should win over quit input");
+
+    assert_eq!(err.to_string(), "boom");
+    assert!(cache.by_app.is_empty());
+    assert!(cache.incomplete_by_app.contains(&AppType::Claude));
+}
+
+#[test]
+fn initial_loading_input_polling_stops_after_success_or_failure() {
+    assert!(should_poll_initial_loading_input(true, false));
+    assert!(!should_poll_initial_loading_input(false, false));
+    assert!(!should_poll_initial_loading_input(true, true));
+    assert!(!should_poll_initial_loading_input(false, true));
+}
+
+#[test]
+fn initial_loading_quit_waits_for_success_and_never_hides_error() {
+    assert!(!should_exit_after_initial_loading(true, false, true));
+    assert!(!should_exit_after_initial_loading(false, true, true));
+    assert!(!should_exit_after_initial_loading(false, false, false));
+    assert!(should_exit_after_initial_loading(false, false, true));
+}
+
+#[test]
+fn initial_loading_only_accepts_quit_keys() {
+    assert!(is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Char('q'),
+        KeyModifiers::NONE,
+    )));
+    assert!(is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Char('Q'),
+        KeyModifiers::NONE,
+    )));
+    assert!(is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    )));
+    assert!(is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(!is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Char('1'),
+        KeyModifiers::NONE,
+    )));
+    assert!(!is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(!is_initial_loading_quit_key(&KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::NONE,
+    )));
+}
+
+#[test]
+fn initial_loading_event_quit_detection_only_uses_pressed_quit_keys() {
+    let pressed_quit = event::Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(initial_loading_event_requests_quit(&pressed_quit));
+
+    let mut released_quit = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    released_quit.kind = KeyEventKind::Release;
+    assert!(!initial_loading_event_requests_quit(&event::Event::Key(
+        released_quit
+    )));
+
+    assert!(!initial_loading_event_requests_quit(&event::Event::Mouse(
+        event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        },
+    )));
+}
+
+#[test]
+fn initial_loading_quit_recording_ignores_non_quit_events() {
+    let mut quit_requested = false;
+
+    record_initial_loading_quit_event(
+        &mut quit_requested,
+        &event::Event::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+    );
+    assert!(!quit_requested);
+
+    record_initial_loading_quit_event(
+        &mut quit_requested,
+        &event::Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+    );
+    assert!(quit_requested);
+}
+
+#[test]
+fn usage_pricing_results_are_tracked_per_app() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    cache.queue_usage_pricing_load(
+        &mut app,
+        Some(&tx),
+        &AppType::Claude,
+        data::UsageRangePreset::SevenDays,
+    );
+    cache.queue_usage_pricing_load(
+        &mut app,
+        Some(&tx),
+        &AppType::Codex,
+        data::UsageRangePreset::SevenDays,
+    );
+
+    let requests = [rx.recv().unwrap(), rx.recv().unwrap()];
+    assert!(requests.iter().any(|req| matches!(
+        req,
+        UsagePricingReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            ..
+        }
+    )));
+    assert!(requests.iter().any(|req| matches!(
+        req,
+        UsagePricingReq::Load {
+            request_id: 2,
+            app_type: AppType::Codex,
+            ..
+        }
+    )));
+
+    let mut claude_usage = data::UsageSnapshot::default();
+    claude_usage.summary_7d.total_cost_usd = 1.0;
+    let mut codex_usage = data::UsageSnapshot::default();
+    codex_usage.summary_7d.total_cost_usd = 2.0;
+
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 2,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Codex,
+            range: data::UsageRangePreset::SevenDays,
+            result: Ok(data::UsagePricingData {
+                usage: codex_usage,
+                pricing: Some(data::ModelPricingSnapshot::default()),
+            }),
+        },
+    );
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            result: Ok(data::UsagePricingData {
+                usage: claude_usage,
+                pricing: Some(data::ModelPricingSnapshot::default()),
+            }),
+        },
+    );
+
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 1.0);
+    assert_eq!(
+        cache
+            .usage_pricing_by_key
+            .get(&(AppType::Codex, data::UsageRangePreset::SevenDays))
+            .map(|usage_pricing| usage_pricing.usage.summary_7d.total_cost_usd),
+        Some(2.0)
+    );
+}
+
+#[test]
+fn usage_pricing_load_updates_non_blocking_loading_state() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    cache.queue_usage_pricing_load(
+        &mut app,
+        Some(&tx),
+        &AppType::Claude,
+        data::UsageRangePreset::SevenDays,
+    );
+
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::Today));
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::SevenDays));
+    assert!(!app
+        .usage
+        .is_loading_for(&AppType::Codex, data::UsageRangePreset::SevenDays));
+    assert!(matches!(
+        rx.recv().expect("usage/pricing request should be queued"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            ..
+        }
+    ));
+
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            result: Ok(data::UsagePricingData::default()),
+        },
+    );
+
+    assert!(!app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::SevenDays));
+}
+
+#[test]
+fn background_session_usage_sync_queues_once() {
+    let (tx, rx) = mpsc::channel();
+    let mut tracker = RequestTracker::default();
+
+    queue_background_session_usage_sync(Some(&tx), &mut tracker);
+    queue_background_session_usage_sync(Some(&tx), &mut tracker);
+
+    assert_eq!(tracker.active, Some(1));
+    assert!(matches!(
+        rx.recv()
+            .expect("session usage sync request should be queued"),
+        SessionUsageSyncReq::Run { request_id: 1 }
+    ));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn background_session_usage_sync_refreshes_usage_with_new_epoch() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.usage.summary_7d.total_cost_usd = 3.0;
+    app.usage
+        .start_loading(AppType::Codex, data::UsageRangePreset::SevenDays);
+    let mut cache = UiDataByAppCache::default();
+    let mut cached_codex = UiData::default();
+    cached_codex.usage.summary_7d.total_cost_usd = 9.0;
+    cached_codex.pricing.rows.push(data::ModelPricingRow {
+        model_id: "stale-model".to_string(),
+        ..data::ModelPricingRow::default()
+    });
+    cache.by_app.insert(AppType::Codex, cached_codex);
+    let mut tracker = RequestTracker::default();
+    let request_id = tracker.start();
+    let (tx, rx) = mpsc::channel();
+
+    handle_session_usage_sync_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut tracker,
+        Some(&tx),
+        SessionUsageSyncMsg::Finished {
+            request_id,
+            result: Ok(()),
+        },
+    );
+
+    assert_eq!(tracker.active, None);
+    assert_eq!(cache.app_state_epoch, 1);
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 3.0);
+    assert!(!app
+        .usage
+        .is_loading_for(&AppType::Codex, data::UsageRangePreset::SevenDays));
+    let cached_codex = cache
+        .by_app
+        .get(&AppType::Codex)
+        .expect("non-current app snapshot should remain cached");
+    assert_eq!(cached_codex.usage.summary_7d.total_cost_usd, 0.0);
+    assert!(cached_codex.pricing.rows.is_empty());
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::SevenDays));
+    assert!(matches!(
+        rx.recv()
+            .expect("usage/pricing refresh should be queued after sync"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            generation: 1,
+            app_state_epoch: 1,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+        }
+    ));
+}
+
+#[test]
+fn background_session_usage_sync_error_does_not_refresh_usage() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.usage.summary_7d.total_cost_usd = 3.0;
+    let mut cache = UiDataByAppCache::default();
+    let mut tracker = RequestTracker::default();
+    let request_id = tracker.start();
+    let (tx, rx) = mpsc::channel();
+
+    handle_session_usage_sync_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        &mut tracker,
+        Some(&tx),
+        SessionUsageSyncMsg::Finished {
+            request_id,
+            result: Err("sync failed".to_string()),
+        },
+    );
+
+    assert_eq!(tracker.active, None);
+    assert_eq!(cache.app_state_epoch, 0);
+    assert_eq!(data.usage.summary_7d.total_cost_usd, 3.0);
+    assert!(!app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::SevenDays));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn usage_custom_range_action_queues_range_specific_load() {
+    let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut webdav_loading = RequestTracker::default();
+    let mut update_check = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+    let range =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid custom range");
+    data.usage.recent_logs.push(data::UsageLogRow {
+        request_id: "stale-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    data.usage.logs_total = 1;
+    data.usage.recent_logs_custom.push(data::UsageLogRow {
+        request_id: "stale-custom-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    data.usage.logs_total_custom = 1;
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        None,
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        Some(&tx),
+        Action::UsageCustomRange { range },
+    )
+    .expect("custom range action should be handled");
+
+    assert!(matches!(
+        app.usage.range,
+        data::UsageRangePreset::Custom(active) if active == range
+    ));
+    assert_eq!(data.usage.custom_range, Some(range));
+    assert!(!data.usage.trends_custom.is_empty());
+    assert_eq!(data.usage.recent_logs.len(), 1);
+    assert_eq!(data.usage.logs_total, 1);
+    assert!(data
+        .usage
+        .recent_logs_for(data::UsageRangePreset::Custom(range))
+        .is_empty());
+    assert_eq!(
+        data.usage
+            .logs_total_for(data::UsageRangePreset::Custom(range)),
+        0
+    );
+    assert_eq!(
+        cache
+            .pending_usage_pricing_by_key
+            .get(&(AppType::Claude, data::UsageRangePreset::Custom(range)))
+            .copied(),
+        Some(PendingDataLoad {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        })
+    );
+    assert!(matches!(
+        rx.recv().expect("custom usage/pricing request should be queued"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::Custom(queued_range),
+        } if queued_range == range
+    ));
+}
+
+#[test]
+fn usage_custom_range_app_switch_does_not_show_stale_custom_cache() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let active_range =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid active range");
+    let stale_range =
+        data::parse_usage_custom_range("2026-05-01..2026-05-05").expect("valid stale range");
+
+    app.usage.range = data::UsageRangePreset::Custom(active_range);
+    data.usage.begin_custom_range(active_range);
+
+    let mut stale_usage = data::UsageSnapshot {
+        custom_range: Some(stale_range),
+        ..Default::default()
+    };
+    stale_usage.summary_custom.total_requests = 99;
+    stale_usage.summary_custom.total_cost_usd = 12.34;
+    cache.usage_pricing_by_key.insert(
+        (AppType::Codex, data::UsageRangePreset::Custom(stale_range)),
+        data::UsagePricingData {
+            usage: stale_usage,
+            pricing: None,
+        },
+    );
+    cache.by_app.insert(AppType::Codex, UiData::default());
+
+    cache
+        .switch_to(&mut app, &mut data, None, AppType::Codex)
+        .expect("switch should work");
+
+    assert_eq!(app.app_type, AppType::Codex);
+    assert_eq!(data.usage.custom_range, Some(active_range));
+    assert_eq!(data.usage.summary_custom.total_requests, 0);
+    assert_eq!(data.usage.summary_custom.total_cost_usd, 0.0);
+}
+
+#[test]
+fn usage_fixed_result_does_not_replace_active_custom_logs() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let active_range =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid active range");
+    app.usage.range = data::UsageRangePreset::Custom(active_range);
+    data.usage.begin_custom_range(active_range);
+    data.usage.recent_logs_custom.push(data::UsageLogRow {
+        request_id: "custom-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    data.usage.logs_total_custom = 1;
+    cache.pending_usage_pricing_by_key.insert(
+        (AppType::Claude, data::UsageRangePreset::SevenDays),
+        PendingDataLoad {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+        },
+    );
+
+    let mut fixed_usage = data::UsageSnapshot::default();
+    fixed_usage.summary_7d.total_requests = 10;
+    fixed_usage.recent_logs.push(data::UsageLogRow {
+        request_id: "fixed-log".to_string(),
+        ..data::UsageLogRow::default()
+    });
+    fixed_usage.logs_total = 10;
+
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            result: Ok(data::UsagePricingData {
+                usage: fixed_usage,
+                pricing: Some(data::ModelPricingSnapshot::default()),
+            }),
+        },
+    );
+
+    assert_eq!(data.usage.summary_7d.total_requests, 10);
+    assert_eq!(
+        data.usage
+            .logs_total_for(data::UsageRangePreset::Custom(active_range)),
+        1
+    );
+    assert_eq!(
+        data.usage
+            .recent_logs_for(data::UsageRangePreset::Custom(active_range))[0]
+            .request_id,
+        "custom-log"
+    );
+    assert_eq!(
+        data.usage.logs_total_for(data::UsageRangePreset::SevenDays),
+        10
+    );
+    assert_eq!(
+        data.usage
+            .recent_logs_for(data::UsageRangePreset::SevenDays)[0]
+            .request_id,
+        "fixed-log"
+    );
+}
+
+#[test]
+#[serial]
+fn usage_custom_range_reload_requeues_active_custom_range() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut webdav_loading = RequestTracker::default();
+    let mut update_check = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+    let range =
+        data::parse_usage_custom_range("2026-06-01..2026-06-05").expect("valid custom range");
+
+    app.usage.range = data::UsageRangePreset::Custom(range);
+    data.usage.custom_range = Some(range);
+    data.usage.summary_custom.total_requests = 42;
+
+    handle_tui_action(
+        &mut terminal,
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut proxy_loading,
+        None,
+        None,
+        None,
+        &mut webdav_loading,
+        None,
+        &mut update_check,
+        None,
+        None,
+        None,
+        Some(&tx),
+        Action::ReloadData,
+    )
+    .expect("reload data should be handled");
+
+    assert_eq!(data.usage.custom_range, Some(range));
+    assert_eq!(data.usage.summary_custom.total_requests, 0);
+    assert!(matches!(
+        rx.recv().expect("custom usage/pricing reload should be queued"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::Custom(queued_range),
+            ..
+        } if queued_range == range
+    ));
 }
 
 #[test]
@@ -99,6 +1821,7 @@ fn opening_skills_import_picker_selects_all_by_default() {
             name: "Hello Skill".to_string(),
             description: Some("A local skill".to_string()),
             found_in: vec!["claude".to_string()],
+            path: "/tmp/hello-skill".to_string(),
         }])
     })
     .expect("import picker should open");
@@ -181,6 +1904,195 @@ fn managed_proxy_action_enqueues_background_request_and_shows_loading_overlay() 
             ..
         }
     ));
+}
+
+#[test]
+fn proxy_snapshot_refresh_enqueues_single_background_request() {
+    let mut tracker = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+
+    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::Codex);
+    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::Claude);
+
+    let req = rx.recv().expect("proxy snapshot request should be queued");
+    assert!(matches!(
+        req,
+        ProxyReq::RefreshSnapshot {
+            request_id: 1,
+            app_type: AppType::Codex,
+        }
+    ));
+    assert!(rx.try_recv().is_err(), "in-flight refresh should not stack");
+    assert_eq!(tracker.active, Some(1));
+}
+
+#[test]
+fn proxy_snapshot_refresh_can_be_requeued_after_app_switch_cancel() {
+    let mut tracker = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let (tx, rx) = mpsc::channel();
+
+    tracker.cancel();
+    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::OpenCode);
+
+    let req = rx
+        .recv()
+        .expect("new app snapshot request should be queued");
+    assert!(matches!(
+        req,
+        ProxyReq::RefreshSnapshot {
+            request_id: 2,
+            app_type: AppType::OpenCode,
+        }
+    ));
+    assert_eq!(tracker.active, Some(2));
+}
+
+#[test]
+fn proxy_snapshot_refresh_send_failure_clears_active_request() {
+    let mut tracker = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+    drop(rx);
+
+    queue_proxy_snapshot_refresh(&mut tracker, Some(&tx), &AppType::Claude);
+
+    assert_eq!(tracker.active, None);
+}
+
+#[test]
+fn proxy_snapshot_after_app_switch_queues_only_after_successful_change() {
+    let (tx, rx) = mpsc::channel();
+    let mut tracker = RequestTracker {
+        seq: 7,
+        active: Some(7),
+    };
+
+    queue_proxy_snapshot_refresh_after_app_switch(
+        &mut tracker,
+        Some(&tx),
+        &AppType::Claude,
+        &AppType::Codex,
+        false,
+    );
+    assert_eq!(tracker.active, Some(7));
+    assert!(rx.try_recv().is_err());
+
+    queue_proxy_snapshot_refresh_after_app_switch(
+        &mut tracker,
+        Some(&tx),
+        &AppType::Claude,
+        &AppType::Claude,
+        true,
+    );
+    assert_eq!(tracker.active, Some(7));
+    assert!(rx.try_recv().is_err());
+
+    queue_proxy_snapshot_refresh_after_app_switch(
+        &mut tracker,
+        Some(&tx),
+        &AppType::Claude,
+        &AppType::Codex,
+        true,
+    );
+    let req = rx
+        .recv()
+        .expect("successful app switch should queue proxy snapshot");
+    assert!(matches!(
+        req,
+        ProxyReq::RefreshSnapshot {
+            request_id: 8,
+            app_type: AppType::Codex,
+        }
+    ));
+    assert_eq!(tracker.active, Some(8));
+}
+
+#[test]
+fn proxy_snapshot_result_updates_proxy_without_cache_invalidation() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut proxy_snapshot_refresh = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let proxy = data::ProxySnapshot {
+        running: true,
+        estimated_input_tokens_total: 12,
+        estimated_output_tokens_total: 34,
+        ..data::ProxySnapshot::default()
+    };
+    app.reset_proxy_activity(0, 0);
+
+    let invalidation = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::SnapshotRefreshed {
+            request_id: 1,
+            app_type: AppType::Claude,
+            result: Ok(proxy),
+        },
+    )
+    .expect("snapshot result should be handled");
+
+    assert_eq!(invalidation, CacheInvalidation::None);
+    assert!(data.proxy.running);
+    assert_eq!(data.proxy.estimated_input_tokens_total, 12);
+    assert_eq!(data.proxy.estimated_output_tokens_total, 34);
+    assert_eq!(app.proxy_activity_last_input_tokens, Some(12));
+    assert_eq!(app.proxy_activity_last_output_tokens, Some(34));
+    assert_eq!(proxy_snapshot_refresh.active, None);
+}
+
+#[test]
+fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut proxy_loading = RequestTracker::default();
+    let mut proxy_snapshot_refresh = RequestTracker {
+        seq: 2,
+        active: Some(2),
+    };
+
+    handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::SnapshotRefreshed {
+            request_id: 1,
+            app_type: AppType::Claude,
+            result: Ok(data::ProxySnapshot {
+                running: true,
+                ..data::ProxySnapshot::default()
+            }),
+        },
+    )
+    .expect("stale snapshot result should be ignored");
+    assert!(!data.proxy.running);
+    assert_eq!(proxy_snapshot_refresh.active, Some(2));
+
+    handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::SnapshotRefreshed {
+            request_id: 2,
+            app_type: AppType::Codex,
+            result: Ok(data::ProxySnapshot {
+                running: true,
+                ..data::ProxySnapshot::default()
+            }),
+        },
+    )
+    .expect("wrong-app snapshot result should be ignored");
+    assert!(!data.proxy.running);
+    assert_eq!(proxy_snapshot_refresh.active, None);
 }
 
 #[test]
@@ -312,6 +2224,7 @@ fn stream_check_result_lines_include_core_fields() {
         model_used: "gpt-5.1-codex".to_string(),
         tested_at: 1_700_000_000,
         retry_count: 1,
+        error_category: None,
     };
 
     let lines = build_stream_check_result_lines("Provider One", &result);
@@ -475,6 +2388,7 @@ fn update_check_finished_is_ignored_when_canceled() {
         target_tag: "v9.9.9".to_string(),
         is_already_latest: false,
         is_downgrade: false,
+        is_homebrew_managed: false,
     };
 
     handle_update_msg(
@@ -500,14 +2414,17 @@ fn update_check_finished_is_processed_when_request_id_matches() {
         title: texts::tui_update_checking_title().to_string(),
         message: texts::tui_loading().to_string(),
     };
-    let mut update_check = RequestTracker::default();
-    update_check.active = Some(7);
+    let mut update_check = RequestTracker {
+        active: Some(7),
+        ..Default::default()
+    };
 
     let info = crate::cli::commands::update::UpdateCheckInfo {
         current_version: "4.7.0".to_string(),
         target_tag: "v9.9.9".to_string(),
         is_already_latest: false,
         is_downgrade: false,
+        is_homebrew_managed: false,
     };
 
     handle_update_msg(
@@ -531,17 +2448,58 @@ fn update_check_finished_is_processed_when_request_id_matches() {
 }
 
 #[test]
+fn update_check_finished_for_homebrew_update_shows_brew_toast() {
+    let mut app = App::new(None);
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::UpdateCheck,
+        title: texts::tui_update_checking_title().to_string(),
+        message: texts::tui_loading().to_string(),
+    };
+    let mut update_check = RequestTracker {
+        active: Some(7),
+        ..Default::default()
+    };
+
+    let info = crate::cli::commands::update::UpdateCheckInfo {
+        current_version: "4.7.0".to_string(),
+        target_tag: "v9.9.9".to_string(),
+        is_already_latest: false,
+        is_downgrade: false,
+        is_homebrew_managed: true,
+    };
+
+    handle_update_msg(
+        &mut app,
+        &mut update_check,
+        UpdateMsg::CheckFinished {
+            request_id: 7,
+            result: Ok(info),
+        },
+    );
+
+    assert_eq!(update_check.active, None);
+    assert!(matches!(app.overlay, Overlay::None));
+    let toast = app.toast.as_ref().expect("homebrew update should toast");
+    assert_eq!(toast.kind, ToastKind::Info);
+    assert!(toast.message.contains("v9.9.9"));
+    assert!(toast.message.contains("brew upgrade cc-switch"));
+}
+
+#[test]
 fn update_check_finished_is_ignored_when_request_id_mismatch() {
     let mut app = App::new(None);
     app.overlay = Overlay::None;
-    let mut update_check = RequestTracker::default();
-    update_check.active = Some(2);
+    let mut update_check = RequestTracker {
+        active: Some(2),
+        ..Default::default()
+    };
 
     let stale = crate::cli::commands::update::UpdateCheckInfo {
         current_version: "4.7.0".to_string(),
         target_tag: "v1.0.0".to_string(),
         is_already_latest: false,
         is_downgrade: false,
+        is_homebrew_managed: false,
     };
     handle_update_msg(
         &mut app,
@@ -560,6 +2518,7 @@ fn update_check_finished_is_ignored_when_request_id_mismatch() {
         target_tag: "v9.9.9".to_string(),
         is_already_latest: false,
         is_downgrade: false,
+        is_homebrew_managed: false,
     };
     handle_update_msg(
         &mut app,
@@ -588,6 +2547,10 @@ fn model_fetch_strategy_matches_provider_field() {
         model_fetch_strategy_for_field(ProviderAddField::ClaudeModelConfig),
         ModelFetchStrategy::Anthropic
     );
+    assert_eq!(
+        model_fetch_strategy_for_field(ProviderAddField::HermesModels),
+        ModelFetchStrategy::Bearer
+    );
 }
 
 #[test]
@@ -606,6 +2569,22 @@ fn model_fetch_candidate_urls_prefers_v1_for_anthropic_base() {
 }
 
 #[test]
+fn model_fetch_candidate_urls_strip_anthropic_compat_suffix() {
+    let urls = build_model_fetch_candidate_urls(
+        "https://api.deepseek.com/anthropic",
+        ModelFetchStrategy::Anthropic,
+    );
+    assert_eq!(
+        urls,
+        vec![
+            "https://api.deepseek.com/anthropic/v1/models".to_string(),
+            "https://api.deepseek.com/v1/models".to_string(),
+            "https://api.deepseek.com/models".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn model_fetch_candidate_urls_for_gemini_v1beta_keeps_models_endpoint() {
     let urls = build_model_fetch_candidate_urls(
         "https://generativelanguage.googleapis.com/v1beta",
@@ -614,6 +2593,60 @@ fn model_fetch_candidate_urls_for_gemini_v1beta_keeps_models_endpoint() {
     assert_eq!(
         urls,
         vec!["https://generativelanguage.googleapis.com/v1beta/models".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn model_fetch_sends_trimmed_custom_user_agent() {
+    use std::sync::{Arc, Mutex};
+
+    use axum::{http::HeaderMap, routing::get, Router};
+
+    let observed_user_agent = Arc::new(Mutex::new(None::<String>));
+    let handler_user_agent = Arc::clone(&observed_user_agent);
+    let app = Router::new().route(
+        "/v1/models",
+        get(move |headers: HeaderMap| {
+            let observed_user_agent = Arc::clone(&handler_user_agent);
+            async move {
+                let user_agent = headers
+                    .get(reqwest::header::USER_AGENT)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                *observed_user_agent
+                    .lock()
+                    .expect("capture model fetch user agent") = user_agent;
+                axum::Json(json!({ "data": [{ "id": "model-a" }] }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind model fetch test server");
+    let address = listener.local_addr().expect("model fetch listener address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("model fetch test server should run");
+    });
+
+    let models = fetch_provider_models_for_tui(
+        &format!("http://{address}"),
+        Some("sk-test"),
+        Some("  cc-switch-model-fetch/test  "),
+        ModelFetchStrategy::Bearer,
+    )
+    .await
+    .expect("model fetch should succeed");
+    server.abort();
+
+    assert_eq!(models, vec!["model-a"]);
+    assert_eq!(
+        observed_user_agent
+            .lock()
+            .expect("read model fetch user agent")
+            .as_deref(),
+        Some("cc-switch-model-fetch/test")
     );
 }
 
@@ -627,6 +2660,7 @@ fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_
         codex: true,
         gemini: false,
         opencode: true,
+        hermes: false,
         openclaw: true,
     })
     .expect("save visible apps");
@@ -640,6 +2674,20 @@ fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_
 
     assert_eq!(loaded_app_type, Some(AppType::OpenCode));
     assert_eq!(app.app_type, AppType::OpenCode);
+}
+
+#[test]
+#[serial(home_settings)]
+fn startup_reads_persisted_common_config_notice_confirmation() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+    crate::settings::set_common_config_confirmed(true).expect("save confirmation");
+
+    let (app, _data) =
+        initialize_app_state_for_test(Some(AppType::Claude), |_| Ok(UiData::default()))
+            .expect("bootstrap app state");
+
+    assert!(app.common_config_notice_confirmed);
 }
 
 #[test]

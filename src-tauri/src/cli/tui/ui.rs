@@ -2,10 +2,11 @@ use chrono::{Local, TimeZone};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, Gauge, List, ListItem, ListState, Paragraph, Row,
-        Table, TableState, Wrap,
+        Axis, Block, BorderType, Borders, Cell, Chart, Clear, Dataset, Gauge, GraphType, LineGauge,
+        List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
     },
     Frame,
 };
@@ -19,12 +20,15 @@ use serde_json::Value;
 use super::{
     app,
     app::{
-        App, ConfigItem, ConfirmAction, Focus, LoadingKind, Overlay, ToastKind, WebDavConfigItem,
+        App, ConfigItem, ConfirmAction, Focus, LoadingKind, Overlay, SessionsPane, ToastKind,
+        WebDavConfigItem,
     },
     data::{McpRow, ProviderRow, UiData},
     form::{
-        CodexPreviewSection, FormFocus, FormState, GeminiAuthType, McpAddField, ProviderAddField,
+        CodexPreviewSection, FormFocus, FormState, GeminiAuthType, McpAddField, PromptMetaField,
+        ProviderAddField,
     },
+    icons,
     route::{NavItem, Route},
     theme,
     theme::theme_for,
@@ -37,11 +41,14 @@ mod forms;
 mod main_page;
 mod mcp;
 mod overlay;
+mod pricing;
 mod prompts;
 mod providers;
 mod proxy_wave;
+mod sessions;
 mod shared;
 mod skills;
+mod usage;
 
 #[cfg(test)]
 mod header_tests;
@@ -56,11 +63,14 @@ use forms::*;
 use main_page::*;
 use mcp::*;
 use overlay::*;
+use pricing::*;
 use prompts::*;
 use providers::*;
 use proxy_wave::*;
+use sessions::*;
 use shared::*;
 use skills::*;
+use usage::*;
 
 pub fn render(frame: &mut Frame<'_>, app: &App, data: &UiData) {
     let theme = theme_for(&app.app_type);
@@ -93,8 +103,13 @@ pub fn render(frame: &mut Frame<'_>, app: &App, data: &UiData) {
     render_content(frame, app, data, body[1], &theme);
     render_footer(frame, app, data, root[2], &theme);
 
-    render_overlay(frame, app, data, &theme);
-    render_toast(frame, app, &theme);
+    if should_render_toast_below_overlay(app) {
+        render_toast(frame, app, &theme);
+        render_overlay(frame, app, data, &theme);
+    } else {
+        render_overlay(frame, app, data, &theme);
+        render_toast(frame, app, &theme);
+    }
 }
 
 pub(super) fn proxy_open_flash_effect(area: Rect) -> tachyonfx::Effect {
@@ -106,6 +121,15 @@ pub(super) fn proxy_open_flash_effect(area: Rect) -> tachyonfx::Effect {
         .with_area(area);
 
     fx::ping_pong(radial_hsl_xform)
+}
+
+fn should_render_toast_below_overlay(app: &App) -> bool {
+    app.toast.as_ref().is_some_and(|toast| toast.persistent)
+        && matches!(
+            &app.overlay,
+            Overlay::Confirm(confirm)
+                if matches!(confirm.action, ConfirmAction::ManagedAuthCancelLogin)
+        )
 }
 
 fn render_content(
@@ -134,11 +158,16 @@ fn render_content(
     match &app.route {
         Route::Main => render_main(frame, app, data, content_area, theme),
         Route::Providers => render_providers(frame, app, data, content_area, theme),
-        Route::ProviderDetail { id } => {
-            render_provider_detail(frame, app, data, content_area, theme, id)
+        Route::Usage => render_usage(frame, app, data, content_area, theme),
+        Route::UsageLogs => render_usage_logs(frame, app, data, content_area, theme),
+        Route::UsageLogDetail { request_id } => {
+            render_usage_log_detail(frame, app, data, content_area, theme, request_id)
         }
+        Route::Pricing => render_pricing(frame, app, data, content_area, theme),
+        Route::Sessions => render_sessions(frame, app, data, content_area, theme),
         Route::Mcp => render_mcp(frame, app, data, content_area, theme),
         Route::Prompts => render_prompts(frame, app, data, content_area, theme),
+        Route::HermesMemory => render_hermes_memory(frame, app, data, content_area, theme),
         Route::Config => render_config(frame, app, data, content_area, theme),
         Route::ConfigOpenClawWorkspace | Route::ConfigOpenClawDailyMemory => {
             if matches!(app.app_type, AppType::OpenClaw) {
@@ -163,12 +192,14 @@ fn render_content(
         }
         Route::Settings => render_settings(frame, app, data, content_area, theme),
         Route::SettingsProxy => render_settings_proxy(frame, app, data, content_area, theme),
+        Route::SettingsManagedAccounts => {
+            render_settings_managed_accounts(frame, app, data, content_area, theme)
+        }
     }
 }
 
 fn split_filter_area(area: Rect, app: &App) -> (Option<Rect>, Rect) {
-    let show = app.filter.active || !app.filter.buffer.trim().is_empty();
-    if !show {
+    if !app.should_show_filter_bar() {
         return (None, area);
     }
 
@@ -180,22 +211,8 @@ fn split_filter_area(area: Rect, app: &App) -> (Option<Rect>, Rect) {
     (Some(chunks[0]), chunks[1])
 }
 
-#[cfg(test)]
-mod effect_tests {
-    use super::*;
-
-    #[test]
-    fn proxy_open_flash_uses_ping_pong_sine_in_out_once() {
-        let effect = proxy_open_flash_effect(Rect::new(0, 0, 80, 24));
-        let dsl = effect.to_dsl().unwrap().to_string();
-
-        assert!(dsl.contains("fx::ping_pong("), "{dsl}");
-        assert!(dsl.contains("SineInOut"), "{dsl}");
-        assert!(!dsl.contains("fx::repeating("), "{dsl}");
-    }
-}
-
 fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super::theme::Theme) {
+    let input = app.displayed_filter_input();
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -221,11 +238,8 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super
 
     let input_inner = input_block.inner(inner);
     frame.render_widget(input_block, inner);
-    let available = input_inner.width as usize;
-    let full = app.filter.buffer.clone();
-    let cursor = full.chars().count();
-    let start = cursor.saturating_sub(available);
-    let visible = full.chars().skip(start).take(available).collect::<String>();
+    let (visible, cursor_x) =
+        visible_text_window(&input.value, input.cursor, input_inner.width as usize);
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::raw(visible))).wrap(Wrap { trim: false }),
@@ -233,8 +247,23 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super
     );
 
     if app.filter.active {
-        let cursor_x = input_inner.x + (cursor.saturating_sub(start) as u16);
+        let cursor_x = input_inner.x + cursor_x.min(input_inner.width.saturating_sub(1));
         let cursor_y = input_inner.y;
         frame.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+
+    #[test]
+    fn proxy_open_flash_uses_ping_pong_sine_in_out_once() {
+        let effect = proxy_open_flash_effect(Rect::new(0, 0, 80, 24));
+        let dsl = effect.to_dsl().unwrap().to_string();
+
+        assert!(dsl.contains("fx::ping_pong("), "{dsl}");
+        assert!(dsl.contains("SineInOut"), "{dsl}");
+        assert!(!dsl.contains("fx::repeating("), "{dsl}");
     }
 }

@@ -2,11 +2,22 @@ mod adapter;
 mod auth;
 mod claude;
 mod codex;
+pub(crate) mod codex_chat_common;
+pub mod codex_chat_history;
 pub mod codex_oauth_auth;
+#[allow(dead_code)]
+pub mod copilot_auth;
+pub mod copilot_model_map;
 mod gemini;
+pub(crate) mod gemini_schema;
+pub mod gemini_shadow;
 pub mod streaming;
+pub mod streaming_codex_chat;
+pub mod streaming_gemini;
 pub mod streaming_responses;
 pub mod transform;
+pub mod transform_codex_chat;
+pub mod transform_gemini;
 pub mod transform_responses;
 
 use crate::app_config::AppType;
@@ -18,9 +29,17 @@ pub use auth::{AuthInfo, AuthStrategy};
 #[allow(unused_imports)]
 pub use claude::{
     claude_api_format_needs_transform, get_claude_api_format,
-    transform_claude_request_for_api_format, ClaudeAdapter,
+    normalize_anthropic_tool_thinking_history_for_provider,
+    transform_claude_request_for_api_format, transform_claude_request_for_api_format_with_shadow,
+    transform_gemini_response_for_provider, ClaudeAdapter,
 };
 pub use codex::CodexAdapter;
+#[allow(unused_imports)]
+pub use codex::{
+    apply_codex_chat_upstream_model, codex_provider_catalog_tool_profile,
+    codex_provider_upstream_model, codex_provider_uses_chat_completions, is_origin_only_url,
+    resolve_codex_chat_reasoning_config, should_convert_codex_responses_to_chat,
+};
 pub use gemini::GeminiAdapter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +83,14 @@ impl ProviderType {
     pub fn from_app_type_and_config(app_type: &AppType, provider: &Provider) -> Self {
         match app_type {
             AppType::Claude => {
+                if get_claude_api_format(provider) == "gemini_native" {
+                    let adapter = ClaudeAdapter::new();
+                    return match adapter.extract_auth(provider).map(|auth| auth.strategy) {
+                        Some(AuthStrategy::GoogleOAuth) => ProviderType::GeminiCli,
+                        _ => ProviderType::Gemini,
+                    };
+                }
+
                 if let Some(meta) = provider.meta.as_ref() {
                     if meta.provider_type.as_deref() == Some("github_copilot") {
                         return ProviderType::GitHubCopilot;
@@ -114,7 +141,7 @@ impl ProviderType {
                 }
                 ProviderType::Gemini
             }
-            AppType::OpenCode | AppType::OpenClaw => ProviderType::Codex,
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => ProviderType::Codex,
         }
     }
 
@@ -164,6 +191,7 @@ pub fn get_adapter(app_type: &AppType) -> Box<dyn ProviderAdapter> {
         AppType::Codex => Box::new(CodexAdapter::new()),
         AppType::Gemini => Box::new(GeminiAdapter::new()),
         AppType::OpenCode => Box::new(CodexAdapter::new()),
+        AppType::Hermes => Box::new(CodexAdapter::new()),
         AppType::OpenClaw => Box::new(CodexAdapter::new()),
     }
 }

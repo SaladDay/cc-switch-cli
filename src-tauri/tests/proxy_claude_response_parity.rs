@@ -75,15 +75,16 @@ async fn forward_openai_chat_response(upstream_response: Value) -> Value {
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
+
     let service = ProxyService::new(db);
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -240,7 +241,8 @@ async fn response_prompt_tokens_details_cached_tokens_maps_to_cache_read_input_t
     }))
     .await;
 
-    assert_eq!(body["usage"]["input_tokens"], 100);
+    // input_tokens is fresh input: prompt_tokens(100) - cache_read(80) = 20.
+    assert_eq!(body["usage"]["input_tokens"], 20);
     assert_eq!(body["usage"]["output_tokens"], 50);
     assert_eq!(body["usage"]["cache_read_input_tokens"], 80);
 }
@@ -264,7 +266,8 @@ async fn response_direct_usage_cache_fields_match_upstream() {
     }))
     .await;
 
-    assert_eq!(body["usage"]["input_tokens"], 100);
+    // input_tokens is fresh input: prompt(100) - cache_read(60) - cache_creation(20) = 20.
+    assert_eq!(body["usage"]["input_tokens"], 20);
     assert_eq!(body["usage"]["output_tokens"], 50);
     assert_eq!(body["usage"]["cache_read_input_tokens"], 60);
     assert_eq!(body["usage"]["cache_creation_input_tokens"], 20);

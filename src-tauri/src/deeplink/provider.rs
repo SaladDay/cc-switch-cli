@@ -67,6 +67,7 @@ pub fn import_provider_from_deeplink(
                 Some("codex") => Some("https://openai.com".to_string()),
                 Some("gemini") => Some("https://ai.google.dev".to_string()),
                 Some("opencode") => Some("https://opencode.ai".to_string()),
+                Some("hermes") => Some("https://hermes.sh".to_string()),
                 _ => None,
             };
         }
@@ -139,6 +140,7 @@ fn build_provider_from_request(
         AppType::Codex => build_codex_settings(request),
         AppType::Gemini => build_gemini_settings(request),
         AppType::OpenCode => build_opencode_settings(request),
+        AppType::Hermes => build_hermes_settings(request),
         AppType::OpenClaw => build_openclaw_settings(request),
     };
 
@@ -212,6 +214,7 @@ fn build_provider_meta(request: &DeepLinkImportRequest) -> Result<Option<Provide
         user_id: request.usage_user_id.clone(),
         template_type: None,
         auto_query_interval: request.usage_auto_interval,
+        coding_plan_provider: None,
     };
 
     Ok(Some(ProviderMeta {
@@ -257,38 +260,65 @@ fn build_claude_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
 }
 
 fn build_codex_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
+    // The `model_provider` key is always the shared `custom` id; the human
+    // readable provider name is preserved in the `name` field of the
+    // `[model_providers.custom]` table. Codex rejects a provider table whose
+    // `name` is missing or empty ("provider name must not be empty", #333), so
+    // the display name is always written (falling back to `custom`).
+    let provider_display_name = request
+        .name
+        .as_deref()
+        .unwrap_or("custom")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let provider_display_name = if provider_display_name.is_empty() {
+        "custom".to_string()
+    } else {
+        provider_display_name
+    };
+
+    // Model name: use deeplink model or default
     let model_name = request
         .model
         .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("gpt-5.4");
+        .unwrap_or("gpt-5-codex")
+        .to_string();
 
+    // Endpoint: normalize trailing slashes (use primary endpoint only)
     let endpoint = get_primary_endpoint(request)
         .trim()
         .trim_end_matches('/')
         .to_string();
 
-    // Generate a provider key from the name (same logic as clean_codex_provider_key)
-    let provider_key =
-        crate::codex_config::clean_codex_provider_key(request.name.as_deref().unwrap_or("custom"));
+    // Escape every user-controlled value through toml_edit so quotes/specials
+    // in the display name or endpoint cannot corrupt the generated TOML.
+    let provider_display_name = toml_edit::Value::from(provider_display_name.as_str()).to_string();
+    let model_name = toml_edit::Value::from(model_name.as_str()).to_string();
+    let endpoint = toml_edit::Value::from(endpoint.as_str()).to_string();
 
-    // Use upstream model_provider + [model_providers.<key>] format
-    let config_snippet = format!(
-        "model_provider = \"{provider_key}\"\n\
-         model = \"{model_name}\"\n\
-         \n\
-         [model_providers.{provider_key}]\n\
-         base_url = \"{endpoint}\"\n\
-         wire_api = \"responses\"\n\
-         requires_openai_auth = false\n\
-         env_key = \"OPENAI_API_KEY\""
+    // Build config.toml content
+    let config_toml = format!(
+        r#"model_provider = "custom"
+model = {model_name}
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.custom]
+name = {provider_display_name}
+base_url = {endpoint}
+wire_api = "responses"
+requires_openai_auth = true
+"#
     );
 
     json!({
         "auth": {
             "OPENAI_API_KEY": request.api_key,
         },
-        "config": config_snippet
+        "config": config_toml
     })
 }
 
@@ -326,6 +356,31 @@ fn build_opencode_settings(request: &DeepLinkImportRequest) -> serde_json::Value
         "options": options,
         "models": models
     })
+}
+
+fn build_hermes_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
+    let endpoint = get_primary_endpoint(request);
+    let mut settings = serde_json::Map::new();
+    settings.insert(
+        "name".to_string(),
+        json!(request.name.clone().unwrap_or_else(|| "custom".to_string())),
+    );
+
+    if !endpoint.is_empty() {
+        settings.insert("baseUrl".to_string(), json!(endpoint));
+    }
+    if let Some(api_key) = &request.api_key {
+        settings.insert("apiKey".to_string(), json!(api_key));
+    }
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.insert("model".to_string(), json!(model));
+    }
+
+    Value::Object(settings)
 }
 
 fn build_openclaw_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
@@ -433,6 +488,7 @@ pub fn parse_and_merge_config(
         "codex" => merge_codex_config(&mut merged, &config_value)?,
         "gemini" => merge_gemini_config(&mut merged, &config_value)?,
         "opencode" => merge_additive_config(&mut merged, &config_value)?,
+        "hermes" => merge_additive_config(&mut merged, &config_value)?,
         "openclaw" => merge_openclaw_config(&mut merged, &config_value)?,
         "" => return Ok(merged),
         other => return Err(AppError::InvalidInput(format!("Invalid app type: {other}"))),

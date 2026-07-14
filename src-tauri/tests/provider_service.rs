@@ -3,13 +3,17 @@ use std::collections::HashMap;
 
 use cc_switch_lib::{
     get_claude_settings_path, read_json_file, update_settings, write_codex_live_atomic, AppError,
-    AppSettings, AppType, McpApps, McpServer, MultiAppConfig, Provider, ProviderMeta,
+    AppSettings, AppState, AppType, McpApps, McpServer, MultiAppConfig, Provider, ProviderMeta,
     ProviderService,
 };
+use indexmap::IndexMap;
 
 #[path = "support.rs"]
 mod support;
-use support::{ensure_test_home, lock_test_mutex, reset_test_fs, state_from_config};
+use support::{
+    enable_codex_official_auth_preservation, ensure_test_home, lock_test_mutex, reset_test_fs,
+    state_from_config,
+};
 
 fn sanitize_provider_name(name: &str) -> String {
     name.chars()
@@ -24,6 +28,20 @@ fn sanitize_provider_name(name: &str) -> String {
 fn read_openclaw_live_config_json5(path: &std::path::Path) -> serde_json::Value {
     let source = std::fs::read_to_string(path).expect("read openclaw live config source");
     json5::from_str(&source).expect("parse openclaw live config as json5")
+}
+
+fn openclaw_db_providers(state: &AppState) -> IndexMap<String, Provider> {
+    state
+        .db
+        .get_all_providers(AppType::OpenClaw.as_str())
+        .expect("read OpenClaw providers from database")
+}
+
+fn openclaw_db_current(state: &AppState) -> Option<String> {
+    state
+        .db
+        .get_current_provider(AppType::OpenClaw.as_str())
+        .expect("read OpenClaw current provider from database")
 }
 
 fn config_with_prompt_entries(entries: &[(&AppType, &str, &str, bool)]) -> MultiAppConfig {
@@ -94,6 +112,7 @@ fn insert_codex_managed_mcp(config: &mut MultiAppConfig) {
 fn provider_service_switch_codex_updates_live_and_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();
+    enable_codex_official_auth_preservation();
     let _home = ensure_test_home();
 
     let legacy_auth = json!({ "OPENAI_API_KEY": "legacy-key" });
@@ -170,8 +189,8 @@ command = "echo"
         read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
     assert_eq!(
         auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
-        Some("fresh-key"),
-        "live auth.json should reflect new provider"
+        Some("legacy-key"),
+        "third-party Codex switches should preserve the user's auth.json login cache"
     );
 
     let config_text =
@@ -179,6 +198,16 @@ command = "echo"
     assert!(
         config_text.contains("mcp_servers.echo-server"),
         "config.toml should contain synced MCP servers"
+    );
+    let parsed_config: toml::Value = toml::from_str(&config_text).expect("parse config.toml");
+    assert_eq!(
+        parsed_config
+            .get("model_providers")
+            .and_then(|value| value.get("latest"))
+            .and_then(|value| value.get("experimental_bearer_token"))
+            .and_then(|value| value.as_str()),
+        Some("fresh-key"),
+        "third-party provider token should be written into the active model provider table"
     );
 
     let guard = state.config.read().expect("read config after switch");
@@ -222,19 +251,406 @@ command = "echo"
 }
 
 #[test]
+fn provider_service_switch_codex_overwrites_live_auth_when_preservation_off() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "official-oauth-token",
+            "account_id": "acct-1"
+        }
+    });
+    let legacy_config = r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    let third_party_config = r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+
+[model_providers.aihubmix]
+name = "AiHubMix"
+base_url = "https://aihubmix.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&live_auth, Some(third_party_config))
+        .expect("seed existing Codex OAuth live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "legacy-provider".to_string();
+        manager.providers.insert(
+            "legacy-provider".to_string(),
+            Provider::with_id(
+                "legacy-provider".to_string(),
+                "RightCode".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "rightcode-key"},
+                    "config": legacy_config
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "third-party".to_string(),
+            Provider::with_id(
+                "third-party".to_string(),
+                "AiHubMix".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "third-party-key"},
+                    "config": third_party_config
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(initial_config);
+
+    // Upstream parity (clean-write, preservation OFF): switching to a
+    // third-party provider OVERWRITES auth.json with the provider's API key and
+    // overwrites config.toml. The live OAuth cache is intentionally replaced
+    // because preserve_codex_official_auth_on_switch is off.
+    ProviderService::switch(&state, AppType::Codex, "third-party")
+        .expect("clean-write switch should succeed");
+
+    let auth_value: serde_json::Value =
+        read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
+    assert_eq!(
+        auth_value
+            .get("OPENAI_API_KEY")
+            .and_then(|value| value.as_str()),
+        Some("third-party-key"),
+        "clean switch should overwrite auth.json with the incoming provider key"
+    );
+
+    let config_text =
+        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
+    assert!(
+        config_text.contains("aihubmix"),
+        "clean switch should overwrite config.toml with the third-party provider: {config_text}"
+    );
+
+    let guard = state.config.read().expect("read config after switch");
+    let manager = guard
+        .get_manager(&AppType::Codex)
+        .expect("codex manager after switch");
+    assert_eq!(
+        manager.current, "third-party",
+        "switch should update the current provider"
+    );
+}
+
+#[test]
+fn provider_service_switch_codex_preserves_provider_model_provider_after_history_migration() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let legacy_auth = json!({});
+    let legacy_config = r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    let live_config = r#"[mcp_servers.legacy]
+type = "stdio"
+command = "echo"
+"#;
+    write_codex_live_atomic(&legacy_auth, Some(live_config))
+        .expect("seed existing codex live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "RightCode".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "stale"},
+                    "config": legacy_config
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "AiHubMix".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "fresh-key"},
+                    "config": r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+
+[model_providers.aihubmix]
+name = "AiHubMix"
+base_url = "https://aihubmix.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(initial_config);
+
+    ProviderService::switch(&state, AppType::Codex, "new-provider")
+        .expect("switch provider should succeed");
+
+    let config_text =
+        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
+    let parsed: toml::Value = toml::from_str(&config_text).expect("parse config.toml");
+
+    assert_eq!(
+        parsed.get("model_provider").and_then(|v| v.as_str()),
+        Some("aihubmix"),
+        "live Codex model_provider should preserve the selected provider template"
+    );
+
+    let model_providers = parsed
+        .get("model_providers")
+        .and_then(|v| v.as_table())
+        .expect("model_providers table exists");
+    assert_eq!(
+        model_providers
+            .get("aihubmix")
+            .and_then(|v| v.get("base_url"))
+            .and_then(|v| v.as_str()),
+        Some("https://aihubmix.example/v1"),
+        "selected provider id should point at the newly selected supplier endpoint"
+    );
+
+    let guard = state.config.read().expect("read config after switch");
+    let new_config_text = guard
+        .get_manager(&AppType::Codex)
+        .and_then(|manager| manager.providers.get("new-provider"))
+        .and_then(|provider| provider.settings_config.get("config"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        new_config_text.contains("[model_providers.aihubmix]"),
+        "stored provider template should remain provider-specific after refresh"
+    );
+}
+
+#[test]
+fn provider_service_switch_codex_backfill_keeps_provider_specific_model_provider_id() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let legacy_auth = json!({});
+    let provider_a_config = r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    let live_config = r#"[mcp_servers.legacy]
+type = "stdio"
+command = "echo"
+"#;
+    write_codex_live_atomic(&legacy_auth, Some(live_config))
+        .expect("seed existing codex live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "provider-a".to_string();
+        manager.providers.insert(
+            "provider-a".to_string(),
+            Provider::with_id(
+                "provider-a".to_string(),
+                "RightCode".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "rightcode-key"},
+                    "config": provider_a_config
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "provider-b".to_string(),
+            Provider::with_id(
+                "provider-b".to_string(),
+                "AiHubMix".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "aihubmix-key"},
+                    "config": r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+profile = "work"
+
+[model_providers.aihubmix]
+name = "AiHubMix"
+base_url = "https://aihubmix.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[profiles.work]
+model_provider = "aihubmix"
+model = "gpt-5.4"
+"#
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "provider-c".to_string(),
+            Provider::with_id(
+                "provider-c".to_string(),
+                "Vendor C".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "vendor-c-key"},
+                    "config": r#"model_provider = "vendor_c"
+model = "gpt-5.4"
+
+[model_providers.vendor_c]
+name = "Vendor C"
+base_url = "https://vendor-c.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(initial_config);
+
+    ProviderService::switch(&state, AppType::Codex, "provider-b")
+        .expect("switch to provider b should succeed");
+
+    let guard = state.config.read().expect("read config after switches");
+    let provider_b_config = guard
+        .get_manager(&AppType::Codex)
+        .and_then(|manager| manager.providers.get("provider-b"))
+        .and_then(|provider| provider.settings_config.get("config"))
+        .and_then(|v| v.as_str())
+        .expect("provider b config");
+    let parsed: toml::Value = toml::from_str(provider_b_config).expect("parse provider b config");
+
+    assert_eq!(
+        parsed.get("model_provider").and_then(|v| v.as_str()),
+        Some("aihubmix"),
+        "backfill should restore provider b's storage-specific model_provider id"
+    );
+    assert!(
+        parsed
+            .get("model_providers")
+            .and_then(|v| v.get("aihubmix"))
+            .is_some(),
+        "provider b should keep its own model_providers table after backfill"
+    );
+    assert_eq!(
+        parsed
+            .get("profiles")
+            .and_then(|v| v.get("work"))
+            .and_then(|v| v.get("model_provider"))
+            .and_then(|v| v.as_str()),
+        Some("aihubmix"),
+        "profile overrides should be restored to provider b's storage-specific id"
+    );
+}
+
+#[test]
+fn provider_service_switch_codex_backfill_ignores_invalid_template_config() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({});
+    let live_config = r#"[mcp_servers.local]
+type = "stdio"
+command = "echo"
+"#;
+    write_codex_live_atomic(&live_auth, Some(live_config)).expect("seed codex live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "broken-provider".to_string();
+        manager.providers.insert(
+            "broken-provider".to_string(),
+            Provider::with_id(
+                "broken-provider".to_string(),
+                "Broken".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "broken-key"},
+                    "config": "model_provider = ["
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "next-provider".to_string(),
+            Provider::with_id(
+                "next-provider".to_string(),
+                "Next".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "next-key"},
+                    "config": r#"model_provider = "next"
+
+[model_providers.next]
+base_url = "https://next.example/v1"
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(initial_config);
+
+    ProviderService::switch(&state, AppType::Codex, "next-provider")
+        .expect("invalid old template should not block switch");
+}
+
+#[test]
 fn update_current_codex_provider_preserves_managed_mcp_servers() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
 
     let common_snippet = "disable_response_storage = true";
-    let live_auth = json!({ "OPENAI_API_KEY": "live-key" });
+    let live_auth = json!({ "OPENAI_API_KEY": "updated-key" });
     let live_config = r#"disable_response_storage = true
 model_provider = "current"
 model = "gpt-5.2-codex"
 
 [model_providers.current]
-base_url = "https://api.before.example/v1"
+base_url = "https://api.after.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 
@@ -303,13 +719,12 @@ fn add_current_codex_provider_preserves_managed_mcp_servers() {
     let _home = ensure_test_home();
 
     let common_snippet = "disable_response_storage = true";
-    let live_auth = json!({ "OPENAI_API_KEY": "live-key" });
-    let live_config = r#"disable_response_storage = true
-model_provider = "legacy"
+    let live_auth = json!({ "OPENAI_API_KEY": "fresh-key" });
+    let live_config = r#"model_provider = "new"
 model = "gpt-5.2-codex"
 
-[model_providers.legacy]
-base_url = "https://api.legacy.example/v1"
+[model_providers.new]
+base_url = "https://api.new.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 
@@ -362,13 +777,13 @@ fn update_current_codex_provider_uses_db_current_even_if_config_current_drifted(
     let _home = ensure_test_home();
 
     let common_snippet = "disable_response_storage = true";
-    let live_auth = json!({ "OPENAI_API_KEY": "live-key" });
+    let live_auth = json!({ "OPENAI_API_KEY": "updated-key" });
     let live_config = r#"disable_response_storage = true
-model_provider = "stale"
+model_provider = "current"
 model = "gpt-5.2-codex"
 
-[model_providers.stale]
-base_url = "https://api.stale.example/v1"
+[model_providers.current]
+base_url = "https://api.after.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 
@@ -459,13 +874,13 @@ fn add_first_codex_provider_sets_db_current_and_rewrites_live_when_db_current_mi
     let _home = ensure_test_home();
 
     let common_snippet = "disable_response_storage = true";
-    let live_auth = json!({ "OPENAI_API_KEY": "live-key" });
+    let live_auth = json!({ "OPENAI_API_KEY": "fresh-key" });
     let live_config = r#"disable_response_storage = true
-model_provider = "stale"
+model_provider = "new"
 model = "gpt-5.2-codex"
 
-[model_providers.stale]
-base_url = "https://api.stale.example/v1"
+[model_providers.new]
+base_url = "https://api.new.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 
@@ -1077,7 +1492,118 @@ fn switch_gemini_merges_existing_settings_preserving_mcp_servers() {
 }
 
 #[test]
-fn provider_service_switch_claude_updates_live_and_state() {
+fn provider_service_switch_claude_overwrites_live_with_provider_config() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let settings_path = get_claude_settings_path();
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).expect("create claude settings dir");
+    }
+    let legacy_live = json!({
+        "env": {
+            "LOCAL_ONLY": "keep-me"
+        },
+        "workspace": {
+            "path": "/tmp/workspace"
+        }
+    });
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&legacy_live).expect("serialize legacy live"),
+    )
+    .expect("seed claude live config");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Legacy Claude".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "stale-key" }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "new-provider".to_string(),
+            Provider::with_id(
+                "new-provider".to_string(),
+                "Fresh Claude".to_string(),
+                json!({
+                    "env": { "ANTHROPIC_API_KEY": "fresh-key" },
+                    "permissions": { "allow": ["Bash(cargo test:*)"] }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+
+    ProviderService::switch(&state, AppType::Claude, "new-provider")
+        .expect("switch provider should succeed");
+
+    // Upstream parity (clean-write): settings.json is OVERWRITTEN with the new
+    // provider's effective config. Local-only fields that are neither in the
+    // provider nor the common-config snippet are NOT preserved.
+    let live_after: serde_json::Value =
+        read_json_file(&settings_path).expect("read claude live settings");
+    assert_eq!(
+        live_after
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|key| key.as_str()),
+        Some("fresh-key"),
+        "live settings.json should include new provider auth"
+    );
+    assert!(
+        live_after
+            .get("env")
+            .and_then(|env| env.get("LOCAL_ONLY"))
+            .is_none(),
+        "clean overwrite should not retain local-only env keys"
+    );
+    assert!(
+        live_after.get("workspace").is_none(),
+        "clean overwrite should not retain local-only nested objects"
+    );
+    assert_eq!(
+        live_after
+            .pointer("/permissions/allow/0")
+            .and_then(|value| value.as_str()),
+        Some("Bash(cargo test:*)"),
+        "live settings.json should add provider-only nested objects"
+    );
+
+    let guard = state
+        .config
+        .read()
+        .expect("read claude config after switch");
+    let manager = guard
+        .get_manager(&AppType::Claude)
+        .expect("claude manager after switch");
+    assert_eq!(manager.current, "new-provider", "current provider updated");
+
+    let legacy_provider = manager
+        .providers
+        .get("old-provider")
+        .expect("legacy provider still exists");
+    assert_eq!(
+        legacy_provider.settings_config, legacy_live,
+        "previous provider should receive backfilled live config"
+    );
+}
+
+#[test]
+fn provider_service_switch_claude_overwrites_live_discarding_unstored_edits() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -1133,18 +1659,26 @@ fn provider_service_switch_claude_updates_live_and_state() {
 
     let state = state_from_config(config);
 
+    // Upstream parity: switching to a provider whose values diverge from the
+    // live file's unstored edits succeeds and overwrites with the provider's
+    // values (no conflict is surfaced).
     ProviderService::switch(&state, AppType::Claude, "new-provider")
-        .expect("switch provider should succeed");
+        .expect("clean-write switch should succeed");
 
     let live_after: serde_json::Value =
-        read_json_file(&settings_path).expect("read claude live settings");
+        read_json_file(&settings_path).expect("read claude live settings after switch");
     assert_eq!(
         live_after
-            .get("env")
-            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
-            .and_then(|key| key.as_str()),
+            .pointer("/env/ANTHROPIC_API_KEY")
+            .and_then(|value| value.as_str()),
         Some("fresh-key"),
-        "live settings.json should reflect new provider auth"
+    );
+    assert_eq!(
+        live_after
+            .pointer("/workspace/path")
+            .and_then(|value| value.as_str()),
+        Some("/tmp/new-workspace"),
+        "incoming provider workspace should win on a clean write"
     );
 
     let guard = state
@@ -1155,15 +1689,6 @@ fn provider_service_switch_claude_updates_live_and_state() {
         .get_manager(&AppType::Claude)
         .expect("claude manager after switch");
     assert_eq!(manager.current, "new-provider", "current provider updated");
-
-    let legacy_provider = manager
-        .providers
-        .get("old-provider")
-        .expect("legacy provider still exists");
-    assert_eq!(
-        legacy_provider.settings_config, legacy_live,
-        "previous provider should receive backfilled live config"
-    );
 }
 
 #[test]
@@ -1375,9 +1900,10 @@ fn provider_service_sync_current_to_live_openclaw_skips_saved_only_snapshot_prov
                 "mode": "merge",
                 "providers": {
                     "keep": {
-                        "apiKey": "sk-keep-old",
-                        "baseUrl": "https://keep.old.example/v1",
-                        "models": [{ "id": "keep-model-old" }]
+                        "apiKey": "sk-keep-new",
+                        "baseUrl": "https://keep.new.example/v1",
+                        "models": [{ "id": "keep-model-old" }],
+                        "localOnly": "preserved"
                     }
                 }
             },
@@ -1513,9 +2039,10 @@ fn provider_service_sync_current_to_live_openclaw_ignores_malformed_live_members
                 "mode": "merge",
                 "providers": {
                     "keep": {
-                        "apiKey": "sk-keep-old",
-                        "baseUrl": "https://keep.old.example/v1",
-                        "models": [{ "id": "keep-model-old" }]
+                        "apiKey": "sk-keep-new",
+                        "baseUrl": "https://keep.new.example/v1",
+                        "models": [{ "id": "keep-model-old" }],
+                        "localOnly": "preserved"
                     },
                     "model-less": {
                         "apiKey": "sk-model-less-old",
@@ -1610,9 +2137,10 @@ fn provider_service_sync_current_to_live_openclaw_ignores_blank_model_ids_in_liv
                 "mode": "merge",
                 "providers": {
                     "keep": {
-                        "apiKey": "sk-keep-old",
-                        "baseUrl": "https://keep.old.example/v1",
-                        "models": [{ "id": "keep-model" }]
+                        "apiKey": "sk-keep-new",
+                        "baseUrl": "https://keep.new.example/v1",
+                        "models": [{ "id": "keep-model" }],
+                        "localOnly": "preserved"
                     },
                     "blank-model-id": {
                         "apiKey": "sk-blank-old",
@@ -2044,11 +2572,9 @@ fn provider_service_update_openclaw_allows_model_catalog_refs_to_dangle() {
     providers: {
       keep: {
         apiKey: 'sk-keep',
-        baseUrl: 'https://keep.example/v1',
-        models: [
-          { id: 'primary-model' },
-          { id: 'fallback-model' },
-        ],
+        baseUrl: 'https://keep.example/v2',
+        models: [{ id: 'primary-model' }],
+        localOnly: 'preserved',
       },
     },
   },
@@ -2101,6 +2627,10 @@ fn provider_service_update_openclaw_allows_model_catalog_refs_to_dangle() {
     assert_eq!(
         live_after["models"]["providers"]["keep"]["baseUrl"],
         json!("https://keep.example/v2")
+    );
+    assert_eq!(
+        live_after["models"]["providers"]["keep"]["localOnly"],
+        json!("preserved")
     );
     assert_eq!(
         live_after["agents"]["defaults"]["models"]["keep/fallback-model"]["alias"],
@@ -2267,9 +2797,10 @@ fn provider_service_update_in_config_openclaw_updates_live_config() {
                 mode: 'merge',
                 providers: {
                     keep: {
-                        apiKey: 'sk-keep-old',
-                        baseUrl: 'https://keep.old.example/v1',
-                        models: [{ id: 'keep-model' }],
+                        apiKey: 'sk-keep-new',
+                        baseUrl: 'https://keep.new.example/v1',
+                        models: [{ id: 'keep-model-updated' }],
+                        localOnly: 'preserved',
                     },
                 },
             },
@@ -2301,8 +2832,8 @@ fn provider_service_update_in_config_openclaw_updates_live_config() {
         json!("https://keep.new.example/v1")
     );
     assert_eq!(
-        live_after["models"]["providers"]["keep"]["models"][0]["id"],
-        json!("keep-model-updated")
+        live_after["models"]["providers"]["keep"]["localOnly"],
+        json!("preserved")
     );
 }
 
@@ -2630,11 +3161,9 @@ fn provider_service_update_openclaw_allows_default_model_refs_to_dangle() {
     providers: {
       keep: {
         apiKey: 'sk-keep',
-        baseUrl: 'https://keep.example/v1',
-        models: [
-          { id: 'primary-model' },
-          { id: 'fallback-model' },
-        ],
+        baseUrl: 'https://keep.example/v2',
+        models: [{ id: 'primary-model' }],
+        localOnly: 'preserved',
       },
     },
   },
@@ -2694,6 +3223,10 @@ fn provider_service_update_openclaw_allows_default_model_refs_to_dangle() {
     assert_eq!(
         live_after["models"]["providers"]["keep"]["models"],
         json!([{ "id": "primary-model" }])
+    );
+    assert_eq!(
+        live_after["models"]["providers"]["keep"]["localOnly"],
+        json!("preserved")
     );
     assert_eq!(
         live_after["agents"]["defaults"]["model"]["primary"],
@@ -2796,41 +3329,34 @@ fn provider_service_import_openclaw_providers_from_live_imports_valid_live_provi
     let imported = ProviderService::import_openclaw_providers_from_live(&state)
         .expect("import should skip invalid OpenClaw live providers and keep valid ones");
 
-    let guard = state
-        .config
-        .read()
-        .expect("read openclaw config after import");
-    let manager = guard
-        .get_manager(&AppType::OpenClaw)
-        .expect("openclaw manager after import");
+    let providers = openclaw_db_providers(&state);
     assert_eq!(
         imported, 1,
         "only valid OpenClaw live providers should import"
     );
-    assert_eq!(manager.providers.len(), 1);
-    assert!(manager.providers.contains_key("openai"));
+    assert_eq!(providers.len(), 1);
+    assert!(providers.contains_key("openai"));
     assert!(
-        !manager.providers.contains_key("anthropic"),
+        !providers.contains_key("anthropic"),
         "legacy-alias live entries should be skipped"
     );
     assert!(
-        !manager.providers.contains_key("modeless"),
+        !providers.contains_key("modeless"),
         "model-less live entries should be skipped"
     );
     assert!(
-        !manager.providers.contains_key("malformed"),
+        !providers.contains_key("malformed"),
         "malformed live entries should be skipped"
     );
     assert_eq!(
-        manager
-            .providers
+        providers
             .get("openai")
             .expect("valid provider should be imported")
             .settings_config["baseUrl"],
         json!("https://api.example.com/v1")
     );
     assert!(
-        manager.current.is_empty(),
+        openclaw_db_current(&state).is_none(),
         "additive-mode import should not set current"
     );
 
@@ -2894,48 +3420,38 @@ fn provider_service_import_openclaw_providers_from_live_imports_missing_live_pro
     let imported = ProviderService::import_openclaw_providers_from_live(&state)
         .expect("import openclaw live config should succeed");
 
-    let guard = state
-        .config
-        .read()
-        .expect("read openclaw config after incremental import");
-    let manager = guard
-        .get_manager(&AppType::OpenClaw)
-        .expect("openclaw manager after incremental import");
+    let providers = openclaw_db_providers(&state);
 
     assert_eq!(
-        imported, 2,
-        "sync should refresh existing bare rows and import missing live providers"
+        imported, 1,
+        "import should skip existing DB rows and only add missing live providers"
     );
-    assert_eq!(manager.providers.len(), 2);
-    assert!(manager.providers.contains_key("openai"));
-    assert!(manager.providers.contains_key("groq"));
+    assert_eq!(providers.len(), 2);
+    assert!(providers.contains_key("openai"));
+    assert!(providers.contains_key("groq"));
     assert_eq!(
-        manager
-            .providers
+        providers
             .get("openai")
-            .expect("existing provider should be refreshed from live config")
+            .expect("existing provider should be preserved")
             .name,
-        "openai"
+        "Already Imported"
     );
     assert_eq!(
-        manager
-            .providers
+        providers
             .get("openai")
-            .expect("existing provider should be refreshed from live config")
+            .expect("existing provider should be preserved")
             .settings_config["baseUrl"],
-        json!("https://api.example.com/v1")
+        json!("https://existing.example/v1")
     );
     assert_eq!(
-        manager
-            .providers
+        providers
             .get("groq")
             .expect("missing provider should be imported")
             .name,
-        "groq"
+        "Llama 4"
     );
     assert_eq!(
-        manager
-            .providers
+        providers
             .get("groq")
             .expect("missing provider should be imported")
             .settings_config["baseUrl"],
@@ -2944,7 +3460,8 @@ fn provider_service_import_openclaw_providers_from_live_imports_missing_live_pro
 }
 
 #[test]
-fn provider_service_import_openclaw_providers_from_live_skips_legacy_alias_provider_shape() {
+fn provider_service_import_openclaw_providers_from_live_imports_typed_legacy_alias_provider_shape()
+{
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -2974,20 +3491,21 @@ fn provider_service_import_openclaw_providers_from_live_skips_legacy_alias_provi
     let state = state_from_config(MultiAppConfig::default());
 
     let imported = ProviderService::import_openclaw_providers_from_live(&state)
-        .expect("import should skip malformed OpenClaw live providers");
+        .expect("import should mirror valid typed OpenClaw live providers");
 
-    let guard = state
-        .config
-        .read()
-        .expect("read config after rejected import");
-    let manager = guard
-        .get_manager(&AppType::OpenClaw)
-        .expect("openclaw manager after import");
-    assert_eq!(imported, 1, "only valid live providers should be mirrored");
-    assert!(manager.providers.contains_key("openai"));
-    assert!(
-        !manager.providers.contains_key("legacy"),
-        "legacy-alias OpenClaw providers should be skipped instead of blocking the whole mirror"
+    let providers = openclaw_db_providers(&state);
+    assert_eq!(
+        imported, 2,
+        "typed providers with models should be mirrored regardless of field alias style"
+    );
+    assert!(providers.contains_key("openai"));
+    assert!(providers.contains_key("legacy"));
+    assert_eq!(
+        providers
+            .get("legacy")
+            .expect("legacy-alias provider should be imported")
+            .name,
+        "legacy"
     );
 
     let after = std::fs::read_to_string(&openclaw_path).expect("read openclaw file after import");
@@ -3055,53 +3573,43 @@ fn provider_service_import_openclaw_live_skips_blank_ids_and_existing_entries() 
         .expect("import openclaw live config should succeed");
 
     assert_eq!(
-        imported, 2,
-        "sync should skip blank ids, refresh existing bare rows, and import newcomers"
+        imported, 1,
+        "import should skip blank ids and existing DB rows, then add newcomers"
     );
 
-    let guard = state
-        .config
-        .read()
-        .expect("read openclaw config after blank-id import");
-    let manager = guard
-        .get_manager(&AppType::OpenClaw)
-        .expect("openclaw manager after blank-id import");
+    let providers = openclaw_db_providers(&state);
 
-    assert_eq!(manager.providers.len(), 2);
-    assert!(!manager.providers.contains_key(""));
-    assert!(manager.providers.contains_key("existing"));
-    assert!(manager.providers.contains_key("newcomer"));
+    assert_eq!(providers.len(), 2);
+    assert!(!providers.contains_key(""));
+    assert!(providers.contains_key("existing"));
+    assert!(providers.contains_key("newcomer"));
     assert!(
-        manager.current.is_empty(),
+        openclaw_db_current(&state).is_none(),
         "additive-mode import should keep current provider empty"
     );
     assert_eq!(
-        manager
-            .providers
+        providers
             .get("existing")
-            .expect("existing provider should be refreshed from live config")
+            .expect("existing provider should be preserved")
             .name,
-        "existing"
+        "Already Imported"
     );
     assert_eq!(
-        manager
-            .providers
+        providers
             .get("existing")
-            .expect("existing provider should be refreshed from live config")
+            .expect("existing provider should be preserved")
             .settings_config["baseUrl"],
-        json!("https://existing-live.example/v1")
+        json!("https://existing-db.example/v1")
     );
     assert_eq!(
-        manager
-            .providers
+        providers
             .get("newcomer")
             .expect("new provider should be imported")
             .name,
-        "newcomer"
+        "New Model"
     );
     assert_eq!(
-        manager
-            .providers
+        providers
             .get("newcomer")
             .expect("new provider should be imported")
             .settings_config["baseUrl"],
@@ -3148,16 +3656,10 @@ fn provider_service_import_openclaw_providers_from_live_skips_modeless_provider_
     ProviderService::import_openclaw_providers_from_live(&state)
         .expect("import openclaw live config should succeed");
 
-    let guard = state
-        .config
-        .read()
-        .expect("read openclaw config after import");
-    let manager = guard
-        .get_manager(&AppType::OpenClaw)
-        .expect("openclaw manager after import");
+    let providers = openclaw_db_providers(&state);
 
     assert!(
-        !manager.providers.contains_key("openai"),
+        !providers.contains_key("openai"),
         "OpenClaw import should stay aligned with upstream and skip providers without models"
     );
 }
@@ -3195,15 +3697,8 @@ fn provider_service_import_openclaw_providers_from_live_uses_provider_id_when_pr
     ProviderService::import_openclaw_providers_from_live(&state)
         .expect("import openclaw live config should succeed");
 
-    let guard = state
-        .config
-        .read()
-        .expect("read openclaw config after import");
-    let manager = guard
-        .get_manager(&AppType::OpenClaw)
-        .expect("openclaw manager after import");
-    let openai = manager
-        .providers
+    let providers = openclaw_db_providers(&state);
+    let openai = providers
         .get("openai")
         .expect("openai provider should be imported");
 
@@ -3251,15 +3746,8 @@ fn provider_service_import_openclaw_providers_from_live_ignores_later_model_name
     ProviderService::import_openclaw_providers_from_live(&state)
         .expect("import openclaw live config should succeed");
 
-    let guard = state
-        .config
-        .read()
-        .expect("read openclaw config after import");
-    let manager = guard
-        .get_manager(&AppType::OpenClaw)
-        .expect("openclaw manager after import");
-    let openai = manager
-        .providers
+    let providers = openclaw_db_providers(&state);
+    let openai = providers
         .get("openai")
         .expect("openai provider should be imported");
 
@@ -3318,17 +3806,10 @@ fn provider_service_import_openclaw_providers_from_live_preserves_saved_name_for
 
     let imported = ProviderService::import_openclaw_providers_from_live(&state)
         .expect("import openclaw live config should succeed");
-    assert_eq!(imported, 1, "sync should update the existing row in place");
+    assert_eq!(imported, 0, "import should skip the existing row");
 
-    let guard = state
-        .config
-        .read()
-        .expect("read openclaw config after import");
-    let manager = guard
-        .get_manager(&AppType::OpenClaw)
-        .expect("openclaw manager after import");
-    let openai = manager
-        .providers
+    let providers = openclaw_db_providers(&state);
+    let openai = providers
         .get("openai")
         .expect("openai provider should still exist");
 
@@ -3338,8 +3819,8 @@ fn provider_service_import_openclaw_providers_from_live_preserves_saved_name_for
     );
     assert_eq!(
         openai.settings_config["baseUrl"],
-        json!("https://live.example/v1"),
-        "existing OpenClaw rows should still refresh settings from live config"
+        json!("https://saved.example/v1"),
+        "existing OpenClaw rows should not be overwritten by live import"
     );
 }
 
@@ -3397,15 +3878,8 @@ fn provider_service_import_openclaw_providers_from_live_preserves_existing_row_w
         "invalid-but-present OpenClaw rows should not be pruned or re-imported"
     );
 
-    let guard = state
-        .config
-        .read()
-        .expect("read openclaw config after import");
-    let manager = guard
-        .get_manager(&AppType::OpenClaw)
-        .expect("openclaw manager after import");
-    let preserved = manager
-        .providers
+    let providers = openclaw_db_providers(&state);
+    let preserved = providers
         .get("preserved")
         .expect("existing provider row should stay mirrored locally");
 
@@ -3461,7 +3935,7 @@ fn provider_service_switch_codex_missing_auth_is_rejected() {
 }
 
 #[test]
-fn provider_service_switch_codex_openai_official_writes_auth_json_from_provider_snapshot() {
+fn provider_service_switch_codex_openai_official_overwrites_auth_json_from_provider_snapshot() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -3469,7 +3943,7 @@ fn provider_service_switch_codex_openai_official_writes_auth_json_from_provider_
     std::fs::create_dir_all(home.join(".codex")).expect("create codex dir (initialized)");
 
     let auth_path = cc_switch_lib::get_codex_auth_path();
-    std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"stale-key"}"#).expect("seed auth.json");
+    std::fs::write(&auth_path, r#"{"LOCAL_ONLY":"discard-me"}"#).expect("seed auth.json");
     assert!(auth_path.exists(), "auth.json should exist before switch");
 
     let mut config = MultiAppConfig::default();
@@ -3479,18 +3953,17 @@ fn provider_service_switch_codex_openai_official_writes_auth_json_from_provider_
             .expect("codex manager");
         manager.current = "p2".to_string();
 
-        manager.providers.insert(
+        let mut official = Provider::with_id(
             "p1".to_string(),
-            Provider::with_id(
-                "p1".to_string(),
-                "OpenAI Official".to_string(),
-                json!({
-                    "auth": { "OPENAI_API_KEY": "sk-official" },
-                    "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-                }),
-                None,
-            ),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-official" },
+                "config": "model_provider = \"p1\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p1]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+            }),
+            None,
         );
+        official.category = Some("official".to_string());
+        manager.providers.insert("p1".to_string(), official);
 
         manager.providers.insert(
             "p2".to_string(),
@@ -3511,12 +3984,19 @@ fn provider_service_switch_codex_openai_official_writes_auth_json_from_provider_
     ProviderService::switch(&state, AppType::Codex, "p1")
         .expect("switch to OpenAI official provider should succeed");
 
+    // Upstream parity (clean-write): an official provider with login material
+    // OVERWRITES auth.json with the provider snapshot's auth (Write branch). The
+    // live-only auth field is not preserved.
     let auth_value: serde_json::Value =
         read_json_file(&auth_path).expect("read auth.json after switch");
     assert_eq!(
         auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
         Some("sk-official"),
-        "auth.json should be overwritten from the provider snapshot"
+        "auth.json should be overwritten with the provider snapshot auth key"
+    );
+    assert!(
+        auth_value.get("LOCAL_ONLY").is_none(),
+        "clean overwrite should not retain local-only auth fields"
     );
 }
 
@@ -3611,7 +4091,7 @@ fn provider_service_switch_codex_openai_official_preserves_oauth_auth_and_common
     std::fs::create_dir_all(home.join(".codex")).expect("create codex dir (initialized)");
 
     let auth_path = cc_switch_lib::get_codex_auth_path();
-    std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"stale-key"}"#).expect("seed auth.json");
+    std::fs::write(&auth_path, r#"{"LOCAL_ONLY":"preserve-me"}"#).expect("seed auth.json");
 
     let mut config = MultiAppConfig::default();
     {
@@ -3657,12 +4137,19 @@ fn provider_service_switch_codex_openai_official_preserves_oauth_auth_and_common
     ProviderService::switch(&state, AppType::Codex, "p1")
         .expect("switch to stripped OpenAI official provider should succeed");
 
+    // Upstream parity (clean-write): the official provider's stored OAuth auth
+    // snapshot is written to auth.json (Write branch). The auth.json is
+    // overwritten, so live-only fields are not retained.
     let auth_value: serde_json::Value =
         read_json_file(&auth_path).expect("read auth.json after switch");
     assert_eq!(
         auth_value["access_token"],
         json!("oauth-token"),
         "official provider should restore the stored OAuth auth snapshot"
+    );
+    assert!(
+        auth_value.get("LOCAL_ONLY").is_none(),
+        "clean overwrite should not retain local-only auth fields"
     );
 
     let live_text =
@@ -4254,8 +4741,10 @@ fn provider_service_delete_provider_selected_in_local_settings_returns_error() {
         );
     }
 
-    let mut settings = AppSettings::default();
-    settings.current_provider_claude = Some("delete".to_string());
+    let settings = AppSettings {
+        current_provider_claude: Some("delete".to_string()),
+        ..Default::default()
+    };
     update_settings(settings).expect("set local current provider override");
 
     let app_state = state_from_config(config);

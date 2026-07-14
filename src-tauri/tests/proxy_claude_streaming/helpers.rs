@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use cc_switch_lib::ProxyStatus;
+use cc_switch_lib::{Database, ProxyStatus};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -26,6 +26,11 @@ pub(crate) async fn bind_test_listener() -> tokio::net::TcpListener {
         "bind upstream listener: {:?}",
         last_error.expect("listener bind should produce an error")
     );
+}
+
+pub(crate) async fn set_claude_proxy_port_to_ephemeral(db: &Arc<Database>) {
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
 }
 
 pub(crate) async fn read_proxy_status(

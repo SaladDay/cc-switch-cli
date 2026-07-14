@@ -1,4 +1,5 @@
 use super::super::*;
+use std::collections::BTreeSet;
 
 pub(crate) fn focus_block_style(active: bool, theme: &super::theme::Theme) -> Style {
     if active {
@@ -39,21 +40,35 @@ pub(crate) fn add_form_key_items(
                     }
                     Some(
                         ProviderAddField::ClaudeModelConfig
+                        | ProviderAddField::ClaudeQuickConfig
+                        | ProviderAddField::CodexQuickConfig
+                        | ProviderAddField::CodexOAuthAccount
+                        | ProviderAddField::CodexLocalRouting
+                        | ProviderAddField::LocalProxySettings
                         | ProviderAddField::CommonSnippet
-                        | ProviderAddField::OpenClawModels,
+                        | ProviderAddField::UsageQuery
+                        | ProviderAddField::OpenClawModels
+                        | ProviderAddField::HermesModels,
                     ) => texts::tui_key_open(),
                     Some(
                         ProviderAddField::GeminiAuthType
+                        | ProviderAddField::ClaudeHideAttribution
+                        | ProviderAddField::ClaudeTeammates
+                        | ProviderAddField::ClaudeToolSearch
+                        | ProviderAddField::ClaudeDisableAutoUpgrade
+                        | ProviderAddField::CodexGoalMode
+                        | ProviderAddField::CodexRemoteCompaction
+                        | ProviderAddField::CodexFastMode
                         | ProviderAddField::OpenClawApiProtocol
-                        | ProviderAddField::OpenClawUserAgent,
+                        | ProviderAddField::OpenClawUserAgent
+                        | ProviderAddField::HermesApiMode,
                     ) => texts::tui_key_toggle(),
                     _ => texts::tui_key_edit_mode(),
                 };
-                keys.extend([
-                    ("↑↓", texts::tui_key_select()),
-                    ("Enter", enter_action),
-                    ("Space", texts::tui_key_toggle()),
-                ]);
+                keys.extend([("↑↓", texts::tui_key_select()), ("Enter", enter_action)]);
+                if !matches!(selected_field, Some(ProviderAddField::LocalProxySettings)) {
+                    keys.push(("Space", texts::tui_key_toggle()));
+                }
             }
         }
         FormFocus::JsonPreview => {
@@ -62,6 +77,137 @@ pub(crate) fn add_form_key_items(
                 ("↑↓", texts::tui_key_scroll()),
             ]);
         }
+        FormFocus::Content => {}
+    }
+
+    keys
+}
+
+pub(crate) fn quick_config_form_key_items() -> Vec<(&'static str, &'static str)> {
+    // Ctrl+S only saves from the outermost form page, so it is not advertised
+    // on this sub-page; Esc returns to the main page.
+    vec![
+        ("Esc", texts::tui_key_no()),
+        ("↑↓", texts::tui_key_select()),
+        ("Space", texts::tui_key_toggle()),
+        ("Enter", texts::tui_key_toggle()),
+    ]
+}
+
+pub(crate) fn codex_local_routing_form_key_items(
+    selected_field: Option<super::form::CodexLocalRoutingField>,
+) -> Vec<(&'static str, &'static str)> {
+    // Ctrl+S only saves from the outermost form page, so it is not advertised
+    // on this sub-page; Esc returns to the main page.
+    if matches!(
+        selected_field,
+        Some(super::form::CodexLocalRoutingField::ModelCatalog)
+    ) {
+        // Focus is on the inline model-catalog table.
+        return vec![
+            ("Esc", texts::tui_key_no()),
+            ("↑↓", texts::tui_key_select()),
+            ("←→", texts::tui_key_select()),
+            ("Enter", texts::tui_key_edit()),
+            ("a", texts::tui_key_add()),
+            ("f", texts::tui_key_fetch_model()),
+            ("Del", texts::tui_key_delete()),
+        ];
+    }
+
+    vec![
+        ("Esc", texts::tui_key_no()),
+        ("↑↓", texts::tui_key_select()),
+        ("Enter", texts::tui_key_toggle()),
+    ]
+}
+
+pub(crate) fn local_proxy_settings_form_key_items(
+    selected_field: Option<super::form::LocalProxySettingsField>,
+) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![
+        ("Esc", texts::tui_key_no()),
+        ("↑↓", texts::tui_key_select()),
+    ];
+    match selected_field {
+        Some(super::form::LocalProxySettingsField::UserAgent) => {
+            keys.push(("Enter", texts::tui_key_select()));
+        }
+        Some(
+            super::form::LocalProxySettingsField::HeaderOverrides
+            | super::form::LocalProxySettingsField::BodyOverrides,
+        ) => keys.push(("Enter", texts::tui_key_open())),
+        None => {}
+    }
+    keys.push(("?", texts::tui_help_title()));
+    keys
+}
+
+pub(crate) fn codex_model_catalog_form_key_items(
+    has_rows: bool,
+) -> Vec<(&'static str, &'static str)> {
+    // Ctrl+S only saves from the outermost form page (not this sub-page).
+    let mut keys = vec![
+        ("Esc", texts::tui_key_no()),
+        ("f", texts::tui_key_fetch_model()),
+        ("+", texts::tui_key_add()),
+    ];
+    if has_rows {
+        keys.extend([
+            ("↑↓", texts::tui_key_select()),
+            ("←→", texts::tui_key_select()),
+            ("Enter", texts::tui_key_edit()),
+            ("Del", texts::tui_key_delete()),
+        ]);
+    }
+    keys
+}
+
+pub(crate) fn usage_query_form_key_items(
+    focus: FormFocus,
+    editing: bool,
+    selected_field: Option<super::form::UsageQueryField>,
+    extractor_available: bool,
+) -> Vec<(&'static str, &'static str)> {
+    // Ctrl+S only saves from the outermost form page (not this sub-page).
+    let mut keys = vec![("Esc", texts::tui_key_no())];
+    if extractor_available {
+        keys.insert(0, ("Tab", texts::tui_key_focus()));
+    }
+
+    match focus {
+        FormFocus::Fields => {
+            keys.push(("↑↓", texts::tui_key_select()));
+            if editing {
+                keys.extend([
+                    ("←→", texts::tui_key_move()),
+                    ("Enter", texts::tui_key_exit_edit()),
+                ]);
+            } else {
+                let enter_action = match selected_field {
+                    Some(
+                        super::form::UsageQueryField::Enabled
+                        | super::form::UsageQueryField::Template
+                        | super::form::UsageQueryField::CodingPlanProvider,
+                    ) => texts::tui_key_toggle(),
+                    Some(super::form::UsageQueryField::Script) => texts::tui_key_open(),
+                    Some(_) => texts::tui_key_edit_mode(),
+                    None => texts::tui_key_edit_mode(),
+                };
+                keys.push(("Enter", enter_action));
+            }
+        }
+        FormFocus::JsonPreview => {
+            if extractor_available {
+                keys.push(("Enter", texts::tui_key_open()));
+            }
+        }
+        FormFocus::Content => {
+            if extractor_available {
+                keys.push(("Enter", texts::tui_key_view()));
+            }
+        }
+        FormFocus::Templates => {}
     }
 
     keys
@@ -79,7 +225,7 @@ pub(crate) fn render_form_template_chips(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(focus_block_style(active, theme))
-        .title(texts::tui_form_templates_title());
+        .title(format!(" {} ", texts::tui_form_templates_title()));
     frame.render_widget(template_block.clone(), area);
     let template_inner = template_block.inner(area);
 
@@ -146,17 +292,54 @@ pub(crate) fn render_form_json_preview(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
+    render_form_json_preview_with_highlights(
+        frame,
+        json_text,
+        scroll,
+        active,
+        area,
+        theme,
+        &BTreeSet::new(),
+    );
+}
+
+pub(crate) fn render_form_json_preview_with_highlights(
+    frame: &mut Frame<'_>,
+    json_text: &str,
+    scroll: usize,
+    active: bool,
+    area: Rect,
+    theme: &super::theme::Theme,
+    highlighted_lines: &BTreeSet<usize>,
+) {
     let json_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(focus_block_style(active, theme))
-        .title(texts::tui_form_json_title());
+        .title(format!(" {} ", texts::tui_form_json_title()));
     frame.render_widget(json_block.clone(), area);
     let json_inner = json_block.inner(area);
 
+    let highlight_style = Style::default().bg(theme.surface);
     let lines = json_text
         .lines()
-        .map(|s| Line::raw(s.to_string()))
+        .enumerate()
+        .map(|(idx, s)| {
+            if highlighted_lines.contains(&idx) {
+                match s.find(|ch: char| !ch.is_whitespace()) {
+                    Some(start) => {
+                        let (indent, content) = s.split_at(start);
+                        Line::from(vec![
+                            Span::raw(indent.to_string()),
+                            Span::styled(content.to_string(), highlight_style),
+                        ])
+                    }
+                    None => Line::raw(s.to_string()),
+                }
+            } else {
+                Line::raw(s.to_string())
+            }
+        })
         .collect::<Vec<_>>();
 
     let height = json_inner.height as usize;
@@ -186,7 +369,7 @@ pub(crate) fn render_form_text_preview(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(focus_block_style(active, theme))
-        .title(title);
+        .title(format!(" {} ", title));
     frame.render_widget(block.clone(), area);
     let inner = block.inner(area);
 
@@ -222,5 +405,6 @@ pub(crate) fn render_add_form(
             render_provider_add_form(frame, app, data, provider, area, theme)
         }
         FormState::McpAdd(mcp) => render_mcp_add_form(frame, app, mcp, area, theme),
+        FormState::PromptMeta(prompt) => render_prompt_meta_form(frame, app, prompt, area, theme),
     }
 }

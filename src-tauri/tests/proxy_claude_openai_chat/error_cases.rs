@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use crate::helpers::{
     bind_test_listener, handle_chat_completions_error,
     handle_chat_completions_non_standard_json_error, handle_chat_completions_plain_error,
-    handle_invalid_chat_completions, parse_insert_values, wait_for_request_log_lines,
+    handle_invalid_chat_completions, parse_insert_values, set_claude_proxy_port_to_ephemeral,
+    wait_for_request_log_lines,
 };
 
 #[tokio::test]
@@ -51,15 +52,15 @@ async fn proxy_claude_openai_chat_non_success_error_is_transformed_to_anthropic_
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db.clone());
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -107,9 +108,10 @@ async fn proxy_claude_openai_chat_non_success_error_is_transformed_to_anthropic_
     assert_eq!(log_values[1], "claude-openai-chat-error");
     assert_eq!(log_values[3], "claude-3-7-sonnet");
     assert_eq!(log_values[4], "claude-3-7-sonnet");
-    assert_eq!(log_values[17], "400");
-    assert_eq!(log_values[19], "claude-session-non-success");
-    assert!(log_values[18].contains("upstream rejected the request"));
+    assert_eq!(log_values[5], "");
+    assert_eq!(log_values[18], "400");
+    assert_eq!(log_values[20], "claude-session-non-success");
+    assert!(log_values[19].contains("upstream rejected the request"));
 
     service.stop().await.expect("stop proxy service");
     upstream_handle.abort();
@@ -158,15 +160,15 @@ async fn proxy_claude_openai_chat_non_standard_json_error_preserves_upstream_sta
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db.clone());
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -255,15 +257,15 @@ async fn proxy_claude_openai_chat_non_json_error_body_passthrough_preserves_stat
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -373,19 +375,20 @@ async fn proxy_claude_buffered_transform_error_does_not_sync_failover_state() {
         .expect("get claude proxy config");
     claude_proxy.auto_failover_enabled = true;
     claude_proxy.max_retries = 0;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(claude_proxy)
         .await
         .expect("update claude proxy config");
 
     let service = ProxyService::new(db.clone());
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(

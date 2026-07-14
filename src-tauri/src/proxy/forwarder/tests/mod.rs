@@ -10,7 +10,7 @@ use std::{
 use axum::{
     body::Body,
     extract::State,
-    http::{StatusCode, Uri},
+    http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::any,
     Json, Router,
@@ -28,6 +28,7 @@ mod request_building;
 struct UpstreamHits {
     count: Arc<AtomicUsize>,
     paths: Arc<Mutex<Vec<String>>>,
+    headers: Arc<Mutex<Vec<HeaderMap>>>,
 }
 
 #[derive(Clone)]
@@ -104,10 +105,12 @@ async fn spawn_mock_upstream(
 async fn handle_scripted_upstream(
     State(mock): State<ScriptedUpstream>,
     uri: Uri,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     mock.hits.count.fetch_add(1, Ordering::SeqCst);
     mock.hits.paths.lock().await.push(uri.path().to_string());
+    mock.hits.headers.lock().await.push(headers);
     mock.bodies.lock().await.push(body);
 
     let (status, body) = mock.responses.lock().await.pop_front().unwrap_or((
@@ -322,12 +325,7 @@ async fn spawn_delayed_body_upstream() -> (String, UpstreamHits, JoinHandle<()>)
 }
 
 async fn closed_base_url() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind closed-port listener");
-    let address = listener.local_addr().expect("closed-port listener address");
-    drop(listener);
-    format!("http://{address}")
+    "http://127.0.0.1:9".to_string()
 }
 
 fn claude_provider(id: &str, base_url: &str, api_format: Option<&str>) -> Provider {

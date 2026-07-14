@@ -23,7 +23,7 @@ pub(super) fn render_skill_detail(
                         .borders(Borders::ALL)
                         .border_type(BorderType::Plain)
                         .border_style(pane_border_style(app, Focus::Content, theme))
-                        .title(texts::tui_skills_detail_title()),
+                        .title(format!(" {} ", texts::tui_skills_detail_title())),
                 ),
             area,
         );
@@ -34,7 +34,7 @@ pub(super) fn render_skill_detail(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(texts::tui_skills_detail_title());
+        .title(format!(" {} ", texts::tui_skills_detail_title()));
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
@@ -43,19 +43,18 @@ pub(super) fn render_skill_detail(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("x", texts::tui_key_toggle()),
-                ("m", texts::tui_key_apps()),
-                ("d", texts::tui_key_uninstall()),
-                ("s", texts::tui_key_sync()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("Space", texts::tui_key_toggle()),
+            ("m", texts::tui_key_apps()),
+            ("d", texts::tui_key_uninstall()),
+            ("s", texts::tui_key_sync()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     let mut lines = vec![
         Line::from(vec![

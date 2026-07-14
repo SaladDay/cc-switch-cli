@@ -66,11 +66,9 @@ impl ProviderRouter {
                     circuit_open_count += 1;
                 }
             }
-        } else {
-            if let Some(current) = self.current_provider(app_type)? {
-                total_providers = 1;
-                result.push(current);
-            }
+        } else if let Some(current) = self.current_provider(app_type)? {
+            total_providers = 1;
+            result.push(current);
         }
 
         if result.is_empty() {

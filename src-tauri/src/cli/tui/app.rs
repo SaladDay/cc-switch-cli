@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::Size;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app_config::AppType;
@@ -12,15 +12,18 @@ use crate::services::skill::SyncMethod;
 use super::data::UiData;
 use super::form::{
     CodexWireApi, FormFocus, FormMode, FormState, GeminiAuthType, McpAddField, McpAddFormState,
-    ProviderAddField, ProviderAddFormState,
+    McpTransport, PromptMetaField, PromptMetaFormState, ProviderAddField, ProviderAddFormState,
 };
 use super::route::{NavItem, Route};
+use super::text_edit::{TextEditCommand, TextInput, TextInputPolicy};
 use super::{data, form};
 
 mod app_state;
 mod content_config;
 mod content_entities;
+mod content_pricing;
 mod content_skills;
+mod content_usage;
 mod editor_handlers;
 mod editor_state;
 mod form_handlers;
@@ -32,15 +35,23 @@ mod tests;
 mod types;
 
 pub(crate) use app_state::{
-    Action, App, ConfigItem, LocalProxySettingsItem, ProxyVisualTransition, SettingsItem,
-    WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
+    Action, App, ConfigItem, LocalProxySettingsItem, MoveDirection, ProxyVisualTransition,
+    SettingsItem, WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
 };
+pub(crate) use content_config::HERMES_MEMORY_ROW_COUNT;
+pub(crate) use content_usage::usage_active_pane_len;
 pub use editor_state::{EditorKind, EditorMode, EditorState, EditorSubmit};
 pub(crate) use helpers::*;
 pub use types::{
-    ConfirmAction, ConfirmOverlay, FilterState, Focus, LoadingKind, Overlay, TextInputState,
-    TextSubmit, TextViewAction, TextViewState, Toast, ToastKind,
+    CommonSnippetViewSource, ConfirmAction, ConfirmOverlay, FilterScope, FilterState, Focus,
+    LoadingKind, ManagedAuthLoginState, Overlay, PricingState, SessionsPane, SessionsState,
+    SkillsDiscoverSource, TextInputState, TextSubmit, TextViewAction, TextViewState, Toast,
+    ToastKind, UsageMetric, UsagePane, UsageState,
 };
+
+pub(crate) fn supports_failover_controls(app_type: &AppType) -> bool {
+    app_type.supports_failover()
+}
 
 const PROVIDER_NOTES_MAX_CHARS: usize = 120;
 

@@ -11,7 +11,11 @@ pub(super) fn render_skills_repos(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(texts::tui_skills_repos_title());
+        .title(breadcrumb_title(&[
+            texts::menu_manage_skills(),
+            texts::tui_skills_discover_title(),
+            texts::tui_skills_repos_title(),
+        ]));
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
@@ -24,18 +28,17 @@ pub(super) fn render_skills_repos(
         ])
         .split(inner);
 
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("a", texts::tui_key_add()),
-                ("d", texts::tui_key_delete()),
-                ("x", texts::tui_key_toggle()),
-            ],
-        );
-    }
+    render_page_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &[
+            ("a", texts::tui_key_add()),
+            ("d", texts::tui_key_delete()),
+            ("Space", texts::tui_key_toggle()),
+        ],
+        app.focus == Focus::Content,
+    );
 
     frame.render_widget(
         Paragraph::new(texts::tui_skills_repos_hint())

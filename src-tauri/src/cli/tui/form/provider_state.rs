@@ -1,6 +1,7 @@
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
-use crate::provider::Provider;
+use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig, Provider};
+use crate::services::ProviderService;
 use serde_json::{json, Value};
 
 use super::provider_json::{
@@ -8,30 +9,125 @@ use super::provider_json::{
 };
 use super::provider_state_loading::populate_form_from_provider;
 use super::{
-    ClaudeApiFormat, CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType,
-    ProviderAddField, ProviderAddFormState, TextInput, OPENCLAW_DEFAULT_API_PROTOCOL,
+    ClaudeApiFormat, CodexLocalRoutingField, CodexModelCatalogField, CodexModelCatalogRow,
+    CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType, HermesModelField,
+    LocalProxySettingsField, ProviderAddField, ProviderAddFormState, ProviderFormPage, TextInput,
+    UsageQueryField, UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE,
+    OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
+fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
+    let base_id = format!("{}-copy", original_id.trim());
+    if !existing_ids.iter().any(|id| id == &base_id) {
+        return base_id;
+    }
+
+    let mut counter = 2;
+    loop {
+        let candidate = format!("{base_id}-{counter}");
+        if !existing_ids.iter().any(|id| id == &candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
 impl ProviderAddFormState {
+    pub const USAGE_QUERY_GENERAL_PRESET: &'static str = r#"({
+  request: {
+    url: "{{baseUrl}}/user/balance",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "cc-switch/1.0"
+    }
+  },
+  extractor: function(response) {
+    return {
+      isValid: response.is_active || true,
+      remaining: response.balance,
+      unit: "USD"
+    };
+  }
+})"#;
+
+    pub const USAGE_QUERY_CUSTOM_PRESET: &'static str = r#"({
+  request: {
+    url: "",
+    method: "GET",
+    headers: {}
+  },
+  extractor: function(response) {
+    return {
+      remaining: 0,
+      unit: "USD"
+    };
+  }
+})"#;
+
+    pub const USAGE_QUERY_NEWAPI_PRESET: &'static str = r#"({
+  request: {
+    url: "{{baseUrl}}/api/user/self",
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer {{accessToken}}",
+      "User-Agent": "cc-switch/1.0",
+      "New-Api-User": "{{userId}}"
+    },
+  },
+  extractor: function (response) {
+    if (response.success && response.data) {
+      return {
+        planName: response.data.group || "Default Plan",
+        remaining: response.data.quota / 500000,
+        used: response.data.used_quota / 500000,
+        total: (response.data.quota + response.data.used_quota) / 500000,
+        unit: "USD",
+      };
+    }
+    return {
+      isValid: false,
+      invalidMessage: response.message || "Query failed"
+    };
+  },
+})"#;
+
     pub fn new(app_type: AppType) -> Self {
-        let include_common_config = !matches!(app_type, AppType::OpenClaw);
+        Self::new_with_common_snippet(app_type, "")
+    }
+
+    pub fn new_with_common_snippet(app_type: AppType, common_snippet: &str) -> Self {
+        let include_common_config =
+            Self::snippet_has_effective_common_config(&app_type, common_snippet);
+        let is_codex = matches!(app_type, AppType::Codex);
         let openclaw_api_default = match app_type {
             AppType::OpenClaw => OPENCLAW_DEFAULT_API_PROTOCOL,
             _ => "@ai-sdk/openai-compatible",
         };
 
-        let codex_defaults = match app_type {
-            AppType::Codex => ("", "gpt-5.4", CodexWireApi::Responses, true),
-            _ => ("", "", CodexWireApi::Responses, true),
+        let codex_defaults = if is_codex {
+            ("", "gpt-5.4", CodexWireApi::Responses, true)
+        } else {
+            ("", "", CodexWireApi::Responses, true)
         };
 
         let mut form = Self {
             app_type,
             mode: FormMode::Add,
+            copy_source_id: None,
             focus: FormFocus::Templates,
+            page: ProviderFormPage::Main,
             template_idx: 0,
             field_idx: 0,
             editing: false,
+            usage_query_touched: false,
+            usage_query_field_idx: 0,
+            usage_query_editing: false,
+            codex_local_routing_field_idx: 0,
+            local_proxy_settings_field_idx: 0,
+            codex_model_catalog_idx: 0,
+            codex_model_catalog_field: CodexModelCatalogField::Model,
             extra: json!({}),
             id: TextInput::new(""),
             id_is_manual: false,
@@ -46,25 +142,62 @@ impl ProviderAddFormState {
             codex_config_scroll: 0,
             claude_model_config_touched: false,
             claude_api_key: TextInput::new(""),
+            claude_api_key_field: ClaudeApiKeyField::AuthToken,
             claude_base_url: TextInput::new(""),
-            claude_api_format: ClaudeApiFormat::Anthropic,
+            claude_api_format: if is_codex {
+                ClaudeApiFormat::OpenAiResponses
+            } else {
+                ClaudeApiFormat::Anthropic
+            },
             claude_model: TextInput::new(""),
             claude_reasoning_model: TextInput::new(""),
             claude_haiku_model: TextInput::new(""),
             claude_sonnet_model: TextInput::new(""),
             claude_opus_model: TextInput::new(""),
+            claude_hide_attribution: false,
+            claude_hide_attribution_touched: false,
+            claude_teammates: false,
+            claude_teammates_touched: false,
+            claude_tool_search: false,
+            claude_tool_search_touched: false,
+            claude_disable_auto_upgrade: false,
+            claude_disable_auto_upgrade_touched: false,
+            claude_quick_config_idx: 0,
+            codex_goal_mode: false,
+            codex_goal_mode_touched: false,
+            codex_remote_compaction: false,
+            codex_remote_compaction_touched: false,
+            codex_quick_config_idx: 0,
+            codex_oauth_account_id: None,
+            codex_fast_mode: false,
             codex_base_url: TextInput::new(codex_defaults.0),
             codex_model: TextInput::new(codex_defaults.1),
             codex_wire_api: codex_defaults.2,
             codex_requires_openai_auth: codex_defaults.3,
             codex_env_key: TextInput::new("OPENAI_API_KEY"),
             codex_api_key: TextInput::new(""),
+            codex_chat_reasoning: CodexChatReasoningConfig::default(),
+            codex_model_catalog: Vec::new(),
+            codex_local_routing_enabled: false,
+            custom_user_agent: TextInput::new(""),
+            local_proxy_header_overrides: Default::default(),
+            local_proxy_body_override: None,
             gemini_auth_type: GeminiAuthType::ApiKey,
             gemini_api_key: TextInput::new(""),
             gemini_base_url: TextInput::new("https://generativelanguage.googleapis.com"),
             gemini_model: TextInput::new(""),
             openclaw_user_agent: false,
             openclaw_models: Vec::new(),
+            usage_query_enabled: false,
+            usage_query_template: UsageQueryTemplate::General,
+            usage_query_api_key: TextInput::new(""),
+            usage_query_base_url: TextInput::new(""),
+            usage_query_access_token: TextInput::new(""),
+            usage_query_user_id: TextInput::new(""),
+            usage_query_timeout: TextInput::new("10"),
+            usage_query_auto_interval: TextInput::new("5"),
+            usage_query_code: Self::USAGE_QUERY_GENERAL_PRESET.to_string(),
+            usage_query_coding_plan_provider: TextInput::new("kimi"),
             opencode_npm_package: TextInput::new(openclaw_api_default),
             opencode_api_key: TextInput::new(""),
             opencode_base_url: TextInput::new(""),
@@ -73,6 +206,14 @@ impl ProviderAddFormState {
             opencode_model_context_limit: TextInput::new(""),
             opencode_model_output_limit: TextInput::new(""),
             opencode_model_original_id: None,
+            hermes_api_mode: HERMES_DEFAULT_API_MODE.to_string(),
+            hermes_api_key: TextInput::new(""),
+            hermes_base_url: TextInput::new(""),
+            hermes_models: Vec::new(),
+            hermes_models_field_idx: 0,
+            hermes_models_editing: false,
+            hermes_model_input: TextInput::new(""),
+            hermes_rate_limit_delay: TextInput::new(""),
             initial_snapshot: Value::Null,
         };
         form.capture_initial_snapshot();
@@ -80,7 +221,15 @@ impl ProviderAddFormState {
     }
 
     pub fn from_provider(app_type: AppType, provider: &Provider) -> Self {
-        let mut form = Self::new(app_type.clone());
+        Self::from_provider_with_common_snippet(app_type, provider, "")
+    }
+
+    pub fn from_provider_with_common_snippet(
+        app_type: AppType,
+        provider: &Provider,
+        common_snippet: &str,
+    ) -> Self {
+        let mut form = Self::new_with_common_snippet(app_type.clone(), common_snippet);
         form.mode = FormMode::Edit {
             id: provider.id.clone(),
         };
@@ -96,20 +245,88 @@ impl ProviderAddFormState {
         if let Some(notes) = provider.notes.as_deref() {
             form.notes.set(notes);
         }
-        form.include_common_config = provider
+        let explicit_common_config = provider
             .meta
             .as_ref()
-            .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(!matches!(app_type, AppType::OpenClaw));
+            .and_then(|meta| meta.apply_common_config);
+        form.include_common_config = explicit_common_config.unwrap_or_else(|| {
+            Self::provider_settings_contain_common_config(&app_type, provider, common_snippet)
+        });
+        form.include_common_config_touched = explicit_common_config.is_some();
 
-        if matches!(app_type, AppType::OpenClaw) {
+        if !Self::supports_common_config(&app_type) {
             form.include_common_config = false;
+            form.include_common_config_touched = false;
         }
 
         populate_form_from_provider(&mut form, &app_type, provider);
         form.capture_initial_snapshot();
 
         form
+    }
+
+    pub fn copy_from_provider_with_common_snippet(
+        app_type: AppType,
+        provider: &Provider,
+        common_snippet: &str,
+        existing_ids: &[String],
+    ) -> Self {
+        let mut form = Self::from_provider_with_common_snippet(app_type, provider, common_snippet);
+        form.mode = FormMode::Add;
+        form.copy_source_id = Some(provider.id.clone());
+        form.id_is_manual = false;
+        form.name.set(format!("{} copy", provider.name.trim()));
+        // Remove fields that should be unique or not copied over
+        if let Some(extra) = form.extra.as_object_mut() {
+            for key in ["id", "createdAt", "inFailoverQueue"] {
+                extra.remove(key);
+            }
+        }
+        form.id.set(provider_copy_id(&provider.id, existing_ids));
+        form
+    }
+
+    pub fn supports_common_config(app_type: &AppType) -> bool {
+        matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+    }
+
+    pub fn snippet_has_effective_common_config(app_type: &AppType, common_snippet: &str) -> bool {
+        if !Self::supports_common_config(app_type) {
+            return false;
+        }
+
+        let snippet = common_snippet.trim();
+        if snippet.is_empty() {
+            return false;
+        }
+
+        match app_type {
+            AppType::Codex => snippet
+                .parse::<toml_edit::DocumentMut>()
+                .ok()
+                .is_some_and(|doc| doc.as_table().iter().next().is_some()),
+            AppType::Claude | AppType::Gemini => serde_json::from_str::<Value>(snippet)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .is_some_and(|obj| !obj.is_empty()),
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+        }
+    }
+
+    pub fn provider_settings_contain_common_config(
+        app_type: &AppType,
+        provider: &Provider,
+        common_snippet: &str,
+    ) -> bool {
+        if !Self::supports_common_config(app_type) {
+            return false;
+        }
+
+        ProviderService::settings_contain_common_config_for_preview(
+            app_type,
+            &provider.settings_config,
+            common_snippet,
+        )
     }
 
     fn capture_initial_snapshot(&mut self) {
@@ -121,11 +338,12 @@ impl ProviderAddFormState {
     }
 
     pub fn is_id_editable(&self) -> bool {
-        !self.mode.is_edit()
+        !self.mode.is_edit() && self.copy_source_id.is_none()
     }
 
     pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {
         let Some(generated_id) = resolve_provider_id_for_submit(
+            &self.app_type,
             self.name.value.as_str(),
             self.id.value.as_str(),
             existing_ids,
@@ -147,24 +365,46 @@ impl ProviderAddFormState {
             ProviderAddField::Notes,
         ];
 
-        if matches!(self.app_type, AppType::OpenClaw) {
+        if matches!(self.app_type, AppType::Hermes | AppType::OpenClaw)
+            && self.copy_source_id.is_none()
+        {
             fields.insert(0, ProviderAddField::Id);
         }
 
         match self.app_type {
             AppType::Claude => {
-                if !self.is_claude_official_provider() {
-                    fields.push(ProviderAddField::ClaudeBaseUrl);
-                    fields.push(ProviderAddField::ClaudeApiFormat);
-                    fields.push(ProviderAddField::ClaudeApiKey);
+                if self.is_claude_codex_oauth_provider() {
+                    fields.push(ProviderAddField::CodexOAuthAccount);
+                    fields.push(ProviderAddField::CodexFastMode);
+                    fields.push(ProviderAddField::ClaudeAdvancedDivider);
                     fields.push(ProviderAddField::ClaudeModelConfig);
+                    fields.push(ProviderAddField::ClaudeFallbackModel);
+                    fields.push(ProviderAddField::LocalProxySettings);
+                } else if !self.is_claude_official_provider() {
+                    fields.push(ProviderAddField::ClaudeBaseUrl);
+                    fields.push(ProviderAddField::ClaudeApiKey);
+                    fields.push(ProviderAddField::ClaudeAdvancedDivider);
+                    fields.push(ProviderAddField::ClaudeApiFormat);
+                    fields.push(ProviderAddField::ClaudeModelConfig);
+                    fields.push(ProviderAddField::ClaudeFallbackModel);
+                    if self.supports_local_proxy_settings() {
+                        fields.push(ProviderAddField::LocalProxySettings);
+                    }
                 }
             }
             AppType::Codex => {
                 if !self.is_codex_official_provider() {
                     fields.push(ProviderAddField::CodexBaseUrl);
-                    fields.push(ProviderAddField::CodexModel);
                     fields.push(ProviderAddField::CodexApiKey);
+                    // No standalone model field (matches upstream): the model is
+                    // configured via 模型映射 / the catalog, falling back to the
+                    // default when empty.
+                    fields.push(ProviderAddField::CodexAdvancedDivider);
+                    // Upstream format is an independent picker; local routing /
+                    // model mapping is decoupled from it.
+                    fields.push(ProviderAddField::ClaudeApiFormat);
+                    fields.push(ProviderAddField::CodexLocalRouting);
+                    fields.push(ProviderAddField::LocalProxySettings);
                 }
             }
             AppType::Gemini => {
@@ -184,6 +424,14 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::OpenCodeModelContextLimit);
                 fields.push(ProviderAddField::OpenCodeModelOutputLimit);
             }
+            AppType::Hermes => {
+                fields.push(ProviderAddField::HermesApiMode);
+                fields.push(ProviderAddField::HermesBaseUrl);
+                fields.push(ProviderAddField::HermesApiKey);
+                fields.push(ProviderAddField::HermesModels);
+                fields.push(ProviderAddField::HermesAdvancedDivider);
+                fields.push(ProviderAddField::HermesRateLimitDelay);
+            }
             AppType::OpenClaw => {
                 fields.push(ProviderAddField::OpenClawApiProtocol);
                 fields.push(ProviderAddField::OpenCodeApiKey);
@@ -193,12 +441,88 @@ impl ProviderAddFormState {
             }
         }
 
-        if !matches!(self.app_type, AppType::OpenClaw) {
+        if Self::supports_common_config(&self.app_type) {
             fields.push(ProviderAddField::CommonConfigDivider);
             fields.push(ProviderAddField::CommonSnippet);
             fields.push(ProviderAddField::IncludeCommonConfig);
         }
+        // The Claude/Codex quick toggles are collapsed into a single sub-page
+        // entry ("快捷配置菜单") that sits directly below the common-config
+        // controls. Goal mode applies to every Codex provider, so the Codex
+        // entry is present for official providers too.
+        match self.app_type {
+            AppType::Claude => fields.push(ProviderAddField::ClaudeQuickConfig),
+            AppType::Codex => fields.push(ProviderAddField::CodexQuickConfig),
+            _ => {}
+        }
+        fields.push(ProviderAddField::UsageQueryDivider);
+        fields.push(ProviderAddField::UsageQuery);
         fields
+    }
+
+    pub fn usage_query_fields(&self) -> Vec<UsageQueryField> {
+        let mut fields = vec![UsageQueryField::Enabled];
+
+        if !self.usage_query_enabled {
+            return fields;
+        }
+
+        fields.push(UsageQueryField::Template);
+
+        match self.usage_query_template {
+            UsageQueryTemplate::General => {
+                fields.extend([
+                    UsageQueryField::ApiKey,
+                    UsageQueryField::BaseUrl,
+                    UsageQueryField::Timeout,
+                    UsageQueryField::AutoInterval,
+                    UsageQueryField::Script,
+                ]);
+            }
+            UsageQueryTemplate::NewApi => {
+                fields.extend([
+                    UsageQueryField::BaseUrl,
+                    UsageQueryField::AccessToken,
+                    UsageQueryField::UserId,
+                    UsageQueryField::Timeout,
+                    UsageQueryField::AutoInterval,
+                    UsageQueryField::Script,
+                ]);
+            }
+            UsageQueryTemplate::Custom => {
+                fields.extend([
+                    UsageQueryField::Timeout,
+                    UsageQueryField::AutoInterval,
+                    UsageQueryField::Script,
+                ]);
+            }
+            UsageQueryTemplate::GitHubCopilot => {
+                fields.extend([UsageQueryField::Timeout, UsageQueryField::AutoInterval]);
+            }
+            UsageQueryTemplate::Balance => {
+                fields.extend([
+                    UsageQueryField::Timeout,
+                    UsageQueryField::AutoInterval,
+                    UsageQueryField::Script,
+                ]);
+            }
+            UsageQueryTemplate::TokenPlan => {
+                fields.extend([
+                    UsageQueryField::CodingPlanProvider,
+                    UsageQueryField::Timeout,
+                    UsageQueryField::AutoInterval,
+                ]);
+            }
+        }
+
+        fields
+    }
+
+    pub fn usage_query_table_fields(&self) -> Vec<UsageQueryField> {
+        self.usage_query_fields()
+            .into_iter()
+            .filter(|field| *field != UsageQueryField::Script)
+            .collect()
     }
 
     pub fn input(&self, field: ProviderAddField) -> Option<&TextInput> {
@@ -209,6 +533,7 @@ impl ProviderAddFormState {
             ProviderAddField::Notes => Some(&self.notes),
             ProviderAddField::ClaudeBaseUrl => Some(&self.claude_base_url),
             ProviderAddField::ClaudeApiKey => Some(&self.claude_api_key),
+            ProviderAddField::ClaudeFallbackModel => Some(&self.claude_model),
             ProviderAddField::CodexBaseUrl => Some(&self.codex_base_url),
             ProviderAddField::CodexModel => Some(&self.codex_model),
             ProviderAddField::CodexEnvKey => Some(&self.codex_env_key),
@@ -223,17 +548,39 @@ impl ProviderAddFormState {
             ProviderAddField::OpenCodeModelName => Some(&self.opencode_model_name),
             ProviderAddField::OpenCodeModelContextLimit => Some(&self.opencode_model_context_limit),
             ProviderAddField::OpenCodeModelOutputLimit => Some(&self.opencode_model_output_limit),
-            ProviderAddField::CodexWireApi
+            ProviderAddField::HermesApiKey => Some(&self.hermes_api_key),
+            ProviderAddField::HermesBaseUrl => Some(&self.hermes_base_url),
+            ProviderAddField::HermesRateLimitDelay => Some(&self.hermes_rate_limit_delay),
+            ProviderAddField::CodexOAuthAccount
+            | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexLocalRouting
+            | ProviderAddField::LocalProxySettings
+            | ProviderAddField::CodexQuickConfig
+            | ProviderAddField::CodexGoalMode
+            | ProviderAddField::CodexRemoteCompaction
+            | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
             | ProviderAddField::ClaudeModelConfig
+            | ProviderAddField::ClaudeAdvancedDivider
+            | ProviderAddField::CodexAdvancedDivider
+            | ProviderAddField::ClaudeQuickConfig
+            | ProviderAddField::ClaudeHideAttribution
+            | ProviderAddField::ClaudeTeammates
+            | ProviderAddField::ClaudeToolSearch
+            | ProviderAddField::ClaudeDisableAutoUpgrade
             | ProviderAddField::GeminiAuthType
             | ProviderAddField::OpenClawApiProtocol
             | ProviderAddField::OpenClawUserAgent
             | ProviderAddField::OpenClawModels
+            | ProviderAddField::HermesApiMode
+            | ProviderAddField::HermesModels
+            | ProviderAddField::HermesAdvancedDivider
             | ProviderAddField::CommonConfigDivider
             | ProviderAddField::CommonSnippet
-            | ProviderAddField::IncludeCommonConfig => None,
+            | ProviderAddField::IncludeCommonConfig
+            | ProviderAddField::UsageQueryDivider
+            | ProviderAddField::UsageQuery => None,
         }
     }
 
@@ -245,6 +592,7 @@ impl ProviderAddFormState {
             ProviderAddField::Notes => Some(&mut self.notes),
             ProviderAddField::ClaudeBaseUrl => Some(&mut self.claude_base_url),
             ProviderAddField::ClaudeApiKey => Some(&mut self.claude_api_key),
+            ProviderAddField::ClaudeFallbackModel => Some(&mut self.claude_model),
             ProviderAddField::CodexBaseUrl => Some(&mut self.codex_base_url),
             ProviderAddField::CodexModel => Some(&mut self.codex_model),
             ProviderAddField::CodexEnvKey => Some(&mut self.codex_env_key),
@@ -263,45 +611,966 @@ impl ProviderAddFormState {
             ProviderAddField::OpenCodeModelOutputLimit => {
                 Some(&mut self.opencode_model_output_limit)
             }
-            ProviderAddField::CodexWireApi
+            ProviderAddField::HermesApiKey => Some(&mut self.hermes_api_key),
+            ProviderAddField::HermesBaseUrl => Some(&mut self.hermes_base_url),
+            ProviderAddField::HermesRateLimitDelay => Some(&mut self.hermes_rate_limit_delay),
+            ProviderAddField::CodexOAuthAccount
+            | ProviderAddField::CodexFastMode
+            | ProviderAddField::CodexLocalRouting
+            | ProviderAddField::LocalProxySettings
+            | ProviderAddField::CodexQuickConfig
+            | ProviderAddField::CodexGoalMode
+            | ProviderAddField::CodexRemoteCompaction
+            | ProviderAddField::CodexWireApi
             | ProviderAddField::CodexRequiresOpenaiAuth
             | ProviderAddField::ClaudeApiFormat
             | ProviderAddField::ClaudeModelConfig
+            | ProviderAddField::ClaudeAdvancedDivider
+            | ProviderAddField::CodexAdvancedDivider
+            | ProviderAddField::ClaudeQuickConfig
+            | ProviderAddField::ClaudeHideAttribution
+            | ProviderAddField::ClaudeTeammates
+            | ProviderAddField::ClaudeToolSearch
+            | ProviderAddField::ClaudeDisableAutoUpgrade
             | ProviderAddField::GeminiAuthType
             | ProviderAddField::OpenClawApiProtocol
             | ProviderAddField::OpenClawUserAgent
             | ProviderAddField::OpenClawModels
+            | ProviderAddField::HermesApiMode
+            | ProviderAddField::HermesModels
+            | ProviderAddField::HermesAdvancedDivider
             | ProviderAddField::CommonConfigDivider
             | ProviderAddField::CommonSnippet
-            | ProviderAddField::IncludeCommonConfig => None,
+            | ProviderAddField::IncludeCommonConfig
+            | ProviderAddField::UsageQueryDivider
+            | ProviderAddField::UsageQuery => None,
         }
     }
 
+    pub fn usage_query_input(&self, field: UsageQueryField) -> Option<&TextInput> {
+        match field {
+            UsageQueryField::ApiKey => Some(&self.usage_query_api_key),
+            UsageQueryField::BaseUrl => Some(&self.usage_query_base_url),
+            UsageQueryField::AccessToken => Some(&self.usage_query_access_token),
+            UsageQueryField::UserId => Some(&self.usage_query_user_id),
+            UsageQueryField::Timeout => Some(&self.usage_query_timeout),
+            UsageQueryField::AutoInterval => Some(&self.usage_query_auto_interval),
+            UsageQueryField::CodingPlanProvider => Some(&self.usage_query_coding_plan_provider),
+            UsageQueryField::Enabled | UsageQueryField::Template | UsageQueryField::Script => None,
+        }
+    }
+
+    pub fn usage_query_input_mut(&mut self, field: UsageQueryField) -> Option<&mut TextInput> {
+        match field {
+            UsageQueryField::ApiKey => Some(&mut self.usage_query_api_key),
+            UsageQueryField::BaseUrl => Some(&mut self.usage_query_base_url),
+            UsageQueryField::AccessToken => Some(&mut self.usage_query_access_token),
+            UsageQueryField::UserId => Some(&mut self.usage_query_user_id),
+            UsageQueryField::Timeout => Some(&mut self.usage_query_timeout),
+            UsageQueryField::AutoInterval => Some(&mut self.usage_query_auto_interval),
+            UsageQueryField::CodingPlanProvider => Some(&mut self.usage_query_coding_plan_provider),
+            UsageQueryField::Enabled | UsageQueryField::Template | UsageQueryField::Script => None,
+        }
+    }
+
+    /// The four Claude quick toggles, in upstream order. They live on the
+    /// "快捷配置菜单" sub-page rather than the main field list.
+    pub fn claude_quick_config_fields(&self) -> Vec<ProviderAddField> {
+        vec![
+            ProviderAddField::ClaudeHideAttribution,
+            ProviderAddField::ClaudeTeammates,
+            ProviderAddField::ClaudeToolSearch,
+            ProviderAddField::ClaudeDisableAutoUpgrade,
+        ]
+    }
+
+    pub fn claude_quick_config_enabled_count(&self) -> usize {
+        [
+            self.claude_hide_attribution,
+            self.claude_teammates,
+            self.claude_tool_search,
+            self.claude_disable_auto_upgrade,
+        ]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+    }
+
+    pub fn selected_claude_quick_config_field(&self) -> Option<ProviderAddField> {
+        let fields = self.claude_quick_config_fields();
+        fields
+            .get(
+                self.claude_quick_config_idx
+                    .min(fields.len().saturating_sub(1)),
+            )
+            .copied()
+    }
+
+    pub fn open_claude_quick_config_page(&mut self) {
+        if !matches!(self.app_type, AppType::Claude) {
+            return;
+        }
+        self.page = ProviderFormPage::ClaudeQuickConfig;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        let len = self.claude_quick_config_fields().len();
+        self.claude_quick_config_idx = self.claude_quick_config_idx.min(len.saturating_sub(1));
+    }
+
+    pub fn close_claude_quick_config_page(&mut self) {
+        self.page = ProviderFormPage::Main;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+    }
+
+    pub fn toggle_codex_goal_mode(&mut self) {
+        self.codex_goal_mode = !self.codex_goal_mode;
+        self.codex_goal_mode_touched = true;
+    }
+
+    pub fn toggle_codex_remote_compaction(&mut self) {
+        self.codex_remote_compaction = !self.codex_remote_compaction;
+        self.codex_remote_compaction_touched = true;
+    }
+
+    /// The Codex quick toggles, in upstream order. They live on the Codex
+    /// "快捷配置菜单" sub-page rather than the main field list. Goal mode is
+    /// available for every Codex provider; remote compaction is only meaningful
+    /// for custom providers (upstream `showRemoteCompaction = category != "official"`).
+    pub fn codex_quick_config_fields(&self) -> Vec<ProviderAddField> {
+        let mut fields = vec![ProviderAddField::CodexGoalMode];
+        if !self.is_codex_official_provider() {
+            fields.push(ProviderAddField::CodexRemoteCompaction);
+        }
+        fields
+    }
+
+    pub fn codex_quick_config_enabled_count(&self) -> usize {
+        self.codex_quick_config_fields()
+            .iter()
+            .filter(|field| match field {
+                ProviderAddField::CodexGoalMode => self.codex_goal_mode,
+                ProviderAddField::CodexRemoteCompaction => self.codex_remote_compaction,
+                _ => false,
+            })
+            .count()
+    }
+
+    pub fn selected_codex_quick_config_field(&self) -> Option<ProviderAddField> {
+        let fields = self.codex_quick_config_fields();
+        fields
+            .get(
+                self.codex_quick_config_idx
+                    .min(fields.len().saturating_sub(1)),
+            )
+            .copied()
+    }
+
+    pub fn open_codex_quick_config_page(&mut self) {
+        if !matches!(self.app_type, AppType::Codex) {
+            return;
+        }
+        self.page = ProviderFormPage::CodexQuickConfig;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        let len = self.codex_quick_config_fields().len();
+        self.codex_quick_config_idx = self.codex_quick_config_idx.min(len.saturating_sub(1));
+    }
+
+    pub fn close_codex_quick_config_page(&mut self) {
+        self.page = ProviderFormPage::Main;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+    }
+
+    pub fn supports_local_proxy_settings(&self) -> bool {
+        match self.app_type {
+            AppType::Claude => {
+                !self.is_claude_official_provider() && !self.is_claude_github_copilot_provider()
+            }
+            AppType::Codex => !self.is_codex_official_provider(),
+            AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+        }
+    }
+
+    pub fn local_proxy_settings_fields(&self) -> &'static [LocalProxySettingsField] {
+        &LocalProxySettingsField::ALL
+    }
+
+    pub fn selected_local_proxy_settings_field(&self) -> Option<LocalProxySettingsField> {
+        self.local_proxy_settings_fields()
+            .get(
+                self.local_proxy_settings_field_idx
+                    .min(self.local_proxy_settings_fields().len().saturating_sub(1)),
+            )
+            .copied()
+    }
+
+    pub fn open_local_proxy_settings_page(&mut self) {
+        if !self.supports_local_proxy_settings() {
+            return;
+        }
+        self.page = ProviderFormPage::LocalProxySettings;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        self.local_proxy_settings_field_idx = self
+            .local_proxy_settings_field_idx
+            .min(self.local_proxy_settings_fields().len().saturating_sub(1));
+    }
+
+    pub fn close_local_proxy_settings_page(&mut self) {
+        self.page = ProviderFormPage::Main;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+    }
+
+    pub fn local_proxy_body_field_count(&self) -> usize {
+        self.local_proxy_body_override
+            .as_ref()
+            .and_then(Value::as_object)
+            .map_or(0, serde_json::Map::len)
+    }
+
+    pub fn local_proxy_settings_summary(&self) -> String {
+        texts::tui_local_proxy_settings_summary(
+            !self.custom_user_agent.is_blank(),
+            self.local_proxy_header_overrides.len(),
+            self.local_proxy_body_field_count(),
+        )
+    }
+
+    pub fn local_proxy_header_overrides_summary(&self) -> String {
+        texts::tui_local_proxy_headers_summary(self.local_proxy_header_overrides.len())
+    }
+
+    pub fn local_proxy_body_override_summary(&self) -> String {
+        texts::tui_local_proxy_body_summary(self.local_proxy_body_field_count())
+    }
+
+    pub fn custom_user_agent_is_valid(&self) -> bool {
+        super::provider_request_overrides::is_valid_custom_user_agent(&self.custom_user_agent.value)
+    }
+
+    pub fn set_custom_user_agent_preset(&mut self, preset: &str) {
+        self.custom_user_agent.set(preset);
+    }
+
+    pub fn apply_local_proxy_header_overrides(
+        &mut self,
+        overrides: std::collections::BTreeMap<String, String>,
+    ) {
+        self.local_proxy_header_overrides = overrides;
+    }
+
+    pub fn apply_local_proxy_body_override(&mut self, override_value: Option<Value>) {
+        self.local_proxy_body_override = override_value;
+    }
+
+    pub(super) fn reset_local_proxy_settings_state(&mut self) {
+        self.custom_user_agent.set("");
+        self.local_proxy_header_overrides.clear();
+        self.local_proxy_body_override = None;
+        self.local_proxy_settings_field_idx = 0;
+        if matches!(self.page, ProviderFormPage::LocalProxySettings) {
+            self.page = ProviderFormPage::Main;
+        }
+    }
+
+    pub fn open_usage_query_page(&mut self) {
+        self.refresh_default_usage_query_template();
+        self.page = ProviderFormPage::UsageQuery;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        self.usage_query_editing = false;
+        let len = self.usage_query_table_fields().len();
+        self.usage_query_field_idx = self.usage_query_field_idx.min(len.saturating_sub(1));
+    }
+
+    pub fn open_codex_local_routing_page(&mut self) {
+        if !matches!(self.app_type, AppType::Codex) || self.is_codex_official_provider() {
+            return;
+        }
+        self.page = ProviderFormPage::CodexLocalRouting;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        self.usage_query_editing = false;
+        let len = self.codex_local_routing_fields().len();
+        self.codex_local_routing_field_idx = self
+            .codex_local_routing_field_idx
+            .min(len.saturating_sub(1));
+    }
+
+    pub fn close_codex_local_routing_page(&mut self) {
+        self.page = ProviderFormPage::Main;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+    }
+
+    pub fn open_codex_model_catalog_page(&mut self) {
+        // Model mapping is available for both Chat and native Responses formats.
+        self.page = ProviderFormPage::CodexModelCatalog;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        self.usage_query_editing = false;
+        self.codex_model_catalog_idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len().saturating_sub(1));
+    }
+
+    pub fn close_codex_model_catalog_page(&mut self) {
+        self.page = ProviderFormPage::CodexLocalRouting;
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        self.codex_model_catalog_idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len().saturating_sub(1));
+    }
+
+    pub fn selected_codex_model_catalog_row(&self) -> Option<&CodexModelCatalogRow> {
+        self.codex_model_catalog.get(
+            self.codex_model_catalog_idx
+                .min(self.codex_model_catalog.len().saturating_sub(1)),
+        )
+    }
+
+    pub fn selected_codex_model_catalog_field_value(
+        &self,
+        field: CodexModelCatalogField,
+    ) -> String {
+        let Some(row) = self.selected_codex_model_catalog_row() else {
+            return String::new();
+        };
+        match field {
+            CodexModelCatalogField::Model => row.model.clone(),
+            CodexModelCatalogField::DisplayName => row.display_name.clone(),
+            CodexModelCatalogField::ContextWindow => row.context_window.clone(),
+        }
+    }
+
+    pub fn upsert_codex_model_catalog_model(&mut self, model: &str) -> bool {
+        let model = model.trim();
+        if model.is_empty() {
+            return false;
+        }
+
+        if let Some(index) = self
+            .codex_model_catalog
+            .iter()
+            .position(|row| row.model.eq_ignore_ascii_case(model))
+        {
+            self.codex_model_catalog_idx = index;
+            return false;
+        }
+
+        self.codex_model_catalog.push(CodexModelCatalogRow {
+            model: model.to_string(),
+            display_name: String::new(),
+            context_window: String::new(),
+        });
+        self.codex_model_catalog_idx = self.codex_model_catalog.len().saturating_sub(1);
+        true
+    }
+
+    pub fn set_selected_codex_model_catalog_model(&mut self, model: &str) -> bool {
+        let model = model.trim();
+        if model.is_empty() {
+            return false;
+        }
+
+        let idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len().saturating_sub(1));
+        if self.codex_model_catalog.get(idx).is_none() {
+            return self.upsert_codex_model_catalog_model(model);
+        }
+
+        if let Some(existing_idx) = self
+            .codex_model_catalog
+            .iter()
+            .position(|row| row.model.eq_ignore_ascii_case(model))
+        {
+            if existing_idx != idx {
+                self.codex_model_catalog.remove(idx);
+                self.codex_model_catalog_idx =
+                    existing_idx.min(self.codex_model_catalog.len().saturating_sub(1));
+                return true;
+            }
+        }
+
+        if let Some(row) = self.codex_model_catalog.get_mut(idx) {
+            row.model = model.to_string();
+            self.codex_model_catalog_idx = idx;
+            return true;
+        }
+        false
+    }
+
+    pub fn set_codex_model_catalog_field(
+        &mut self,
+        row: Option<usize>,
+        field: CodexModelCatalogField,
+        value: &str,
+    ) -> bool {
+        match (row, field) {
+            (None, CodexModelCatalogField::Model) => self.upsert_codex_model_catalog_model(value),
+            (None, _) => false,
+            (Some(index), CodexModelCatalogField::Model) => {
+                self.codex_model_catalog_idx =
+                    index.min(self.codex_model_catalog.len().saturating_sub(1));
+                self.set_selected_codex_model_catalog_model(value)
+            }
+            (Some(index), CodexModelCatalogField::DisplayName) => {
+                let Some(row) = self.codex_model_catalog.get_mut(index) else {
+                    return false;
+                };
+                row.display_name = value.trim().to_string();
+                self.codex_model_catalog_idx = index;
+                true
+            }
+            (Some(index), CodexModelCatalogField::ContextWindow) => {
+                let Some(row) = self.codex_model_catalog.get_mut(index) else {
+                    return false;
+                };
+                row.context_window = value.trim().to_string();
+                self.codex_model_catalog_idx = index;
+                true
+            }
+        }
+    }
+
+    pub fn remove_selected_codex_model_catalog_model(&mut self) -> bool {
+        if self.codex_model_catalog.is_empty() {
+            self.codex_model_catalog_idx = 0;
+            return false;
+        }
+        let idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len() - 1);
+        self.codex_model_catalog.remove(idx);
+        self.codex_model_catalog_idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len().saturating_sub(1));
+        true
+    }
+
+    pub fn codex_local_routing_fields(&self) -> Vec<CodexLocalRoutingField> {
+        // The "需要本地路由映射" toggle gates everything (decoupled from the
+        // upstream format). When on, reasoning shows only for Chat, and the
+        // model-mapping table is available for both formats.
+        let mut fields = vec![CodexLocalRoutingField::Enabled];
+        if self.codex_local_routing_enabled() {
+            if self.codex_is_chat_format() {
+                fields.push(CodexLocalRoutingField::SupportsThinking);
+                fields.push(CodexLocalRoutingField::SupportsEffort);
+            }
+            fields.push(CodexLocalRoutingField::ModelCatalog);
+        }
+        fields
+    }
+
+    pub fn selected_codex_local_routing_field(&self) -> Option<CodexLocalRoutingField> {
+        let fields = self.codex_local_routing_fields();
+        fields
+            .get(
+                self.codex_local_routing_field_idx
+                    .min(fields.len().saturating_sub(1)),
+            )
+            .copied()
+    }
+
+    pub fn toggle_codex_local_routing_enabled(&mut self) {
+        // Independent of the upstream format: just flip the routing/mapping gate.
+        self.codex_local_routing_enabled = !self.codex_local_routing_enabled;
+        let len = self.codex_local_routing_fields().len();
+        self.codex_local_routing_field_idx = self
+            .codex_local_routing_field_idx
+            .min(len.saturating_sub(1));
+    }
+
+    pub fn toggle_codex_reasoning_thinking(&mut self) {
+        let next = !self.codex_reasoning_supports_thinking();
+        self.codex_chat_reasoning.supports_thinking = Some(next);
+        if !next {
+            self.codex_chat_reasoning.supports_effort = Some(false);
+        }
+    }
+
+    pub fn toggle_codex_reasoning_effort(&mut self) {
+        let next = !self.codex_reasoning_supports_effort();
+        self.codex_chat_reasoning.supports_effort = Some(next);
+        if next {
+            self.codex_chat_reasoning.supports_thinking = Some(true);
+            if self.codex_chat_reasoning.effort_param.is_none() {
+                self.codex_chat_reasoning.effort_param = Some("reasoning_effort".to_string());
+            }
+        } else {
+            self.codex_chat_reasoning.effort_param = Some("none".to_string());
+        }
+    }
+
+    pub fn codex_reasoning_supports_thinking(&self) -> bool {
+        self.codex_chat_reasoning.supports_thinking == Some(true)
+            || self.codex_chat_reasoning.supports_effort == Some(true)
+    }
+
+    pub fn codex_reasoning_supports_effort(&self) -> bool {
+        self.codex_chat_reasoning.supports_effort == Some(true)
+    }
+
+    pub fn refresh_default_usage_query_template(&mut self) {
+        if self.usage_query_touched || self.has_usage_script_meta() {
+            return;
+        }
+
+        let template = match self
+            .extra
+            .get("meta")
+            .and_then(|meta| meta.get("providerType"))
+            .and_then(|value| value.as_str())
+        {
+            Some("github_copilot") => UsageQueryTemplate::GitHubCopilot,
+            _ if detect_balance_provider_for_usage_query(&self.current_provider_base_url()) => {
+                UsageQueryTemplate::Balance
+            }
+            _ => UsageQueryTemplate::General,
+        };
+
+        self.set_usage_query_template(template);
+        if let Some(provider) =
+            detect_coding_plan_provider_for_usage_query(&self.current_provider_base_url())
+        {
+            self.usage_query_coding_plan_provider.set(provider);
+        }
+    }
+
+    pub fn close_usage_query_page(&mut self) {
+        self.page = ProviderFormPage::Main;
+        self.focus = FormFocus::Fields;
+        self.usage_query_editing = false;
+    }
+
+    pub fn open_hermes_models_picker(&mut self) {
+        if !matches!(self.app_type, AppType::Hermes) {
+            return;
+        }
+        self.focus = FormFocus::Fields;
+        self.editing = false;
+        self.hermes_models_editing = false;
+        let len = self.hermes_model_fields().len();
+        self.hermes_models_field_idx = self.hermes_models_field_idx.min(len.saturating_sub(1));
+        self.sync_hermes_model_input_from_selection();
+    }
+
+    pub fn close_hermes_models_picker(&mut self) {
+        self.hermes_models_editing = false;
+        self.hermes_model_input.set("");
+    }
+
+    pub fn hermes_model_fields(&self) -> Vec<HermesModelField> {
+        let mut fields = Vec::with_capacity(self.hermes_models.len().saturating_mul(3));
+        for index in 0..self.hermes_models.len() {
+            fields.push(HermesModelField::Id(index));
+            fields.push(HermesModelField::Name(index));
+            fields.push(HermesModelField::ContextLength(index));
+        }
+        fields
+    }
+
+    pub fn selected_hermes_model_field(&self) -> Option<HermesModelField> {
+        let fields = self.hermes_model_fields();
+        fields
+            .get(
+                self.hermes_models_field_idx
+                    .min(fields.len().saturating_sub(1)),
+            )
+            .copied()
+    }
+
+    pub fn add_empty_hermes_model(&mut self) {
+        if !matches!(self.app_type, AppType::Hermes) {
+            return;
+        }
+        self.hermes_models.push(json!({ "id": "", "name": "" }));
+        self.hermes_models_field_idx = self
+            .hermes_model_fields()
+            .iter()
+            .position(|field| matches!(field, HermesModelField::Id(index) if *index == self.hermes_models.len().saturating_sub(1)))
+            .unwrap_or(self.hermes_models_field_idx);
+        self.sync_hermes_model_input_from_selection();
+    }
+
+    pub fn remove_hermes_model(&mut self, index: usize) {
+        if index >= self.hermes_models.len() {
+            return;
+        }
+        self.hermes_models.remove(index);
+        let fields_len = self.hermes_model_fields().len();
+        self.hermes_models_field_idx = self
+            .hermes_models_field_idx
+            .min(fields_len.saturating_sub(1));
+        self.hermes_models_editing = false;
+        self.sync_hermes_model_input_from_selection();
+    }
+
+    pub fn remove_selected_hermes_model(&mut self) -> bool {
+        let Some(field) = self.selected_hermes_model_field() else {
+            return false;
+        };
+        let index = match field {
+            HermesModelField::Id(index)
+            | HermesModelField::Name(index)
+            | HermesModelField::ContextLength(index) => index,
+        };
+        if index >= self.hermes_models.len() {
+            return false;
+        }
+        self.remove_hermes_model(index);
+        true
+    }
+
+    pub fn hermes_model_field_input(&self, field: HermesModelField) -> Option<TextInput> {
+        let (index, key) = match field {
+            HermesModelField::Id(index) => (index, "id"),
+            HermesModelField::Name(index) => (index, "name"),
+            HermesModelField::ContextLength(index) => (index, "context_length"),
+        };
+        let model = self.hermes_models.get(index)?;
+        let value = model
+            .get(key)
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| value.as_i64().map(|number| number.to_string()))
+                    .or_else(|| value.as_u64().map(|number| number.to_string()))
+            })
+            .unwrap_or_default();
+        Some(TextInput::new(value))
+    }
+
+    pub fn sync_hermes_model_input_from_selection(&mut self) {
+        let input = self
+            .selected_hermes_model_field()
+            .and_then(|field| self.hermes_model_field_input(field))
+            .unwrap_or_else(|| TextInput::new(""));
+        self.hermes_model_input = input;
+    }
+
+    pub fn set_hermes_model_field_text(&mut self, field: HermesModelField, value: &str) {
+        let (index, key) = match field {
+            HermesModelField::Id(index) => (index, "id"),
+            HermesModelField::Name(index) => (index, "name"),
+            HermesModelField::ContextLength(index) => (index, "context_length"),
+        };
+        let Some(model) = self.hermes_models.get_mut(index) else {
+            return;
+        };
+        if !model.is_object() {
+            *model = json!({});
+        }
+        let Some(obj) = model.as_object_mut() else {
+            return;
+        };
+        let trimmed = value.trim();
+        if key == "context_length" {
+            if trimmed.is_empty() {
+                obj.remove(key);
+            } else if let Ok(number) = trimmed.parse::<u64>() {
+                obj.insert(key.to_string(), json!(number));
+            } else {
+                obj.insert(key.to_string(), json!(trimmed));
+            }
+        } else {
+            obj.insert(key.to_string(), json!(value));
+        }
+    }
+
+    pub(crate) fn set_selected_hermes_model_id_from_picker(&mut self, model_id: &str) -> bool {
+        if !matches!(self.app_type, AppType::Hermes) {
+            return false;
+        }
+        let model_id = model_id.trim();
+        if model_id.is_empty() {
+            return false;
+        }
+
+        let selected = self.selected_hermes_model_field();
+        let target_index = match selected {
+            Some(HermesModelField::Id(index)) if index < self.hermes_models.len() => index,
+            Some(HermesModelField::Name(index) | HermesModelField::ContextLength(index))
+                if index < self.hermes_models.len() =>
+            {
+                index
+            }
+            _ => {
+                self.add_empty_hermes_model();
+                self.hermes_models.len().saturating_sub(1)
+            }
+        };
+
+        self.set_hermes_model_field_text(HermesModelField::Id(target_index), model_id);
+        self.hermes_models_field_idx = self
+            .hermes_model_fields()
+            .iter()
+            .position(|field| *field == HermesModelField::Id(target_index))
+            .unwrap_or(self.hermes_models_field_idx);
+        self.sync_hermes_model_input_from_selection();
+        true
+    }
+
+    pub fn touch_usage_query(&mut self) {
+        self.usage_query_touched = true;
+    }
+
+    pub fn toggle_usage_query_enabled(&mut self) {
+        self.usage_query_enabled = !self.usage_query_enabled;
+        self.touch_usage_query();
+    }
+
+    pub fn selected_usage_query_field(&self) -> Option<UsageQueryField> {
+        let fields = self.usage_query_table_fields();
+        fields
+            .get(
+                self.usage_query_field_idx
+                    .min(fields.len().saturating_sub(1)),
+            )
+            .copied()
+    }
+
+    pub fn cycle_usage_query_coding_plan_provider(&mut self) {
+        let options = ["kimi", "zhipu", "minimax"];
+        let current = options
+            .iter()
+            .position(|value| *value == self.usage_query_coding_plan_provider.value.trim())
+            .unwrap_or(0);
+        self.usage_query_coding_plan_provider
+            .set(options[(current + 1) % options.len()]);
+        self.touch_usage_query();
+    }
+
+    pub fn available_usage_query_templates(&self) -> Vec<UsageQueryTemplate> {
+        vec![
+            UsageQueryTemplate::Custom,
+            UsageQueryTemplate::General,
+            UsageQueryTemplate::NewApi,
+            UsageQueryTemplate::Balance,
+        ]
+    }
+
+    pub fn set_usage_query_template(&mut self, template: UsageQueryTemplate) {
+        self.usage_query_template = template;
+        match template {
+            UsageQueryTemplate::Custom => {
+                self.usage_query_code = self.usage_query_custom_preset_with_variables();
+                self.usage_query_api_key.set("");
+                self.usage_query_base_url.set("");
+                self.usage_query_access_token.set("");
+                self.usage_query_user_id.set("");
+            }
+            UsageQueryTemplate::General => {
+                self.usage_query_code = Self::USAGE_QUERY_GENERAL_PRESET.to_string();
+                self.usage_query_access_token.set("");
+                self.usage_query_user_id.set("");
+            }
+            UsageQueryTemplate::NewApi => {
+                self.usage_query_code = Self::USAGE_QUERY_NEWAPI_PRESET.to_string();
+                self.usage_query_api_key.set("");
+            }
+            UsageQueryTemplate::GitHubCopilot | UsageQueryTemplate::Balance => {
+                self.usage_query_code.clear();
+                self.usage_query_api_key.set("");
+                self.usage_query_base_url.set("");
+                self.usage_query_access_token.set("");
+                self.usage_query_user_id.set("");
+            }
+            UsageQueryTemplate::TokenPlan => {
+                self.usage_query_code.clear();
+                self.usage_query_api_key.set("");
+                self.usage_query_base_url.set("");
+                self.usage_query_access_token.set("");
+                self.usage_query_user_id.set("");
+                if self
+                    .usage_query_coding_plan_provider
+                    .value
+                    .trim()
+                    .is_empty()
+                {
+                    self.usage_query_coding_plan_provider.set("kimi");
+                }
+            }
+        }
+        let len = self.usage_query_table_fields().len();
+        self.usage_query_field_idx = self.usage_query_field_idx.min(len.saturating_sub(1));
+    }
+
+    pub fn refresh_usage_query_custom_variable_comment(&mut self) {
+        if self.usage_query_template != UsageQueryTemplate::Custom {
+            return;
+        }
+
+        let Some(body) = Self::strip_usage_query_custom_variable_comment(&self.usage_query_code)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let next = format!("{}{}", self.usage_query_custom_variable_comment(), body);
+        if self.usage_query_code != next {
+            self.usage_query_code = next;
+            self.touch_usage_query();
+        }
+    }
+
+    pub fn usage_query_script_help_lines() -> Vec<String> {
+        vec![
+            texts::tui_usage_query_config_format().to_string(),
+            "({".to_string(),
+            "  request: {".to_string(),
+            "    url: \"{{baseUrl}}/api/usage\",".to_string(),
+            "    method: \"POST\",".to_string(),
+            "    headers: {".to_string(),
+            "      \"Authorization\": \"Bearer {{apiKey}}\",".to_string(),
+            "      \"User-Agent\": \"cc-switch/1.0\"".to_string(),
+            "    }".to_string(),
+            "  },".to_string(),
+            "  extractor: function(response) {".to_string(),
+            "    return {".to_string(),
+            "      isValid: !response.error,".to_string(),
+            "      remaining: response.balance,".to_string(),
+            "      unit: \"USD\"".to_string(),
+            "    };".to_string(),
+            "  }".to_string(),
+            "})".to_string(),
+            String::new(),
+            texts::tui_usage_query_extractor_format().to_string(),
+            texts::tui_usage_query_field_is_valid().to_string(),
+            texts::tui_usage_query_field_invalid_message().to_string(),
+            texts::tui_usage_query_field_remaining().to_string(),
+            texts::tui_usage_query_field_unit().to_string(),
+            texts::tui_usage_query_field_plan_name().to_string(),
+            texts::tui_usage_query_field_total().to_string(),
+            texts::tui_usage_query_field_used().to_string(),
+            texts::tui_usage_query_field_extra().to_string(),
+            String::new(),
+            texts::tui_usage_query_tips().to_string(),
+            texts::tui_usage_query_tip1().to_string(),
+            texts::tui_usage_query_tip2().to_string(),
+            texts::tui_usage_query_tip3().to_string(),
+        ]
+    }
+
+    pub fn usage_query_template_value(&self) -> &'static str {
+        self.usage_query_template.as_str()
+    }
+
+    pub fn usage_query_template_label(&self) -> &'static str {
+        self.usage_query_template.label()
+    }
+
+    pub fn usage_query_extractor_available(&self) -> bool {
+        self.usage_query_enabled
+            && !matches!(
+                self.usage_query_template,
+                UsageQueryTemplate::GitHubCopilot | UsageQueryTemplate::TokenPlan
+            )
+    }
+
+    fn usage_query_custom_preset_with_variables(&self) -> String {
+        format!(
+            "{}{}",
+            self.usage_query_custom_variable_comment(),
+            Self::USAGE_QUERY_CUSTOM_PRESET
+        )
+    }
+
+    fn usage_query_custom_variable_comment(&self) -> String {
+        let (api_key, base_url) = self.usage_query_provider_credentials();
+        format!(
+            "// 支持的变量\n// {{{{baseUrl}}}}\n// =\n// {base_url}\n// {{{{apiKey}}}}\n// =\n// {api_key}\n\n"
+        )
+    }
+
+    pub fn current_provider_base_url(&self) -> String {
+        if self.is_claude_codex_oauth_provider() {
+            return "https://chatgpt.com/backend-api/codex".to_string();
+        }
+
+        match self.app_type {
+            AppType::Claude => self.claude_base_url.value.clone(),
+            AppType::Codex => self.codex_base_url.value.clone(),
+            AppType::Gemini => self.gemini_base_url.value.clone(),
+            AppType::Hermes => self.hermes_base_url.value.clone(),
+            AppType::OpenCode | AppType::OpenClaw => self.opencode_base_url.value.clone(),
+        }
+    }
+
+    fn usage_query_provider_credentials(&self) -> (String, String) {
+        if self.is_claude_codex_oauth_provider() {
+            return (
+                String::new(),
+                "https://chatgpt.com/backend-api/codex".to_string(),
+            );
+        }
+
+        let (api_key, base_url) = match self.app_type {
+            AppType::Claude => (&self.claude_api_key.value, &self.claude_base_url.value),
+            AppType::Codex => (&self.codex_api_key.value, &self.codex_base_url.value),
+            AppType::Gemini => (&self.gemini_api_key.value, &self.gemini_base_url.value),
+            AppType::Hermes => (&self.hermes_api_key.value, &self.hermes_base_url.value),
+            AppType::OpenCode | AppType::OpenClaw => {
+                (&self.opencode_api_key.value, &self.opencode_base_url.value)
+            }
+        };
+        (
+            Self::usage_query_comment_value(api_key),
+            Self::usage_query_comment_value(base_url),
+        )
+    }
+
+    fn usage_query_comment_value(value: &str) -> String {
+        value.trim().replace(['\r', '\n'], " ").trim().to_string()
+    }
+
+    fn strip_usage_query_custom_variable_comment(code: &str) -> Option<&str> {
+        if !code.starts_with("// 支持的变量\n") {
+            return None;
+        }
+
+        let mut newline_count = 0;
+        for (idx, ch) in code.char_indices() {
+            if ch == '\n' {
+                newline_count += 1;
+                if newline_count == 8 {
+                    return code.get(idx + ch.len_utf8()..);
+                }
+            }
+        }
+        None
+    }
+
+    // The model-mapping sub-page exposes only the four role models; the main
+    // model (ANTHROPIC_MODEL) is edited via the top-level ClaudeFallbackModel row.
     pub fn claude_model_input(&self, index: usize) -> Option<&TextInput> {
         match index {
-            0 => Some(&self.claude_model),
-            1 => Some(&self.claude_reasoning_model),
-            2 => Some(&self.claude_haiku_model),
-            3 => Some(&self.claude_sonnet_model),
-            4 => Some(&self.claude_opus_model),
+            0 => Some(&self.claude_reasoning_model),
+            1 => Some(&self.claude_haiku_model),
+            2 => Some(&self.claude_sonnet_model),
+            3 => Some(&self.claude_opus_model),
             _ => None,
         }
     }
 
     pub fn claude_model_input_mut(&mut self, index: usize) -> Option<&mut TextInput> {
         match index {
-            0 => Some(&mut self.claude_model),
-            1 => Some(&mut self.claude_reasoning_model),
-            2 => Some(&mut self.claude_haiku_model),
-            3 => Some(&mut self.claude_sonnet_model),
-            4 => Some(&mut self.claude_opus_model),
+            0 => Some(&mut self.claude_reasoning_model),
+            1 => Some(&mut self.claude_haiku_model),
+            2 => Some(&mut self.claude_sonnet_model),
+            3 => Some(&mut self.claude_opus_model),
             _ => None,
         }
     }
 
     pub fn claude_model_configured_count(&self) -> usize {
         [
-            &self.claude_model,
             &self.claude_reasoning_model,
             &self.claude_haiku_model,
             &self.claude_sonnet_model,
@@ -314,6 +1583,72 @@ impl ProviderAddFormState {
 
     pub fn mark_claude_model_config_touched(&mut self) {
         self.claude_model_config_touched = true;
+    }
+
+    pub fn toggle_claude_hide_attribution(&mut self) {
+        self.claude_hide_attribution = !self.claude_hide_attribution;
+        self.claude_hide_attribution_touched = true;
+    }
+
+    pub fn toggle_claude_teammates(&mut self) {
+        self.claude_teammates = !self.claude_teammates;
+        self.claude_teammates_touched = true;
+    }
+
+    pub fn toggle_claude_tool_search(&mut self) {
+        self.claude_tool_search = !self.claude_tool_search;
+        self.claude_tool_search_touched = true;
+    }
+
+    pub fn toggle_claude_disable_auto_upgrade(&mut self) {
+        self.claude_disable_auto_upgrade = !self.claude_disable_auto_upgrade;
+        self.claude_disable_auto_upgrade_touched = true;
+    }
+
+    pub fn toggle_codex_fast_mode(&mut self) {
+        if self.is_claude_codex_oauth_provider() {
+            self.codex_fast_mode = !self.codex_fast_mode;
+        }
+    }
+
+    pub fn set_codex_oauth_account_id(&mut self, account_id: Option<String>) {
+        self.codex_oauth_account_id = account_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    }
+
+    pub fn codex_oauth_account_display(&self) -> String {
+        self.codex_oauth_account_id
+            .clone()
+            .unwrap_or_else(|| texts::tui_managed_accounts_follow_default().to_string())
+    }
+
+    pub fn is_claude_codex_oauth_provider(&self) -> bool {
+        if !matches!(self.app_type, AppType::Claude) {
+            return false;
+        }
+
+        self.extra
+            .get("meta")
+            .and_then(|meta| meta.get("providerType"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value == "codex_oauth")
+    }
+
+    pub fn is_claude_github_copilot_provider(&self) -> bool {
+        if !matches!(self.app_type, AppType::Claude) {
+            return false;
+        }
+
+        let provider_type_matches = self
+            .extra
+            .get("meta")
+            .and_then(|meta| meta.get("providerType"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "github_copilot");
+        let endpoint_matches = self.claude_base_url.value.contains("githubcopilot.com");
+
+        provider_type_matches || endpoint_matches
     }
 
     pub fn is_claude_official_provider(&self) -> bool {
@@ -360,11 +1695,32 @@ impl ProviderAddFormState {
         meta_flag || category_flag || website_flag || name_flag
     }
 
+    pub fn codex_local_routing_enabled(&self) -> bool {
+        matches!(self.app_type, AppType::Codex)
+            && !self.is_codex_official_provider()
+            && self.codex_local_routing_enabled
+    }
+
+    /// Whether the Codex upstream format is Chat Completions (which needs proxy
+    /// conversion). Reasoning capability is Chat-only.
+    pub fn codex_is_chat_format(&self) -> bool {
+        matches!(self.app_type, AppType::Codex)
+            && !self.is_codex_official_provider()
+            && matches!(self.claude_api_format, ClaudeApiFormat::OpenAiChat)
+    }
+
     pub fn apply_provider_json_to_fields(&mut self, provider: &Provider) {
         let previous_mode = self.mode.clone();
         let previous_focus = self.focus;
+        let previous_page = self.page;
+        let previous_copy_source_id = self.copy_source_id.clone();
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
+        let previous_usage_query_field_idx = self.usage_query_field_idx;
+        let previous_codex_local_routing_field_idx = self.codex_local_routing_field_idx;
+        let previous_local_proxy_settings_field_idx = self.local_proxy_settings_field_idx;
+        let previous_codex_model_catalog_field = self.codex_model_catalog_field;
+        let previous_hermes_models_field_idx = self.hermes_models_field_idx;
         let previous_json_scroll = self.json_scroll;
         let previous_codex_preview_section = self.codex_preview_section;
         let previous_codex_auth_scroll = self.codex_auth_scroll;
@@ -393,19 +1749,45 @@ impl ProviderAddFormState {
         }
 
         next.mode = previous_mode.clone();
+        next.copy_source_id = previous_copy_source_id;
         next.focus = previous_focus;
+        next.page = previous_page;
         next.template_idx = previous_template_idx;
         next.json_scroll = previous_json_scroll;
         next.codex_preview_section = previous_codex_preview_section;
         next.codex_auth_scroll = previous_codex_auth_scroll;
         next.codex_config_scroll = previous_codex_config_scroll;
+        next.codex_model_catalog_field = previous_codex_model_catalog_field;
         next.editing = false;
+        next.usage_query_editing = false;
+        next.hermes_models_editing = false;
         let fields_len = next.fields().len();
         next.field_idx = if fields_len == 0 {
             0
         } else {
             previous_field_idx.min(fields_len - 1)
         };
+        let usage_fields_len = next.usage_query_table_fields().len();
+        next.usage_query_field_idx = if usage_fields_len == 0 {
+            0
+        } else {
+            previous_usage_query_field_idx.min(usage_fields_len - 1)
+        };
+        let codex_local_routing_fields_len = next.codex_local_routing_fields().len();
+        next.codex_local_routing_field_idx = if codex_local_routing_fields_len == 0 {
+            0
+        } else {
+            previous_codex_local_routing_field_idx.min(codex_local_routing_fields_len - 1)
+        };
+        next.local_proxy_settings_field_idx = previous_local_proxy_settings_field_idx
+            .min(next.local_proxy_settings_fields().len().saturating_sub(1));
+        let hermes_model_fields_len = next.hermes_model_fields().len();
+        next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
+            0
+        } else {
+            previous_hermes_models_field_idx.min(hermes_model_fields_len - 1)
+        };
+        next.sync_hermes_model_input_from_selection();
 
         if let FormMode::Edit { id } = previous_mode {
             next.id.set(id);
@@ -422,8 +1804,15 @@ impl ProviderAddFormState {
     ) -> Result<(), String> {
         let previous_mode = self.mode.clone();
         let previous_focus = self.focus;
+        let previous_page = self.page;
+        let previous_copy_source_id = self.copy_source_id.clone();
         let previous_template_idx = self.template_idx;
         let previous_field_idx = self.field_idx;
+        let previous_usage_query_field_idx = self.usage_query_field_idx;
+        let previous_codex_local_routing_field_idx = self.codex_local_routing_field_idx;
+        let previous_local_proxy_settings_field_idx = self.local_proxy_settings_field_idx;
+        let previous_codex_model_catalog_field = self.codex_model_catalog_field;
+        let previous_hermes_models_field_idx = self.hermes_models_field_idx;
         let previous_json_scroll = self.json_scroll;
         let previous_codex_preview_section = self.codex_preview_section;
         let previous_codex_auth_scroll = self.codex_auth_scroll;
@@ -462,13 +1851,18 @@ impl ProviderAddFormState {
         }
 
         next.mode = previous_mode.clone();
+        next.copy_source_id = previous_copy_source_id;
         next.focus = previous_focus;
+        next.page = previous_page;
         next.template_idx = previous_template_idx;
         next.json_scroll = previous_json_scroll;
         next.codex_preview_section = previous_codex_preview_section;
         next.codex_auth_scroll = previous_codex_auth_scroll;
         next.codex_config_scroll = previous_codex_config_scroll;
+        next.codex_model_catalog_field = previous_codex_model_catalog_field;
         next.editing = false;
+        next.usage_query_editing = false;
+        next.hermes_models_editing = false;
 
         let fields_len = next.fields().len();
         next.field_idx = if fields_len == 0 {
@@ -476,6 +1870,27 @@ impl ProviderAddFormState {
         } else {
             previous_field_idx.min(fields_len - 1)
         };
+        let usage_fields_len = next.usage_query_table_fields().len();
+        next.usage_query_field_idx = if usage_fields_len == 0 {
+            0
+        } else {
+            previous_usage_query_field_idx.min(usage_fields_len - 1)
+        };
+        let codex_local_routing_fields_len = next.codex_local_routing_fields().len();
+        next.codex_local_routing_field_idx = if codex_local_routing_fields_len == 0 {
+            0
+        } else {
+            previous_codex_local_routing_field_idx.min(codex_local_routing_fields_len - 1)
+        };
+        next.local_proxy_settings_field_idx = previous_local_proxy_settings_field_idx
+            .min(next.local_proxy_settings_fields().len().saturating_sub(1));
+        let hermes_model_fields_len = next.hermes_model_fields().len();
+        next.hermes_models_field_idx = if hermes_model_fields_len == 0 {
+            0
+        } else {
+            previous_hermes_models_field_idx.min(hermes_model_fields_len - 1)
+        };
+        next.sync_hermes_model_input_from_selection();
 
         if let FormMode::Edit { id } = previous_mode {
             next.id.set(id);
@@ -534,9 +1949,66 @@ impl ProviderAddFormState {
         }
     }
 
+    pub(crate) fn cycle_hermes_api_mode(&mut self) {
+        let current = HERMES_API_MODES
+            .iter()
+            .position(|mode| *mode == self.hermes_api_mode.trim())
+            .unwrap_or(0);
+        self.hermes_api_mode = HERMES_API_MODES[(current + 1) % HERMES_API_MODES.len()].to_string();
+    }
+
+    pub(crate) fn hermes_api_mode_value(&self) -> &str {
+        if HERMES_API_MODES
+            .iter()
+            .any(|mode| *mode == self.hermes_api_mode.trim())
+        {
+            self.hermes_api_mode.trim()
+        } else {
+            HERMES_DEFAULT_API_MODE
+        }
+    }
+
+    pub(crate) fn hermes_models_summary(&self) -> String {
+        texts::tui_hermes_models_summary(self.hermes_models.len())
+    }
+
     pub(crate) fn openclaw_models_summary(&self) -> String {
         let total = self.openclaw_models.len();
         texts::tui_openclaw_models_summary(total)
+    }
+
+    pub(crate) fn codex_model_catalog_summary(&self) -> String {
+        let count = self.codex_model_catalog.len();
+        if crate::cli::i18n::is_chinese() {
+            format!("{count} 个模型")
+        } else if count == 1 {
+            "1 model".to_string()
+        } else {
+            format!("{count} models")
+        }
+    }
+
+    #[cfg(test)]
+    pub fn apply_codex_model_catalog_value(&mut self, models_value: Value) -> Result<(), String> {
+        if !matches!(self.app_type, AppType::Codex) {
+            return Ok(());
+        }
+        let Some(models) = models_value.as_array() else {
+            return Err(texts::tui_toast_json_must_be_array().to_string());
+        };
+        self.codex_model_catalog = models
+            .iter()
+            .filter_map(codex_model_catalog_row_from_value)
+            .collect();
+        self.codex_model_catalog_idx = self
+            .codex_model_catalog_idx
+            .min(self.codex_model_catalog.len().saturating_sub(1));
+        if self.codex_model_catalog.is_empty() {
+            self.codex_model_catalog_field = CodexModelCatalogField::Model;
+        }
+        // Applying a catalog implies routing/mapping is on (mirrors load init).
+        self.codex_local_routing_enabled = !self.codex_model_catalog.is_empty();
+        Ok(())
     }
 
     pub(crate) fn openclaw_models_editor_text(&self) -> String {
@@ -565,7 +2037,129 @@ impl ProviderAddFormState {
     }
 }
 
+pub(crate) fn codex_model_catalog_row_from_value(value: &Value) -> Option<CodexModelCatalogRow> {
+    let model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if model.is_empty() {
+        return None;
+    }
+
+    let display_name = value
+        .get("displayName")
+        .or_else(|| value.get("display_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let context_window = value
+        .get("contextWindow")
+        .or_else(|| value.get("context_window"))
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(|value| value.trim().to_string())
+                .or_else(|| value.as_u64().map(|value| value.to_string()))
+                .or_else(|| value.as_i64().map(|value| value.to_string()))
+        })
+        .unwrap_or_default();
+
+    Some(CodexModelCatalogRow {
+        model,
+        display_name,
+        context_window,
+    })
+}
+
+pub(crate) fn detect_coding_plan_provider_for_usage_query(base_url: &str) -> Option<&'static str> {
+    let url = base_url.to_lowercase();
+    if url.contains("api.kimi.com/coding") {
+        Some("kimi")
+    } else if url.contains("open.bigmodel.cn")
+        || url.contains("bigmodel.cn")
+        || url.contains("api.z.ai")
+    {
+        Some("zhipu")
+    } else if url.contains("api.minimaxi.com")
+        || url.contains("api.minimax.io")
+        || url.contains("api.minimax.com")
+    {
+        Some("minimax")
+    } else {
+        None
+    }
+}
+
+pub(crate) fn detect_balance_provider_for_usage_query(base_url: &str) -> bool {
+    let url = base_url.to_lowercase();
+    url.contains("api.deepseek.com")
+        || url.contains("api.stepfun.ai")
+        || url.contains("api.stepfun.com")
+        || url.contains("api.siliconflow.cn")
+        || url.contains("api.siliconflow.com")
+        || url.contains("openrouter.ai")
+        || url.contains("api.novita.ai")
+}
+
+impl UsageQueryTemplate {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::General => "general",
+            Self::NewApi => "newapi",
+            Self::GitHubCopilot => "github_copilot",
+            Self::TokenPlan => "token_plan",
+            Self::Balance => "balance",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Custom => {
+                if crate::cli::i18n::is_chinese() {
+                    "自定义"
+                } else {
+                    "Custom"
+                }
+            }
+            Self::General => {
+                if crate::cli::i18n::is_chinese() {
+                    "通用模板"
+                } else {
+                    "General"
+                }
+            }
+            Self::NewApi => "NewAPI",
+            Self::GitHubCopilot => "GitHub Copilot",
+            Self::TokenPlan => "Token Plan",
+            Self::Balance => {
+                if crate::cli::i18n::is_chinese() {
+                    "官方"
+                } else {
+                    "Official"
+                }
+            }
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "custom" => Some(Self::Custom),
+            "general" => Some(Self::General),
+            "newapi" => Some(Self::NewApi),
+            "github_copilot" => Some(Self::GitHubCopilot),
+            "token_plan" => Some(Self::TokenPlan),
+            "balance" => Some(Self::Balance),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) fn resolve_provider_id_for_submit(
+    app_type: &AppType,
     name: &str,
     id: &str,
     existing_ids: &[String],
@@ -578,7 +2172,10 @@ pub(crate) fn resolve_provider_id_for_submit(
         return Some(id.to_string());
     }
 
-    let generated_id =
-        crate::cli::commands::provider_input::generate_provider_id(name.trim(), existing_ids);
+    let generated_id = crate::cli::commands::provider_input::generate_provider_id_for_app(
+        app_type,
+        name.trim(),
+        existing_ids,
+    );
     (!generated_id.trim().is_empty()).then_some(generated_id)
 }

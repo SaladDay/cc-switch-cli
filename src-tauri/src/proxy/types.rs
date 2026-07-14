@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// 代理服务器配置
@@ -98,6 +100,20 @@ pub struct ProxyStatus {
     /// 当前活跃的代理目标列表
     #[serde(default)]
     pub active_targets: Vec<ActiveTarget>,
+    /// 当前活跃的 daemon-managed worker 列表
+    #[serde(default)]
+    pub active_workers: Vec<ActiveWorker>,
+}
+
+/// 活跃的 daemon-managed worker 信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveWorker {
+    pub app_type: String,
+    pub address: String,
+    pub port: u16,
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub started_at: Option<String>,
 }
 
 /// 活跃的代理目标信息
@@ -157,6 +173,15 @@ pub struct LiveBackup {
     pub backed_up_at: String,
 }
 
+/// 故障转移队列按供应商生成的 Live 配置快照
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailoverLiveSnapshot {
+    pub app_type: String,
+    pub provider_id: String,
+    pub config_json: String,
+    pub generated_at: String,
+}
+
 /// 全局代理配置（统一字段，三行镜像）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -199,6 +224,20 @@ pub struct AppProxyConfig {
     pub circuit_error_rate_threshold: f64,
     /// 计算错误率的最小请求数
     pub circuit_min_requests: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyPreferences {
+    #[serde(default)]
+    pub apps: BTreeMap<String, AppProxyPreference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppProxyPreference {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_port: Option<u16>,
 }
 
 /// 整流器配置
@@ -264,6 +303,52 @@ impl Default for OptimizerConfig {
             thinking_optimizer: true,
             cache_injection: true,
             cache_ttl: "1h".to_string(),
+        }
+    }
+}
+
+/// Copilot 优化器配置
+///
+/// 存储在 settings 表中，key = "copilot_optimizer_config"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopilotOptimizerConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub request_classification: bool,
+    #[serde(default = "default_true")]
+    pub tool_result_merging: bool,
+    #[serde(default = "default_true")]
+    pub compact_detection: bool,
+    #[serde(default = "default_true")]
+    pub deterministic_request_id: bool,
+    #[serde(default = "default_true")]
+    pub subagent_detection: bool,
+    #[serde(default = "default_true")]
+    pub warmup_downgrade: bool,
+    #[serde(default = "default_warmup_model")]
+    pub warmup_model: String,
+    #[serde(default = "default_true")]
+    pub strip_thinking: bool,
+}
+
+fn default_warmup_model() -> String {
+    "gpt-5-mini".to_string()
+}
+
+impl Default for CopilotOptimizerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            request_classification: true,
+            tool_result_merging: true,
+            compact_detection: true,
+            deterministic_request_id: true,
+            subagent_detection: true,
+            warmup_downgrade: true,
+            warmup_model: "gpt-5-mini".to_string(),
+            strip_thinking: true,
         }
     }
 }
@@ -393,6 +478,35 @@ mod tests {
         assert!(config.thinking_optimizer);
         assert!(config.cache_injection);
         assert_eq!(config.cache_ttl, "1h");
+    }
+
+    #[test]
+    fn test_copilot_optimizer_config_default() {
+        let config = CopilotOptimizerConfig::default();
+        assert!(config.enabled);
+        assert!(config.request_classification);
+        assert!(config.tool_result_merging);
+        assert!(config.compact_detection);
+        assert!(config.deterministic_request_id);
+        assert!(config.subagent_detection);
+        assert!(config.warmup_downgrade);
+        assert_eq!(config.warmup_model, "gpt-5-mini");
+        assert!(config.strip_thinking);
+    }
+
+    #[test]
+    fn test_copilot_optimizer_config_serde_default() {
+        let json = "{}";
+        let config: CopilotOptimizerConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert!(config.request_classification);
+        assert!(config.tool_result_merging);
+        assert!(config.compact_detection);
+        assert!(config.deterministic_request_id);
+        assert!(config.subagent_detection);
+        assert!(config.warmup_downgrade);
+        assert_eq!(config.warmup_model, "gpt-5-mini");
+        assert!(config.strip_thinking);
     }
 
     #[test]

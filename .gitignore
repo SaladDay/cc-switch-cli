@@ -9,9 +9,9 @@ release/
 .env.local
 *.tsbuildinfo
 .npmrc
-CLAUDE.md
 AGENT.md
 AGENTS.md
+!/AGENTS.md
 plan.md
 GEMINI.md
 *.claude
@@ -26,12 +26,15 @@ vitest-report.json
 skill.md
 scripts/*
 !scripts/generate_latest_json.py
+!scripts/benchmark_cc_switch.py
+!scripts/check_benchmark_thresholds.py
 
 .agent/
 .agents/
+/.agents/skills/review-pr/
 .worktrees/
 docs/superpowers/
 .omx/
 .superpowers/
 skills-lock.json
-skills/
+/skills/

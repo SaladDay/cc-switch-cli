@@ -151,15 +151,16 @@ async fn assert_forwarded_model(case: MappingCase) {
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
+
     let service = ProxyService::new(db);
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -259,7 +260,7 @@ async fn opus_request_uses_opus_model_override() {
 
 #[tokio::test]
 #[serial]
-async fn thinking_enabled_request_uses_reasoning_model_override() {
+async fn thinking_enabled_ignores_legacy_reasoning_model_override() {
     let mut provider_env = Map::new();
     provider_env.insert(
         "ANTHROPIC_REASONING_MODEL".to_string(),
@@ -271,7 +272,7 @@ async fn thinking_enabled_request_uses_reasoning_model_override() {
     assert_forwarded_model(MappingCase {
         provider_env,
         request_body,
-        expected_model: "reasoning-mapped",
+        expected_model: "claude-3-7-sonnet-20250219",
         upstream_format: UpstreamFormat::OpenAiChat,
     })
     .await;
@@ -279,7 +280,7 @@ async fn thinking_enabled_request_uses_reasoning_model_override() {
 
 #[tokio::test]
 #[serial]
-async fn thinking_adaptive_request_uses_reasoning_model_override() {
+async fn thinking_adaptive_ignores_legacy_reasoning_model_override() {
     let mut provider_env = Map::new();
     provider_env.insert(
         "ANTHROPIC_REASONING_MODEL".to_string(),
@@ -291,7 +292,7 @@ async fn thinking_adaptive_request_uses_reasoning_model_override() {
     assert_forwarded_model(MappingCase {
         provider_env,
         request_body,
-        expected_model: "reasoning-mapped",
+        expected_model: "claude-3-7-sonnet-20250219",
         upstream_format: UpstreamFormat::OpenAiChat,
     })
     .await;

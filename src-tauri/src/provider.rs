@@ -1,7 +1,60 @@
 use indexmap::IndexMap;
+use reqwest::header::{HeaderValue, InvalidHeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+
+pub const CLAUDE_AUTH_TOKEN_ENV_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
+pub const CLAUDE_API_KEY_ENV_KEY: &str = "ANTHROPIC_API_KEY";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeApiKeyField {
+    AuthToken,
+    ApiKey,
+}
+
+impl ClaudeApiKeyField {
+    pub fn as_env_key(self) -> &'static str {
+        match self {
+            Self::AuthToken => CLAUDE_AUTH_TOKEN_ENV_KEY,
+            Self::ApiKey => CLAUDE_API_KEY_ENV_KEY,
+        }
+    }
+
+    pub fn alternate_env_key(self) -> &'static str {
+        match self {
+            Self::AuthToken => CLAUDE_API_KEY_ENV_KEY,
+            Self::ApiKey => CLAUDE_AUTH_TOKEN_ENV_KEY,
+        }
+    }
+
+    pub fn from_raw(value: &str) -> Option<Self> {
+        match value {
+            CLAUDE_AUTH_TOKEN_ENV_KEY => Some(Self::AuthToken),
+            CLAUDE_API_KEY_ENV_KEY => Some(Self::ApiKey),
+            _ => None,
+        }
+    }
+
+    pub fn from_meta_and_settings(meta: Option<&ProviderMeta>, settings_config: &Value) -> Self {
+        if let Some(field) = meta
+            .and_then(|meta| meta.api_key_field.as_deref())
+            .and_then(Self::from_raw)
+        {
+            return field;
+        }
+
+        if settings_config
+            .get("env")
+            .and_then(Value::as_object)
+            .is_some_and(|env| env.contains_key(CLAUDE_API_KEY_ENV_KEY))
+        {
+            return Self::ApiKey;
+        }
+
+        Self::AuthToken
+    }
+}
 
 // SSOT 模式：不再写供应商副本文件
 
@@ -65,6 +118,58 @@ impl Provider {
             in_failover_queue: false,
         }
     }
+
+    pub fn is_codex_oauth(&self) -> bool {
+        self.provider_type() == Some("codex_oauth")
+    }
+
+    pub fn is_codex_official(&self) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.codex_official)
+            .unwrap_or(false)
+            || self
+                .category
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("official"))
+            || self
+                .website_url
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("https://chatgpt.com/codex"))
+            || self.name.trim().eq_ignore_ascii_case("OpenAI Official")
+    }
+
+    pub fn is_github_copilot(&self) -> bool {
+        self.provider_type() == Some("github_copilot")
+            || self.claude_base_url_contains("githubcopilot.com")
+    }
+
+    pub fn uses_managed_account_auth(&self) -> bool {
+        self.is_github_copilot()
+            || self.is_codex_oauth()
+            || self.claude_base_url_contains("chatgpt.com/backend-api/codex")
+    }
+
+    fn provider_type(&self) -> Option<&str> {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.provider_type.as_deref())
+    }
+
+    fn claude_base_url_contains(&self, needle: &str) -> bool {
+        self.settings_config
+            .pointer("/env/ANTHROPIC_BASE_URL")
+            .and_then(Value::as_str)
+            .map(|base_url| base_url.contains(needle))
+            .unwrap_or(false)
+    }
+
+    pub fn codex_fast_mode_enabled(&self) -> bool {
+        self.meta
+            .as_ref()
+            .map(|meta| meta.codex_fast_mode_enabled())
+            .unwrap_or(false)
+    }
 }
 
 /// 供应商管理器
@@ -106,6 +211,10 @@ pub struct UsageScript {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "autoQueryInterval")]
     pub auto_query_interval: Option<u64>,
+    /// Coding Plan 供应商标识（如 "kimi", "zhipu", "minimax"）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "codingPlanProvider")]
+    pub coding_plan_provider: Option<String>,
 }
 
 /// 用量数据
@@ -216,6 +325,40 @@ pub struct AuthBinding {
     pub account_id: Option<String>,
 }
 
+/// Codex Responses -> Chat Completions 的 reasoning 能力描述。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct CodexChatReasoningConfig {
+    #[serde(rename = "supportsThinking", skip_serializing_if = "Option::is_none")]
+    pub supports_thinking: Option<bool>,
+    #[serde(rename = "supportsEffort", skip_serializing_if = "Option::is_none")]
+    pub supports_effort: Option<bool>,
+    #[serde(rename = "thinkingParam", skip_serializing_if = "Option::is_none")]
+    pub thinking_param: Option<String>,
+    #[serde(rename = "effortParam", skip_serializing_if = "Option::is_none")]
+    pub effort_param: Option<String>,
+    #[serde(rename = "effortValueMode", skip_serializing_if = "Option::is_none")]
+    pub effort_value_mode: Option<String>,
+    /// 声明性字段：标注上游 reasoning 的回传位置。当前响应侧按字段兜底提取；
+    /// 保留该字段用于与上游持久化 shape 对齐。
+    #[serde(rename = "outputFormat", skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<String>,
+}
+
+/// Local proxy request overrides applied after route/protocol transforms.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalProxyRequestOverrides {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<Value>,
+}
+
+impl LocalProxyRequestOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty() && self.body.is_none()
+    }
+}
+
 /// 供应商元数据
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderMeta {
@@ -265,21 +408,39 @@ pub struct ProviderMeta {
     /// 供应商单独的代理配置
     #[serde(rename = "proxyConfig", skip_serializing_if = "Option::is_none")]
     pub proxy_config: Option<ProviderProxyConfig>,
-    /// Claude API 格式（仅 Claude 供应商使用）
+    /// Claude API 格式；Codex 供应商也用 `openai_chat` 标记本地 Responses ↔ Chat 路由。
     /// - "anthropic": 原生 Anthropic Messages API，直接透传
     /// - "openai_chat": OpenAI Chat Completions 格式，需要转换
     /// - "openai_responses": OpenAI Responses API 格式，需要转换
     #[serde(rename = "apiFormat", skip_serializing_if = "Option::is_none")]
     pub api_format: Option<String>,
+    /// Codex Responses -> Chat Completions reasoning 能力描述。
+    #[serde(rename = "codexChatReasoning", skip_serializing_if = "Option::is_none")]
+    pub codex_chat_reasoning: Option<CodexChatReasoningConfig>,
     /// OpenAI 兼容端点使用的 prompt cache key。
     #[serde(rename = "promptCacheKey", skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+    /// Codex OAuth FAST mode: inject `service_tier = "priority"` for ChatGPT Codex requests.
+    #[serde(rename = "codexFastMode", skip_serializing_if = "Option::is_none")]
+    pub codex_fast_mode: Option<bool>,
+    /// Custom User-Agent for local proxy routing.
+    #[serde(rename = "customUserAgent", skip_serializing_if = "Option::is_none")]
+    pub custom_user_agent: Option<String>,
+    /// Local proxy request overrides applied to the transformed upstream request.
+    #[serde(
+        rename = "localProxyRequestOverrides",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub local_proxy_request_overrides: Option<LocalProxyRequestOverrides>,
     /// 通用认证绑定（provider_config / managed_account）
     #[serde(rename = "authBinding", skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<AuthBinding>,
     /// Claude 认证字段名（"ANTHROPIC_AUTH_TOKEN" 或 "ANTHROPIC_API_KEY"）
     #[serde(rename = "apiKeyField", skip_serializing_if = "Option::is_none")]
     pub api_key_field: Option<String>,
+    /// 是否将 base_url 视为完整 API 端点（不拼接 endpoint 路径）
+    #[serde(rename = "isFullUrl", skip_serializing_if = "Option::is_none")]
+    pub is_full_url: Option<bool>,
     /// 累加模式应用中，该 provider 是否已写入 live config。
     /// `None` 表示旧数据/未知状态，`Some(false)` 表示明确仅存在于数据库中。
     #[serde(rename = "liveConfigManaged", skip_serializing_if = "Option::is_none")]
@@ -294,7 +455,25 @@ pub struct ProviderMeta {
     pub github_account_id: Option<String>,
 }
 
+/// Parse the provider-level User-Agent used by proxy-related requests.
+pub fn parse_custom_user_agent(
+    raw: Option<&str>,
+) -> Result<Option<HeaderValue>, InvalidHeaderValue> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value.parse::<HeaderValue>().map(Some),
+        None => Ok(None),
+    }
+}
+
 impl ProviderMeta {
+    pub fn codex_fast_mode_enabled(&self) -> bool {
+        self.codex_fast_mode.unwrap_or(false)
+    }
+
+    pub fn custom_user_agent_header(&self) -> Result<Option<HeaderValue>, InvalidHeaderValue> {
+        parse_custom_user_agent(self.custom_user_agent.as_deref())
+    }
+
     pub fn managed_account_id_for(&self, auth_provider: &str) -> Option<String> {
         if let Some(binding) = self.auth_binding.as_ref() {
             if binding.source == AuthBindingSource::ManagedAccount
@@ -325,10 +504,14 @@ pub struct OpenCodeProviderConfig {
     pub npm: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modalities: Option<Value>,
     #[serde(default)]
     pub options: OpenCodeProviderOptions,
     #[serde(default)]
     pub models: HashMap<String, OpenCodeModel>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, Value>,
 }
 
 impl Default for OpenCodeProviderConfig {
@@ -336,8 +519,10 @@ impl Default for OpenCodeProviderConfig {
         Self {
             npm: "@ai-sdk/openai-compatible".to_string(),
             name: None,
+            modalities: None,
             options: OpenCodeProviderOptions::default(),
             models: HashMap::new(),
+            extra: HashMap::new(),
         }
     }
 }
@@ -416,7 +601,11 @@ pub struct OpenClawModelCost {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthBinding, AuthBindingSource, ProviderMeta};
+    use super::{
+        parse_custom_user_agent, AuthBinding, AuthBindingSource, LocalProxyRequestOverrides,
+        OpenCodeProviderConfig, Provider, ProviderMeta,
+    };
+    use std::collections::HashMap;
 
     #[test]
     fn provider_meta_serializes_upstream_common_config_key_and_accepts_legacy_alias() {
@@ -437,6 +626,138 @@ mod tests {
         }))
         .expect("deserialize legacy alias");
         assert_eq!(deserialized.apply_common_config, Some(false));
+    }
+
+    #[test]
+    fn provider_meta_round_trips_upstream_full_url_flag() {
+        let meta: ProviderMeta = serde_json::from_value(serde_json::json!({
+            "isFullUrl": true
+        }))
+        .expect("deserialize full-url flag");
+
+        assert_eq!(meta.is_full_url, Some(true));
+        let serialized = serde_json::to_value(&meta).expect("serialize provider meta");
+        assert_eq!(serialized["isFullUrl"], true);
+    }
+
+    #[test]
+    fn provider_meta_round_trips_local_proxy_request_metadata_exactly() {
+        let value = serde_json::json!({
+            "customUserAgent": "Mozilla/5.0 (compatible; CC-Switch/1.0)",
+            "localProxyRequestOverrides": {
+                "headers": {
+                    "x-tenant": "tenant-a",
+                    "x-trace-mode": "verbose"
+                },
+                "body": {
+                    "metadata": {
+                        "source": "cc-switch"
+                    },
+                    "temperature": 0.2
+                }
+            }
+        });
+
+        let meta: ProviderMeta =
+            serde_json::from_value(value.clone()).expect("deserialize proxy request metadata");
+        assert_eq!(
+            meta.custom_user_agent.as_deref(),
+            Some("Mozilla/5.0 (compatible; CC-Switch/1.0)")
+        );
+        assert!(!meta
+            .local_proxy_request_overrides
+            .as_ref()
+            .expect("local proxy request overrides")
+            .is_empty());
+
+        let serialized = serde_json::to_value(&meta).expect("serialize proxy request metadata");
+        assert_eq!(serialized, value);
+    }
+
+    #[test]
+    fn proxy_request_metadata_omits_empty_fields_exactly() {
+        let empty_overrides = LocalProxyRequestOverrides::default();
+        assert!(empty_overrides.is_empty());
+        assert_eq!(
+            serde_json::to_value(&empty_overrides).expect("serialize empty overrides"),
+            serde_json::json!({})
+        );
+
+        let empty_meta = ProviderMeta::default();
+        assert_eq!(
+            serde_json::to_value(&empty_meta).expect("serialize empty provider meta"),
+            serde_json::json!({})
+        );
+
+        let headers_only = LocalProxyRequestOverrides {
+            headers: HashMap::from([("x-feature".to_string(), "enabled".to_string())]),
+            body: None,
+        };
+        assert_eq!(
+            serde_json::to_value(headers_only).expect("serialize headers-only overrides"),
+            serde_json::json!({
+                "headers": {
+                    "x-feature": "enabled"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn custom_user_agent_parser_trims_and_validates_header_values() {
+        assert!(parse_custom_user_agent(None)
+            .expect("missing user agent")
+            .is_none());
+        assert!(parse_custom_user_agent(Some("   "))
+            .expect("blank user agent")
+            .is_none());
+        assert_eq!(
+            parse_custom_user_agent(Some("  cc-switch-cli/1.0  "))
+                .expect("valid user agent")
+                .and_then(|value| value.to_str().ok().map(str::to_string))
+                .as_deref(),
+            Some("cc-switch-cli/1.0")
+        );
+        assert!(parse_custom_user_agent(Some("invalid\nuser-agent")).is_err());
+    }
+
+    #[test]
+    fn opencode_provider_config_without_modalities_or_extra_serializes_as_existing_shape() {
+        let serialized =
+            serde_json::to_string(&OpenCodeProviderConfig::default()).expect("serialize config");
+
+        assert_eq!(
+            serialized,
+            r#"{"npm":"@ai-sdk/openai-compatible","options":{},"models":{}}"#
+        );
+    }
+
+    #[test]
+    fn opencode_provider_config_preserves_modalities_and_unknown_provider_keys() {
+        let input = serde_json::json!({
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {
+                "baseURL": "https://vision.example.com/v1"
+            },
+            "models": {
+                "vision": { "name": "Vision" }
+            },
+            "modalities": {
+                "input": ["text", "image"],
+                "output": ["text"]
+            },
+            "customRouting": {
+                "tier": "vision"
+            }
+        });
+
+        let config: OpenCodeProviderConfig =
+            serde_json::from_value(input.clone()).expect("deserialize opencode config");
+        let serialized = serde_json::to_value(&config).expect("serialize opencode config");
+
+        assert_eq!(serialized["modalities"], input["modalities"]);
+        assert_eq!(serialized["customRouting"], input["customRouting"]);
+        assert!(serialized.get("extra").is_none());
     }
 
     #[test]
@@ -478,6 +799,82 @@ mod tests {
             provider_config_meta.managed_account_id_for("github_copilot"),
             Some("legacy-account".to_string())
         );
+    }
+
+    #[test]
+    fn provider_managed_account_auth_detection_uses_type_or_known_endpoint() {
+        let mut copilot = Provider::with_id(
+            "copilot".to_string(),
+            "Copilot".to_string(),
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.githubcopilot.com"
+                }
+            }),
+            None,
+        );
+        assert!(copilot.is_github_copilot());
+        assert!(copilot.uses_managed_account_auth());
+
+        let mut codex = Provider::with_id(
+            "codex".to_string(),
+            "Codex".to_string(),
+            serde_json::json!({ "env": {} }),
+            None,
+        );
+        codex.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+        assert!(codex.is_codex_oauth());
+        assert!(codex.uses_managed_account_auth());
+
+        let codex_endpoint = Provider::with_id(
+            "codex-endpoint".to_string(),
+            "Codex Endpoint".to_string(),
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex"
+                }
+            }),
+            None,
+        );
+        assert!(codex_endpoint.uses_managed_account_auth());
+
+        copilot.meta = Some(ProviderMeta {
+            provider_type: Some("github_copilot".to_string()),
+            ..Default::default()
+        });
+        assert!(copilot.is_github_copilot());
+    }
+
+    #[test]
+    fn provider_detects_codex_official_identity() {
+        let mut provider = Provider::with_id(
+            "openai".to_string(),
+            "Third Party".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        assert!(!provider.is_codex_official());
+
+        provider.meta = Some(ProviderMeta {
+            codex_official: Some(true),
+            ..Default::default()
+        });
+        assert!(provider.is_codex_official());
+
+        provider.meta = None;
+        provider.category = Some("Official".to_string());
+        assert!(provider.is_codex_official());
+
+        provider.category = None;
+        provider.website_url = Some("https://chatgpt.com/codex".to_string());
+        assert!(provider.is_codex_official());
+
+        provider.website_url = None;
+        provider.name = "OpenAI Official".to_string();
+        assert!(provider.is_codex_official());
     }
 }
 
@@ -548,6 +945,7 @@ mod issue_71_tests {
                 },
                 "apiKeyField": "ANTHROPIC_AUTH_TOKEN",
                 "providerType": "github_copilot",
+                "codexFastMode": true,
                 "githubAccountId": "gh-123"
             }
         });
@@ -585,6 +983,10 @@ mod issue_71_tests {
         assert_eq!(
             meta.get("providerType").and_then(|value| value.as_str()),
             Some("github_copilot")
+        );
+        assert_eq!(
+            meta.get("codexFastMode").and_then(|value| value.as_bool()),
+            Some(true)
         );
         assert_eq!(
             meta.get("githubAccountId").and_then(|value| value.as_str()),

@@ -4,22 +4,51 @@ use super::*;
 pub enum EditorKind {
     Plain,
     Json,
+    Toml,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditorSubmit {
-    PromptEdit { id: String },
+    #[allow(dead_code)]
+    PromptCreate {
+        id: String,
+        name: String,
+        description: Option<String>,
+    },
+    PromptEdit {
+        id: String,
+    },
     ProviderFormApplyJson,
     ProviderFormApplyOpenClawModels,
+    ProviderFormApplyLocalProxyHeaders,
+    ProviderFormApplyLocalProxyBody,
+    ProviderFormApplyUsageScriptCode,
     ProviderFormApplyCodexAuth,
     ProviderFormApplyCodexConfigToml,
     ProviderAdd,
-    ProviderEdit { id: String },
+    ProviderEdit {
+        id: String,
+    },
+    PricingEdit {
+        model_id: String,
+    },
     McpAdd,
-    McpEdit { id: String },
-    ConfigCommonSnippet { app_type: AppType },
-    OpenClawWorkspaceFile { filename: String },
-    OpenClawDailyMemoryFile { filename: String },
+    McpEdit {
+        id: String,
+    },
+    ConfigCommonSnippet {
+        app_type: AppType,
+        source: CommonSnippetViewSource,
+    },
+    OpenClawWorkspaceFile {
+        filename: String,
+    },
+    OpenClawDailyMemoryFile {
+        filename: String,
+    },
+    HermesMemory {
+        kind: crate::hermes_config::MemoryKind,
+    },
     ConfigOpenClawEnv,
     ConfigOpenClawTools,
     ConfigOpenClawAgents,
@@ -120,11 +149,7 @@ impl EditorState {
             current_width = current_width.saturating_add(ch_width);
         }
 
-        if segments.is_empty() {
-            segments.push(current);
-        } else {
-            segments.push(current);
-        }
+        segments.push(current);
 
         segments
     }
@@ -227,6 +252,186 @@ impl EditorState {
             .unwrap_or(line.len())
     }
 
+    fn apply_current_line_command(&mut self, command: TextEditCommand) -> bool {
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
+
+        let mut input = TextInput {
+            value: self.lines[self.cursor_row].clone(),
+            cursor: self.cursor_col,
+        };
+        let changed = input.apply_command(command, TextInputPolicy::default());
+        self.lines[self.cursor_row] = input.value;
+        self.cursor_col = input.cursor;
+        changed
+    }
+
+    pub(crate) fn apply_text_command(&mut self, command: TextEditCommand) -> bool {
+        match command {
+            TextEditCommand::MoveLeft => self.move_left(),
+            TextEditCommand::MoveRight => self.move_right(),
+            TextEditCommand::MoveLineStart
+            | TextEditCommand::MoveLineEnd
+            | TextEditCommand::DeleteToLineStart
+            | TextEditCommand::DeleteToLineEnd
+            | TextEditCommand::Insert(_) => self.apply_current_line_command(command),
+            TextEditCommand::MoveWordLeft => self.move_word_left(),
+            TextEditCommand::MoveWordRight => self.move_word_right(),
+            TextEditCommand::DeleteBackward => self.backspace(),
+            TextEditCommand::DeleteForward => self.delete(),
+            TextEditCommand::DeleteWordBackward => self.delete_word_backward(),
+        }
+    }
+
+    pub(crate) fn apply_editor_key(&mut self, key: KeyEvent, viewport: Size) -> bool {
+        if let Some(command) = TextEditCommand::from_key(key) {
+            self.apply_text_command(command);
+            self.ensure_cursor_visible(viewport);
+            return true;
+        }
+
+        let jump_rows = viewport.height as usize;
+        match key.code {
+            KeyCode::Up => {
+                self.cursor_row = self.cursor_row.saturating_sub(1);
+                self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            KeyCode::Down => {
+                if !self.lines.is_empty() {
+                    self.cursor_row = (self.cursor_row + 1).min(self.lines.len() - 1);
+                }
+                self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_sub(jump_rows);
+                self.cursor_row = self.cursor_row.saturating_sub(jump_rows);
+                self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            KeyCode::PageDown => {
+                if !self.lines.is_empty() {
+                    self.scroll = (self.scroll + jump_rows).min(self.lines.len() - 1);
+                    self.cursor_row = (self.cursor_row + jump_rows).min(self.lines.len() - 1);
+                    self.cursor_col = self.cursor_col.min(self.line_len_chars(self.cursor_row));
+                }
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            KeyCode::Enter => {
+                self.newline();
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            KeyCode::Tab => {
+                self.insert_str("  ");
+                self.ensure_cursor_visible(viewport);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn move_left(&mut self) -> bool {
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
+
+        if self.cursor_col > 0 {
+            self.cursor_col -= 1;
+            return true;
+        }
+
+        if self.cursor_row > 0 {
+            self.cursor_row -= 1;
+            self.cursor_col = self.line_len_chars(self.cursor_row);
+            return true;
+        }
+
+        false
+    }
+
+    pub(crate) fn move_right(&mut self) -> bool {
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
+
+        let line_len = self.line_len_chars(self.cursor_row);
+        if self.cursor_col < line_len {
+            self.cursor_col += 1;
+            return true;
+        }
+
+        if self.cursor_row + 1 < self.lines.len() {
+            self.cursor_row += 1;
+            self.cursor_col = 0;
+            return true;
+        }
+
+        false
+    }
+
+    fn move_word_left(&mut self) -> bool {
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
+        let before = (self.cursor_row, self.cursor_col);
+
+        loop {
+            if self.cursor_col > 0 {
+                let line = &self.lines[self.cursor_row];
+                self.cursor_col =
+                    super::super::text_edit::previous_word_boundary(line, self.cursor_col);
+                break;
+            }
+
+            if self.cursor_row == 0 {
+                break;
+            }
+
+            self.cursor_row -= 1;
+            self.cursor_col = self.line_len_chars(self.cursor_row);
+        }
+
+        (self.cursor_row, self.cursor_col) != before
+    }
+
+    fn move_word_right(&mut self) -> bool {
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
+        let before = (self.cursor_row, self.cursor_col);
+
+        loop {
+            let line_len = self.line_len_chars(self.cursor_row);
+            if self.cursor_col < line_len {
+                let line = &self.lines[self.cursor_row];
+                self.cursor_col =
+                    super::super::text_edit::next_word_boundary(line, self.cursor_col);
+                break;
+            }
+
+            if self.cursor_row + 1 >= self.lines.len() {
+                break;
+            }
+
+            self.cursor_row += 1;
+            self.cursor_col = 0;
+        }
+
+        (self.cursor_row, self.cursor_col) != before
+    }
+
     pub(crate) fn insert_char(&mut self, c: char) {
         if self.lines.is_empty() {
             self.lines.push(String::new());
@@ -258,7 +463,7 @@ impl EditorState {
         self.cursor_col = 0;
     }
 
-    pub(crate) fn backspace(&mut self) {
+    pub(crate) fn backspace(&mut self) -> bool {
         if self.lines.is_empty() {
             self.lines.push(String::new());
         }
@@ -271,12 +476,13 @@ impl EditorState {
             if start < end && end <= line.len() {
                 line.replace_range(start..end, "");
                 self.cursor_col -= 1;
+                return true;
             }
-            return;
+            return false;
         }
 
         if self.cursor_row == 0 {
-            return;
+            return false;
         }
 
         let current = self.lines.remove(self.cursor_row);
@@ -284,9 +490,10 @@ impl EditorState {
         let prev = &mut self.lines[self.cursor_row];
         self.cursor_col = prev.chars().count();
         prev.push_str(&current);
+        true
     }
 
-    pub(crate) fn delete(&mut self) {
+    pub(crate) fn delete(&mut self) -> bool {
         if self.lines.is_empty() {
             self.lines.push(String::new());
         }
@@ -299,15 +506,35 @@ impl EditorState {
             let end = Self::byte_index(line, self.cursor_col + 1);
             if start < end && end <= line.len() {
                 line.replace_range(start..end, "");
+                return true;
             }
-            return;
+            return false;
         }
 
         if self.cursor_row + 1 >= self.lines.len() {
-            return;
+            return false;
         }
 
         let next = self.lines.remove(self.cursor_row + 1);
         self.lines[self.cursor_row].push_str(&next);
+        true
+    }
+
+    fn delete_word_backward(&mut self) -> bool {
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor_row = self.cursor_row.min(self.lines.len() - 1);
+
+        if self.cursor_col > 0 {
+            return self.apply_current_line_command(TextEditCommand::DeleteWordBackward);
+        }
+
+        if self.cursor_row == 0 {
+            return false;
+        }
+
+        self.backspace();
+        self.apply_current_line_command(TextEditCommand::DeleteWordBackward)
     }
 }

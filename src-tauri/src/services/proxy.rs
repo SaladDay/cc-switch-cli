@@ -3,21 +3,17 @@ mod codex_toml;
 use std::{
     collections::HashMap,
     future::Future,
-    process::{Command, Stdio},
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
     time::Duration,
 };
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tokio::sync::RwLock;
 
 use crate::{
     app_config::AppType,
-    codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic},
+    codex_config::{get_codex_auth_path, get_codex_config_path},
     config::{get_claude_settings_path, read_json_file, write_json_file, write_text_file},
     database::Database,
     gemini_config::{
@@ -26,9 +22,10 @@ use crate::{
     provider::Provider,
     proxy::{
         switch_lock::SwitchLockManager,
-        types::{GlobalProxyConfig, ProxyTakeoverStatus},
+        types::{ActiveTarget, GlobalProxyConfig, ProxyTakeoverStatus},
         ProxyConfig, ProxyServer, ProxyServerInfo, ProxyStatus,
     },
+    services::provider::live_merge,
     AppError,
 };
 
@@ -37,14 +34,28 @@ const PROXY_RUNTIME_SESSION_KEY: &str = "proxy_runtime_session";
 const PROXY_RUNTIME_KIND_ENV_KEY: &str = "CC_SWITCH_PROXY_RUNTIME_KIND";
 const PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY: &str = "CC_SWITCH_PROXY_SESSION_TOKEN";
 
-const CLAUDE_MODEL_OVERRIDE_ENV_KEYS: [&str; 6] = [
+const CLAUDE_MODEL_OVERRIDE_ENV_KEYS: [&str; 9] = [
     "ANTHROPIC_MODEL",
     "ANTHROPIC_REASONING_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
     "ANTHROPIC_SMALL_FAST_MODEL",
 ];
+
+const CLAUDE_TAKEOVER_HAIKU_MODEL: &str = "claude-haiku-4-5";
+const CLAUDE_TAKEOVER_SONNET_MODEL: &str = "claude-sonnet-4-6";
+const CLAUDE_TAKEOVER_OPUS_MODEL: &str = "claude-opus-4-8";
+const CLAUDE_ONE_M_MARKER_FOR_CLIENT: &str = "[1M]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeTakeoverAuthPolicy {
+    PreserveExistingOrAuthToken,
+    ManagedAccount,
+}
 
 #[derive(Clone)]
 pub struct ProxyService {
@@ -62,18 +73,20 @@ pub struct HotSwitchOutcome {
     pub logical_target_changed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum PersistedProxyRuntimeSessionKind {
-    #[serde(alias = "foreground")]
-    Foreground,
-    ManagedExternal,
+#[derive(Debug, Clone)]
+pub struct GlobalProxySwitchUpdate {
+    pub config: GlobalProxyConfig,
+    pub cleared_auto_failover: usize,
 }
 
-impl Default for PersistedProxyRuntimeSessionKind {
-    fn default() -> Self {
-        Self::Foreground
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+enum PersistedProxyRuntimeSessionKind {
+    #[serde(alias = "foreground")]
+    #[default]
+    Foreground,
+    ManagedExternal,
 }
 
 impl PersistedProxyRuntimeSessionKind {
@@ -84,6 +97,7 @@ impl PersistedProxyRuntimeSessionKind {
         }
     }
 
+    #[cfg(test)]
     fn as_env_value(&self) -> &'static str {
         match self {
             Self::Foreground => "foreground",
@@ -106,12 +120,37 @@ struct PersistedProxyRuntimeSession {
     kind: PersistedProxyRuntimeSessionKind,
     #[serde(default)]
     session_token: Option<String>,
+    #[serde(default)]
+    app_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedProxyRuntimeSessions {
+    workers: HashMap<String, PersistedProxyRuntimeSession>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LiveManagedRuntimeSession {
+    pub app_type: AppType,
+    pub pid: u32,
+    pub address: String,
+    pub port: u16,
+    pub started_at: String,
+    pub session_token: String,
 }
 
 enum ExternalProxyStatusProbe {
-    Matched(ProxyStatus),
+    Matched(Box<ProxyStatus>),
     Mismatched,
     Unreachable,
+}
+
+struct AutoFailoverActivation {
+    app_type: AppType,
+    previous_db_current_provider: Option<String>,
+    previous_local_current_provider: Option<String>,
+    previous_live_backup: Option<String>,
+    rollback_live_backup: String,
 }
 
 fn proxy_runtime_registry() -> &'static StdMutex<HashMap<String, Weak<ProxyRuntimeState>>> {
@@ -154,6 +193,20 @@ impl ProxyService {
         })
     }
 
+    pub fn should_skip_startup_recovery_for_active_managed_session_blocking(
+        &self,
+    ) -> Result<bool, String> {
+        self.run_in_blocking_runtime(|service| async move {
+            Ok(service.should_skip_startup_recovery_for_active_managed_session())
+        })
+    }
+
+    fn should_skip_startup_recovery_for_active_managed_session(&self) -> bool {
+        self.load_persisted_runtime_sessions()
+            .into_iter()
+            .any(|session| self.should_preserve_takeover_for_active_managed_session(&session))
+    }
+
     pub fn recover_takeovers_on_startup_blocking(&self) -> Result<(), String> {
         self.run_in_blocking_runtime(|service| async move {
             service.recover_takeovers_on_startup().await
@@ -185,6 +238,219 @@ impl ProxyService {
         runtime
     }
 
+    #[cfg(test)]
+    fn apply_claude_takeover_fields(config: &mut Value, proxy_url: &str) {
+        Self::apply_claude_takeover_fields_with_policy(
+            config,
+            proxy_url,
+            ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
+        );
+    }
+
+    fn apply_claude_takeover_fields_for_provider(
+        config: &mut Value,
+        proxy_url: &str,
+        provider: &Provider,
+    ) {
+        let uses_managed_account = provider.uses_managed_account_auth();
+        let auth_policy = if uses_managed_account {
+            ClaudeTakeoverAuthPolicy::ManagedAccount
+        } else {
+            ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken
+        };
+        let takeover_model_fields = if uses_managed_account {
+            Self::build_claude_takeover_model_fields(&provider.settings_config)
+        } else {
+            Self::build_claude_takeover_model_fields(config)
+        };
+
+        Self::apply_claude_takeover_fields_with_policy_and_models(
+            config,
+            proxy_url,
+            auth_policy,
+            takeover_model_fields,
+        );
+    }
+
+    fn apply_claude_takeover_fields_with_policy(
+        config: &mut Value,
+        proxy_url: &str,
+        auth_policy: ClaudeTakeoverAuthPolicy,
+    ) {
+        let takeover_model_fields = Self::build_claude_takeover_model_fields(config);
+
+        Self::apply_claude_takeover_fields_with_policy_and_models(
+            config,
+            proxy_url,
+            auth_policy,
+            takeover_model_fields,
+        );
+    }
+
+    fn apply_claude_takeover_fields_with_policy_and_models(
+        config: &mut Value,
+        proxy_url: &str,
+        auth_policy: ClaudeTakeoverAuthPolicy,
+        takeover_model_fields: Vec<(&'static str, String)>,
+    ) {
+        if !config.is_object() {
+            *config = json!({});
+        }
+
+        let root = config
+            .as_object_mut()
+            .expect("Claude config should be normalized to an object");
+        let env = root.entry("env".to_string()).or_insert_with(|| json!({}));
+        if !env.is_object() {
+            *env = json!({});
+        }
+
+        let env = env
+            .as_object_mut()
+            .expect("Claude env should be normalized to an object");
+        env.insert("ANTHROPIC_BASE_URL".to_string(), json!(proxy_url));
+
+        for key in CLAUDE_MODEL_OVERRIDE_ENV_KEYS {
+            env.remove(key);
+        }
+
+        for (key, value) in takeover_model_fields {
+            env.insert(key.to_string(), Value::String(value));
+        }
+
+        let token_keys = [
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OPENAI_API_KEY",
+        ];
+
+        match auth_policy {
+            ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken => {
+                let mut replaced_any = false;
+                for key in token_keys {
+                    if env.contains_key(key) {
+                        env.insert(key.to_string(), json!(PROXY_TOKEN_PLACEHOLDER));
+                        replaced_any = true;
+                    }
+                }
+
+                if !replaced_any {
+                    env.insert(
+                        "ANTHROPIC_AUTH_TOKEN".to_string(),
+                        json!(PROXY_TOKEN_PLACEHOLDER),
+                    );
+                }
+            }
+            ClaudeTakeoverAuthPolicy::ManagedAccount => {
+                for key in token_keys {
+                    env.remove(key);
+                }
+                env.insert(
+                    "ANTHROPIC_API_KEY".to_string(),
+                    json!(PROXY_TOKEN_PLACEHOLDER),
+                );
+            }
+        }
+    }
+
+    fn build_claude_takeover_model_fields(config: &Value) -> Vec<(&'static str, String)> {
+        let Some(env) = config.get("env").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+
+        let default_model = Self::claude_env_string(env, "ANTHROPIC_MODEL");
+        let small_fast_model = Self::claude_env_string(env, "ANTHROPIC_SMALL_FAST_MODEL");
+        let haiku_model = Self::claude_env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            .or(small_fast_model)
+            .or(default_model);
+        let sonnet_model = Self::claude_env_string(env, "ANTHROPIC_DEFAULT_SONNET_MODEL")
+            .or(default_model)
+            .or(small_fast_model);
+        let opus_model = Self::claude_env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL")
+            .or(default_model)
+            .or(small_fast_model);
+
+        let mut fields = Vec::with_capacity(6);
+        Self::push_claude_takeover_role_fields(
+            &mut fields,
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+            CLAUDE_TAKEOVER_HAIKU_MODEL,
+            false,
+            haiku_model,
+        );
+        Self::push_claude_takeover_role_fields(
+            &mut fields,
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            CLAUDE_TAKEOVER_SONNET_MODEL,
+            true,
+            sonnet_model,
+        );
+        Self::push_claude_takeover_role_fields(
+            &mut fields,
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            CLAUDE_TAKEOVER_OPUS_MODEL,
+            true,
+            opus_model,
+        );
+        fields
+    }
+
+    fn push_claude_takeover_role_fields(
+        fields: &mut Vec<(&'static str, String)>,
+        env: &Map<String, Value>,
+        model_key: &'static str,
+        name_key: &'static str,
+        takeover_model: &'static str,
+        supports_one_m: bool,
+        upstream_model: Option<&str>,
+    ) {
+        let Some(upstream_model) = upstream_model else {
+            return;
+        };
+
+        let mut client_model = takeover_model.to_string();
+        if supports_one_m && Self::has_claude_one_m_marker(upstream_model) {
+            client_model.push_str(CLAUDE_ONE_M_MARKER_FOR_CLIENT);
+        }
+        fields.push((model_key, client_model));
+
+        let display_name = Self::claude_env_string(env, name_key)
+            .map(str::to_string)
+            .unwrap_or_else(|| Self::strip_claude_one_m_marker(upstream_model));
+        if !display_name.is_empty() {
+            fields.push((name_key, display_name));
+        }
+    }
+
+    fn claude_env_string<'a>(env: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+        env.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn has_claude_one_m_marker(model: &str) -> bool {
+        model.trim_end().to_ascii_lowercase().ends_with("[1m]")
+    }
+
+    fn strip_claude_one_m_marker(model: &str) -> String {
+        let trimmed = model.trim();
+        if Self::has_claude_one_m_marker(trimmed) {
+            trimmed[..trimmed.len().saturating_sub(4)]
+                .trim_end()
+                .to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
         let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
         let config = self.get_config().await.map_err(|e| e.to_string())?;
@@ -200,7 +466,9 @@ impl ProxyService {
     }
 
     pub async fn start_managed_session(&self, app_type: &str) -> Result<ProxyServerInfo, String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        // This delegates to the daemon, whose IPC handler owns the state
+        // mutation guard while it rewrites live config. Holding the guard in
+        // the caller while waiting for the daemon can deadlock the handshake.
         self.start_managed_session_unlocked(app_type).await
     }
 
@@ -211,79 +479,271 @@ impl ProxyService {
         Self::ensure_managed_sessions_supported()?;
 
         let app_type = Self::takeover_app_from_str(app_type)?;
-        let current_status = self.get_status().await;
-        if current_status.running {
+        if self.has_running_foreground_runtime().await {
             return Err(
-                "proxy is already running; stop the current runtime before starting a managed session"
+                "proxy is already running in foreground mode; stop the current runtime before attaching another app to a managed session"
                     .to_string(),
             );
         }
 
-        let executable = Self::resolve_managed_proxy_executable()?;
-        let session_token = uuid::Uuid::new_v4().to_string();
-        let mut child = Command::new(executable);
-        child
-            .arg("proxy")
-            .arg("serve")
-            .arg("--takeover")
-            .arg(app_type.as_str())
-            .env(
-                PROXY_RUNTIME_KIND_ENV_KEY,
-                PersistedProxyRuntimeSessionKind::ManagedExternal.as_env_value(),
-            )
-            .env(PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY, &session_token)
-            .env(
-                crate::services::state_coordination::RESTORE_GUARD_BYPASS_ENV_KEY,
-                "1",
-            )
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-
-        #[cfg(unix)]
-        unsafe {
-            child.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+        let current_status = self.get_status().await;
+        let persisted_sessions = self.load_persisted_runtime_sessions();
+        if current_status.running
+            && current_status.active_workers.is_empty()
+            && persisted_sessions.is_empty()
+        {
+            return Err(
+                "proxy is already running in foreground mode; stop the current runtime before attaching another app to a managed session"
+                    .to_string(),
+            );
         }
-
-        let mut child = child
-            .spawn()
-            .map_err(|error| format!("spawn managed proxy session failed: {error}"))?;
-        let child_pid = child.id();
-
-        let start_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("poll managed proxy process failed: {error}"))?
-            {
-                return Err(format!(
-                    "managed proxy session exited before becoming ready: {}",
-                    status
-                ));
-            }
-
-            if let Some(info) = self
-                .managed_session_ready_info(child_pid, session_token.as_str())
+        if current_status.running {
+            // Daemon is already running this worker. Just attach the app.
+            let fallback_provider_id = self.current_provider_fallback_for_app(&app_type)?;
+            self.daemon_ensure_worker(app_type.as_str(), fallback_provider_id.as_deref())
                 .await
-            {
-                Self::spawn_managed_child_reaper(child);
-                return Ok(info);
-            }
-
-            if tokio::time::Instant::now() >= start_deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = self.clear_persisted_runtime_session();
-                return Err("managed proxy session did not become ready in time".to_string());
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        } else {
+            let fallback_provider_id = self.current_provider_fallback_for_app(&app_type)?;
+            self.validate_app_proxy_activation(&app_type, fallback_provider_id.as_deref())
+                .await?;
+            self.daemon_ensure_worker(app_type.as_str(), fallback_provider_id.as_deref())
+                .await
         }
+    }
+
+    fn current_provider_fallback_for_app(
+        &self,
+        app_type: &AppType,
+    ) -> Result<Option<String>, String> {
+        let provider_id =
+            crate::settings::get_effective_current_provider(self.db.as_ref(), app_type).map_err(
+                |error| {
+                    format!(
+                        "load effective current provider for {} failed: {error}",
+                        app_type.as_str()
+                    )
+                },
+            )?;
+        if let Some(provider_id) = provider_id.as_deref() {
+            self.db
+                .set_current_provider(app_type.as_str(), provider_id)
+                .map_err(|error| {
+                    format!(
+                        "persist current provider {provider_id} for {} failed: {error}",
+                        app_type.as_str()
+                    )
+                })?;
+        }
+        Ok(provider_id)
+    }
+
+    async fn daemon_ensure_worker(
+        &self,
+        app_type: &str,
+        fallback_provider_id: Option<&str>,
+    ) -> Result<ProxyServerInfo, String> {
+        #[cfg(unix)]
+        {
+            use crate::daemon::ipc::client;
+            use crate::daemon::ipc::protocol::{Request, Response};
+            let socket_path = crate::daemon::paths::socket_path();
+            let app_type = app_type.to_string();
+            let fallback_provider_id = fallback_provider_id.map(str::to_string);
+            let response = tokio::task::spawn_blocking(move || {
+                let mut stream = client::connect_or_spawn(&socket_path, || {
+                    let bin = Self::resolve_managed_proxy_executable()
+                        .map_err(client::ClientError::NoDaemon)?;
+                    Ok(bin)
+                })?;
+                client::exchange(
+                    &mut stream,
+                    &Request::EnsureWorker {
+                        app_type,
+                        fallback_provider_id,
+                    },
+                )
+            })
+            .await
+            .map_err(|err| format!("daemon ensure worker task panicked: {err}"))?
+            .map_err(|err| format!("daemon ensure worker failed: {err}"))?;
+
+            match response {
+                Response::Worker {
+                    address,
+                    port,
+                    started_at,
+                    ..
+                } => Ok(ProxyServerInfo {
+                    address,
+                    port,
+                    started_at: started_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+                }),
+                Response::Error { message } => Err(message),
+                other => Err(format!(
+                    "daemon ensure worker returned unexpected response: {other:?}"
+                )),
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = app_type;
+            Err("managed sessions are only supported on unix".to_string())
+        }
+    }
+
+    async fn daemon_drop_takeover(&self, app_type: &str) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use crate::daemon::ipc::client;
+            use crate::daemon::ipc::protocol::{Request, Response};
+            use std::io::ErrorKind;
+            let socket_path = crate::daemon::paths::socket_path();
+            // No socket at all → daemon isn't running. Do the cleanup the
+            // daemon would have done so the DB and live config stay aligned
+            // with "this app is no longer being proxied".
+            if !socket_path.exists() {
+                return self.local_disable_takeover(app_type).await;
+            }
+            let app_type_owned = app_type.to_string();
+            let socket_for_task = socket_path.clone();
+            let outcome = tokio::task::spawn_blocking(
+                move || -> Result<Option<Response>, client::ClientError> {
+                    let mut stream = match client::connect(&socket_for_task) {
+                        Ok(s) => s,
+                        // ECONNREFUSED / ENOENT here means the socket inode is
+                        // a leftover from a daemon that died ungracefully —
+                        // nobody is listening. Treat as "no daemon" and let
+                        // the caller fall back to local cleanup.
+                        Err(client::ClientError::Io(e))
+                            if matches!(
+                                e.kind(),
+                                ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                            ) =>
+                        {
+                            return Ok(None);
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    client::exchange(
+                        &mut stream,
+                        &Request::DropTakeover {
+                            app_type: app_type_owned,
+                        },
+                    )
+                    .map(Some)
+                },
+            )
+            .await
+            .map_err(|err| format!("daemon drop takeover task panicked: {err}"))?
+            .map_err(|err| format!("daemon drop takeover failed: {err}"))?;
+
+            match outcome {
+                Some(Response::Ok) => Ok(()),
+                Some(Response::Error { message }) => Err(message),
+                Some(other) => Err(format!(
+                    "daemon drop takeover returned unexpected response: {other:?}"
+                )),
+                None => {
+                    // Stale socket inode — best-effort remove so the next call
+                    // takes the !socket_path.exists() short-circuit instead of
+                    // tripping over the same ECONNREFUSED again.
+                    let _ = std::fs::remove_file(&socket_path);
+                    self.local_disable_takeover(app_type).await
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = app_type;
+            Err("managed sessions are only supported on unix".to_string())
+        }
+    }
+
+    async fn should_drop_takeover_via_daemon(&self, app_type: &AppType) -> Result<bool, String> {
+        let Some(session) = self.load_persisted_runtime_session_for_app(app_type) else {
+            self.remove_stale_daemon_socket_if_unreachable();
+            return Ok(false);
+        };
+
+        if !session.kind.is_managed_external() {
+            if let Some(status) = Self::daemon_status_snapshot().await {
+                return Ok(Self::status_has_worker_for_app(&status, app_type));
+            }
+            return Ok(true);
+        }
+
+        if !Self::is_process_alive(session.pid) {
+            self.clear_persisted_runtime_session_for_app(app_type)?;
+            return Ok(false);
+        }
+
+        match Self::probe_external_proxy_status(&session).await {
+            ExternalProxyStatusProbe::Matched(_) => Ok(true),
+            ExternalProxyStatusProbe::Mismatched | ExternalProxyStatusProbe::Unreachable => {
+                self.clear_persisted_runtime_session_for_app(app_type)?;
+                Ok(false)
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn remove_stale_daemon_socket_if_unreachable(&self) {
+        use std::io::ErrorKind;
+
+        let socket_path = crate::daemon::paths::socket_path();
+        if !socket_path.exists() {
+            return;
+        }
+
+        match std::os::unix::net::UnixStream::connect(&socket_path) {
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                ) =>
+            {
+                let _ = std::fs::remove_file(socket_path);
+            }
+            Err(_) => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn remove_stale_daemon_socket_if_unreachable(&self) {}
+
+    /// Foreground-only fallback for when no daemon is reachable. Drops the
+    /// per-app takeover via the same code path the supervisor uses, takes the
+    /// cross-process state-mutation guard around it (so a concurrent CLI
+    /// invocation can't race the live-config restore), and clears the matching
+    /// daemon-managed runtime marker.
+    async fn local_disable_takeover(&self, app_type: &str) -> Result<(), String> {
+        let app = Self::takeover_app_from_str(app_type)?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        self.disable_takeover_for_app_unlocked(&app, false).await?;
+        if !self
+            .db
+            .is_live_takeover_active()
+            .await
+            .map_err(|error| format!("check active takeovers failed: {error}"))?
+        {
+            self.sync_persisted_global_proxy_enabled(false).await?;
+        }
+        if let Some(session) = self.load_persisted_runtime_session_for_app(&app) {
+            if session.kind.is_managed_external()
+                && matches!(
+                    Self::probe_external_proxy_status(&session).await,
+                    ExternalProxyStatusProbe::Matched(_)
+                )
+                && Self::is_process_alive(session.pid)
+            {
+                Self::terminate_external_process(session.pid).await?;
+            }
+        }
+        let _ = self.clear_persisted_runtime_session_for_app(&app);
+        Ok(())
     }
 
     pub async fn set_managed_session_for_app(
@@ -291,7 +751,13 @@ impl ProxyService {
         app_type: &str,
         enabled: bool,
     ) -> Result<(), String> {
-        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        // Intentionally NO state-mutation guard here. This function purely
+        // delegates to the daemon (`daemon_ensure_worker` / `daemon_drop_takeover`)
+        // which acquires its own cross-process guard inside its IPC handler.
+        // Holding the guard on the foreground side and then making a synchronous
+        // IPC call deadlocks against the daemon's handler — observed as
+        // "Resource temporarily unavailable (os error 35)" once the IPC read
+        // times out.
         self.set_managed_session_for_app_unlocked(app_type, enabled)
             .await
     }
@@ -301,36 +767,74 @@ impl ProxyService {
         app_type: &str,
         enabled: bool,
     ) -> Result<(), String> {
-        let app_type = Self::takeover_app_from_str(app_type)?;
+        let app_type_enum = Self::takeover_app_from_str(app_type)?;
 
         if enabled {
+            if self.has_running_foreground_runtime().await {
+                return Err(
+                    "proxy is already running in foreground mode; stop the current runtime before attaching another app to a managed session"
+                        .to_string(),
+                );
+            }
+
+            self.cleanup_legacy_managed_runtime_session_before_daemon_start()
+                .await?;
+
             let status = self.get_status().await;
-            if !status.running {
-                self.start_managed_session_unlocked(app_type.as_str())
-                    .await?;
-                return Ok(());
-            }
-
-            if self
-                .load_persisted_runtime_session()
-                .is_some_and(|session| session.kind.is_managed_external())
+            if status.running
+                && status.active_workers.is_empty()
+                && self.load_persisted_runtime_sessions().is_empty()
             {
-                self.enable_takeover_for_app_unlocked(&app_type).await?;
-                return Ok(());
+                return Err(
+                    "proxy is already running in foreground mode; stop the current runtime before attaching another app to a managed session"
+                        .to_string(),
+                );
             }
 
-            return Err(
-                "proxy is already running in foreground mode; stop the current runtime before attaching another app to a managed session"
-                    .to_string(),
-            );
+            // Daemon-driven path: ensure worker is up + takeover is on for this app.
+            let fallback_provider_id = self.current_provider_fallback_for_app(&app_type_enum)?;
+            self.daemon_ensure_worker(app_type_enum.as_str(), fallback_provider_id.as_deref())
+                .await?;
+            return Ok(());
         }
 
-        let stop_server_when_last = self
-            .load_persisted_runtime_session()
-            .map(|session| session.kind.is_managed_external())
-            .unwrap_or(false);
-        self.disable_takeover_for_app_unlocked(&app_type, stop_server_when_last)
-            .await
+        // Disable: route through the daemon when one is running so it stays
+        // the sole writer of `proxy_runtime_session`.
+        if self.should_drop_takeover_via_daemon(&app_type_enum).await? {
+            self.daemon_drop_takeover(app_type_enum.as_str()).await
+        } else {
+            self.local_disable_takeover(app_type_enum.as_str()).await
+        }
+    }
+
+    async fn cleanup_legacy_managed_runtime_session_before_daemon_start(
+        &self,
+    ) -> Result<(), String> {
+        let Some(session) = self.load_legacy_persisted_runtime_session() else {
+            return Ok(());
+        };
+        if !session.kind.is_managed_external() {
+            return Ok(());
+        }
+
+        // v5.6.1 compatibility shim for users upgrading from the pre-daemon
+        // managed proxy. Remove after several releases once old single-session
+        // runtime markers are no longer expected in the wild.
+        if Self::is_process_alive(session.pid) {
+            match Self::probe_external_proxy_status(&session).await {
+                ExternalProxyStatusProbe::Matched(_) => {
+                    Self::terminate_external_process(session.pid).await?;
+                }
+                ExternalProxyStatusProbe::Unreachable
+                    if Self::has_managed_external_ownership_signal(&session) =>
+                {
+                    Self::terminate_external_process(session.pid).await?;
+                }
+                ExternalProxyStatusProbe::Mismatched | ExternalProxyStatusProbe::Unreachable => {}
+            }
+        }
+        let _ = self.clear_persisted_runtime_session();
+        Ok(())
     }
 
     async fn start_with_resolved_config_unlocked(
@@ -362,6 +866,20 @@ impl ProxyService {
         Ok(info)
     }
 
+    async fn runtime_config_for_app(&self, app_type: &AppType) -> Result<ProxyConfig, String> {
+        let mut config = self.get_config().await.map_err(|e| e.to_string())?;
+        config.listen_port = self
+            .db
+            .get_app_proxy_preferred_port(app_type.as_str())
+            .map_err(|error| {
+                format!(
+                    "load proxy preference for {} failed: {error}",
+                    app_type.as_str()
+                )
+            })?;
+        Ok(config)
+    }
+
     pub(crate) fn publish_runtime_session_if_needed(
         &self,
         info: &ProxyServerInfo,
@@ -375,6 +893,12 @@ impl ProxyService {
 
     pub async fn recover_takeovers_on_startup(&self) -> Result<(), String> {
         for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            if self.has_managed_worker_for_app(&app_type).await {
+                self.reconcile_takeover_for_live_managed_worker(&app_type)
+                    .await?;
+                continue;
+            }
+
             let app_key = app_type.as_str();
             let app_proxy = self
                 .db
@@ -390,6 +914,18 @@ impl ProxyService {
             let live_taken_over = self.detect_takeover_in_live_config_for_app(&app_type);
 
             if !app_proxy.enabled && !has_backup && !live_taken_over {
+                self.clear_app_proxy_routing_flags(app_proxy).await?;
+                self.delete_failover_live_snapshots_for_app(&app_type)
+                    .await?;
+                continue;
+            }
+
+            if self
+                .load_persisted_runtime_session_for_app(&app_type)
+                .is_some_and(|session| {
+                    self.should_preserve_takeover_for_active_managed_session(&session)
+                })
+            {
                 continue;
             }
 
@@ -403,19 +939,42 @@ impl ProxyService {
                 self.restore_live_from_current_provider(&app_type).await?;
             }
 
-            if app_proxy.enabled {
-                let mut cleared = app_proxy;
-                cleared.enabled = false;
-                self.db
-                    .update_proxy_config_for_app(cleared)
-                    .await
-                    .map_err(|error| {
-                        format!("clear takeover flag for {app_key} failed: {error}")
-                    })?;
-            }
+            self.clear_app_proxy_routing_flags(app_proxy).await?;
+            self.delete_failover_live_snapshots_for_app(&app_type)
+                .await?;
         }
 
         Ok(())
+    }
+
+    async fn reconcile_takeover_for_live_managed_worker(
+        &self,
+        app_type: &AppType,
+    ) -> Result<(), String> {
+        let app_key = app_type.as_str();
+        let app_proxy = self
+            .db
+            .get_proxy_config_for_app(app_key)
+            .await
+            .map_err(|error| format!("load proxy config for {app_key} failed: {error}"))?;
+        let has_backup = self
+            .db
+            .get_live_backup(app_key)
+            .await
+            .map_err(|error| format!("load live backup for {app_key} failed: {error}"))?
+            .is_some();
+        let live_taken_over = self.detect_takeover_in_live_config_for_app(app_type);
+
+        if !app_proxy.enabled && (has_backup || live_taken_over) {
+            let mut updated = app_proxy;
+            updated.enabled = true;
+            self.db
+                .update_proxy_config_for_app(updated)
+                .await
+                .map_err(|error| format!("set takeover flag for {app_key} failed: {error}"))?;
+        }
+
+        self.sync_persisted_global_proxy_enabled(true).await
     }
 
     pub async fn stop(&self) -> Result<(), String> {
@@ -436,7 +995,7 @@ impl ProxyService {
     async fn stop_server_unlocked(&self) -> Result<(), String> {
         let mut stopped_runtime = false;
 
-        if let Some(server) = self.runtime.server.read().await.as_ref() {
+        if let Some(server) = self.runtime.server.write().await.take() {
             server.stop().await?;
             self.clear_persisted_runtime_session()?;
             self.sync_persisted_global_proxy_enabled(false).await?;
@@ -444,20 +1003,15 @@ impl ProxyService {
         }
 
         if let Some(session) = self.load_persisted_runtime_session() {
-            if session.kind.is_managed_external() {
-                let probe = Self::probe_external_proxy_status(&session).await;
-                let should_terminate = match probe {
-                    ExternalProxyStatusProbe::Matched(_) => true,
-                    ExternalProxyStatusProbe::Mismatched => false,
-                    ExternalProxyStatusProbe::Unreachable => {
-                        Self::has_managed_external_ownership_signal(&session)
-                    }
-                };
-
-                if Self::is_process_alive(session.pid) && should_terminate {
-                    Self::terminate_external_process(session.pid).await?;
-                    stopped_runtime = true;
-                }
+            if session.kind.is_managed_external()
+                && matches!(
+                    Self::probe_external_proxy_status(&session).await,
+                    ExternalProxyStatusProbe::Matched(_)
+                )
+                && Self::is_process_alive(session.pid)
+            {
+                Self::terminate_external_process(session.pid).await?;
+                stopped_runtime = true;
             }
         }
 
@@ -475,70 +1029,437 @@ impl ProxyService {
     }
 
     pub async fn get_status(&self) -> ProxyStatus {
+        self.get_status_with_cleanup(true).await
+    }
+
+    pub async fn get_status_snapshot(&self) -> ProxyStatus {
+        self.get_status_with_cleanup(false).await
+    }
+
+    pub async fn get_status_snapshot_for_app(&self, app_type: &AppType) -> ProxyStatus {
+        self.get_status_with_cleanup_for_app(false, Some(app_type))
+            .await
+    }
+
+    async fn get_status_with_cleanup(&self, cleanup_stale_sessions: bool) -> ProxyStatus {
+        self.get_status_with_cleanup_for_app(cleanup_stale_sessions, None)
+            .await
+    }
+
+    async fn get_status_with_cleanup_for_app(
+        &self,
+        cleanup_stale_sessions: bool,
+        app_type: Option<&AppType>,
+    ) -> ProxyStatus {
         if let Some(server) = self.runtime.server.read().await.as_ref() {
             return server.get_status().await;
         }
 
-        if let Some(session) = self.load_persisted_runtime_session() {
-            if session.kind.is_managed_external() {
-                if Self::is_process_alive(session.pid) {
-                    match Self::probe_external_proxy_status(&session).await {
-                        ExternalProxyStatusProbe::Matched(status) => return status,
-                        ExternalProxyStatusProbe::Mismatched => {
-                            let _ = self.clear_persisted_runtime_session();
-                            return ProxyStatus::default();
-                        }
-                        ExternalProxyStatusProbe::Unreachable => {
-                            if Self::has_managed_external_ownership_signal(&session) {
-                                let uptime_seconds =
-                                    chrono::DateTime::parse_from_rfc3339(&session.started_at)
-                                        .ok()
-                                        .map(|started_at| {
-                                            let started_at = started_at.with_timezone(&chrono::Utc);
-                                            (chrono::Utc::now() - started_at).num_seconds().max(0)
-                                                as u64
-                                        })
-                                        .unwrap_or(0);
+        let sessions = self.load_persisted_runtime_sessions_with_cleanup(cleanup_stale_sessions);
+        if !sessions.is_empty()
+            && sessions
+                .iter()
+                .all(|session| session.kind.is_managed_external())
+        {
+            let mut workers = Vec::new();
+            let mut matched_statuses = Vec::new();
+            let mut stale_app_keys = Vec::new();
 
-                                return ProxyStatus {
-                                    running: true,
-                                    address: session.address.clone(),
-                                    port: session.port,
-                                    uptime_seconds,
-                                    managed_session_token: session.session_token.clone(),
-                                    ..ProxyStatus::default()
-                                };
-                            }
-                        }
-                    }
+            for session in sessions {
+                if !Self::is_process_alive(session.pid) {
+                    stale_app_keys.push(session.app_type.clone());
+                    continue;
                 }
 
-                let _ = self.clear_persisted_runtime_session();
-                return ProxyStatus::default();
+                match Self::probe_external_proxy_status(&session).await {
+                    ExternalProxyStatusProbe::Matched(status) => {
+                        let mut status = *status;
+                        workers.push(crate::proxy::types::ActiveWorker {
+                            app_type: session
+                                .app_type
+                                .clone()
+                                .unwrap_or_else(|| "proxy".to_string()),
+                            address: status.address.clone(),
+                            port: status.port,
+                            pid: Some(session.pid),
+                            started_at: Some(session.started_at.clone()),
+                        });
+                        if status.uptime_seconds == 0 {
+                            status.uptime_seconds = Self::uptime_seconds_since(&session.started_at);
+                        }
+                        matched_statuses.push((session.app_type.clone(), status));
+                    }
+                    ExternalProxyStatusProbe::Mismatched => {
+                        stale_app_keys.push(session.app_type.clone());
+                    }
+                    ExternalProxyStatusProbe::Unreachable => {
+                        stale_app_keys.push(session.app_type.clone());
+                    }
+                }
             }
 
-            if Self::is_process_alive(session.pid) {
-                let uptime_seconds = chrono::DateTime::parse_from_rfc3339(&session.started_at)
-                    .ok()
-                    .map(|started_at| {
-                        let started_at = started_at.with_timezone(&chrono::Utc);
-                        (chrono::Utc::now() - started_at).num_seconds().max(0) as u64
-                    })
-                    .unwrap_or(0);
+            if cleanup_stale_sessions && !stale_app_keys.is_empty() {
+                let _ = self.clear_persisted_runtime_sessions_for_app_keys(&stale_app_keys);
+            }
 
+            let selected_status = if let Some(app_type) = app_type {
+                matched_statuses
+                    .into_iter()
+                    .find(|(session_app, _)| {
+                        session_app
+                            .as_deref()
+                            .is_none_or(|value| value.eq_ignore_ascii_case(app_type.as_str()))
+                    })
+                    .map(|(_, status)| status)
+            } else {
+                matched_statuses
+                    .into_iter()
+                    .next()
+                    .map(|(_, status)| status)
+            };
+
+            if let Some(mut status) = selected_status {
+                status.running = !workers.is_empty();
+                if status.uptime_seconds == 0 {
+                    let scoped_workers = Self::workers_for_status_scope(&workers, app_type);
+                    status.uptime_seconds =
+                        Self::uptime_seconds_from_active_workers(&scoped_workers);
+                }
+                status.active_workers = workers;
+                return status;
+            }
+
+            let scoped_workers = Self::workers_for_status_scope(&workers, app_type);
+            let primary = scoped_workers.first();
+            return ProxyStatus {
+                running: !workers.is_empty(),
+                address: primary
+                    .map(|worker| worker.address.clone())
+                    .unwrap_or_default(),
+                port: primary.map(|worker| worker.port).unwrap_or_default(),
+                uptime_seconds: Self::uptime_seconds_from_active_workers(&scoped_workers),
+                active_workers: workers,
+                ..ProxyStatus::default()
+            };
+        }
+
+        if let Some(session) = sessions.into_iter().next() {
+            if Self::is_process_alive(session.pid) {
                 return ProxyStatus {
                     running: true,
                     address: session.address,
                     port: session.port,
-                    uptime_seconds,
+                    uptime_seconds: Self::uptime_seconds_since(&session.started_at),
                     ..ProxyStatus::default()
                 };
             }
 
-            let _ = self.clear_persisted_runtime_session();
+            if cleanup_stale_sessions {
+                let _ = self.clear_persisted_runtime_session();
+            }
+        }
+
+        if let Some(status) =
+            Self::daemon_status_snapshot_with_cleanup_for_app(cleanup_stale_sessions, app_type)
+                .await
+        {
+            return status;
         }
 
         ProxyStatus::default()
+    }
+
+    #[cfg(unix)]
+    async fn daemon_status_snapshot() -> Option<ProxyStatus> {
+        Self::daemon_status_snapshot_with_cleanup(true).await
+    }
+
+    #[cfg(unix)]
+    async fn daemon_status_snapshot_with_cleanup(
+        cleanup_stale_socket: bool,
+    ) -> Option<ProxyStatus> {
+        Self::daemon_status_snapshot_with_cleanup_for_app(cleanup_stale_socket, None).await
+    }
+
+    #[cfg(unix)]
+    async fn daemon_status_snapshot_with_cleanup_for_app(
+        cleanup_stale_socket: bool,
+        app_type: Option<&AppType>,
+    ) -> Option<ProxyStatus> {
+        use crate::daemon::ipc::{
+            client,
+            protocol::{Request, Response},
+        };
+        use std::io::ErrorKind;
+
+        let socket_path = crate::daemon::paths::socket_path();
+        if !socket_path.exists() {
+            return None;
+        }
+        let socket_for_task = socket_path.clone();
+        let response = tokio::task::spawn_blocking(move || {
+            client::round_trip(&socket_for_task, &Request::Status)
+        })
+        .await
+        .ok()?;
+
+        match response {
+            Ok(response @ Response::Status { .. }) => {
+                Self::proxy_status_from_daemon_response_for_app(response, app_type)
+            }
+            Ok(Response::Error { message }) => {
+                log::debug!("daemon status returned error: {message}");
+                None
+            }
+            Ok(other) => {
+                log::debug!("daemon status returned unexpected response: {other:?}");
+                None
+            }
+            Err(client::ClientError::Io(error))
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                ) =>
+            {
+                if cleanup_stale_socket {
+                    let _ = std::fs::remove_file(socket_path);
+                }
+                None
+            }
+            Err(error) => {
+                log::debug!("daemon status probe failed: {error}");
+                None
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn daemon_status_snapshot() -> Option<ProxyStatus> {
+        Self::daemon_status_snapshot_with_cleanup(true).await
+    }
+
+    #[cfg(not(unix))]
+    async fn daemon_status_snapshot_with_cleanup(
+        _cleanup_stale_socket: bool,
+    ) -> Option<ProxyStatus> {
+        None
+    }
+
+    #[cfg(not(unix))]
+    async fn daemon_status_snapshot_with_cleanup_for_app(
+        _cleanup_stale_socket: bool,
+        _app_type: Option<&AppType>,
+    ) -> Option<ProxyStatus> {
+        None
+    }
+
+    #[cfg(unix)]
+    fn proxy_status_from_daemon_response_for_app(
+        response: crate::daemon::ipc::protocol::Response,
+        app_type: Option<&AppType>,
+    ) -> Option<ProxyStatus> {
+        let crate::daemon::ipc::protocol::Response::Status {
+            running,
+            address,
+            port,
+            workers,
+            ..
+        } = response
+        else {
+            return None;
+        };
+
+        let mut active_workers = Vec::new();
+        let mut active_connections = 0usize;
+        let mut total_requests = 0u64;
+        let mut estimated_input_tokens_total = 0u64;
+        let mut estimated_output_tokens_total = 0u64;
+        let mut success_requests = 0u64;
+        let mut failed_requests = 0u64;
+        let mut runtime_uptime_seconds = 0u64;
+        let mut current_provider = None;
+        let mut current_provider_id = None;
+        let mut last_request_at = None::<String>;
+        let mut last_error = None;
+        let mut failover_count = 0u64;
+        let mut active_targets = Vec::new();
+        let mut scoped_workers = Vec::new();
+
+        for worker in workers.into_iter().filter(|worker| worker.running) {
+            let runtime_status = worker.runtime_status;
+            let matches_scope = app_type
+                .is_none_or(|app_type| worker.app_type.eq_ignore_ascii_case(app_type.as_str()));
+            let active_worker = crate::proxy::types::ActiveWorker {
+                app_type: worker.app_type,
+                address: worker.address,
+                port: worker.port,
+                pid: worker.pid,
+                started_at: worker.started_at,
+            };
+            if matches_scope {
+                scoped_workers.push(active_worker.clone());
+            }
+            active_workers.push(active_worker);
+
+            let Some(runtime_status) = runtime_status else {
+                continue;
+            };
+            if !matches_scope {
+                continue;
+            }
+
+            active_connections =
+                active_connections.saturating_add(runtime_status.active_connections);
+            total_requests = total_requests.saturating_add(runtime_status.total_requests);
+            estimated_input_tokens_total = estimated_input_tokens_total
+                .saturating_add(runtime_status.estimated_input_tokens_total);
+            estimated_output_tokens_total = estimated_output_tokens_total
+                .saturating_add(runtime_status.estimated_output_tokens_total);
+            success_requests = success_requests.saturating_add(runtime_status.success_requests);
+            failed_requests = failed_requests.saturating_add(runtime_status.failed_requests);
+            runtime_uptime_seconds = runtime_uptime_seconds.max(runtime_status.uptime_seconds);
+            failover_count = failover_count.saturating_add(runtime_status.failover_count);
+            if current_provider.is_none() {
+                current_provider = runtime_status.current_provider.clone();
+            }
+            if current_provider_id.is_none() {
+                current_provider_id = runtime_status.current_provider_id.clone();
+            }
+            if let Some(value) = runtime_status.last_request_at {
+                if last_request_at
+                    .as_ref()
+                    .is_none_or(|current| value > *current)
+                {
+                    last_request_at = Some(value);
+                }
+            }
+            if last_error.is_none() {
+                last_error = runtime_status.last_error;
+            }
+            active_targets.extend(
+                runtime_status
+                    .active_targets
+                    .into_iter()
+                    .filter(|target| {
+                        app_type.is_none_or(|app_type| {
+                            target.app_type.eq_ignore_ascii_case(app_type.as_str())
+                        })
+                    })
+                    .map(|target| ActiveTarget {
+                        app_type: target.app_type,
+                        provider_name: target.provider_name,
+                        provider_id: target.provider_id,
+                    }),
+            );
+        }
+        let primary = if app_type.is_some() {
+            scoped_workers.first()
+        } else {
+            active_workers.first()
+        };
+        let address = if app_type.is_some() {
+            primary
+                .map(|worker| worker.address.clone())
+                .unwrap_or_default()
+        } else if address.trim().is_empty() {
+            primary
+                .map(|worker| worker.address.clone())
+                .unwrap_or_default()
+        } else {
+            address
+        };
+        let port = if app_type.is_some() {
+            primary.map(|worker| worker.port).unwrap_or_default()
+        } else if port == 0 {
+            primary.map(|worker| worker.port).unwrap_or_default()
+        } else {
+            port
+        };
+        let started_at_workers = if app_type.is_some() {
+            scoped_workers.as_slice()
+        } else {
+            active_workers.as_slice()
+        };
+        let started_at_uptime = Self::uptime_seconds_from_active_workers(started_at_workers);
+        let uptime_seconds = if runtime_uptime_seconds > 0 {
+            runtime_uptime_seconds
+        } else {
+            started_at_uptime
+        };
+        let success_rate = if total_requests > 0 {
+            (success_requests as f32 / total_requests as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        Some(ProxyStatus {
+            running: running || !active_workers.is_empty(),
+            address,
+            port,
+            active_connections,
+            total_requests,
+            estimated_input_tokens_total,
+            estimated_output_tokens_total,
+            success_requests,
+            failed_requests,
+            success_rate,
+            uptime_seconds,
+            current_provider,
+            current_provider_id,
+            last_request_at,
+            last_error,
+            failover_count,
+            active_targets,
+            active_workers,
+            ..ProxyStatus::default()
+        })
+    }
+
+    fn status_has_worker_for_app(status: &ProxyStatus, app_type: &AppType) -> bool {
+        status
+            .active_workers
+            .iter()
+            .any(|worker| worker.app_type.eq_ignore_ascii_case(app_type.as_str()))
+    }
+
+    fn uptime_seconds_from_active_workers(workers: &[crate::proxy::types::ActiveWorker]) -> u64 {
+        workers
+            .iter()
+            .filter_map(|worker| worker.started_at.as_deref())
+            .map(Self::uptime_seconds_since)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn workers_for_status_scope(
+        workers: &[crate::proxy::types::ActiveWorker],
+        app_type: Option<&AppType>,
+    ) -> Vec<crate::proxy::types::ActiveWorker> {
+        match app_type {
+            Some(app_type) => workers
+                .iter()
+                .filter(|worker| worker.app_type.eq_ignore_ascii_case(app_type.as_str()))
+                .cloned()
+                .collect(),
+            None => workers.to_vec(),
+        }
+    }
+
+    fn uptime_seconds_since(started_at: &str) -> u64 {
+        chrono::DateTime::parse_from_rfc3339(started_at)
+            .ok()
+            .map(|started_at| {
+                let started_at = started_at.with_timezone(&chrono::Utc);
+                (chrono::Utc::now() - started_at).num_seconds().max(0) as u64
+            })
+            .unwrap_or(0)
+    }
+
+    async fn has_running_foreground_runtime(&self) -> bool {
+        if let Some(server) = self.runtime.server.read().await.as_ref() {
+            return server.get_status().await.running;
+        }
+        false
     }
 
     pub async fn get_config(&self) -> Result<ProxyConfig, AppError> {
@@ -581,14 +1502,452 @@ impl ProxyService {
         self.db.get_global_proxy_config().await
     }
 
-    pub async fn set_global_enabled(&self, enabled: bool) -> Result<GlobalProxyConfig, AppError> {
+    pub async fn set_global_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<GlobalProxySwitchUpdate, AppError> {
         let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
             .await
             .map_err(AppError::Message)?;
         let mut config = self.get_global_config().await?;
         config.proxy_enabled = enabled;
+        let cleared_auto_failover = if enabled {
+            0
+        } else {
+            self.db.clear_auto_failover_for_supported_apps().await?
+        };
         self.db.update_global_proxy_config(config.clone()).await?;
-        Ok(config)
+        if !enabled {
+            self.db.delete_all_failover_live_snapshots().await?;
+        }
+
+        Ok(GlobalProxySwitchUpdate {
+            config,
+            cleared_auto_failover,
+        })
+    }
+
+    fn first_failover_provider_id(&self, app_type: &str) -> Result<String, String> {
+        self.db
+            .get_failover_queue(app_type)
+            .map_err(|error| format!("load failover queue for {app_type} failed: {error}"))?
+            .first()
+            .map(|item| item.provider_id.clone())
+            .ok_or_else(|| "failover queue is empty".to_string())
+    }
+
+    fn failover_queue_providers(&self, app_type: &AppType) -> Result<Vec<Provider>, String> {
+        let app_key = app_type.as_str();
+        self.db
+            .get_failover_queue(app_key)
+            .map_err(|error| format!("load failover queue for {app_key} failed: {error}"))?
+            .into_iter()
+            .map(|item| {
+                self.db
+                    .get_provider_by_id(&item.provider_id, app_key)
+                    .map_err(|error| {
+                        format!(
+                            "load failover provider {} for {app_key} failed: {error}",
+                            item.provider_id
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        format!("failover provider does not exist: {}", item.provider_id)
+                    })
+            })
+            .collect()
+    }
+
+    async fn original_failover_live_base(
+        &self,
+        app_type: &AppType,
+        fallback_provider_id: Option<&str>,
+    ) -> Result<Value, String> {
+        let app_key = app_type.as_str();
+        if let Some(existing) = self.load_live_backup_value(app_type).await? {
+            return Ok(existing);
+        }
+
+        let (live, sync_live_token_to_current, _) = self
+            .read_takeover_source_live(app_type, fallback_provider_id)
+            .await?;
+        let backup = serde_json::to_string(&live)
+            .map_err(|error| format!("serialize {app_key} live backup failed: {error}"))?;
+        self.db
+            .save_live_backup(app_key, &backup)
+            .await
+            .map_err(|error| format!("save {app_key} live backup failed: {error}"))?;
+        if sync_live_token_to_current {
+            self.sync_live_config_to_current_provider(app_type, &live)
+                .await?;
+        }
+
+        Ok(live)
+    }
+
+    fn build_failover_live_snapshot(
+        &self,
+        app_type: &AppType,
+        original_live: &Value,
+        provider: &Provider,
+    ) -> Result<Value, String> {
+        let mut provider_snapshot = self.build_live_snapshot_from_provider(app_type, provider)?;
+        Self::apply_codex_unified_session_bucket_to_backup(
+            app_type,
+            provider,
+            &mut provider_snapshot,
+        )?;
+        Self::merge_live_backup_snapshot(app_type, Some(original_live), None, provider_snapshot)
+    }
+
+    async fn save_failover_live_snapshot(
+        &self,
+        app_type: &AppType,
+        provider_id: &str,
+        snapshot: &Value,
+    ) -> Result<(), String> {
+        let app_key = app_type.as_str();
+        let serialized = serde_json::to_string(snapshot).map_err(|error| {
+            format!("serialize {app_key} failover live snapshot for {provider_id} failed: {error}")
+        })?;
+        self.db
+            .save_failover_live_snapshot(app_key, provider_id, &serialized)
+            .await
+            .map_err(|error| {
+                format!("save {app_key} failover live snapshot for {provider_id} failed: {error}")
+            })
+    }
+
+    async fn regenerate_failover_live_snapshots_for_app(
+        &self,
+        app_type: &AppType,
+        fallback_provider_id: Option<&str>,
+    ) -> Result<(), String> {
+        let app_key = app_type.as_str();
+        let providers = self.failover_queue_providers(app_type)?;
+        let original_live = self
+            .original_failover_live_base(app_type, fallback_provider_id)
+            .await?;
+        self.db
+            .delete_failover_live_snapshots_for_app(app_key)
+            .await
+            .map_err(|error| format!("clear {app_key} failover live snapshots failed: {error}"))?;
+
+        for provider in providers {
+            let snapshot =
+                self.build_failover_live_snapshot(app_type, &original_live, &provider)?;
+            self.save_failover_live_snapshot(app_type, &provider.id, &snapshot)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn failover_live_snapshot_for_provider(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> Result<Value, String> {
+        let app_key = app_type.as_str();
+        if let Some(snapshot) = self
+            .db
+            .get_failover_live_snapshot(app_key, &provider.id)
+            .await
+            .map_err(|error| {
+                format!(
+                    "load {app_key} failover live snapshot for {} failed: {error}",
+                    provider.id
+                )
+            })?
+        {
+            return serde_json::from_str(&snapshot.config_json).map_err(|error| {
+                format!(
+                    "parse {app_key} failover live snapshot for {} failed: {error}",
+                    provider.id
+                )
+            });
+        }
+
+        let original_live = self
+            .original_failover_live_base(app_type, Some(&provider.id))
+            .await?;
+        let snapshot = self.build_failover_live_snapshot(app_type, &original_live, provider)?;
+        self.save_failover_live_snapshot(app_type, &provider.id, &snapshot)
+            .await?;
+        Ok(snapshot)
+    }
+
+    async fn write_failover_live_snapshot_for_provider(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> Result<(), String> {
+        let mut live = self
+            .failover_live_snapshot_for_provider(app_type, provider)
+            .await?;
+        let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls_for_app(app_type).await?;
+        self.rewrite_live_for_proxy(
+            app_type,
+            &mut live,
+            &proxy_url,
+            &proxy_codex_base_url,
+            Some(provider),
+        )?;
+        if matches!(app_type, AppType::Codex) {
+            self.write_codex_live_for_provider(&live, Some(provider))
+        } else {
+            self.write_live_config_for_app(app_type, &live)
+        }
+    }
+
+    pub async fn refresh_failover_live_snapshot_for_provider(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+    ) -> Result<(), String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let original_live = self
+            .original_failover_live_base(&app_type, Some(&provider.id))
+            .await?;
+        let snapshot = self.build_failover_live_snapshot(&app_type, &original_live, provider)?;
+        self.save_failover_live_snapshot(&app_type, &provider.id, &snapshot)
+            .await?;
+
+        if self.detect_takeover_in_live_config_for_app(&app_type) {
+            self.write_failover_live_snapshot_for_provider(&app_type, provider)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn delete_failover_live_snapshots_for_app(
+        &self,
+        app_type: &AppType,
+    ) -> Result<(), String> {
+        let app_key = app_type.as_str();
+        self.db
+            .delete_failover_live_snapshots_for_app(app_key)
+            .await
+            .map_err(|error| {
+                format!("delete failover live snapshots for {app_key} failed: {error}")
+            })
+    }
+
+    async fn persist_auto_failover_for_app(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let mut config = self
+            .db
+            .get_proxy_config_for_app(app_type)
+            .await
+            .map_err(|error| format!("load proxy config for {app_type} failed: {error}"))?;
+        config.auto_failover_enabled = enabled;
+        self.db
+            .update_proxy_config_for_app(config)
+            .await
+            .map_err(|error| format!("update proxy config for {app_type} failed: {error}"))
+    }
+
+    pub async fn set_auto_failover_for_app(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        if enabled {
+            return self.enable_auto_failover_for_app(app_type).await;
+        }
+
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        self.persist_auto_failover_for_app(app_type.as_str(), false)
+            .await
+    }
+
+    async fn ensure_proxy_routing_active_for_app(&self, app_type: &str) -> Result<(), String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let has_managed_worker = self.has_managed_worker_for_app(&app_type).await;
+        if !has_managed_worker {
+            return Err(
+                "automatic failover requires daemon-managed proxy routing for this app".to_string(),
+            );
+        }
+
+        let app_key = app_type.as_str();
+        let config = self
+            .db
+            .get_proxy_config_for_app(app_key)
+            .await
+            .map_err(|error| format!("load proxy config for {app_key} failed: {error}"))?;
+        if !config.enabled {
+            return Err(
+                "automatic failover requires proxy takeover for this app to be enabled".to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn has_managed_worker_for_app(&self, app_type: &AppType) -> bool {
+        if let Some(session) = self.load_persisted_runtime_session_for_app(app_type) {
+            if session.kind.is_managed_external()
+                && Self::is_process_alive(session.pid)
+                && matches!(
+                    Self::probe_external_proxy_status(&session).await,
+                    ExternalProxyStatusProbe::Matched(_)
+                )
+            {
+                return true;
+            }
+        }
+
+        Self::daemon_status_snapshot()
+            .await
+            .is_some_and(|status| Self::status_has_worker_for_app(&status, app_type))
+    }
+
+    pub async fn enable_auto_failover_for_app(&self, app_type: &str) -> Result<(), String> {
+        let first_provider_id = self.first_failover_provider_id(app_type)?;
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let app_key = app_type.as_str();
+        self.ensure_proxy_routing_active_for_app(app_key).await?;
+        self.regenerate_failover_live_snapshots_for_app(&app_type, Some(&first_provider_id))
+            .await?;
+        self.switch_proxy_target(app_key, &first_provider_id)
+            .await?;
+        self.persist_auto_failover_for_app(app_key, true).await
+    }
+
+    async fn prepare_proxy_and_auto_failover_activation(
+        &self,
+        app_type: &str,
+    ) -> Result<AutoFailoverActivation, String> {
+        let first_provider_id = self.first_failover_provider_id(app_type)?;
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let app_key = app_type.as_str();
+        let previous_db_current_provider = self
+            .db
+            .get_current_provider(app_key)
+            .map_err(|error| format!("load current provider for {app_key} failed: {error}"))?;
+        let previous_local_current_provider = crate::settings::get_current_provider(&app_type);
+        let previous_live_backup = self
+            .db
+            .get_live_backup(app_key)
+            .await
+            .map_err(|error| format!("load live backup for {app_key} failed: {error}"))?
+            .map(|backup| backup.original_config);
+        self.regenerate_failover_live_snapshots_for_app(&app_type, Some(&first_provider_id))
+            .await?;
+        let rollback_live_backup = self
+            .db
+            .get_live_backup(app_key)
+            .await
+            .map_err(|error| format!("load rollback backup for {app_key} failed: {error}"))?
+            .map(|backup| backup.original_config)
+            .ok_or_else(|| format!("missing rollback backup for {app_key}"))?;
+        self.switch_proxy_target(app_key, &first_provider_id)
+            .await?;
+        Ok(AutoFailoverActivation {
+            app_type,
+            previous_db_current_provider,
+            previous_local_current_provider,
+            previous_live_backup,
+            rollback_live_backup,
+        })
+    }
+
+    fn restore_current_provider_after_activation_failure(
+        &self,
+        activation: &AutoFailoverActivation,
+    ) -> Result<(), String> {
+        let app_key = activation.app_type.as_str();
+        match activation.previous_db_current_provider.as_deref() {
+            Some(provider_id) => {
+                self.db
+                    .set_current_provider(app_key, provider_id)
+                    .map_err(|error| {
+                        format!("restore current provider for {app_key} failed: {error}")
+                    })?
+            }
+            None => self.clear_database_current_provider_for_app(app_key)?,
+        }
+        crate::settings::set_current_provider(
+            &activation.app_type,
+            activation.previous_local_current_provider.as_deref(),
+        )
+        .map_err(|error| format!("restore local current provider for {app_key} failed: {error}"))
+    }
+
+    fn clear_database_current_provider_for_app(&self, app_type: &str) -> Result<(), String> {
+        let conn = self.db.conn.lock().map_err(|error| {
+            format!("lock database to clear current provider for {app_type} failed: {error}")
+        })?;
+        conn.execute(
+            "UPDATE providers SET is_current = 0 WHERE app_type = ?1",
+            rusqlite::params![app_type],
+        )
+        .map_err(|error| format!("clear current provider for {app_type} failed: {error}"))?;
+        Ok(())
+    }
+
+    pub async fn enable_proxy_and_auto_failover_for_app(
+        &self,
+        app_type: &str,
+    ) -> Result<(), String> {
+        let activation = {
+            let _guard =
+                crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+            self.prepare_proxy_and_auto_failover_activation(app_type)
+                .await?
+        };
+        let app_key = activation.app_type.as_str();
+        if let Err(start_error) = self.set_managed_session_for_app(app_key, true).await {
+            {
+                let _guard =
+                    crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+                self.db
+                    .save_live_backup(app_key, &activation.rollback_live_backup)
+                    .await
+                    .map_err(|rollback_error| {
+                        format!(
+                            "enable proxy and auto failover failed: {start_error}; rollback failed: restore live backup for {app_key} failed: {rollback_error}"
+                        )
+                    })?;
+                if let Err(rollback_error) = self
+                    .disable_takeover_for_app_unlocked(&activation.app_type, false)
+                    .await
+                {
+                    return Err(format!(
+                        "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
+                    ));
+                }
+                let restore_backup_result = match activation.previous_live_backup.as_deref() {
+                    Some(previous_live_backup) => {
+                        self.db
+                            .save_live_backup(app_key, previous_live_backup)
+                            .await
+                    }
+                    None => self.db.delete_live_backup(app_key).await,
+                };
+                if let Err(rollback_error) = restore_backup_result {
+                    return Err(format!(
+                        "enable proxy and auto failover failed: {start_error}; rollback failed: restore prior live backup for {app_key} failed: {rollback_error}"
+                    ));
+                }
+                if let Err(rollback_error) =
+                    self.restore_current_provider_after_activation_failure(&activation)
+                {
+                    return Err(format!(
+                        "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
+                    ));
+                }
+            }
+            return Err(start_error);
+        }
+        self.persist_auto_failover_for_app(app_key, true).await?;
+
+        Ok(())
     }
 
     pub async fn get_takeover_status(&self) -> Result<ProxyTakeoverStatus, String> {
@@ -624,6 +1983,13 @@ impl ProxyService {
             self.disable_takeover_for_app_unlocked(&app_type, true)
                 .await
         }
+    }
+
+    pub(crate) async fn clear_daemon_takeover_for_app(&self, app_type: &str) -> Result<(), String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        self.disable_takeover_for_app_unlocked(&app_type, false)
+            .await
     }
 
     pub async fn is_app_takeover_active(&self, app_type: &AppType) -> Result<bool, String> {
@@ -688,11 +2054,21 @@ impl ProxyService {
     }
 
     fn is_codex_live_taken_over(config: &Value) -> bool {
-        config
+        if config
             .get("auth")
             .and_then(|auth| auth.get("OPENAI_API_KEY"))
             .and_then(Value::as_str)
             .is_some_and(|value| value == PROXY_TOKEN_PLACEHOLDER)
+        {
+            return true;
+        }
+
+        config
+            .get("config")
+            .and_then(Value::as_str)
+            .and_then(crate::codex_config::extract_codex_experimental_bearer_token)
+            .as_deref()
+            == Some(PROXY_TOKEN_PLACEHOLDER)
     }
 
     fn is_gemini_live_taken_over(config: &Value) -> bool {
@@ -708,43 +2084,247 @@ impl ProxyService {
         app_type: &str,
         provider: &Provider,
     ) -> Result<(), String> {
+        let app_type_enum = Self::takeover_app_from_str(app_type)?;
+        let mut backup_snapshot =
+            self.build_live_snapshot_from_provider(&app_type_enum, provider)?;
+        Self::apply_codex_unified_session_bucket_to_backup(
+            &app_type_enum,
+            provider,
+            &mut backup_snapshot,
+        )?;
+        let existing_backup_value = self.load_live_backup_value(&app_type_enum).await?;
+        let backup_snapshot = Self::merge_live_backup_snapshot(
+            &app_type_enum,
+            existing_backup_value.as_ref(),
+            None,
+            backup_snapshot,
+        )?;
+        self.save_live_backup_snapshot(app_type, &backup_snapshot)
+            .await
+    }
+
+    pub(crate) async fn prepare_live_backup_from_provider(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        previous_provider: Option<&Provider>,
+    ) -> Result<Value, String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
         let mut backup_snapshot = self.build_live_snapshot_from_provider(&app_type, provider)?;
+        Self::apply_codex_unified_session_bucket_to_backup(
+            &app_type,
+            provider,
+            &mut backup_snapshot,
+        )?;
+        let previous_backup_snapshot = previous_provider
+            .map(|provider| {
+                let mut snapshot = self.build_live_snapshot_from_provider(&app_type, provider)?;
+                Self::apply_codex_unified_session_bucket_to_backup(
+                    &app_type,
+                    provider,
+                    &mut snapshot,
+                )?;
+                Ok::<Value, String>(snapshot)
+            })
+            .transpose()?;
+        let existing_backup_value = self.load_live_backup_value(&app_type).await?;
+        Self::merge_live_backup_snapshot(
+            &app_type,
+            existing_backup_value.as_ref(),
+            previous_backup_snapshot.as_ref(),
+            backup_snapshot,
+        )
+    }
 
-        if matches!(app_type, AppType::Codex) {
-            if let Some(existing_backup) = self
-                .db
-                .get_live_backup(app_type.as_str())
-                .await
-                .map_err(|error| {
+    async fn load_live_backup_value(&self, app_type: &AppType) -> Result<Option<Value>, String> {
+        self.db
+            .get_live_backup(app_type.as_str())
+            .await
+            .map_err(|error| {
+                format!(
+                    "load {} existing live backup failed: {error}",
+                    app_type.as_str()
+                )
+            })?
+            .map(|backup| {
+                serde_json::from_str::<Value>(&backup.original_config).map_err(|error| {
                     format!(
-                        "load {} existing live backup failed: {error}",
+                        "parse {} existing live backup failed: {error}",
                         app_type.as_str()
                     )
-                })?
-            {
-                let existing_value: Value = serde_json::from_str(&existing_backup.original_config)
-                    .map_err(|error| {
-                        format!(
-                            "parse {} existing live backup failed: {error}",
-                            app_type.as_str()
-                        )
-                    })?;
-                Self::preserve_codex_mcp_servers_in_backup(&mut backup_snapshot, &existing_value)?;
-            }
+                })
+            })
+            .transpose()
+    }
+
+    fn apply_codex_unified_session_bucket_to_backup(
+        app_type: &AppType,
+        provider: &Provider,
+        backup_snapshot: &mut Value,
+    ) -> Result<(), String> {
+        if !matches!(app_type, AppType::Codex) {
+            return Ok(());
         }
 
-        if matches!(app_type, AppType::Gemini) {
-            backup_snapshot = json!({
-                "env": backup_snapshot
+        crate::codex_config::apply_codex_unified_session_bucket_to_settings(
+            crate::services::provider::ProviderService::codex_live_write_category(provider),
+            backup_snapshot,
+        )
+        .map_err(|error| {
+            format!("apply Codex unified session bucket to live backup failed: {error}")
+        })
+    }
+
+    fn merge_live_backup_snapshot(
+        app_type: &AppType,
+        existing_backup: Option<&Value>,
+        previous_backup_snapshot: Option<&Value>,
+        backup_snapshot: Value,
+    ) -> Result<Value, String> {
+        match app_type {
+            AppType::Claude => match (existing_backup, previous_backup_snapshot) {
+                (Some(existing), Some(base)) => live_merge::merge_json_with_base_live(
+                    app_type,
+                    "proxy live backup",
+                    existing.clone(),
+                    base,
+                    &backup_snapshot,
+                )
+                .map_err(|error| error.to_string()),
+                (Some(existing), None) => live_merge::merge_json_live(
+                    app_type,
+                    "proxy live backup",
+                    existing.clone(),
+                    &backup_snapshot,
+                )
+                .map_err(|error| error.to_string()),
+                (None, _) => Ok(backup_snapshot),
+            },
+            AppType::Codex => Self::merge_codex_live_backup(
+                existing_backup,
+                previous_backup_snapshot,
+                backup_snapshot,
+            ),
+            AppType::Gemini => {
+                let incoming_env = backup_snapshot
                     .get("env")
                     .cloned()
-                    .unwrap_or_else(|| json!({}))
-            });
+                    .unwrap_or_else(|| json!({}));
+                let incoming_snapshot = json!({ "env": incoming_env });
+                let base_snapshot = previous_backup_snapshot.map(|base| {
+                    let base_env = base.get("env").cloned().unwrap_or_else(|| json!({}));
+                    json!({ "env": base_env })
+                });
+                match (existing_backup, base_snapshot.as_ref()) {
+                    (Some(existing), Some(base)) => live_merge::merge_json_with_base_live(
+                        app_type,
+                        "proxy live backup",
+                        existing.clone(),
+                        base,
+                        &incoming_snapshot,
+                    )
+                    .map_err(|error| error.to_string()),
+                    (Some(existing), None) => live_merge::merge_json_live(
+                        app_type,
+                        "proxy live backup",
+                        existing.clone(),
+                        &incoming_snapshot,
+                    )
+                    .map_err(|error| error.to_string()),
+                    (None, _) => Ok(incoming_snapshot),
+                }
+            }
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(backup_snapshot),
         }
+    }
 
-        self.save_live_backup_snapshot(app_type.as_str(), &backup_snapshot)
-            .await
+    fn merge_codex_live_backup(
+        existing_backup: Option<&Value>,
+        previous_backup_snapshot: Option<&Value>,
+        mut incoming_backup: Value,
+    ) -> Result<Value, String> {
+        let Some(existing_backup) = existing_backup else {
+            return Ok(incoming_backup);
+        };
+
+        let mut merged = existing_backup.clone();
+        let existing_auth = existing_backup
+            .get("auth")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let base_auth = previous_backup_snapshot
+            .and_then(|base| base.get("auth"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let incoming_auth = incoming_backup
+            .get("auth")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let merged_auth = if previous_backup_snapshot.is_some() {
+            live_merge::merge_json_with_base_live(
+                &AppType::Codex,
+                "proxy live backup auth",
+                existing_auth,
+                &base_auth,
+                &incoming_auth,
+            )
+        } else {
+            live_merge::merge_json_live(
+                &AppType::Codex,
+                "proxy live backup auth",
+                existing_auth,
+                &incoming_auth,
+            )
+        }
+        .map_err(|error| error.to_string())?;
+
+        let existing_config = existing_backup
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let base_config = previous_backup_snapshot
+            .and_then(|base| base.get("config"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let incoming_config = incoming_backup
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let merged_config = if previous_backup_snapshot.is_some() {
+            live_merge::merge_toml_with_base_live(
+                &AppType::Codex,
+                "proxy live backup config",
+                existing_config,
+                base_config,
+                incoming_config,
+            )
+        } else {
+            live_merge::merge_toml_live(
+                &AppType::Codex,
+                "proxy live backup config",
+                existing_config,
+                incoming_config,
+            )
+        }
+        .map_err(|error| error.to_string())?;
+
+        if let Some(root) = merged.as_object_mut() {
+            root.insert("auth".to_string(), merged_auth);
+            root.insert("config".to_string(), json!(merged_config));
+            if let Some(incoming_root) = incoming_backup.as_object_mut() {
+                for (key, value) in incoming_root {
+                    if key != "auth" && key != "config" && !root.contains_key(key) {
+                        root.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            Ok(merged)
+        } else {
+            let mut merged_root = serde_json::Map::new();
+            merged_root.insert("auth".to_string(), merged_auth);
+            merged_root.insert("config".to_string(), json!(merged_config));
+            Ok(Value::Object(merged_root))
+        }
     }
 
     pub async fn hot_switch_provider(
@@ -761,11 +2341,25 @@ impl ProxyService {
             .map_err(|e| format!("读取供应商失败: {e}"))?
             .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
 
-        let logical_target_changed =
+        let current_provider_id =
             crate::settings::get_effective_current_provider(&self.db, &app_type_enum)
-                .map_err(|e| format!("读取当前供应商失败: {e}"))?
-                .as_deref()
-                != Some(provider_id);
+                .map_err(|e| format!("读取当前供应商失败: {e}"))?;
+        let logical_target_changed = current_provider_id.as_deref() != Some(provider_id);
+        let previous_provider = current_provider_id
+            .as_deref()
+            .filter(|current_id| *current_id != provider_id)
+            .and_then(|current_id| {
+                self.db
+                    .get_provider_by_id(current_id, app_type)
+                    .map_err(|error| {
+                        log::warn!(
+                            "load previous provider {current_id} for {app_type} failed while hot-switching: {error}"
+                        );
+                        error
+                    })
+                    .ok()
+                    .flatten()
+            });
 
         let has_backup = self
             .db
@@ -774,7 +2368,7 @@ impl ProxyService {
             .map_err(|e| format!("读取 {app_type} 备份失败: {e}"))?
             .is_some();
         let live_taken_over = self.detect_takeover_in_live_config_for_app(&app_type_enum);
-        let should_sync_backup = has_backup || live_taken_over;
+        let should_sync_live = has_backup || live_taken_over;
 
         self.db
             .set_current_provider(app_type_enum.as_str(), provider_id)
@@ -782,8 +2376,17 @@ impl ProxyService {
         crate::settings::set_current_provider(&app_type_enum, Some(provider_id))
             .map_err(|e| format!("更新本地当前供应商失败: {e}"))?;
 
-        if should_sync_backup {
-            self.update_live_backup_from_provider(app_type, &provider)
+        if should_sync_live {
+            let backup_snapshot = self
+                .prepare_live_backup_from_provider(
+                    app_type_enum.as_str(),
+                    &provider,
+                    previous_provider.as_ref(),
+                )
+                .await?;
+            self.save_live_backup_snapshot(app_type_enum.as_str(), &backup_snapshot)
+                .await?;
+            self.write_failover_live_snapshot_for_provider(&app_type_enum, &provider)
                 .await?;
         }
 
@@ -796,6 +2399,24 @@ impl ProxyService {
         Ok(HotSwitchOutcome {
             logical_target_changed,
         })
+    }
+
+    pub async fn sync_claude_live_from_provider_while_proxy_active(
+        &self,
+        provider: &Provider,
+    ) -> Result<(), String> {
+        let mut effective_provider = provider.clone();
+        effective_provider.settings_config =
+            self.build_live_snapshot_from_provider(&AppType::Claude, provider)?;
+        let mut effective_settings = effective_provider.settings_config.clone();
+        let (proxy_url, _) = self.build_proxy_urls_for_app(&AppType::Claude).await?;
+
+        Self::apply_claude_takeover_fields_for_provider(
+            &mut effective_settings,
+            &proxy_url,
+            &effective_provider,
+        );
+        self.write_claude_live(&effective_settings)
     }
 
     pub async fn switch_proxy_target(
@@ -814,60 +2435,71 @@ impl ProxyService {
         Ok(())
     }
 
-    fn preserve_codex_mcp_servers_in_backup(
-        target_settings: &mut Value,
-        existing_backup: &Value,
+    pub(crate) async fn validate_app_proxy_activation(
+        &self,
+        app_type: &AppType,
+        fallback_provider_id: Option<&str>,
     ) -> Result<(), String> {
-        let target_obj = target_settings
-            .as_object_mut()
-            .ok_or_else(|| "Codex live backup must be a JSON object".to_string())?;
+        let app_key = app_type.as_str();
+        let app_proxy = self
+            .db
+            .get_proxy_config_for_app(app_key)
+            .await
+            .map_err(|error| format!("load proxy config for {app_key} failed: {error}"))?;
 
-        let target_config = target_obj
-            .get("config")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let mut target_doc = if target_config.trim().is_empty() {
-            toml_edit::DocumentMut::new()
-        } else {
-            target_config
-                .parse::<toml_edit::DocumentMut>()
-                .map_err(|error| format!("parse new Codex config.toml failed: {error}"))?
-        };
+        if app_proxy.auto_failover_enabled
+            && self
+                .db
+                .get_failover_queue(app_key)
+                .map_err(|error| format!("load failover queue for {app_key} failed: {error}"))?
+                .is_empty()
+        {
+            return Err(
+                "cannot enable proxy because automatic failover is enabled and the failover queue is empty"
+                    .to_string(),
+            );
+        }
 
-        let existing_config = existing_backup
-            .get("config")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if existing_config.trim().is_empty() {
-            target_obj.insert("config".to_string(), json!(target_doc.to_string()));
+        if let Some(provider_id) = fallback_provider_id {
+            if self
+                .db
+                .get_provider_by_id(provider_id, app_key)
+                .map_err(|error| {
+                    format!("load provider {provider_id} for {app_key} failed: {error}")
+                })?
+                .is_some()
+            {
+                return Ok(());
+            }
+            return Err("cannot enable proxy because no active provider is selected".to_string());
+        }
+
+        if self.read_live_config_for_app(app_type).is_ok() {
             return Ok(());
         }
 
-        let existing_doc = existing_config
-            .parse::<toml_edit::DocumentMut>()
-            .map_err(|error| format!("parse existing Codex backup failed: {error}"))?;
+        let Some(provider_id) =
+            crate::settings::get_effective_current_provider(self.db.as_ref(), app_type).map_err(
+                |error| {
+                    format!(
+                        "load effective current provider for {} failed: {error}",
+                        app_type.as_str()
+                    )
+                },
+            )?
+        else {
+            return Err("cannot enable proxy because no active provider is selected".to_string());
+        };
 
-        if let Some(existing_mcp_servers) = existing_doc.get("mcp_servers") {
-            match target_doc.get_mut("mcp_servers") {
-                Some(target_mcp_servers) => {
-                    if let (Some(target_table), Some(existing_table)) = (
-                        target_mcp_servers.as_table_like_mut(),
-                        existing_mcp_servers.as_table_like(),
-                    ) {
-                        for (server_id, server_item) in existing_table.iter() {
-                            if target_table.get(server_id).is_none() {
-                                target_table.insert(server_id, server_item.clone());
-                            }
-                        }
-                    }
-                }
-                None => {
-                    target_doc["mcp_servers"] = existing_mcp_servers.clone();
-                }
-            }
+        if self
+            .db
+            .get_provider_by_id(&provider_id, app_key)
+            .map_err(|error| format!("load provider {provider_id} for {app_key} failed: {error}"))?
+            .is_none()
+        {
+            return Err("cannot enable proxy because no active provider is selected".to_string());
         }
 
-        target_obj.insert("config".to_string(), json!(target_doc.to_string()));
         Ok(())
     }
 
@@ -899,8 +2531,44 @@ impl ProxyService {
     }
 
     async fn enable_takeover_for_app_unlocked(&self, app_type: &AppType) -> Result<(), String> {
-        if !self.is_running().await {
-            let config = self.get_config().await.map_err(|e| e.to_string())?;
+        self.enable_takeover_for_app_unlocked_with_provider(app_type, None)
+            .await
+    }
+
+    pub(crate) async fn enable_takeover_for_daemon_worker(
+        &self,
+        app_type: &str,
+        fallback_provider_id: Option<&str>,
+    ) -> Result<(), String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        self.enable_takeover_for_app_unlocked_with_options(&app_type, fallback_provider_id, true)
+            .await
+    }
+
+    async fn enable_takeover_for_app_unlocked_with_provider(
+        &self,
+        app_type: &AppType,
+        fallback_provider_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.enable_takeover_for_app_unlocked_with_options(app_type, fallback_provider_id, false)
+            .await
+    }
+
+    async fn enable_takeover_for_app_unlocked_with_options(
+        &self,
+        app_type: &AppType,
+        fallback_provider_id: Option<&str>,
+        runtime_already_known: bool,
+    ) -> Result<(), String> {
+        self.validate_app_proxy_activation(app_type, fallback_provider_id)
+            .await?;
+
+        if !runtime_already_known
+            && !self.has_running_foreground_runtime().await
+            && !self.has_managed_worker_for_app(app_type).await
+        {
+            let config = self.runtime_config_for_app(app_type).await?;
             self.start_with_resolved_config_unlocked(config).await?;
         }
 
@@ -922,7 +2590,9 @@ impl ProxyService {
             return Ok(());
         }
 
-        let live = self.read_or_current_provider_live(app_type).await?;
+        let (live, sync_live_token_to_current, provider_for_write) = self
+            .read_takeover_source_live(app_type, fallback_provider_id)
+            .await?;
         if !has_backup {
             let backup = serde_json::to_string(&live)
                 .map_err(|error| format!("serialize {app_key} live backup failed: {error}"))?;
@@ -931,13 +2601,25 @@ impl ProxyService {
                 .await
                 .map_err(|error| format!("save {app_key} live backup failed: {error}"))?;
         }
-        self.sync_live_config_to_current_provider(app_type, &live)
-            .await?;
+        if sync_live_token_to_current {
+            self.sync_live_config_to_current_provider(app_type, &live)
+                .await?;
+        }
 
-        let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls_for_app(app_type).await?;
         let mut taken_over = live;
-        self.rewrite_live_for_proxy(app_type, &mut taken_over, &proxy_url, &proxy_codex_base_url)?;
-        self.write_live_config_for_app(app_type, &taken_over)?;
+        self.rewrite_live_for_proxy(
+            app_type,
+            &mut taken_over,
+            &proxy_url,
+            &proxy_codex_base_url,
+            provider_for_write.as_ref(),
+        )?;
+        if matches!(app_type, AppType::Codex) {
+            self.write_codex_live_for_provider(&taken_over, provider_for_write.as_ref())?;
+        } else {
+            self.write_live_config_for_app(app_type, &taken_over)?;
+        }
 
         if !app_proxy.enabled {
             let mut updated = app_proxy;
@@ -971,6 +2653,9 @@ impl ProxyService {
         let live_taken_over = self.detect_takeover_in_live_config_for_app(app_type);
 
         if !app_proxy.enabled && !has_backup && !live_taken_over {
+            self.clear_app_proxy_routing_flags(app_proxy).await?;
+            self.delete_failover_live_snapshots_for_app(app_type)
+                .await?;
             return Ok(());
         }
 
@@ -984,14 +2669,9 @@ impl ProxyService {
             self.restore_live_from_current_provider(app_type).await?;
         }
 
-        if app_proxy.enabled {
-            let mut cleared = app_proxy;
-            cleared.enabled = false;
-            self.db
-                .update_proxy_config_for_app(cleared)
-                .await
-                .map_err(|error| format!("clear takeover flag for {app_key} failed: {error}"))?;
-        }
+        self.clear_app_proxy_routing_flags(app_proxy).await?;
+        self.delete_failover_live_snapshots_for_app(app_type)
+            .await?;
 
         self.db
             .clear_provider_health_for_app(app_key)
@@ -1005,10 +2685,31 @@ impl ProxyService {
                 .await
                 .map_err(|error| format!("check active takeovers failed: {error}"))?
         {
-            self.stop_server_unlocked().await?;
+            if let Err(error) = self.stop_server_unlocked().await {
+                if error != "proxy server is not running" {
+                    return Err(error);
+                }
+            }
         }
 
         Ok(())
+    }
+
+    async fn clear_app_proxy_routing_flags(
+        &self,
+        mut app_proxy: crate::proxy::types::AppProxyConfig,
+    ) -> Result<(), String> {
+        if !app_proxy.enabled && !app_proxy.auto_failover_enabled {
+            return Ok(());
+        }
+
+        let app_key = app_proxy.app_type.clone();
+        app_proxy.enabled = false;
+        app_proxy.auto_failover_enabled = false;
+        self.db
+            .update_proxy_config_for_app(app_proxy)
+            .await
+            .map_err(|error| format!("clear proxy routing flags for {app_key} failed: {error}"))
     }
 
     async fn restore_live_config_for_app(&self, app_type: &AppType) -> Result<(), String> {
@@ -1028,13 +2729,24 @@ impl ProxyService {
     }
 
     async fn restore_live_from_current_provider(&self, app_type: &AppType) -> Result<(), String> {
-        let Some(settings) = self.current_provider_settings(app_type).await? else {
+        let Some((settings, provider)) = self.current_provider_settings(app_type).await? else {
             return self.clear_stale_takeover_from_live_config(app_type);
         };
-        self.write_live_config_for_app(app_type, &settings)
+        if matches!(app_type, AppType::Codex) {
+            if let Some(provider) = provider.as_ref() {
+                let category =
+                    crate::services::provider::ProviderService::codex_live_write_category(provider);
+                if category != Some("official") {
+                    return self.write_codex_provider_live_config_only(&settings, provider);
+                }
+            }
+            self.write_codex_live_for_provider(&settings, provider.as_ref())
+        } else {
+            self.write_live_config_for_app(app_type, &settings)
+        }
     }
 
-    async fn current_provider_settings(&self, app_type: &AppType) -> Result<Option<Value>, String> {
+    fn current_provider_for_app(&self, app_type: &AppType) -> Result<Option<Provider>, String> {
         let Some(current_provider) =
             crate::settings::get_effective_current_provider(self.db.as_ref(), app_type).map_err(
                 |error| {
@@ -1057,10 +2769,18 @@ impl ProxyService {
                     app_type.as_str()
                 )
             })
+    }
+
+    async fn current_provider_settings(
+        &self,
+        app_type: &AppType,
+    ) -> Result<Option<(Value, Option<Provider>)>, String> {
+        self.current_provider_for_app(app_type)
             .and_then(|provider| {
                 provider
                     .map(|provider| {
                         self.build_current_provider_restore_snapshot(app_type, &provider)
+                            .map(|settings| (settings, Some(provider)))
                     })
                     .transpose()
             })
@@ -1080,11 +2800,12 @@ impl ProxyService {
                         app_type.as_str()
                     )
                 })?;
-        let apply_common_config = provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(true);
+        let apply_common_config =
+            crate::services::provider::ProviderService::provider_uses_common_config_for_app(
+                app_type,
+                provider,
+                common_config_snippet.as_deref(),
+            );
 
         crate::services::provider::ProviderService::build_live_backup_snapshot(
             app_type,
@@ -1176,6 +2897,10 @@ impl ProxyService {
         else {
             return Ok(());
         };
+
+        if matches!(app_type, AppType::Claude) && provider.uses_managed_account_auth() {
+            return Ok(());
+        }
 
         let Some(root) = (match &mut provider.settings_config {
             Value::Object(root) => Some(root),
@@ -1277,34 +3002,73 @@ impl ProxyService {
         Ok(())
     }
 
-    async fn read_or_current_provider_live(&self, app_type: &AppType) -> Result<Value, String> {
-        match self.read_live_config_for_app(app_type) {
-            Ok(live) => Ok(live),
-            Err(_) => self
-                .current_provider_settings(app_type)
-                .await?
-                .ok_or_else(|| {
+    async fn read_takeover_source_live(
+        &self,
+        app_type: &AppType,
+        fallback_provider_id: Option<&str>,
+    ) -> Result<(Value, bool, Option<Provider>), String> {
+        if let Ok(live) = self.read_live_config_for_app(app_type) {
+            let provider = if matches!(app_type, AppType::Claude | AppType::Codex) {
+                self.current_provider_for_app(app_type).ok().flatten()
+            } else {
+                None
+            };
+            return Ok((live, true, provider));
+        }
+
+        if let Some(provider_id) = fallback_provider_id {
+            let provider = self
+                .db
+                .get_provider_by_id(provider_id, app_type.as_str())
+                .map_err(|error| {
                     format!(
-                        "missing live config and current provider for {}",
+                        "load provider {} for {} failed: {error}",
+                        provider_id,
                         app_type.as_str()
                     )
-                }),
+                })?
+                .ok_or_else(|| format!("provider does not exist: {provider_id}"))?;
+            return self
+                .build_current_provider_restore_snapshot(app_type, &provider)
+                .map(|snapshot| (snapshot, false, Some(provider)));
         }
+
+        self.current_provider_settings(app_type)
+            .await?
+            .ok_or_else(|| {
+                format!(
+                    "missing live config and current provider for {}",
+                    app_type.as_str()
+                )
+            })
+            .map(|(live, provider)| (live, false, provider))
     }
 
-    async fn build_proxy_urls(&self) -> Result<(String, String), String> {
-        let runtime_status = self.get_status().await;
+    async fn build_proxy_urls_for_app(
+        &self,
+        app_type: &AppType,
+    ) -> Result<(String, String), String> {
         let persisted = self.get_config().await.map_err(|e| e.to_string())?;
-        let listen_address = if runtime_status.running && !runtime_status.address.is_empty() {
-            runtime_status.address
-        } else {
-            persisted.listen_address.clone()
-        };
-        let listen_port = if runtime_status.running && runtime_status.port != 0 {
-            runtime_status.port
-        } else {
-            persisted.listen_port
-        };
+        let preferred_port = self
+            .db
+            .get_app_proxy_preferred_port(app_type.as_str())
+            .map_err(|error| {
+                format!(
+                    "load proxy preference for {} failed: {error}",
+                    app_type.as_str()
+                )
+            })?;
+        let session = self.load_persisted_runtime_session_for_app(app_type);
+        let listen_address = session
+            .as_ref()
+            .map(|session| session.address.clone())
+            .filter(|address| !address.trim().is_empty())
+            .unwrap_or_else(|| persisted.listen_address.clone());
+        let listen_port = session
+            .as_ref()
+            .map(|session| session.port)
+            .filter(|port| *port != 0)
+            .unwrap_or(preferred_port);
 
         let connect_host = match listen_address.as_str() {
             "0.0.0.0" => "127.0.0.1".to_string(),
@@ -1328,47 +3092,24 @@ impl ProxyService {
         live: &mut Value,
         proxy_url: &str,
         proxy_codex_base_url: &str,
+        provider_for_write: Option<&Provider>,
     ) -> Result<(), String> {
         match app_type {
             AppType::Claude => {
-                if !live.is_object() {
-                    *live = json!({});
-                }
-
-                let root = live
-                    .as_object_mut()
-                    .ok_or_else(|| "claude live config root must be an object".to_string())?;
-                if !root.get("env").is_some_and(Value::is_object) {
-                    root.insert("env".to_string(), json!({}));
-                }
-
-                let env = root
-                    .get_mut("env")
-                    .and_then(Value::as_object_mut)
-                    .ok_or_else(|| "claude env must be an object".to_string())?;
-                env.insert("ANTHROPIC_BASE_URL".to_string(), json!(proxy_url));
-                for key in CLAUDE_MODEL_OVERRIDE_ENV_KEYS {
-                    env.remove(key);
-                }
-
-                let token_keys = [
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "ANTHROPIC_API_KEY",
-                    "OPENROUTER_API_KEY",
-                    "OPENAI_API_KEY",
-                ];
-                let mut replaced_any = false;
-                for key in token_keys {
-                    if env.contains_key(key) {
-                        env.insert(key.to_string(), json!(PROXY_TOKEN_PLACEHOLDER));
-                        replaced_any = true;
-                    }
-                }
-
-                if !replaced_any {
-                    env.insert(
-                        "ANTHROPIC_AUTH_TOKEN".to_string(),
-                        json!(PROXY_TOKEN_PLACEHOLDER),
+                if let Some(provider) = provider_for_write {
+                    let mut effective_provider = provider.clone();
+                    effective_provider.settings_config =
+                        self.build_live_snapshot_from_provider(app_type, provider)?;
+                    Self::apply_claude_takeover_fields_for_provider(
+                        live,
+                        proxy_url,
+                        &effective_provider,
+                    );
+                } else {
+                    Self::apply_claude_takeover_fields_with_policy(
+                        live,
+                        proxy_url,
+                        ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
                     );
                 }
             }
@@ -1502,8 +3243,16 @@ impl ProxyService {
                 }
 
                 if let Some(config_text) = live.get("config").and_then(Value::as_str) {
-                    live["config"] =
-                        json!(codex_toml::remove_loopback_base_url_from_toml(config_text));
+                    let config_text = codex_toml::remove_loopback_base_url_from_toml(config_text);
+                    let config_text =
+                        crate::codex_config::remove_codex_experimental_bearer_token_if(
+                            &config_text,
+                            |token| token == PROXY_TOKEN_PLACEHOLDER,
+                        )
+                        .map_err(|error| {
+                            format!("clear Codex takeover placeholder failed: {error}")
+                        })?;
+                    live["config"] = json!(config_text);
                 }
             }
             AppType::Gemini => {
@@ -1556,58 +3305,151 @@ impl ProxyService {
     }
 
     fn read_codex_live(&self) -> Result<Value, String> {
-        let auth_path = get_codex_auth_path();
-        let config_path = get_codex_config_path();
-        if !auth_path.exists() && !config_path.exists() {
-            return Err("Codex live config does not exist".to_string());
-        }
-
-        let auth = if auth_path.exists() {
-            read_json_file(&auth_path)
-                .map_err(|error| format!("read Codex auth.json failed: {error}"))?
-        } else {
-            json!({})
-        };
-        let config = if config_path.exists() {
-            std::fs::read_to_string(&config_path)
-                .map_err(|error| format!("read Codex config.toml failed: {error}"))?
-        } else {
-            String::new()
-        };
-
-        Ok(json!({
-            "auth": auth,
-            "config": config,
-        }))
+        crate::codex_config::read_codex_live_settings_with_model_catalog()
+            .map_err(|error| format!("read Codex live config failed: {error}"))
     }
 
     fn write_codex_live(&self, config: &Value) -> Result<(), String> {
+        self.write_codex_live_verbatim(config)
+    }
+
+    fn write_codex_live_for_provider(
+        &self,
+        config: &Value,
+        provider: Option<&Provider>,
+    ) -> Result<(), String> {
+        let Some(provider) = provider else {
+            if crate::settings::preserve_codex_official_auth_on_switch() {
+                if let (Some(auth), Some(config_text)) = (
+                    config.get("auth"),
+                    config.get("config").and_then(Value::as_str),
+                ) {
+                    if auth
+                        .get("OPENAI_API_KEY")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value == PROXY_TOKEN_PLACEHOLDER)
+                    {
+                        let live_config = crate::codex_config::prepare_codex_provider_live_config(
+                            auth,
+                            config_text,
+                        )
+                        .map_err(|error| format!("write Codex live config failed: {error}"))?;
+                        crate::codex_config::write_codex_live_config_atomic(Some(&live_config))
+                            .map_err(|error| format!("write Codex live config failed: {error}"))?;
+                        return Ok(());
+                    }
+                }
+            }
+
+            return self.write_codex_live_verbatim(config);
+        };
+
         let auth = config
             .get("auth")
-            .filter(|value| !value.as_object().is_some_and(|object| object.is_empty()));
+            .ok_or_else(|| "Codex config missing auth field".to_string())?;
         let config_text = config.get("config").and_then(Value::as_str);
-        let auth_path = get_codex_auth_path();
+        let mut settings = config.clone();
+        if settings
+            .get("modelCatalog")
+            .and_then(|catalog| catalog.get("models"))
+            .is_none()
+        {
+            if let Some(root) = settings.as_object_mut() {
+                root.insert(
+                    "modelCatalog".to_string(),
+                    provider
+                        .settings_config
+                        .get("modelCatalog")
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "models": [] })),
+                );
+            }
+        }
 
+        let profile = crate::proxy::providers::codex_provider_catalog_tool_profile(provider);
+        crate::codex_config::write_codex_provider_live_with_catalog(
+            &settings,
+            crate::services::provider::ProviderService::codex_live_write_category(provider),
+            auth,
+            config_text,
+            profile,
+        )
+        .map_err(|error| format!("write Codex live config failed: {error}"))
+    }
+
+    fn write_codex_provider_live_config_only(
+        &self,
+        config: &Value,
+        provider: &Provider,
+    ) -> Result<(), String> {
+        let auth = config
+            .get("auth")
+            .ok_or_else(|| "Codex config missing auth field".to_string())?;
+        let config_text = config.get("config").and_then(Value::as_str);
+        let mut settings = config.clone();
+        if settings
+            .get("modelCatalog")
+            .and_then(|catalog| catalog.get("models"))
+            .is_none()
+        {
+            if let Some(root) = settings.as_object_mut() {
+                root.insert(
+                    "modelCatalog".to_string(),
+                    provider
+                        .settings_config
+                        .get("modelCatalog")
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "models": [] })),
+                );
+            }
+        }
+
+        let profile = crate::proxy::providers::codex_provider_catalog_tool_profile(provider);
+        crate::codex_config::write_codex_provider_live_config_only_with_catalog(
+            &settings,
+            auth,
+            config_text,
+            profile,
+        )
+        .map_err(|error| format!("write Codex live config failed: {error}"))
+    }
+
+    fn write_codex_live_verbatim(&self, config: &Value) -> Result<(), String> {
+        let auth = config.get("auth");
+        let config_text = config.get("config").and_then(Value::as_str);
+
+        // Proxy restore applies the saved backup config without another stable-provider rewrite.
         match (auth, config_text) {
-            (Some(auth), Some(config_text)) => write_codex_live_atomic(auth, Some(config_text))
-                .map_err(|error| format!("write Codex live config failed: {error}")),
+            (Some(auth), Some(config_text)) => {
+                if auth.as_object().is_some_and(|object| object.is_empty()) {
+                    let auth_path = get_codex_auth_path();
+                    if auth_path.exists() {
+                        std::fs::remove_file(&auth_path)
+                            .map_err(|error| format!("remove Codex auth.json failed: {error}"))?;
+                    }
+                    write_text_file(&get_codex_config_path(), config_text)
+                        .map_err(|error| format!("write Codex config.toml failed: {error}"))
+                } else {
+                    // Verbatim restore has no Provider in hand (only the stored
+                    // backup config), so the catalog tool profile can't be
+                    // recovered. Default to ProxyChat: a restored native-direct
+                    // backup keeps its inline modelCatalog but would not get
+                    // apply_patch re-stripped until the next provider switch
+                    // rewrites it. Acceptable known limitation.
+                    crate::codex_config::write_codex_live_with_catalog(
+                        config,
+                        auth,
+                        Some(config_text),
+                        crate::codex_config::CodexCatalogToolProfile::ProxyChat,
+                    )
+                    .map_err(|error| format!("write Codex live config failed: {error}"))
+                }
+            }
             (Some(auth), None) => write_json_file(&get_codex_auth_path(), auth)
                 .map_err(|error| format!("write Codex auth.json failed: {error}")),
-            (None, Some(config_text)) => {
-                if auth_path.exists() {
-                    std::fs::remove_file(&auth_path)
-                        .map_err(|error| format!("remove Codex auth.json failed: {error}"))?;
-                }
-                write_text_file(&get_codex_config_path(), config_text)
-                    .map_err(|error| format!("write Codex config.toml failed: {error}"))
-            }
-            (None, None) => {
-                if auth_path.exists() {
-                    std::fs::remove_file(&auth_path)
-                        .map_err(|error| format!("remove Codex auth.json failed: {error}"))?;
-                }
-                Ok(())
-            }
+            (None, Some(config_text)) => write_text_file(&get_codex_config_path(), config_text)
+                .map_err(|error| format!("write Codex config.toml failed: {error}")),
+            (None, None) => Ok(()),
         }
     }
 
@@ -1625,11 +3467,12 @@ impl ProxyService {
                         app_type.as_str()
                     )
                 })?;
-        let apply_common_config = provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(true);
+        let apply_common_config =
+            crate::services::provider::ProviderService::provider_uses_common_config_for_app(
+                app_type,
+                provider,
+                common_config_snippet.as_deref(),
+            );
 
         crate::services::provider::ProviderService::build_live_backup_snapshot(
             app_type,
@@ -1655,6 +3498,7 @@ impl ProxyService {
             session_token: std::env::var(PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY)
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
+            app_type: None,
         };
         let serialized = serde_json::to_string(&session)
             .map_err(|error| format!("serialize proxy runtime session failed: {error}"))?;
@@ -1673,7 +3517,7 @@ impl ProxyService {
             .map_err(|error| format!("clear proxy runtime session failed: {error}"))
     }
 
-    fn load_persisted_runtime_session(&self) -> Option<PersistedProxyRuntimeSession> {
+    fn load_raw_persisted_runtime_session(&self) -> Option<String> {
         let raw = self
             .db
             .get_setting(PROXY_RUNTIME_SESSION_KEY)
@@ -1681,16 +3525,165 @@ impl ProxyService {
             .flatten()?;
         let raw = raw.trim();
         if raw.is_empty() {
+            None
+        } else {
+            Some(raw.to_string())
+        }
+    }
+
+    fn load_persisted_runtime_sessions_map(
+        &self,
+    ) -> Option<HashMap<String, PersistedProxyRuntimeSession>> {
+        let raw = self.load_raw_persisted_runtime_session()?;
+        if let Ok(sessions) = serde_json::from_str::<PersistedProxyRuntimeSessions>(&raw) {
+            return Some(sessions.workers);
+        }
+        None
+    }
+
+    fn load_legacy_persisted_runtime_session(&self) -> Option<PersistedProxyRuntimeSession> {
+        let raw = self.load_raw_persisted_runtime_session()?;
+        if serde_json::from_str::<PersistedProxyRuntimeSessions>(&raw).is_ok() {
             return None;
         }
+        serde_json::from_str::<PersistedProxyRuntimeSession>(&raw).ok()
+    }
 
-        match serde_json::from_str(raw) {
-            Ok(session) => Some(session),
+    fn persist_persisted_runtime_sessions_map(
+        &self,
+        sessions: HashMap<String, PersistedProxyRuntimeSession>,
+    ) -> Result<(), String> {
+        if sessions.is_empty() {
+            return self.clear_persisted_runtime_session();
+        }
+
+        let serialized =
+            serde_json::to_string(&PersistedProxyRuntimeSessions { workers: sessions })
+                .map_err(|error| format!("serialize proxy runtime sessions failed: {error}"))?;
+        self.db
+            .set_setting(PROXY_RUNTIME_SESSION_KEY, &serialized)
+            .map_err(|error| format!("persist proxy runtime sessions failed: {error}"))
+    }
+
+    fn clear_persisted_runtime_session_for_app(&self, app_type: &AppType) -> Result<(), String> {
+        let Some(mut sessions) = self.load_persisted_runtime_sessions_map() else {
+            return self.clear_persisted_runtime_session();
+        };
+        sessions.remove(app_type.as_str());
+        self.persist_persisted_runtime_sessions_map(sessions)
+    }
+
+    fn clear_persisted_runtime_sessions_for_app_keys(
+        &self,
+        app_keys: &[Option<String>],
+    ) -> Result<(), String> {
+        if app_keys.iter().any(Option::is_none) {
+            return self.clear_persisted_runtime_session();
+        }
+        let Some(mut sessions) = self.load_persisted_runtime_sessions_map() else {
+            return self.clear_persisted_runtime_session();
+        };
+        for app_key in app_keys.iter().filter_map(Option::as_deref) {
+            sessions.remove(app_key);
+        }
+        self.persist_persisted_runtime_sessions_map(sessions)
+    }
+
+    fn load_persisted_runtime_sessions(&self) -> Vec<PersistedProxyRuntimeSession> {
+        self.load_persisted_runtime_sessions_with_cleanup(true)
+    }
+
+    fn load_persisted_runtime_sessions_with_cleanup(
+        &self,
+        cleanup_invalid_session: bool,
+    ) -> Vec<PersistedProxyRuntimeSession> {
+        let Some(raw) = self.load_raw_persisted_runtime_session() else {
+            return Vec::new();
+        };
+
+        if let Ok(sessions) = serde_json::from_str::<PersistedProxyRuntimeSessions>(&raw) {
+            return sessions
+                .workers
+                .into_iter()
+                .map(|(app_type, mut session)| {
+                    if session.app_type.is_none() {
+                        session.app_type = Some(app_type);
+                    }
+                    session
+                })
+                .collect();
+        }
+
+        match serde_json::from_str::<PersistedProxyRuntimeSession>(&raw) {
+            Ok(session) => vec![session],
             Err(_) => {
-                let _ = self.clear_persisted_runtime_session();
-                None
+                if cleanup_invalid_session {
+                    let _ = self.clear_persisted_runtime_session();
+                }
+                Vec::new()
             }
         }
+    }
+
+    fn load_persisted_runtime_session(&self) -> Option<PersistedProxyRuntimeSession> {
+        self.load_persisted_runtime_sessions().into_iter().next()
+    }
+
+    fn load_persisted_runtime_session_for_app(
+        &self,
+        app_type: &AppType,
+    ) -> Option<PersistedProxyRuntimeSession> {
+        let app_key = app_type.as_str();
+        if let Some(mut sessions) = self.load_persisted_runtime_sessions_map() {
+            return sessions.remove(app_key).map(|mut session| {
+                if session.app_type.is_none() {
+                    session.app_type = Some(app_key.to_string());
+                }
+                session
+            });
+        }
+
+        self.load_persisted_runtime_session()
+    }
+
+    pub(crate) async fn load_live_managed_runtime_sessions_for_recovery(
+        &self,
+    ) -> Vec<LiveManagedRuntimeSession> {
+        let mut live_sessions = Vec::new();
+        for session in self.load_persisted_runtime_sessions() {
+            if !session.kind.is_managed_external() || !Self::is_process_alive(session.pid) {
+                continue;
+            }
+            let app_type = session
+                .app_type
+                .as_deref()
+                .and_then(|app| Self::takeover_app_from_str(app).ok());
+            let Some(app_type) = app_type else {
+                continue;
+            };
+            let session_token = session
+                .session_token
+                .clone()
+                .filter(|token| !token.trim().is_empty());
+            let Some(session_token) = session_token else {
+                continue;
+            };
+            if !matches!(
+                Self::probe_external_proxy_status(&session).await,
+                ExternalProxyStatusProbe::Matched(_)
+            ) {
+                continue;
+            }
+            live_sessions.push(LiveManagedRuntimeSession {
+                app_type,
+                pid: session.pid,
+                address: session.address,
+                port: session.port,
+                started_at: session.started_at,
+                session_token,
+            });
+        }
+        live_sessions
     }
 
     fn is_process_alive(pid: u32) -> bool {
@@ -1701,13 +3694,22 @@ impl ProxyService {
         #[cfg(unix)]
         {
             let rc = unsafe { libc::kill(pid as i32, 0) };
-            return rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+            rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
         }
 
         #[cfg(not(unix))]
         {
             pid == std::process::id()
         }
+    }
+
+    fn should_preserve_takeover_for_active_managed_session(
+        &self,
+        session: &PersistedProxyRuntimeSession,
+    ) -> bool {
+        session.kind.is_managed_external()
+            && Self::is_process_alive(session.pid)
+            && Self::has_managed_external_ownership_signal(session)
     }
 
     fn has_managed_external_ownership_signal(session: &PersistedProxyRuntimeSession) -> bool {
@@ -1730,6 +3732,7 @@ impl ProxyService {
         false
     }
 
+    #[cfg(test)]
     async fn managed_session_ready_info(
         &self,
         child_pid: u32,
@@ -1794,7 +3797,7 @@ impl ProxyService {
         if status.port == 0 {
             status.port = session.port;
         }
-        ExternalProxyStatusProbe::Matched(status)
+        ExternalProxyStatusProbe::Matched(Box::new(status))
     }
 
     fn build_session_status_url(session: &PersistedProxyRuntimeSession) -> String {
@@ -1851,10 +3854,10 @@ impl ProxyService {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
 
-            return Err(format!(
+            Err(format!(
                 "managed proxy session did not exit after termination signal: pid {}",
                 pid
-            ));
+            ))
         }
 
         #[cfg(not(unix))]
@@ -1864,6 +3867,7 @@ impl ProxyService {
         }
     }
 
+    #[allow(dead_code)]
     fn spawn_managed_child_reaper(mut child: std::process::Child) {
         tokio::task::spawn_blocking(move || {
             let _ = child.wait();
@@ -1915,14 +3919,31 @@ impl ProxyService {
             .await
             .map_err(|error| format!("load global proxy config failed: {error}"))?;
         if config.proxy_enabled == enabled {
+            if !enabled {
+                self.db
+                    .clear_auto_failover_for_supported_apps()
+                    .await
+                    .map_err(|error| {
+                        format!("clear auto failover after proxy stop failed: {error}")
+                    })?;
+            }
             return Ok(());
+        }
+
+        if !enabled {
+            self.db
+                .clear_auto_failover_for_supported_apps()
+                .await
+                .map_err(|error| format!("clear auto failover after proxy stop failed: {error}"))?;
         }
 
         config.proxy_enabled = enabled;
         self.db
             .update_global_proxy_config(config)
             .await
-            .map_err(|error| format!("update global proxy switch failed: {error}"))
+            .map_err(|error| format!("update global proxy switch failed: {error}"))?;
+
+        Ok(())
     }
 
     fn read_gemini_live(&self) -> Result<Value, String> {
@@ -1956,12 +3977,535 @@ mod tests {
     use super::*;
     use crate::provider::ProviderMeta;
     use crate::proxy::circuit_breaker::CircuitBreakerConfig;
-    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
+    use crate::test_support::{
+        cleanup_test_processes_under, lock_test_home_and_settings, restore_env,
+        set_test_home_override,
+    };
     use serial_test::serial;
     use std::ffi::OsString;
-    use std::path::Path;
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
+
+    fn seed_proxy_flags_raw(
+        db: &Database,
+        app_type: &str,
+        enabled: bool,
+        auto_failover_enabled: bool,
+    ) {
+        let conn = db.conn.lock().expect("lock db");
+        conn.execute(
+            "UPDATE proxy_config
+             SET enabled = ?2, auto_failover_enabled = ?3
+             WHERE app_type = ?1",
+            rusqlite::params![
+                app_type,
+                if enabled { 1 } else { 0 },
+                if auto_failover_enabled { 1 } else { 0 },
+            ],
+        )
+        .expect("seed raw proxy flags");
+    }
+
+    fn save_queue_provider(db: &Database, app_type: &str, id: &str) {
+        let provider = Provider::with_id(
+            id.to_string(),
+            id.to_string(),
+            json!({"env": {"BASE_URL": "https://example.com"}}),
+            None,
+        );
+        db.save_provider(app_type, &provider)
+            .expect("save failover provider");
+        db.add_to_failover_queue(app_type, &provider.id)
+            .expect("queue failover provider");
+    }
+
+    fn env_object(config: &Value) -> &Map<String, Value> {
+        config
+            .get("env")
+            .and_then(Value::as_object)
+            .expect("env should exist")
+    }
+
+    fn assert_env_str(env: &Map<String, Value>, key: &str, expected: Option<&str>) {
+        assert_eq!(env.get(key).and_then(Value::as_str), expected, "{key}");
+    }
+
+    #[test]
+    fn managed_account_claude_takeover_uses_api_key_placeholder() {
+        let mut provider = Provider::with_id(
+            "copilot".to_string(),
+            "GitHub Copilot".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.githubcopilot.com",
+                    "ANTHROPIC_MODEL": "claude-haiku-4.5"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("github_copilot".to_string()),
+            ..Default::default()
+        });
+
+        let mut live_config = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://stale.example.com",
+                "ANTHROPIC_AUTH_TOKEN": "stale-token",
+                "OPENROUTER_API_KEY": "stale-openrouter-key",
+                "OPENAI_API_KEY": "stale-openai-key"
+            }
+        });
+        ProxyService::apply_claude_takeover_fields_for_provider(
+            &mut live_config,
+            "http://127.0.0.1:15721",
+            &provider,
+        );
+
+        let env = env_object(&live_config);
+        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", None);
+        assert_env_str(env, "OPENROUTER_API_KEY", None);
+        assert_env_str(env, "OPENAI_API_KEY", None);
+    }
+
+    #[test]
+    fn managed_account_claude_takeover_sources_models_from_provider() {
+        let mut provider = Provider::with_id(
+            "codex".to_string(),
+            "Codex OAuth".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex",
+                    "ANTHROPIC_MODEL": "gpt-5.4",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4-pro[1M]",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.4-ultra [1m]",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "GPT 5.4 Ultra"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+
+        let mut live_config = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://stale.example.com",
+                "ANTHROPIC_AUTH_TOKEN": "stale-token",
+                "ANTHROPIC_MODEL": "stale-model",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "stale-haiku",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Stale Haiku",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "stale-sonnet",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Stale Sonnet",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "stale-opus",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Stale Opus"
+            }
+        });
+        ProxyService::apply_claude_takeover_fields_for_provider(
+            &mut live_config,
+            "http://127.0.0.1:15721",
+            &provider,
+        );
+
+        let env = env_object(&live_config);
+        assert_env_str(env, "ANTHROPIC_MODEL", None);
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            Some("claude-haiku-4-5"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+            Some("gpt-5.4-mini"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            Some("claude-sonnet-4-6[1M]"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            Some("gpt-5.4-pro"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            Some("claude-opus-4-8[1M]"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            Some("GPT 5.4 Ultra"),
+        );
+        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", None);
+    }
+
+    #[test]
+    fn normal_claude_takeover_without_token_keeps_auth_token_fallback() {
+        let mut live_config = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.example.com",
+                "ANTHROPIC_MODEL": "claude-haiku-4.5"
+            }
+        });
+
+        ProxyService::apply_claude_takeover_fields(&mut live_config, "http://127.0.0.1:15721");
+
+        let env = env_object(&live_config);
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_API_KEY", None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_snapshot_maps_workers_to_proxy_status() {
+        let status = ProxyService::proxy_status_from_daemon_response_for_app(
+            crate::daemon::ipc::protocol::Response::Status {
+                running: false,
+                address: String::new(),
+                port: 0,
+                worker_pid: None,
+                takeovers: crate::daemon::ipc::protocol::TakeoverFlags::default(),
+                restart_count: 0,
+                last_restart_at: None,
+                workers: vec![
+                    crate::daemon::ipc::protocol::WorkerState {
+                        app_type: "claude".to_string(),
+                        running: true,
+                        address: "127.0.0.1".to_string(),
+                        port: 15722,
+                        pid: Some(4242),
+                        started_at: Some("2026-03-10T00:00:00Z".to_string()),
+                        runtime_status: None,
+                    },
+                    crate::daemon::ipc::protocol::WorkerState {
+                        app_type: "codex".to_string(),
+                        running: false,
+                        address: "127.0.0.1".to_string(),
+                        port: 15723,
+                        pid: Some(4343),
+                        started_at: Some("2026-03-10T00:00:00Z".to_string()),
+                        runtime_status: None,
+                    },
+                ],
+            },
+            None,
+        )
+        .expect("status response should map");
+
+        assert!(status.running);
+        assert_eq!(status.address, "127.0.0.1");
+        assert_eq!(status.port, 15722);
+        assert_eq!(status.active_workers.len(), 1);
+        assert_eq!(status.active_workers[0].app_type, "claude");
+        assert_eq!(status.active_workers[0].pid, Some(4242));
+        assert_eq!(
+            status.active_workers[0].started_at.as_deref(),
+            Some("2026-03-10T00:00:00Z")
+        );
+        assert!(
+            status.uptime_seconds > 0,
+            "daemon worker started_at should drive uptime"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_snapshot_maps_worker_runtime_totals_to_proxy_status() {
+        use crate::daemon::ipc::protocol::{
+            Response, TakeoverFlags, WorkerRuntimeStatus, WorkerState, WorkerTargetState,
+        };
+
+        let status = ProxyService::proxy_status_from_daemon_response_for_app(
+            Response::Status {
+                running: true,
+                address: String::new(),
+                port: 0,
+                worker_pid: None,
+                takeovers: TakeoverFlags::default(),
+                restart_count: 0,
+                last_restart_at: None,
+                workers: vec![WorkerState {
+                    app_type: "claude".to_string(),
+                    running: true,
+                    address: "127.0.0.1".to_string(),
+                    port: 15721,
+                    pid: Some(4242),
+                    started_at: Some("2026-03-10T00:00:00Z".to_string()),
+                    runtime_status: Some(WorkerRuntimeStatus {
+                        active_connections: 1,
+                        total_requests: 7,
+                        estimated_input_tokens_total: 52_726_211,
+                        estimated_output_tokens_total: 454_466,
+                        success_requests: 6,
+                        failed_requests: 1,
+                        uptime_seconds: 91_381,
+                        current_provider: Some("MiniMax My".to_string()),
+                        current_provider_id: Some("minimax-my".to_string()),
+                        last_request_at: Some("2026-06-01T02:58:44.732068565+00:00".to_string()),
+                        last_error: None,
+                        failover_count: 2,
+                        active_targets: vec![WorkerTargetState {
+                            app_type: "claude".to_string(),
+                            provider_name: "MiniMax My".to_string(),
+                            provider_id: "minimax-my".to_string(),
+                        }],
+                    }),
+                }],
+            },
+            None,
+        )
+        .expect("status response should map");
+
+        assert_eq!(status.total_requests, 7);
+        assert_eq!(status.estimated_input_tokens_total, 52_726_211);
+        assert_eq!(status.estimated_output_tokens_total, 454_466);
+        assert_eq!(status.success_requests, 6);
+        assert_eq!(status.failed_requests, 1);
+        assert_eq!(status.uptime_seconds, 91_381);
+        assert_eq!(status.current_provider.as_deref(), Some("MiniMax My"));
+        assert_eq!(status.current_provider_id.as_deref(), Some("minimax-my"));
+        assert_eq!(status.failover_count, 2);
+        assert_eq!(status.active_targets.len(), 1);
+        assert_eq!(status.active_targets[0].provider_id, "minimax-my");
+        assert!((status.success_rate - 85.71429).abs() < 0.001);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_status_snapshot_selects_worker_runtime_for_requested_app() {
+        use crate::daemon::ipc::protocol::{
+            Response, TakeoverFlags, WorkerRuntimeStatus, WorkerState, WorkerTargetState,
+        };
+
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "test fixture builder mirrors worker status fields"
+        )]
+        fn worker(
+            app_type: &str,
+            port: u16,
+            provider_name: &str,
+            provider_id: &str,
+            total_requests: u64,
+            input_tokens: u64,
+            output_tokens: u64,
+            uptime_seconds: u64,
+        ) -> WorkerState {
+            WorkerState {
+                app_type: app_type.to_string(),
+                running: true,
+                address: "127.0.0.1".to_string(),
+                port,
+                pid: Some(u32::from(port)),
+                started_at: Some("2026-03-10T00:00:00Z".to_string()),
+                runtime_status: Some(WorkerRuntimeStatus {
+                    active_connections: 0,
+                    total_requests,
+                    estimated_input_tokens_total: input_tokens,
+                    estimated_output_tokens_total: output_tokens,
+                    success_requests: total_requests.saturating_sub(1),
+                    failed_requests: 1,
+                    uptime_seconds,
+                    current_provider: Some(provider_name.to_string()),
+                    current_provider_id: Some(provider_id.to_string()),
+                    last_request_at: Some(format!("2026-06-01T00:00:{:02}Z", port % 60)),
+                    last_error: Some(format!("{app_type} last error")),
+                    failover_count: 1,
+                    active_targets: vec![WorkerTargetState {
+                        app_type: app_type.to_string(),
+                        provider_name: provider_name.to_string(),
+                        provider_id: provider_id.to_string(),
+                    }],
+                }),
+            }
+        }
+
+        fn status_response() -> Response {
+            Response::Status {
+                running: true,
+                address: String::new(),
+                port: 0,
+                worker_pid: None,
+                takeovers: TakeoverFlags::default(),
+                restart_count: 0,
+                last_restart_at: None,
+                workers: vec![
+                    worker(
+                        "claude",
+                        15721,
+                        "Claude Provider",
+                        "claude-provider",
+                        2,
+                        100,
+                        20,
+                        12,
+                    ),
+                    worker(
+                        "codex",
+                        15722,
+                        "Codex Provider",
+                        "codex-provider",
+                        9,
+                        900,
+                        300,
+                        34,
+                    ),
+                ],
+            }
+        }
+
+        let claude_status = ProxyService::proxy_status_from_daemon_response_for_app(
+            status_response(),
+            Some(&AppType::Claude),
+        )
+        .expect("claude app status should map");
+
+        assert!(claude_status.running);
+        assert_eq!(claude_status.address, "127.0.0.1");
+        assert_eq!(claude_status.port, 15721);
+        assert_eq!(claude_status.total_requests, 2);
+        assert_eq!(claude_status.estimated_input_tokens_total, 100);
+        assert_eq!(claude_status.estimated_output_tokens_total, 20);
+        assert_eq!(claude_status.success_requests, 1);
+        assert_eq!(claude_status.failed_requests, 1);
+        assert_eq!(claude_status.uptime_seconds, 12);
+        assert_eq!(
+            claude_status.current_provider.as_deref(),
+            Some("Claude Provider")
+        );
+        assert_eq!(
+            claude_status.current_provider_id.as_deref(),
+            Some("claude-provider")
+        );
+        assert_eq!(claude_status.active_workers.len(), 2);
+        assert_eq!(claude_status.active_targets.len(), 1);
+        assert_eq!(claude_status.active_targets[0].app_type, "claude");
+        assert_eq!(
+            claude_status.active_targets[0].provider_id,
+            "claude-provider"
+        );
+        assert!((claude_status.success_rate - 50.0).abs() < 0.001);
+
+        let gemini_status = ProxyService::proxy_status_from_daemon_response_for_app(
+            status_response(),
+            Some(&AppType::Gemini),
+        )
+        .expect("gemini app status should map");
+
+        assert!(gemini_status.running);
+        assert_eq!(gemini_status.address, "");
+        assert_eq!(gemini_status.port, 0);
+        assert_eq!(gemini_status.total_requests, 0);
+        assert_eq!(gemini_status.estimated_input_tokens_total, 0);
+        assert_eq!(gemini_status.estimated_output_tokens_total, 0);
+        assert_eq!(gemini_status.uptime_seconds, 0);
+        assert!(gemini_status.current_provider.is_none());
+        assert!(gemini_status.current_provider_id.is_none());
+        assert!(gemini_status.active_targets.is_empty());
+        assert_eq!(gemini_status.active_workers.len(), 2);
+    }
+
+    #[test]
+    fn daemon_status_worker_presence_matches_app_case_insensitively() {
+        let status = ProxyStatus {
+            active_workers: vec![crate::proxy::types::ActiveWorker {
+                app_type: "Claude".to_string(),
+                address: "127.0.0.1".to_string(),
+                port: 15721,
+                pid: Some(4242),
+                started_at: None,
+            }],
+            ..ProxyStatus::default()
+        };
+
+        assert!(ProxyService::status_has_worker_for_app(
+            &status,
+            &AppType::Claude
+        ));
+        assert!(!ProxyService::status_has_worker_for_app(
+            &status,
+            &AppType::Codex
+        ));
+    }
+
+    async fn spawn_status_server_for_test(
+        token: &'static str,
+    ) -> (tokio::task::JoinHandle<()>, u16) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake proxy status listener");
+        let port = listener
+            .local_addr()
+            .expect("read fake proxy listener addr")
+            .port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept status request");
+            let status = json!({
+                "running": true,
+                "address": "127.0.0.1",
+                "port": port,
+                "active_connections": 0,
+                "total_requests": 0,
+                "success_requests": 0,
+                "failed_requests": 0,
+                "success_rate": 0.0,
+                "uptime_seconds": 12,
+                "current_provider": null,
+                "current_provider_id": null,
+                "last_request_at": null,
+                "last_error": null,
+                "failover_count": 0,
+                "managed_session_token": token
+            });
+            let body = status.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            use tokio::io::AsyncWriteExt;
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write fake status response");
+        });
+        (server, port)
+    }
+
+    fn use_ephemeral_app_proxy_port(db: &Database, app_type: &str) {
+        db.set_app_proxy_preferred_port(app_type, 0)
+            .unwrap_or_else(|_| panic!("set {app_type} app proxy port"));
+    }
+
+    fn seed_managed_worker_for_app(db: &Database, app_type: &str, port: u16) {
+        let session = PersistedProxyRuntimeSession {
+            pid: std::process::id(),
+            address: "127.0.0.1".to_string(),
+            port,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
+            session_token: Some(format!("{app_type}-test-token")),
+            app_type: Some(app_type.to_string()),
+        };
+        let serialized = serde_json::to_string(&PersistedProxyRuntimeSessions {
+            workers: HashMap::from([(app_type.to_string(), session)]),
+        })
+        .expect("serialize managed worker session");
+        db.set_setting(PROXY_RUNTIME_SESSION_KEY, &serialized)
+            .expect("persist managed worker session");
+        db.set_proxy_flags_sync(app_type, true, false)
+            .unwrap_or_else(|_| panic!("seed {app_type} proxy routing"));
+    }
 
     struct ManagedRuntimeEnvGuard {
         old_kind: Option<OsString>,
@@ -1999,8 +4543,15 @@ mod tests {
 
     struct TestHomeEnvGuard {
         _lock: crate::test_support::TestHomeSettingsLock,
+        home: PathBuf,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
+        old_xdg_config_home: Option<OsString>,
+        old_xdg_runtime_dir: Option<OsString>,
+        old_xdg_state_home: Option<OsString>,
+        old_config_dir: Option<OsString>,
+        old_claude_config_dir: Option<OsString>,
+        old_codex_home: Option<OsString>,
     }
 
     impl TestHomeEnvGuard {
@@ -2008,31 +4559,770 @@ mod tests {
             let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+            let old_xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
+            let old_xdg_state_home = std::env::var_os("XDG_STATE_HOME");
+            let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+            let old_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+            let old_codex_home = std::env::var_os("CODEX_HOME");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+            std::env::set_var("XDG_RUNTIME_DIR", home.join(".runtime"));
+            std::env::set_var("XDG_STATE_HOME", home.join(".state"));
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+            std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
+            std::env::set_var("CODEX_HOME", home.join(".codex"));
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
                 _lock: lock,
+                home: home.to_path_buf(),
                 old_home,
                 old_userprofile,
+                old_xdg_config_home,
+                old_xdg_runtime_dir,
+                old_xdg_state_home,
+                old_config_dir,
+                old_claude_config_dir,
+                old_codex_home,
             }
         }
     }
 
     impl Drop for TestHomeEnvGuard {
         fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
+            cleanup_test_processes_under(&self.home);
+            restore_env("HOME", &self.old_home);
+            restore_env("USERPROFILE", &self.old_userprofile);
+            restore_env("XDG_CONFIG_HOME", &self.old_xdg_config_home);
+            restore_env("XDG_RUNTIME_DIR", &self.old_xdg_runtime_dir);
+            restore_env("XDG_STATE_HOME", &self.old_xdg_state_home);
+            restore_env("CC_SWITCH_CONFIG_DIR", &self.old_config_dir);
+            restore_env("CLAUDE_CONFIG_DIR", &self.old_claude_config_dir);
+            restore_env("CODEX_HOME", &self.old_codex_home);
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
         }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn enable_auto_failover_for_app_switches_to_queue_head_and_generates_snapshots() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let mut provider_a = Provider::with_id(
+            "provider-a".to_string(),
+            "Provider A".to_string(),
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://a.example","ANTHROPIC_AUTH_TOKEN":"a"}}),
+            None,
+        );
+        provider_a.sort_index = Some(2);
+        let mut provider_b = Provider::with_id(
+            "provider-b".to_string(),
+            "Provider B".to_string(),
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://b.example","ANTHROPIC_AUTH_TOKEN":"b"}}),
+            None,
+        );
+        provider_b.sort_index = Some(1);
+        let mut provider_c = Provider::with_id(
+            "provider-c".to_string(),
+            "Provider C".to_string(),
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://c.example","ANTHROPIC_AUTH_TOKEN":"c"}}),
+            None,
+        );
+        provider_c.sort_index = Some(3);
+        db.save_provider("claude", &provider_a)
+            .expect("save provider a");
+        db.save_provider("claude", &provider_b)
+            .expect("save provider b");
+        db.save_provider("claude", &provider_c)
+            .expect("save provider c");
+        db.set_current_provider("claude", &provider_a.id)
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&provider_a.id))
+            .expect("set settings current provider");
+        db.add_to_failover_queue("claude", &provider_b.id)
+            .expect("queue provider b");
+        db.add_to_failover_queue("claude", &provider_a.id)
+            .expect("queue provider a");
+        db.add_to_failover_queue("claude", &provider_c.id)
+            .expect("queue provider c");
+        let original_live = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://local.example",
+                "ANTHROPIC_AUTH_TOKEN": "local",
+                "LOCAL_ONLY": "kept"
+            }
+        });
+        db.save_live_backup("claude", &original_live.to_string())
+            .await
+            .expect("seed original live backup");
+        let (_server, port) = spawn_status_server_for_test("claude-test-token").await;
+        seed_managed_worker_for_app(db.as_ref(), "claude", port);
+
+        service
+            .enable_auto_failover_for_app("claude")
+            .await
+            .expect("enable auto failover");
+
+        let config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load claude proxy config");
+        assert!(config.auto_failover_enabled);
+        assert_eq!(
+            db.get_current_provider("claude")
+                .expect("load database current provider")
+                .as_deref(),
+            Some("provider-b")
+        );
+        assert_eq!(
+            crate::settings::get_effective_current_provider(db.as_ref(), &AppType::Claude)
+                .expect("load effective current provider")
+                .as_deref(),
+            Some("provider-b")
+        );
+
+        let backup = db
+            .get_live_backup("claude")
+            .await
+            .expect("get original live backup")
+            .expect("backup exists");
+        let stored_backup: Value =
+            serde_json::from_str(&backup.original_config).expect("parse original live backup");
+        assert_eq!(
+            stored_backup
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some("https://b.example"),
+            "enabling auto-failover should refresh the restore backup to the queue head"
+        );
+        assert_eq!(
+            stored_backup
+                .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+                .and_then(Value::as_str),
+            Some("b")
+        );
+        assert_eq!(
+            stored_backup
+                .pointer("/env/LOCAL_ONLY")
+                .and_then(Value::as_str),
+            Some("kept")
+        );
+
+        for (provider_id, token, base_url) in [
+            ("provider-a", "a", "https://a.example"),
+            ("provider-b", "b", "https://b.example"),
+            ("provider-c", "c", "https://c.example"),
+        ] {
+            let snapshot = db
+                .get_failover_live_snapshot("claude", provider_id)
+                .await
+                .expect("get failover snapshot")
+                .unwrap_or_else(|| panic!("snapshot exists for {provider_id}"));
+            let stored: Value =
+                serde_json::from_str(&snapshot.config_json).expect("parse failover snapshot");
+            assert_eq!(
+                stored
+                    .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+                    .and_then(Value::as_str),
+                Some(token)
+            );
+            assert_eq!(
+                stored
+                    .pointer("/env/ANTHROPIC_BASE_URL")
+                    .and_then(Value::as_str),
+                Some(base_url)
+            );
+            assert_eq!(
+                stored.pointer("/env/LOCAL_ONLY").and_then(Value::as_str),
+                Some("kept")
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn enable_auto_failover_for_app_rejects_when_proxy_is_not_routed() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "queue-head".to_string(),
+            "Queue Head".to_string(),
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://a.example","ANTHROPIC_AUTH_TOKEN":"a"}}),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save queued provider");
+        db.add_to_failover_queue("claude", &provider.id)
+            .expect("queue provider");
+
+        let error = service
+            .enable_auto_failover_for_app("claude")
+            .await
+            .expect_err("failover should require active proxy routing");
+
+        assert!(
+            error.contains("daemon-managed proxy routing")
+                || error.contains("proxy takeover")
+                || error.contains("local proxy"),
+            "{error}"
+        );
+        let config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load claude proxy config");
+        assert!(!config.auto_failover_enabled);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn enable_proxy_and_auto_failover_rolls_back_takeover_when_managed_session_start_fails() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+        let original_live = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://local.example",
+                "ANTHROPIC_AUTH_TOKEN": "local-token",
+                "LOCAL_ONLY": "kept"
+            }
+        });
+        write_json_file(&get_claude_settings_path(), &original_live)
+            .expect("seed claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
+        let previous_provider = Provider::with_id(
+            "previous".to_string(),
+            "Previous".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://previous.example",
+                    "ANTHROPIC_AUTH_TOKEN": "previous-token"
+                }
+            }),
+            None,
+        );
+        let provider = Provider::with_id(
+            "queue-head".to_string(),
+            "Queue Head".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://queue.example",
+                    "ANTHROPIC_AUTH_TOKEN": "queue-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &previous_provider)
+            .expect("save previous provider");
+        db.save_provider("claude", &provider)
+            .expect("save queued provider");
+        db.set_current_provider("claude", &previous_provider.id)
+            .expect("set previous database current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&previous_provider.id))
+            .expect("set previous local current provider");
+        db.add_to_failover_queue("claude", &provider.id)
+            .expect("queue provider");
+
+        let mut runtime_config = service.get_config().await.expect("get proxy config");
+        runtime_config.listen_port = 0;
+        service
+            .start_with_runtime_config(runtime_config)
+            .await
+            .expect("start foreground proxy runtime");
+
+        let error = service
+            .enable_proxy_and_auto_failover_for_app("claude")
+            .await
+            .expect_err("managed session start should fail while foreground runtime is active");
+
+        assert!(
+            error.contains("proxy is already running in foreground mode"),
+            "{error}"
+        );
+        service.stop().await.expect("stop foreground proxy runtime");
+
+        let live: Value =
+            read_json_file(&get_claude_settings_path()).expect("read restored claude live config");
+        assert_eq!(live, original_live);
+        assert!(
+            db.get_live_backup("claude")
+                .await
+                .expect("load claude live backup")
+                .is_none(),
+            "rollback should remove temporary live backup"
+        );
+        assert!(
+            db.list_failover_live_snapshots("claude")
+                .await
+                .expect("list failover snapshots")
+                .is_empty(),
+            "rollback should clear generated failover snapshots"
+        );
+        let config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load claude proxy config");
+        assert!(!config.enabled);
+        assert!(!config.auto_failover_enabled);
+        assert_eq!(
+            db.get_current_provider("claude")
+                .expect("load database current provider")
+                .as_deref(),
+            Some("previous")
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+            Some("previous")
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disable_takeover_for_app_clears_auto_failover_without_stopping_other_takeovers() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        db.set_proxy_flags_sync("claude", true, true)
+            .expect("seed claude takeover and failover");
+        db.set_proxy_flags_sync("codex", true, false)
+            .expect("seed codex takeover");
+
+        service
+            .disable_takeover_for_app_unlocked(&AppType::Claude, true)
+            .await
+            .expect("disable claude takeover");
+
+        assert_eq!(db.get_proxy_flags_sync("claude"), (false, false));
+        assert_eq!(db.get_proxy_flags_sync("codex"), (true, false));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disabling_global_proxy_clears_auto_failover_and_reports_count() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        save_queue_provider(&db, "claude", "claude-p1");
+        save_queue_provider(&db, "codex", "codex-p1");
+        db.set_proxy_flags_sync("claude", true, true)
+            .expect("seed claude takeover and failover");
+        db.set_proxy_flags_sync("codex", true, true)
+            .expect("seed codex takeover and failover");
+
+        let update = service
+            .set_global_enabled(false)
+            .await
+            .expect("disable global proxy");
+
+        assert!(!update.config.proxy_enabled);
+        assert_eq!(update.cleared_auto_failover, 2);
+        assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
+        assert_eq!(db.get_proxy_flags_sync("codex"), (true, false));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn startup_recovery_clears_orphaned_auto_failover() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        seed_proxy_flags_raw(&db, "claude", false, true);
+
+        service
+            .recover_takeovers_on_startup()
+            .await
+            .expect("recover takeovers");
+
+        assert_eq!(db.get_proxy_flags_sync("claude"), (false, false));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn startup_recovery_preserves_live_managed_worker_takeover_state() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        let (status_server, port) = spawn_status_server_for_test("daemon-token").await;
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": PROXY_TOKEN_PLACEHOLDER,
+                    "ANTHROPIC_BASE_URL": format!("http://127.0.0.1:{port}")
+                }
+            }),
+        )
+        .expect("seed taken-over claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &json!({
+                "workers": {
+                    "claude": {
+                        "pid": std::process::id(),
+                        "address": "127.0.0.1",
+                        "port": port,
+                        "started_at": chrono::Utc::now().to_rfc3339(),
+                        "kind": "managed_external",
+                        "session_token": "daemon-token"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write daemon worker marker");
+
+        service
+            .recover_takeovers_on_startup()
+            .await
+            .expect("recover takeovers");
+
+        assert_eq!(db.get_proxy_flags_sync("claude"), (true, false));
+        assert!(
+            db.get_global_proxy_config()
+                .await
+                .expect("load global config")
+                .proxy_enabled
+        );
+        let live: Value =
+            read_json_file(&get_claude_settings_path()).expect("read claude live config");
+        assert_eq!(
+            live.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some(format!("http://127.0.0.1:{port}").as_str())
+        );
+        assert_eq!(
+            live.pointer("/env/ANTHROPIC_AUTH_TOKEN")
+                .and_then(Value::as_str),
+            Some(PROXY_TOKEN_PLACEHOLDER)
+        );
+        status_server
+            .await
+            .expect("fake status server should finish");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn prepare_proxy_and_auto_failover_activation_uses_queue_head_without_existing_current_provider(
+    ) {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::init().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "queue-head".to_string(),
+            "Queue Head".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save queued provider");
+        db.add_to_failover_queue("claude", &provider.id)
+            .expect("queue provider");
+
+        let activation = service
+            .prepare_proxy_and_auto_failover_activation("claude")
+            .await
+            .expect("prepare proxy and auto failover activation");
+
+        assert_eq!(activation.app_type, AppType::Claude);
+        assert_eq!(
+            crate::settings::get_effective_current_provider(db.as_ref(), &AppType::Claude)
+                .expect("load effective current provider")
+                .as_deref(),
+            Some("queue-head")
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_activation_rejects_missing_current_provider_when_failover_disabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
+
+        let error = service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect_err("takeover should require an active provider when failover is disabled");
+
+        assert!(
+            error.contains("cannot enable proxy because no active provider is selected"),
+            "{error}"
+        );
+        assert!(
+            !db.get_proxy_config_for_app("claude")
+                .await
+                .expect("load claude proxy config")
+                .enabled,
+            "failed validation should not enable takeover state"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_activation_allows_current_provider_when_failover_disabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "fresh-live-token"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "stale-provider-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
+
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("takeover should allow an active provider when failover is disabled");
+
+        assert!(
+            db.get_proxy_config_for_app("claude")
+                .await
+                .expect("load claude proxy config")
+                .enabled
+        );
+        service.stop().await.expect("stop proxy runtime");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_activation_uses_app_preferred_port_from_settings_kv() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "fresh-live-token"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "provider-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("reserve free local port");
+        let preferred_port = listener
+            .local_addr()
+            .expect("read reserved listener address")
+            .port();
+        drop(listener);
+        db.set_app_proxy_preferred_port("claude", preferred_port)
+            .expect("persist claude preferred proxy port");
+
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("enable claude takeover");
+
+        let status = service.get_status().await;
+        assert_eq!(status.port, preferred_port);
+        let live: Value =
+            read_json_file(&get_claude_settings_path()).expect("read claude live config");
+        let expected_proxy_url = format!("http://127.0.0.1:{preferred_port}");
+        assert_eq!(
+            live.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some(expected_proxy_url.as_str())
+        );
+
+        service.stop().await.expect("stop proxy runtime");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_activation_rejects_empty_queue_when_failover_enabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+        let app_proxy = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load claude proxy config");
+        seed_proxy_flags_raw(&db, &app_proxy.app_type, app_proxy.enabled, true);
+
+        let error = service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect_err("takeover should require a non-empty failover queue");
+
+        assert!(
+            error.contains(
+                "cannot enable proxy because automatic failover is enabled and the failover queue is empty"
+            ),
+            "{error}"
+        );
+        assert!(
+            !db.get_proxy_config_for_app("claude")
+                .await
+                .expect("load claude proxy config")
+                .enabled,
+            "failed validation should not enable takeover state"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_activation_allows_non_empty_queue_when_failover_enabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "fresh-live-token"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "stale-provider-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.add_to_failover_queue("claude", &provider.id)
+            .expect("queue claude provider");
+        let app_proxy = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load claude proxy config");
+        seed_proxy_flags_raw(&db, &app_proxy.app_type, app_proxy.enabled, true);
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
+
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("takeover should allow a non-empty failover queue");
+
+        assert!(
+            db.get_proxy_config_for_app("claude")
+                .await
+                .expect("load claude proxy config")
+                .enabled
+        );
+        service.stop().await.expect("stop proxy runtime");
     }
 
     #[tokio::test]
@@ -2125,12 +5415,7 @@ mod tests {
         db.set_current_provider("claude", &provider.id)
             .expect("set current claude provider");
 
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
 
         service
             .set_takeover_for_app("claude", true)
@@ -2157,6 +5442,83 @@ mod tests {
             !env.contains_key("ANTHROPIC_API_KEY"),
             "sync should not introduce ANTHROPIC_API_KEY when the provider only used ANTHROPIC_AUTH_TOKEN"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn enabling_claude_takeover_does_not_sync_live_token_to_managed_account_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "fresh-live-token"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("reserve free local port");
+        let preferred_port = listener
+            .local_addr()
+            .expect("read reserved listener address")
+            .port();
+        drop(listener);
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        db.set_app_proxy_preferred_port("claude", preferred_port)
+            .expect("persist claude preferred proxy port");
+        let service = ProxyService::new(db.clone());
+
+        let mut provider = Provider::with_id(
+            "codex-provider".to_string(),
+            "Codex OAuth".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("claude", &provider)
+            .expect("save managed provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("enable claude takeover");
+        service.stop().await.expect("stop proxy runtime");
+
+        let updated = db
+            .get_provider_by_id("codex-provider", "claude")
+            .expect("read claude provider")
+            .expect("claude provider exists");
+        let provider_env = env_object(&updated.settings_config);
+        assert_env_str(provider_env, "ANTHROPIC_AUTH_TOKEN", None);
+        assert_env_str(provider_env, "ANTHROPIC_API_KEY", None);
+
+        let live = service.read_claude_live().expect("read live config");
+        let live_env = env_object(&live);
+        assert_env_str(
+            live_env,
+            "ANTHROPIC_BASE_URL",
+            Some(format!("http://127.0.0.1:{preferred_port}").as_str()),
+        );
+        assert_env_str(live_env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(live_env, "ANTHROPIC_AUTH_TOKEN", None);
     }
 
     #[tokio::test]
@@ -2211,12 +5573,7 @@ base_url = "https://api.openai.com/v1"
         db.set_current_provider("codex", &provider.id)
             .expect("set current codex provider");
 
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "codex");
 
         service
             .set_takeover_for_app("codex", true)
@@ -2312,12 +5669,7 @@ base_url = "https://api.openai.com/v1"
         crate::settings::set_current_provider(&AppType::Codex, Some(&local_current.id))
             .expect("set local current codex provider");
 
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "codex");
 
         service
             .set_takeover_for_app("codex", true)
@@ -2402,12 +5754,7 @@ base_url = "https://api.openai.com/v1"
         crate::settings::set_current_provider(&AppType::Gemini, Some(&local_current.id))
             .expect("set local current gemini provider");
 
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "gemini");
 
         service
             .set_takeover_for_app("gemini", true)
@@ -2450,7 +5797,8 @@ base_url = "https://api.openai.com/v1"
     #[serial]
     async fn foreground_runtime_start_and_stop_syncs_global_proxy_switch() {
         let db = Arc::new(Database::memory().expect("create database"));
-        let service = ProxyService::new(db);
+        seed_proxy_flags_raw(&db, "claude", false, true);
+        let service = ProxyService::new(db.clone());
 
         assert!(
             !service
@@ -2487,6 +5835,11 @@ base_url = "https://api.openai.com/v1"
                 .proxy_enabled,
             "stopping the foreground proxy runtime should disable the persisted global proxy switch"
         );
+        assert_eq!(
+            db.get_proxy_flags_sync("claude"),
+            (false, false),
+            "stopping the proxy runtime should also clear app auto failover"
+        );
     }
 
     #[tokio::test]
@@ -2511,6 +5864,276 @@ base_url = "https://api.openai.com/v1"
         );
 
         service.stop().await.expect("stop proxy runtime");
+    }
+
+    #[test]
+    fn loads_per_app_managed_runtime_sessions() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &json!({
+                "workers": {
+                    "claude": {
+                        "pid": std::process::id(),
+                        "address": "127.0.0.1",
+                        "port": 15721,
+                        "started_at": chrono::Utc::now().to_rfc3339(),
+                        "kind": "managed_external",
+                        "session_token": "claude-token"
+                    },
+                    "codex": {
+                        "pid": std::process::id(),
+                        "address": "127.0.0.1",
+                        "port": 15722,
+                        "started_at": chrono::Utc::now().to_rfc3339(),
+                        "kind": "managed_external",
+                        "session_token": "codex-token"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write runtime sessions");
+        let service = ProxyService::new(db);
+
+        let claude = service
+            .load_persisted_runtime_session_for_app(&AppType::Claude)
+            .expect("claude session");
+        let codex = service
+            .load_persisted_runtime_session_for_app(&AppType::Codex)
+            .expect("codex session");
+
+        assert_eq!(claude.app_type.as_deref(), Some("claude"));
+        assert_eq!(claude.port, 15721);
+        assert_eq!(codex.app_type.as_deref(), Some("codex"));
+        assert_eq!(codex.port, 15722);
+    }
+
+    #[test]
+    fn loads_legacy_managed_runtime_session_only_from_single_session_shape() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &serde_json::to_string(&PersistedProxyRuntimeSession {
+                pid: 4242,
+                address: "127.0.0.1".to_string(),
+                port: 15721,
+                started_at: "2026-03-10T00:00:00Z".to_string(),
+                kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
+                session_token: Some("legacy-token".to_string()),
+                app_type: None,
+            })
+            .expect("serialize legacy runtime session"),
+        )
+        .expect("write legacy runtime session");
+
+        assert!(
+            service.load_legacy_persisted_runtime_session().is_some(),
+            "single-session managed runtime marker should be recognized as legacy"
+        );
+
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &json!({
+                "workers": {
+                    "claude": {
+                        "pid": 4242,
+                        "address": "127.0.0.1",
+                        "port": 15721,
+                        "started_at": "2026-03-10T00:00:00Z",
+                        "kind": "managed_external",
+                        "session_token": "daemon-token"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write daemon runtime sessions");
+
+        assert!(
+            service.load_legacy_persisted_runtime_session().is_none(),
+            "daemon workers map must not be treated as legacy upgrade residue"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_status_snapshot_does_not_clear_invalid_runtime_session() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+
+        db.set_setting(PROXY_RUNTIME_SESSION_KEY, "not-json")
+            .expect("write invalid runtime session");
+
+        let status = service.get_status_snapshot().await;
+        assert!(!status.running);
+        assert_eq!(
+            db.get_setting(PROXY_RUNTIME_SESSION_KEY)
+                .expect("read runtime session after snapshot status")
+                .as_deref(),
+            Some("not-json"),
+            "snapshot status reads must not repair or clear persisted runtime state"
+        );
+
+        let _ = service.get_status().await;
+        assert!(
+            db.get_setting(PROXY_RUNTIME_SESSION_KEY)
+                .expect("read runtime session after normal status")
+                .is_none(),
+            "normal status keeps the existing cleanup behavior"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_managed_runtime_cleanup_terminates_owned_unreachable_session() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind unused legacy proxy status port");
+        let port = listener
+            .local_addr()
+            .expect("read unused legacy proxy status port")
+            .port();
+        drop(listener);
+
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn detached legacy worker");
+        let pid = child.id();
+        let reaper = std::thread::spawn(move || child.wait());
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &serde_json::to_string(&PersistedProxyRuntimeSession {
+                pid,
+                address: "127.0.0.1".to_string(),
+                port,
+                started_at: "2026-03-10T00:00:00Z".to_string(),
+                kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
+                session_token: Some("legacy-token".to_string()),
+                app_type: None,
+            })
+            .expect("serialize legacy runtime session"),
+        )
+        .expect("write legacy runtime session");
+
+        service
+            .cleanup_legacy_managed_runtime_session_before_daemon_start()
+            .await
+            .expect("cleanup legacy owned worker");
+
+        let stopped = !ProxyService::is_process_alive(pid);
+        if !stopped {
+            let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+        let _ = reaper.join();
+
+        assert!(
+            stopped,
+            "legacy owned managed worker should be stopped even when /status is unreachable"
+        );
+        assert!(
+            db.get_setting(PROXY_RUNTIME_SESSION_KEY)
+                .expect("read runtime session after cleanup")
+                .is_none(),
+            "legacy runtime marker should be cleared after cleanup"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_known_worker_takeover_does_not_bind_proxy_port_again() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "live-token"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "provider-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+
+        let occupied = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("reserve daemon worker port");
+        let occupied_port = occupied
+            .local_addr()
+            .expect("read occupied listener address")
+            .port();
+        db.set_app_proxy_preferred_port("claude", occupied_port)
+            .expect("persist occupied preferred port");
+
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &json!({
+                "workers": {
+                    "claude": {
+                        "pid": std::process::id(),
+                        "address": "127.0.0.1",
+                        "port": occupied_port,
+                        "started_at": chrono::Utc::now().to_rfc3339(),
+                        "kind": "managed_external",
+                        "session_token": "daemon-token"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write daemon worker marker");
+
+        service
+            .enable_takeover_for_daemon_worker("claude", None)
+            .await
+            .expect("daemon-owned worker should skip a second bind attempt");
+
+        let live: Value =
+            read_json_file(&get_claude_settings_path()).expect("read claude live config");
+        let expected_proxy_url = format!("http://127.0.0.1:{occupied_port}");
+        assert_eq!(
+            live.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some(expected_proxy_url.as_str())
+        );
+
+        drop(occupied);
     }
 
     #[tokio::test]
@@ -2584,12 +6207,7 @@ base_url = "https://api.openai.com/v1"
             .expect("set current claude provider");
 
         let service = ProxyService::new(db.clone());
-        let mut config = service.get_config().await.expect("read proxy config");
-        config.listen_port = 0;
-        service
-            .update_config(&config)
-            .await
-            .expect("update proxy config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
 
         let guard = crate::services::state_coordination::acquire_restore_mutation_guard()
             .await
@@ -2695,6 +6313,15 @@ base_url = "https://api.openai.com/v1"
     #[tokio::test]
     #[serial]
     async fn managed_session_ready_info_accepts_persisted_session_without_status_probe() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind unused proxy status port");
+        let port = listener
+            .local_addr()
+            .expect("read unused proxy status port")
+            .port();
+        drop(listener);
+
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());
 
@@ -2703,10 +6330,11 @@ base_url = "https://api.openai.com/v1"
             &serde_json::to_string(&PersistedProxyRuntimeSession {
                 pid: 4242,
                 address: "127.0.0.1".to_string(),
-                port: 15721,
+                port,
                 started_at: "2026-03-10T00:00:00Z".to_string(),
                 kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
                 session_token: Some("expected-session-token".to_string()),
+                app_type: Some("claude".to_string()),
             })
             .expect("serialize runtime session"),
         )
@@ -2718,7 +6346,7 @@ base_url = "https://api.openai.com/v1"
             .expect("persisted managed runtime marker should be treated as ready");
 
         assert_eq!(info.address, "127.0.0.1");
-        assert_eq!(info.port, 15721);
+        assert_eq!(info.port, port);
         assert_eq!(info.started_at, "2026-03-10T00:00:00Z");
     }
 
@@ -2774,6 +6402,7 @@ base_url = "https://api.openai.com/v1"
                 started_at: "2026-03-10T00:00:00Z".to_string(),
                 kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
                 session_token: Some("expected-session-token".to_string()),
+                app_type: Some("claude".to_string()),
             })
             .expect("serialize runtime session"),
         )
@@ -2842,6 +6471,7 @@ base_url = "https://api.openai.com/v1"
                 started_at: "2026-03-10T00:00:00Z".to_string(),
                 kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
                 session_token: Some("expected-session-token".to_string()),
+                app_type: Some("claude".to_string()),
             })
             .expect("serialize runtime session"),
         )
@@ -3056,6 +6686,789 @@ base_url = "https://new.example/v1"
         );
     }
 
+    #[test]
+    #[serial]
+    fn codex_custom_provider_live_write_preserves_oauth_auth_json() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: true,
+            ..Default::default()
+        })
+        .expect("enable Codex official auth preservation");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db);
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            Some(
+                r#"model_provider = "openai"
+model = "gpt-5.4"
+"#,
+            ),
+        )
+        .expect("seed live OAuth auth");
+
+        let mut provider = Provider::with_id(
+            "rightcode".to_string(),
+            "RightCode".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "rightcode-key"
+                },
+                "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+"#,
+                "modelCatalog": {
+                    "models": [
+                        {
+                            "model": "rightcode-fast",
+                            "displayName": "RightCode Fast",
+                            "contextWindow": "64000"
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+        provider.category = Some("custom".to_string());
+        write_json_file(
+            &crate::codex_config::get_codex_config_dir().join("models_cache.json"),
+            &json!({
+                "models": [
+                    {
+                        "slug": "gpt-5.5",
+                        "display_name": "GPT-5.5",
+                        "description": "Frontier model",
+                        "base_instructions": "gpt-5.5 base instructions",
+                        "model_messages": {
+                            "instructions_template": "gpt-5.5 instructions template",
+                            "instructions_variables": {
+                                "personality_default": "",
+                                "personality_friendly": "",
+                                "personality_pragmatic": ""
+                            }
+                        },
+                        "additional_speed_tiers": ["fast"],
+                        "service_tiers": [],
+                        "availability_nux": {
+                            "message": "GPT-5.5 is now available."
+                        },
+                        "upgrade": {
+                            "target": "gpt-5.5"
+                        },
+                        "context_window": 272000,
+                        "max_context_window": 272000
+                    }
+                ]
+            }),
+        )
+        .expect("seed Codex model cache");
+        let takeover_settings = json!({
+            "auth": {
+                "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+            },
+            "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+"#
+        });
+
+        service
+            .write_codex_live_for_provider(&takeover_settings, Some(&provider))
+            .expect("write provider-driven Codex live config");
+
+        let live_auth: Value = read_json_file(&get_codex_auth_path()).expect("read live auth");
+        assert_eq!(
+            live_auth, oauth_auth,
+            "third-party Codex proxy writes must not overwrite ChatGPT OAuth login state"
+        );
+
+        let live_config =
+            std::fs::read_to_string(get_codex_config_path()).expect("read live config");
+        assert!(
+            live_config.contains("experimental_bearer_token"),
+            "proxy placeholder should move into config.toml instead of auth.json"
+        );
+        assert!(
+            live_config.contains(PROXY_TOKEN_PLACEHOLDER),
+            "live config should carry the proxy placeholder token"
+        );
+        assert!(
+            live_config.contains("model_catalog_json"),
+            "provider-aware proxy writes should project the provider model catalog"
+        );
+        let generated_catalog: Value =
+            read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+                .expect("read generated Codex model catalog");
+        assert_eq!(
+            generated_catalog
+                .pointer("/models/0/slug")
+                .and_then(Value::as_str),
+            Some("rightcode-fast")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_custom_provider_live_write_can_overwrite_auth_when_preserve_disabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db);
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            Some(
+                r#"model_provider = "openai"
+model = "gpt-5.4"
+"#,
+            ),
+        )
+        .expect("seed live OAuth auth");
+
+        let mut provider = Provider::with_id(
+            "rightcode".to_string(),
+            "RightCode".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "rightcode-key"
+                },
+                "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+"#
+            }),
+            None,
+        );
+        provider.category = Some("custom".to_string());
+        let takeover_settings = json!({
+            "auth": {
+                "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+            },
+            "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+"#
+        });
+
+        service
+            .write_codex_live_for_provider(&takeover_settings, Some(&provider))
+            .expect("write provider-driven Codex live config");
+
+        let live_auth: Value = read_json_file(&get_codex_auth_path()).expect("read live auth");
+        assert_eq!(
+            live_auth,
+            json!({
+                "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+            }),
+            "disabled preservation should let third-party switches overwrite auth.json"
+        );
+
+        let live_config =
+            std::fs::read_to_string(get_codex_config_path()).expect("read live config");
+        assert!(
+            !live_config.contains("experimental_bearer_token"),
+            "provider token should stay in auth.json when preservation is disabled"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_config_only_restore_preserves_oauth_auth_json() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let service = ProxyService::new(Arc::new(Database::memory().expect("init db")));
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            Some(
+                r#"model_provider = "openai"
+model = "gpt-5.4"
+"#,
+            ),
+        )
+        .expect("seed live OAuth auth");
+
+        service
+            .write_codex_live(&json!({
+                "config": r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://custom.example/v1"
+"#
+            }))
+            .expect("write config-only Codex live config");
+
+        let live_auth: Value = read_json_file(&get_codex_auth_path()).expect("read live auth");
+        assert_eq!(
+            live_auth, oauth_auth,
+            "config-only Codex restores must not delete ChatGPT OAuth login state"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_config_placeholder_marks_live_taken_over() {
+        let live = json!({
+            "auth": {
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "oauth-access"
+                }
+            },
+            "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+experimental_bearer_token = "PROXY_MANAGED"
+"#
+        });
+
+        assert!(
+            ProxyService::is_codex_live_taken_over(&live),
+            "config.toml proxy placeholder should mark Codex live config as taken over"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_takeover_cleanup_removes_config_placeholder_without_touching_oauth_auth() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let service = ProxyService::new(Arc::new(Database::memory().expect("init db")));
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            Some(
+                r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+experimental_bearer_token = "PROXY_MANAGED"
+"#,
+            ),
+        )
+        .expect("seed taken-over Codex live config");
+
+        assert!(
+            service.detect_takeover_in_live_config_for_app(&AppType::Codex),
+            "config.toml proxy placeholder should be detected before cleanup"
+        );
+
+        service
+            .clear_stale_takeover_from_live_config(&AppType::Codex)
+            .expect("clear stale Codex takeover");
+
+        let live_auth: Value = read_json_file(&get_codex_auth_path()).expect("read live auth");
+        assert_eq!(
+            live_auth, oauth_auth,
+            "cleanup should preserve ChatGPT OAuth auth.json"
+        );
+
+        let live_config =
+            std::fs::read_to_string(get_codex_config_path()).expect("read live config");
+        assert!(
+            !live_config.contains(PROXY_TOKEN_PLACEHOLDER),
+            "cleanup should remove config.toml proxy bearer placeholder"
+        );
+        assert!(
+            !live_config.contains("http://127.0.0.1:15721"),
+            "cleanup should remove local proxy base_url"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_takeover_write_without_provider_preserves_oauth_auth_json() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: true,
+            ..Default::default()
+        })
+        .expect("enable Codex official auth preservation");
+
+        let service = ProxyService::new(Arc::new(Database::memory().expect("init db")));
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            Some(
+                r#"model_provider = "openai"
+model = "gpt-5.4"
+"#,
+            ),
+        )
+        .expect("seed live OAuth auth");
+
+        service
+            .write_codex_live_for_provider(
+                &json!({
+                    "auth": {
+                        "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+                    },
+                    "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            )
+            .expect("write takeover config without provider");
+
+        let live_auth: Value = read_json_file(&get_codex_auth_path()).expect("read live auth");
+        assert_eq!(
+            live_auth, oauth_auth,
+            "provider-less takeover write should not overwrite ChatGPT OAuth auth.json"
+        );
+
+        let live_config =
+            std::fs::read_to_string(get_codex_config_path()).expect("read live config");
+        assert!(
+            live_config.contains(PROXY_TOKEN_PLACEHOLDER),
+            "proxy placeholder should be carried by config.toml"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_takeover_write_without_provider_overwrites_auth_when_preserve_disabled() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let service = ProxyService::new(Arc::new(Database::memory().expect("init db")));
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            Some(
+                r#"model_provider = "openai"
+model = "gpt-5.4"
+"#,
+            ),
+        )
+        .expect("seed live OAuth auth");
+
+        service
+            .write_codex_live_for_provider(
+                &json!({
+                    "auth": {
+                        "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+                    },
+                    "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            )
+            .expect("write takeover config without provider");
+
+        let live_auth: Value = read_json_file(&get_codex_auth_path()).expect("read live auth");
+        assert_eq!(
+            live_auth,
+            json!({
+                "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+            }),
+            "default disabled preservation should overwrite ChatGPT OAuth auth.json"
+        );
+
+        let live_config =
+            std::fs::read_to_string(get_codex_config_path()).expect("read live config");
+        assert!(
+            !live_config.contains("experimental_bearer_token"),
+            "default disabled preservation should keep the placeholder in auth.json"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_empty_auth_restore_removes_existing_auth_json() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let service = ProxyService::new(Arc::new(Database::memory().expect("init db")));
+        crate::codex_config::write_codex_live_atomic(
+            &json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "oauth-access"
+                }
+            }),
+            Some(
+                r#"model_provider = "openai"
+model = "gpt-5.4"
+"#,
+            ),
+        )
+        .expect("seed live OAuth auth");
+
+        service
+            .write_codex_live(&json!({
+                "auth": {},
+                "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+"#
+            }))
+            .expect("restore Codex live config with empty auth");
+
+        assert!(
+            !get_codex_auth_path().exists(),
+            "empty auth restore should remove stale Codex auth.json"
+        );
+        let live_config =
+            std::fs::read_to_string(get_codex_config_path()).expect("read live config");
+        assert!(
+            live_config.contains("model_provider = \"rightcode\""),
+            "config.toml should still be restored when auth is empty"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn hot_switch_codex_provider_refreshes_restore_backup_to_selected_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        let provider_a = Provider::with_id(
+            "a".to_string(),
+            "RightCode".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "rightcode-key"
+                },
+                "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+        let provider_b = Provider::with_id(
+            "b".to_string(),
+            "AiHubMix".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "aihubmix-key"
+                },
+                "config": r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+
+[model_providers.aihubmix]
+name = "AiHubMix"
+base_url = "https://aihubmix.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }),
+            None,
+        );
+
+        db.save_provider("codex", &provider_a)
+            .expect("save provider a");
+        db.save_provider("codex", &provider_b)
+            .expect("save provider b");
+        db.set_current_provider("codex", "a")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("a"))
+            .expect("set local current provider");
+        let original_backup = json!({
+            "auth": {
+                "OPENAI_API_KEY": "rightcode-key"
+            },
+            "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+local_only = "kept"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        });
+        db.save_live_backup(
+            "codex",
+            &serde_json::to_string(&original_backup).expect("serialize provider a"),
+        )
+        .await
+        .expect("seed live backup");
+        service
+            .write_codex_live(&json!({
+                "auth": {
+                    "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+                },
+                "config": r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+            }))
+            .expect("seed taken-over Codex live config");
+
+        service
+            .hot_switch_provider("codex", "b")
+            .await
+            .expect("hot switch Codex provider");
+
+        let backup = db
+            .get_live_backup("codex")
+            .await
+            .expect("get live backup")
+            .expect("backup exists");
+        let stored_backup: Value =
+            serde_json::from_str(&backup.original_config).expect("parse backup json");
+        assert_eq!(
+            stored_backup
+                .get("auth")
+                .and_then(|auth| auth.get("OPENAI_API_KEY"))
+                .and_then(Value::as_str),
+            Some("aihubmix-key"),
+            "hot switch should refresh the restore backup auth to the selected provider"
+        );
+        let backup_config = stored_backup
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("backup config string");
+        let parsed_backup: toml::Value =
+            toml::from_str(backup_config).expect("parse backup config");
+        assert_eq!(
+            parsed_backup.get("model_provider").and_then(|v| v.as_str()),
+            Some("aihubmix"),
+            "hot switch should refresh the restore backup config to the selected provider"
+        );
+        assert_eq!(
+            parsed_backup.get("local_only").and_then(|v| v.as_str()),
+            Some("kept"),
+            "hot switch should preserve local-only live backup fields while refreshing provider-owned fields"
+        );
+        let backup_model_providers = parsed_backup
+            .get("model_providers")
+            .and_then(|v| v.as_table())
+            .expect("backup model_providers");
+        assert!(
+            backup_model_providers.get("rightcode").is_none(),
+            "hot switch should remove stale provider-owned config sections from the restore backup"
+        );
+        assert_eq!(
+            backup_model_providers
+                .get("aihubmix")
+                .and_then(|v| v.get("base_url"))
+                .and_then(|v| v.as_str()),
+            Some("https://aihubmix.example/v1"),
+            "hot switch should keep the selected provider config section in the restore backup"
+        );
+
+        let snapshot = db
+            .get_failover_live_snapshot("codex", "b")
+            .await
+            .expect("get Codex failover snapshot")
+            .expect("snapshot exists");
+        let stored: Value =
+            serde_json::from_str(&snapshot.config_json).expect("parse snapshot json");
+        assert_eq!(
+            stored
+                .get("auth")
+                .and_then(|auth| auth.get("OPENAI_API_KEY"))
+                .and_then(Value::as_str),
+            Some("aihubmix-key")
+        );
+        let snapshot_config = stored
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("snapshot config string");
+        let parsed_snapshot: toml::Value =
+            toml::from_str(snapshot_config).expect("parse snapshot config");
+        assert_eq!(
+            parsed_snapshot
+                .get("model_provider")
+                .and_then(|v| v.as_str()),
+            Some("aihubmix"),
+            "provider-derived snapshot should preserve the selected provider template"
+        );
+        let snapshot_model_providers = parsed_snapshot
+            .get("model_providers")
+            .and_then(|v| v.as_table())
+            .expect("snapshot model_providers");
+        assert_eq!(
+            snapshot_model_providers
+                .get("aihubmix")
+                .and_then(|v| v.get("base_url"))
+                .and_then(|v| v.as_str()),
+            Some("https://aihubmix.example/v1"),
+            "selected provider id should point at the hot-switched provider endpoint"
+        );
+
+        let live = service.read_codex_live().expect("read Codex live config");
+        let live_config = live
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("live config string");
+        let parsed_live: toml::Value = toml::from_str(live_config).expect("parse live config");
+        assert_eq!(
+            parsed_live.get("model_provider").and_then(|v| v.as_str()),
+            Some("aihubmix"),
+            "active Codex live config should use the hot-switched provider snapshot"
+        );
+        assert_eq!(
+            live.get("auth")
+                .and_then(|auth| auth.get("OPENAI_API_KEY"))
+                .and_then(Value::as_str),
+            Some(PROXY_TOKEN_PLACEHOLDER),
+            "active live auth should be proxy-managed during takeover"
+        );
+        let live_model_providers = parsed_live
+            .get("model_providers")
+            .and_then(|v| v.as_table())
+            .expect("live model_providers");
+        assert!(
+            live_model_providers
+                .get("aihubmix")
+                .and_then(|v| v.get("base_url"))
+                .and_then(|v| v.as_str())
+                .is_some_and(crate::services::proxy::codex_toml::is_loopback_proxy_url),
+            "active live provider endpoint should be rewritten to the local proxy"
+        );
+
+        service
+            .restore_live_config_for_app(&AppType::Codex)
+            .await
+            .expect("restore Codex live config");
+
+        let restored = service
+            .read_codex_live()
+            .expect("read restored Codex live config");
+        let restored_config = restored
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("restored config string");
+        let parsed_restored: toml::Value =
+            toml::from_str(restored_config).expect("parse restored config");
+        assert_eq!(
+            parsed_restored
+                .get("model_provider")
+                .and_then(|v| v.as_str()),
+            Some("aihubmix"),
+            "restore should use the hot-switched provider backup"
+        );
+        assert_eq!(
+            parsed_restored.get("local_only").and_then(|v| v.as_str()),
+            Some("kept"),
+            "restore should preserve local-only live backup fields"
+        );
+        let restored_model_providers = parsed_restored
+            .get("model_providers")
+            .and_then(|v| v.as_table())
+            .expect("restored model_providers");
+        assert!(
+            restored_model_providers.get("rightcode").is_none(),
+            "restore should not bring back stale provider-owned config sections"
+        );
+        assert_eq!(
+            restored_model_providers
+                .get("aihubmix")
+                .and_then(|v| v.get("base_url"))
+                .and_then(|v| v.as_str()),
+            Some("https://aihubmix.example/v1"),
+            "restore should keep the selected provider config section"
+        );
+        assert_eq!(
+            restored
+                .get("auth")
+                .and_then(|auth| auth.get("OPENAI_API_KEY"))
+                .and_then(Value::as_str),
+            Some("aihubmix-key"),
+            "restore should use the hot-switched provider backup auth"
+        );
+    }
+
     #[tokio::test]
     #[serial]
     async fn update_live_backup_from_provider_for_gemini_keeps_only_env_snapshot() {
@@ -3129,6 +7542,126 @@ base_url = "https://new.example/v1"
 
     #[tokio::test]
     #[serial]
+    async fn hot_switch_gemini_provider_refreshes_restore_backup_to_selected_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        let provider_a = Provider::with_id(
+            "a".to_string(),
+            "A".to_string(),
+            json!({
+                "env": {
+                    "GEMINI_API_KEY": "a-key"
+                }
+            }),
+            None,
+        );
+        let provider_b = Provider::with_id(
+            "b".to_string(),
+            "B".to_string(),
+            json!({
+                "env": {
+                    "GEMINI_API_KEY": "b-key"
+                },
+                "config": {
+                    "theme": "selected"
+                }
+            }),
+            None,
+        );
+        db.save_provider("gemini", &provider_a)
+            .expect("save provider a");
+        db.save_provider("gemini", &provider_b)
+            .expect("save provider b");
+        db.set_current_provider("gemini", "a")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Gemini, Some("a"))
+            .expect("set local current provider");
+        db.save_live_backup(
+            "gemini",
+            r#"{"env":{"GEMINI_API_KEY":"a-key","LOCAL_ONLY":"kept"}}"#,
+        )
+        .await
+        .expect("seed live backup");
+        service
+            .write_gemini_live(&json!({
+                "env": {
+                    "GOOGLE_GEMINI_BASE_URL": "http://127.0.0.1:15723",
+                    "GEMINI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+                }
+            }))
+            .expect("seed taken-over Gemini live config");
+
+        service
+            .hot_switch_provider("gemini", "b")
+            .await
+            .expect("hot switch Gemini provider");
+
+        let backup = db
+            .get_live_backup("gemini")
+            .await
+            .expect("get live backup")
+            .expect("backup exists");
+        let stored_backup: Value =
+            serde_json::from_str(&backup.original_config).expect("parse backup json");
+        assert_eq!(
+            stored_backup
+                .pointer("/env/GEMINI_API_KEY")
+                .and_then(Value::as_str),
+            Some("b-key"),
+            "hot switch should refresh Gemini restore backup to the selected provider"
+        );
+        assert_eq!(
+            stored_backup
+                .pointer("/env/LOCAL_ONLY")
+                .and_then(Value::as_str),
+            Some("kept"),
+            "hot switch should preserve local-only Gemini backup values"
+        );
+        assert!(
+            stored_backup.get("config").is_none(),
+            "Gemini restore backup should keep only env data"
+        );
+
+        let live = service.read_gemini_live().expect("read Gemini live config");
+        assert_eq!(
+            live.pointer("/env/GEMINI_API_KEY").and_then(Value::as_str),
+            Some(PROXY_TOKEN_PLACEHOLDER),
+            "active Gemini live config should remain proxy-managed during takeover"
+        );
+        assert_eq!(
+            live.pointer("/env/GOOGLE_GEMINI_BASE_URL")
+                .and_then(Value::as_str),
+            Some("http://127.0.0.1:15723"),
+            "active Gemini live config should keep the proxy base URL"
+        );
+
+        service
+            .restore_live_config_for_app(&AppType::Gemini)
+            .await
+            .expect("restore Gemini live config");
+        let restored = service
+            .read_gemini_live()
+            .expect("read restored Gemini live config");
+        assert_eq!(
+            restored
+                .pointer("/env/GEMINI_API_KEY")
+                .and_then(Value::as_str),
+            Some("b-key"),
+            "restore should use the hot-switched Gemini provider backup"
+        );
+        assert_eq!(
+            restored.pointer("/env/LOCAL_ONLY").and_then(Value::as_str),
+            Some("kept"),
+            "restore should preserve local-only Gemini backup values"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn update_live_backup_from_provider_applies_claude_common_config_without_takeover() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestHomeEnvGuard::set(temp_home.path());
@@ -3185,11 +7718,72 @@ base_url = "https://new.example/v1"
 
     #[tokio::test]
     #[serial]
-    async fn switch_proxy_target_updates_live_backup_when_taken_over() {
+    async fn update_live_backup_from_provider_requires_explicit_common_config_opt_in() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestHomeEnvGuard::set(temp_home.path());
 
         let db = Arc::new(Database::memory().expect("init db"));
+        db.set_config_snippet(
+            "claude",
+            Some(
+                serde_json::json!({
+                    "includeCoAuthoredBy": false
+                })
+                .to_string(),
+            ),
+        )
+        .expect("set common config snippet");
+
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "token",
+                    "ANTHROPIC_BASE_URL": "https://claude.example"
+                }
+            }),
+            None,
+        );
+
+        service
+            .update_live_backup_from_provider("claude", &provider)
+            .await
+            .expect("update claude live backup");
+
+        let backup = db
+            .get_live_backup("claude")
+            .await
+            .expect("get claude live backup")
+            .expect("claude backup exists");
+        let stored: Value =
+            serde_json::from_str(&backup.original_config).expect("parse claude backup json");
+
+        assert!(
+            stored.get("includeCoAuthoredBy").is_none(),
+            "proxy backup must not apply common config when provider did not opt in"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn switch_proxy_target_refreshes_restore_backup_to_selected_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("reserve free local port");
+        let preferred_port = listener
+            .local_addr()
+            .expect("read reserved listener address")
+            .port();
+        drop(listener);
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        db.set_app_proxy_preferred_port("claude", preferred_port)
+            .expect("persist claude preferred proxy port");
         let service = ProxyService::new(db.clone());
 
         let provider_a = Provider::with_id(
@@ -3218,8 +7812,11 @@ base_url = "https://new.example/v1"
             .expect("save provider b");
         db.set_current_provider("claude", "a")
             .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some("a"))
+            .expect("set settings current provider");
 
-        db.save_live_backup("claude", "{\"env\":{}}")
+        let original_live = json!({"env":{"LOCAL_ONLY":"kept"}});
+        db.save_live_backup("claude", &original_live.to_string())
             .await
             .expect("seed live backup");
 
@@ -3238,8 +7835,186 @@ base_url = "https://new.example/v1"
             .await
             .expect("get live backup")
             .expect("backup exists");
-        let expected = serde_json::to_string(&provider_b.settings_config).expect("serialize");
-        assert_eq!(backup.original_config, expected);
+        let stored_backup: Value =
+            serde_json::from_str(&backup.original_config).expect("parse live backup");
+        assert_eq!(
+            stored_backup
+                .pointer("/env/ANTHROPIC_API_KEY")
+                .and_then(Value::as_str),
+            Some("b-key"),
+            "switching proxy target should refresh the restore backup to the selected provider"
+        );
+        assert_eq!(
+            stored_backup
+                .pointer("/env/LOCAL_ONLY")
+                .and_then(Value::as_str),
+            Some("kept"),
+            "switching proxy target should preserve local-only backup values"
+        );
+
+        let snapshot = db
+            .get_failover_live_snapshot("claude", "b")
+            .await
+            .expect("get failover snapshot")
+            .expect("snapshot exists");
+        let stored_snapshot: Value =
+            serde_json::from_str(&snapshot.config_json).expect("parse failover snapshot");
+        assert_eq!(
+            stored_snapshot
+                .pointer("/env/ANTHROPIC_API_KEY")
+                .and_then(Value::as_str),
+            Some("b-key")
+        );
+        assert_eq!(
+            stored_snapshot
+                .pointer("/env/LOCAL_ONLY")
+                .and_then(Value::as_str),
+            Some("kept")
+        );
+
+        let live = service.read_claude_live().expect("read Claude live config");
+        let env = env_object(&live);
+        assert_env_str(
+            env,
+            "ANTHROPIC_BASE_URL",
+            Some(format!("http://127.0.0.1:{preferred_port}").as_str()),
+        );
+        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "LOCAL_ONLY", Some("kept"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn hot_switch_provider_refreshes_claude_live_for_managed_account_provider() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("reserve free local port");
+        let preferred_port = listener
+            .local_addr()
+            .expect("read reserved listener address")
+            .port();
+        drop(listener);
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        db.set_app_proxy_preferred_port("claude", preferred_port)
+            .expect("persist claude preferred proxy port");
+        let service = ProxyService::new(db.clone());
+
+        let provider_a = Provider::with_id(
+            "a".to_string(),
+            "A".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "a-key",
+                    "ANTHROPIC_BASE_URL": "https://api.a.example",
+                    "ANTHROPIC_MODEL": "stale-provider-model"
+                },
+                "permissions": { "allow": ["Bash"] }
+            }),
+            None,
+        );
+        let mut provider_b = Provider::with_id(
+            "b".to_string(),
+            "Codex OAuth".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "provider-token-should-not-be-written",
+                    "ANTHROPIC_API_KEY": "provider-api-key-should-not-be-written",
+                    "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4-pro[1M]",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "GPT 5.4 Pro",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.4-ultra [1m]"
+                },
+                "permissions": { "allow": ["Read"] }
+            }),
+            None,
+        );
+        provider_b.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("claude", &provider_a)
+            .expect("save provider a");
+        db.save_provider("claude", &provider_b)
+            .expect("save provider b");
+        db.set_current_provider("claude", "a")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some("a"))
+            .expect("set settings current provider");
+        db.save_live_backup(
+            "claude",
+            &serde_json::to_string(&provider_a.settings_config).expect("serialize provider a"),
+        )
+        .await
+        .expect("seed live backup");
+        service
+            .write_claude_live(&json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": format!("http://127.0.0.1:{preferred_port}"),
+                    "ANTHROPIC_AUTH_TOKEN": PROXY_TOKEN_PLACEHOLDER,
+                    "ANTHROPIC_MODEL": "stale-model",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Stale Sonnet"
+                },
+                "permissions": { "allow": ["Bash"] }
+            }))
+            .expect("seed taken-over live file");
+
+        service
+            .hot_switch_provider("claude", "b")
+            .await
+            .expect("hot switch provider");
+
+        let live = service.read_claude_live().expect("read live config");
+        assert_eq!(
+            live.get("permissions"),
+            provider_b.settings_config.get("permissions"),
+            "provider-derived live settings should be refreshed"
+        );
+        let env = env_object(&live);
+        assert_env_str(
+            env,
+            "ANTHROPIC_BASE_URL",
+            Some(format!("http://127.0.0.1:{preferred_port}").as_str()),
+        );
+        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", None);
+        assert_env_str(env, "OPENROUTER_API_KEY", None);
+        assert_env_str(env, "OPENAI_API_KEY", None);
+        assert_env_str(env, "ANTHROPIC_MODEL", None);
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            Some("claude-haiku-4-5"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+            Some("gpt-5.4-mini"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            Some("claude-sonnet-4-6[1M]"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            Some("GPT 5.4 Pro"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            Some("claude-opus-4-8[1M]"),
+        );
+        assert_env_str(
+            env,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            Some("gpt-5.4-ultra"),
+        );
     }
 
     #[tokio::test]
@@ -3286,18 +8061,25 @@ base_url = "https://api.example/v1"
             .await
             .expect("restore codex live from current provider");
 
-        let auth: Value = read_json_file(&get_codex_auth_path()).expect("read codex auth.json");
-        assert_eq!(
-            auth.get("OPENAI_API_KEY").and_then(Value::as_str),
-            Some("codex-token"),
-            "Codex fallback restore should write auth.json from the current provider"
-        );
-
         let config_text =
             std::fs::read_to_string(get_codex_config_path()).expect("read codex config.toml");
         assert!(
             config_text.contains("disable_response_storage = true"),
             "Codex fallback restore should apply the common config snippet like upstream"
+        );
+        let parsed: toml::Value = toml::from_str(&config_text).expect("parse codex config.toml");
+        assert_eq!(
+            parsed
+                .get("model_providers")
+                .and_then(|v| v.get("default"))
+                .and_then(|v| v.get("experimental_bearer_token"))
+                .and_then(|v| v.as_str()),
+            Some("codex-token"),
+            "Codex fallback restore should move the provider token into config.toml"
+        );
+        assert!(
+            !get_codex_auth_path().exists(),
+            "custom provider restore should not create auth.json"
         );
     }
 }

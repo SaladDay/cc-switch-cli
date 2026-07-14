@@ -8,8 +8,8 @@ use serial_test::serial;
 use std::sync::Arc;
 
 use crate::helpers::{
-    bind_test_listener, handle_streaming_chat, record_upstream_request, wait_for_proxy_status,
-    UpstreamState,
+    bind_test_listener, handle_streaming_chat, record_upstream_request,
+    set_claude_proxy_port_to_ephemeral, wait_for_proxy_status, UpstreamState,
 };
 
 async fn handle_streaming_chat_priced(
@@ -141,15 +141,15 @@ async fn stream_openai_chat_logs_request_with_session_id_and_usage() {
         .await
         .expect("set default cost multiplier");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db.clone());
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
@@ -182,15 +182,16 @@ async fn stream_openai_chat_logs_request_with_session_id_and_usage() {
     assert_eq!(log_values[1], "claude-openai-chat-stream-log");
     assert_eq!(log_values[3], "gpt-5.2");
     assert_eq!(log_values[4], "claude-3-7-sonnet");
-    assert_eq!(log_values[5], "11");
-    assert_eq!(log_values[6], "7");
-    assert_eq!(log_values[9], "0.00001925");
-    assert_eq!(log_values[10], "0.000098");
-    assert_eq!(log_values[13], "0.0002345");
-    assert_eq!(log_values[17], "200");
-    assert_eq!(log_values[19], "claude-stream-session");
-    assert_eq!(log_values[21], "1");
-    assert_eq!(log_values[22], "2");
+    assert_eq!(log_values[5], "gpt-5.2");
+    assert_eq!(log_values[6], "11");
+    assert_eq!(log_values[7], "7");
+    assert_eq!(log_values[10], "0.00001925");
+    assert_eq!(log_values[11], "0.000098");
+    assert_eq!(log_values[14], "0.0002345");
+    assert_eq!(log_values[18], "200");
+    assert_eq!(log_values[20], "claude-stream-session");
+    assert_eq!(log_values[22], "1");
+    assert_eq!(log_values[23], "2");
 
     service.stop().await.expect("stop proxy service");
     upstream_handle.abort();
@@ -240,15 +241,15 @@ async fn proxy_claude_streaming_client_abort_counts_as_failure() {
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    set_claude_proxy_port_to_ephemeral(&db).await;
     let service = ProxyService::new(db);
+
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
-    service
-        .update_config(&config)
+    let proxy = service
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    let proxy = service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     let client = reqwest::Client::new();
     let mut response = client
         .post(format!(

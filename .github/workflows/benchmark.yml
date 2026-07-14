@@ -1,0 +1,88 @@
+name: Benchmark CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src-tauri/**"
+      - "scripts/benchmark_cc_switch.py"
+      - "scripts/check_benchmark_thresholds.py"
+      - ".github/workflows/benchmark.yml"
+  pull_request:
+    paths:
+      - "src-tauri/**"
+      - "scripts/benchmark_cc_switch.py"
+      - "scripts/check_benchmark_thresholds.py"
+      - ".github/workflows/benchmark.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TERM: xterm-256color
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+
+jobs:
+  benchmark:
+    name: Blocking operation benchmarks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.1
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: benchmark-ci
+
+      - name: Build release binary
+        working-directory: src-tauri
+        run: cargo build --release
+
+      - name: Run blocking benchmarks
+        run: |
+          python3 scripts/benchmark_cc_switch.py \
+            --binary src-tauri/target/release/cc-switch \
+            --operation-set ci-blocking \
+            --iterations 5 \
+            --warmup 1 \
+            --providers-per-app 12 \
+            --usage-rows 500 \
+            --sessions-per-app 8 \
+            --mcp-rows 4 \
+            --skill-rows 4 \
+            --redact-paths \
+            --fail-fast \
+            --json-output benchmark-results.json
+
+      - name: Check benchmark thresholds
+        run: |
+          python3 scripts/check_benchmark_thresholds.py \
+            benchmark-results.json \
+            --summary-output benchmark-summary.md
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            benchmark-results.json
+            benchmark-summary.md
+          if-no-files-found: warn

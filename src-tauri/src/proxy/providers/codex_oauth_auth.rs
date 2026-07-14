@@ -23,6 +23,7 @@ pub enum CodexOAuthError {
     #[error("等待用户授权中")]
     AuthorizationPending,
     #[error("用户拒绝授权")]
+    #[allow(dead_code)]
     AccessDenied,
     #[error("Device Code 已过期")]
     ExpiredToken,
@@ -492,6 +493,7 @@ impl CodexOAuthManager {
         self.resolve_default_account_id().await
     }
 
+    #[allow(dead_code)]
     pub async fn list_accounts(&self) -> Vec<ManagedAuthAccount> {
         let accounts = self.accounts.read().await.clone();
         let default_id = self.resolve_default_account_id().await;
@@ -548,6 +550,7 @@ impl CodexOAuthManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn is_authenticated(&self) -> bool {
         !self.accounts.read().await.is_empty()
     }

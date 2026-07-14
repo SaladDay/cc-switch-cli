@@ -18,20 +18,30 @@ impl App {
     }
 
     pub(crate) fn on_skills_installed_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        use crate::cli::tui::keymap::skills_installed::Intent;
+
         let visible = visible_skills_installed(&self.filter, data);
 
         match key.code {
             KeyCode::Up => {
                 self.skills_idx = self.skills_idx.saturating_sub(1);
-                Action::None
+                return Action::None;
             }
             KeyCode::Down => {
                 if !visible.is_empty() {
                     self.skills_idx = (self.skills_idx + 1).min(visible.len() - 1);
                 }
-                Action::None
+                return Action::None;
             }
-            KeyCode::Enter => {
+            _ => {}
+        }
+
+        let Some(intent) = crate::cli::tui::keymap::skills_installed::intent_for(key.code) else {
+            return Action::None;
+        };
+
+        match intent {
+            Intent::Details => {
                 let Some(skill) = visible.get(self.skills_idx) else {
                     return Action::None;
                 };
@@ -39,7 +49,7 @@ impl App {
                     directory: skill.directory.clone(),
                 })
             }
-            KeyCode::Char('x') | KeyCode::Char(' ') => {
+            Intent::Toggle => {
                 let Some(skill) = visible.get(self.skills_idx) else {
                     return Action::None;
                 };
@@ -49,7 +59,7 @@ impl App {
                     enabled,
                 }
             }
-            KeyCode::Char('m') => {
+            Intent::Apps => {
                 let Some(skill) = visible.get(self.skills_idx) else {
                     return Action::None;
                 };
@@ -61,7 +71,7 @@ impl App {
                 };
                 Action::None
             }
-            KeyCode::Char('d') => {
+            Intent::Uninstall => {
                 let Some(skill) = visible.get(self.skills_idx) else {
                     return Action::None;
                 };
@@ -77,9 +87,8 @@ impl App {
                 });
                 Action::None
             }
-            KeyCode::Char('i') => Action::SkillsOpenImport,
-            KeyCode::Char('f') => self.push_route_and_switch(Route::SkillsDiscover),
-            _ => Action::None,
+            Intent::Import => Action::SkillsOpenImport,
+            Intent::Discover => self.push_route_and_switch(Route::SkillsDiscover),
         }
     }
 
@@ -100,13 +109,50 @@ impl App {
             KeyCode::Char('f') => {
                 self.overlay = Overlay::TextInput(TextInputState {
                     title: texts::tui_skills_discover_title().to_string(),
-                    prompt: texts::tui_skills_discover_prompt().to_string(),
-                    buffer: self.skills_discover_query.clone(),
+                    prompt: if matches!(
+                        self.skills_discover_source,
+                        SkillsDiscoverSource::Marketplace
+                    ) {
+                        texts::tui_skills_skillssh_search_prompt().to_string()
+                    } else {
+                        texts::tui_skills_discover_prompt().to_string()
+                    },
+                    input: TextInput::new(self.skills_discover_query.clone()),
                     submit: TextSubmit::SkillsDiscoverQuery,
                     secret: false,
                 });
                 Action::None
             }
+            KeyCode::Tab => {
+                self.skills_discover_source = self.skills_discover_source.toggled();
+                self.skills_discover_idx = 0;
+                let cache_key = (
+                    self.skills_discover_source,
+                    self.skills_discover_query.trim().to_lowercase(),
+                );
+                if let Some(skills) = self.skills_discover_cache.get(&cache_key) {
+                    self.skills_discover_results = skills.clone();
+                    self.skills_discover_loading = false;
+                    return Action::None;
+                }
+
+                self.skills_discover_results.clear();
+                self.skills_discover_loading = false;
+                if matches!(self.skills_discover_source, SkillsDiscoverSource::Repos) {
+                    Action::SkillsDiscover {
+                        query: self.skills_discover_query.clone(),
+                        source: self.skills_discover_source,
+                        force: false,
+                    }
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Char('r') => Action::SkillsDiscover {
+                query: self.skills_discover_query.clone(),
+                source: self.skills_discover_source,
+                force: true,
+            },
             KeyCode::Enter => {
                 let visible = visible_skills_discover(&self.filter, &self.skills_discover_results);
                 let Some(skill) = visible.get(self.skills_discover_idx) else {
@@ -120,7 +166,7 @@ impl App {
                     spec: skill.key.clone(),
                 }
             }
-            KeyCode::Char('r') => self.push_route_and_switch(Route::SkillsRepos),
+            KeyCode::Char('e') => self.push_route_and_switch(Route::SkillsRepos),
             _ => Action::None,
         }
     }
@@ -142,7 +188,7 @@ impl App {
                 self.overlay = Overlay::TextInput(TextInputState {
                     title: texts::tui_skills_repos_add_title().to_string(),
                     prompt: texts::tui_skills_repos_add_prompt().to_string(),
-                    buffer: String::new(),
+                    input: TextInput::new(""),
                     submit: TextSubmit::SkillsRepoAdd,
                     secret: false,
                 });
@@ -162,7 +208,7 @@ impl App {
                 });
                 Action::None
             }
-            KeyCode::Char('x') | KeyCode::Char(' ') => {
+            KeyCode::Char(' ') => {
                 let Some(repo) = visible.get(self.skills_repo_idx) else {
                     return Action::None;
                 };
@@ -192,7 +238,7 @@ impl App {
         };
 
         match key.code {
-            KeyCode::Char('x') | KeyCode::Char(' ') => Action::SkillsToggle {
+            KeyCode::Char(' ') => Action::SkillsToggle {
                 directory: skill.directory.clone(),
                 enabled: !skill.apps.is_enabled_for(&self.app_type),
             },

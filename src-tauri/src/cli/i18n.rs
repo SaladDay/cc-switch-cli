@@ -1,3 +1,8 @@
+#![expect(
+    clippy::if_same_then_else,
+    reason = "generated i18n accessors may share text across locales"
+)]
+
 use crate::settings::{get_settings, update_settings};
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -194,6 +199,17 @@ pub mod texts {
         }
     }
 
+    pub fn provider_duplicated_success(source_id: &str, duplicate_id: &str) -> String {
+        if is_chinese() {
+            format!("✓ 已复制供应商 '{}' 为 '{}'", source_id, duplicate_id)
+        } else {
+            format!(
+                "✓ Duplicated provider '{}' as '{}'",
+                source_id, duplicate_id
+            )
+        }
+    }
+
     pub fn entity_not_found(entity_type: &str, id: &str) -> String {
         if is_chinese() {
             format!("{}不存在: {}", entity_type, id)
@@ -249,9 +265,9 @@ pub mod texts {
     // Welcome & Headers
     pub fn welcome_title() -> &'static str {
         if is_chinese() {
-            "    🎯 CC-Switch 交互模式"
+            "🎯 CC-Switch 交互模式"
         } else {
-            "    🎯 CC-Switch Interactive Mode"
+            "🎯 CC-Switch Interactive Mode"
         }
     }
 
@@ -437,9 +453,9 @@ pub mod texts {
 
     pub fn tui_footer_global() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  ←→ 切换菜单/内容  ↑↓ 移动  Enter 详情  s 切换  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用  ←→ 切换菜单/内容  ↑↓ 移动  Enter 详情  Space 切换  / 过滤  Esc 返回  ? 帮助"
         } else {
-            "[ ] switch app  ←→ focus menu/content  ↑↓ move  Enter details  s switch  / filter  Esc back  ? help"
+            "[ ] switch app  ←→ focus menu/content  ↑↓ move  Enter details  Space switch  / filter  Esc back  ? help"
         }
     }
 
@@ -469,9 +485,9 @@ pub mod texts {
 
     pub fn tui_footer_action_keys() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Enter 详情  s 切换  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用  Enter 详情  Space 切换  / 过滤  Esc 返回  ? 帮助"
         } else {
-            "[ ] switch app  Enter details  s switch  / filter  Esc back  ? help"
+            "[ ] switch app  Enter details  Space switch  / filter  Esc back  ? help"
         }
     }
 
@@ -485,17 +501,9 @@ pub mod texts {
 
     pub fn tui_footer_action_keys_providers() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Enter 详情  s 切换  a 添加  e 编辑  d 删除  t 测速  c 健康检查  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用  Space 切换  a 新增  e 编辑  d 删除  t 测试  r 刷新  o 临时启动  f 管理故障转移  x 设为默认  / 过滤  Esc 返回  ? 帮助"
         } else {
-            "[ ] switch app  Enter details  s switch  a add  e edit  d delete  t speedtest  c stream check  / filter  Esc back  ? help"
-        }
-    }
-
-    pub fn tui_footer_action_keys_provider_detail() -> &'static str {
-        if is_chinese() {
-            "[ ] 切换应用  s 切换  e 编辑  t 测速  c 健康检查  / 过滤  Esc 返回  ? 帮助"
-        } else {
-            "[ ] switch app  s switch  e edit  t speedtest  c stream check  / filter  Esc back  ? help"
+            "[ ] switch app  Space switch  a add  e edit  d delete  t test  r refresh  o launch temp  f manage failover  x set default  / filter  Esc back  ? help"
         }
     }
 
@@ -509,9 +517,9 @@ pub mod texts {
 
     pub fn tui_footer_action_keys_prompts() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Enter 查看  a 激活  x 取消激活  e 编辑  d 删除  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用  Space 启用/禁用  a 新增  Enter 查看  e 编辑  d 删除  / 过滤  Esc 返回  ? 帮助"
         } else {
-            "[ ] switch app  Enter view  a activate  x deactivate  e edit  d delete  / filter  Esc back  ? help"
+            "[ ] switch app  Space toggle  a add  Enter view  e edit  d delete  / filter  Esc back  ? help"
         }
     }
 
@@ -563,11 +571,60 @@ pub mod texts {
         }
     }
 
-    pub fn tui_help_text() -> &'static str {
+    /// The static top of the help sheet: global keys, the text-input line,
+    /// and the "Page keys" header. The per-page key lines below it are
+    /// generated from the keymap registry (see `cli::tui::help`), except the
+    /// static bullets returned by the `tui_help_line_*` functions.
+    pub fn tui_help_prelude() -> &'static str {
         if is_chinese() {
-            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n页面快捷键（在页面内容区顶部显示）：\n- 供应商：Enter 详情，s 切换/添加移除，a 添加，e 编辑，d 删除，t 测速，c 健康检查\n- 供应商详情：s 切换/添加移除，e 编辑，t 测速，c 健康检查\n- MCP：x 启用/禁用(当前应用)，m 选择应用，a 添加，e 编辑，i 导入已有，d 删除\n- 提示词：Enter 查看，a 激活，x 取消激活(当前)，e 编辑，d 删除\n- 技能：Enter 详情，x 启用/禁用(当前应用)，m 选择应用，d 卸载，i 导入已有\n- 配置：Enter 打开/执行，e 编辑片段\n- 设置：Enter 应用"
+            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓ 或 h/j/k/l  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n文本输入：Ctrl+A/E 行首/行尾，Ctrl+U/K 删除行片段，Ctrl+W 删除前词，Alt+B/F 按词移动\n\n页面快捷键（在页面内容区顶部显示）："
         } else {
-            "[ ]  switch app\n←→  focus menu/content\n↑↓  move\n/   filter\nEsc  back\n?   toggle help\n\nPage keys (shown at the top of each page):\n- Providers: Enter details, s switch/add-remove, a add, e edit, d delete, t speedtest, c stream check\n- Provider Detail: s switch/add-remove, e edit, t speedtest, c stream check\n- MCP: x toggle current, m select apps, a add, e edit, i import existing, d delete\n- Prompts: Enter view, a activate, x deactivate active, e edit, d delete\n- Skills: Enter details, x toggle current, m select apps, d uninstall, i import existing\n- Config: Enter open/run, e edit snippet\n- Settings: Enter apply"
+            "[ ]  switch app\n←→  focus menu/content\n↑↓ or h/j/k/l  move\n/   filter\nEsc  back\n?   toggle help\n\nText input: Ctrl+A/E move line, Ctrl+U/K delete line parts, Ctrl+W delete word, Alt+B/F move word\n\nPage keys (shown at the top of each page):"
+        }
+    }
+
+    /// The Providers help line (without the leading "- "). Kept hand-written
+    /// because it carries app-scope annotations ("(OpenClaw)" etc.) that the
+    /// keymap labels do not, and its keys are app-conditional.
+    pub fn tui_help_line_providers(app_type: &crate::app_config::AppType) -> &'static str {
+        if matches!(app_type, crate::app_config::AppType::Hermes) {
+            if is_chinese() {
+                "供应商：Space 添加/移除，Enter/e 编辑，a 新增，c 复制，d 删除，t 测试，r 刷新，x 启用"
+            } else {
+                "Providers: Space add/remove, Enter/e edit, a add, c copy, d delete, t test, r refresh, x enable"
+            }
+        } else if is_chinese() {
+            "供应商：Space 切换，Enter/e 编辑，a 新增，c 复制，d 删除，t 测试，r 刷新，o 临时启动(Claude/Codex)，f 管理故障转移(Claude/Codex/Gemini)，x 设为默认(OpenClaw)"
+        } else {
+            "Providers: Space switch, Enter/e edit, a add, c copy, d delete, t test, r refresh, o launch temp (Claude/Codex), f manage failover (Claude/Codex/Gemini), x set default (OpenClaw)"
+        }
+    }
+
+    /// The Hermes-only Memory help line (without the leading "- ").
+    pub fn tui_help_line_memory() -> &'static str {
+        if is_chinese() {
+            "记忆管理：Enter 编辑，Space/x 启用/禁用，o 打开目录"
+        } else {
+            "Memory: Enter edit, Space/x toggle, o open directory"
+        }
+    }
+
+    /// The Config help line (without the leading "- "). Config has no keymap
+    /// module yet, so it stays static.
+    pub fn tui_help_line_config() -> &'static str {
+        if is_chinese() {
+            "配置：Enter 打开/执行，e 编辑片段"
+        } else {
+            "Config: Enter open/run, e edit snippet"
+        }
+    }
+
+    /// The Settings help line (without the leading "- ").
+    pub fn tui_help_line_settings() -> &'static str {
+        if is_chinese() {
+            "设置：Enter 应用"
+        } else {
+            "Settings: Enter apply"
         }
     }
 
@@ -629,6 +686,10 @@ pub mod texts {
 
     pub fn tui_editor_json_field_title() -> &'static str {
         "JSON"
+    }
+
+    pub fn tui_editor_toml_field_title() -> &'static str {
+        "TOML"
     }
 
     pub fn tui_editor_hint_view() -> &'static str {
@@ -695,11 +756,11 @@ pub mod texts {
         }
     }
 
-    pub fn tui_main_hint() -> &'static str {
+    pub fn tui_provider_test_menu_title() -> &'static str {
         if is_chinese() {
-            "使用左侧菜单（↑↓ + Enter）。←→ 在菜单与内容间切换焦点。"
+            "测试"
         } else {
-            "Use the left menu (↑↓ + Enter). ←→ switches focus between menu and content."
+            "Test"
         }
     }
 
@@ -709,6 +770,18 @@ pub mod texts {
         } else {
             format!("Proxy: {}", if enabled { "On" } else { "Off" })
         }
+    }
+
+    pub fn tui_header_proxy_status_with_failover(enabled: bool, failover_enabled: bool) -> String {
+        let mut text = tui_header_proxy_status(enabled);
+        if enabled && failover_enabled {
+            if is_chinese() {
+                text.push_str(" · 故障转移");
+            } else {
+                text.push_str(" · Failover");
+            }
+        }
+        text
     }
 
     pub fn tui_header_config_error() -> &'static str {
@@ -1179,6 +1252,30 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_provider_proxy() -> &'static str {
+        if is_chinese() {
+            "代理"
+        } else {
+            "Proxy"
+        }
+    }
+
+    pub fn tui_provider_needs_proxy_label() -> &'static str {
+        if is_chinese() {
+            "需要代理"
+        } else {
+            "Needs Proxy"
+        }
+    }
+
+    pub fn tui_provider_no_proxy_support_label() -> &'static str {
+        if is_chinese() {
+            "不支持代理"
+        } else {
+            "No Proxy Support"
+        }
+    }
+
     pub fn tui_quota_loading() -> &'static str {
         if is_chinese() {
             "查询中…"
@@ -1264,6 +1361,16 @@ pub mod texts {
             "刚刚"
         } else {
             "just now"
+        }
+    }
+
+    pub fn tui_quota_seconds_ago(count: i64) -> String {
+        if is_chinese() {
+            format!("{count} 秒前")
+        } else if count == 1 {
+            "1 second ago".to_string()
+        } else {
+            format!("{count} seconds ago")
         }
     }
 
@@ -1497,6 +1604,229 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_local_proxy_settings() -> &'static str {
+        if is_chinese() {
+            "本地代理设置"
+        } else {
+            "Local Proxy Settings"
+        }
+    }
+
+    pub fn tui_local_proxy_settings_summary(
+        custom_ua: bool,
+        headers: usize,
+        body_fields: usize,
+    ) -> String {
+        let mut parts = Vec::new();
+        if custom_ua {
+            parts.push("User-Agent".to_string());
+        }
+        if headers > 0 {
+            if is_chinese() {
+                parts.push(format!("{headers} 个 Header"));
+            } else if headers == 1 {
+                parts.push("1 header".to_string());
+            } else {
+                parts.push(format!("{headers} headers"));
+            }
+        }
+        if body_fields > 0 {
+            if is_chinese() {
+                parts.push(format!("{body_fields} 个 Body 字段"));
+            } else if body_fields == 1 {
+                parts.push("1 body field".to_string());
+            } else {
+                parts.push(format!("{body_fields} body fields"));
+            }
+        }
+
+        if parts.is_empty() {
+            if is_chinese() {
+                "未配置".to_string()
+            } else {
+                "Not configured".to_string()
+            }
+        } else {
+            parts.join(" · ")
+        }
+    }
+
+    pub fn tui_label_custom_user_agent() -> &'static str {
+        if is_chinese() {
+            "自定义 User-Agent"
+        } else {
+            "Custom User-Agent"
+        }
+    }
+
+    pub fn tui_user_agent_picker_title() -> &'static str {
+        if is_chinese() {
+            "选择 User-Agent"
+        } else {
+            "Select User-Agent"
+        }
+    }
+
+    pub fn tui_user_agent_custom_option() -> &'static str {
+        if is_chinese() {
+            "自定义…"
+        } else {
+            "Custom..."
+        }
+    }
+
+    pub fn tui_user_agent_no_override_option() -> &'static str {
+        if is_chinese() {
+            "不覆盖"
+        } else {
+            "Do not override"
+        }
+    }
+
+    pub fn tui_user_agent_presets_heading() -> &'static str {
+        if is_chinese() {
+            "预设"
+        } else {
+            "Presets"
+        }
+    }
+
+    pub fn tui_user_agent_invalid_hint() -> &'static str {
+        if is_chinese() {
+            "User-Agent 不能包含控制字符（如换行符）"
+        } else {
+            "User-Agent must not contain control characters (e.g. line breaks)"
+        }
+    }
+
+    pub fn tui_label_local_proxy_header_overrides() -> &'static str {
+        if is_chinese() {
+            "Header 覆盖"
+        } else {
+            "Header Overrides"
+        }
+    }
+
+    pub fn tui_label_local_proxy_body_overrides() -> &'static str {
+        if is_chinese() {
+            "Body 覆盖"
+        } else {
+            "Body Overrides"
+        }
+    }
+
+    pub fn tui_local_proxy_headers_summary(count: usize) -> String {
+        if count == 0 {
+            if is_chinese() {
+                "未配置".to_string()
+            } else {
+                "Not configured".to_string()
+            }
+        } else if is_chinese() {
+            format!("{count} 个 Header")
+        } else if count == 1 {
+            "1 header".to_string()
+        } else {
+            format!("{count} headers")
+        }
+    }
+
+    pub fn tui_local_proxy_body_summary(count: usize) -> String {
+        if count == 0 {
+            if is_chinese() {
+                "未配置".to_string()
+            } else {
+                "Not configured".to_string()
+            }
+        } else if is_chinese() {
+            format!("{count} 个字段")
+        } else if count == 1 {
+            "1 field".to_string()
+        } else {
+            format!("{count} fields")
+        }
+    }
+
+    pub fn tui_local_proxy_headers_editor_title() -> &'static str {
+        if is_chinese() {
+            "编辑 Header 覆盖"
+        } else {
+            "Edit Header Overrides"
+        }
+    }
+
+    pub fn tui_local_proxy_body_editor_title() -> &'static str {
+        if is_chinese() {
+            "编辑 Body 覆盖"
+        } else {
+            "Edit Body Overrides"
+        }
+    }
+
+    pub fn tui_override_json_not_object() -> &'static str {
+        if is_chinese() {
+            "JSON 必须是对象"
+        } else {
+            "JSON must be an object"
+        }
+    }
+
+    pub fn tui_override_header_empty_name() -> &'static str {
+        if is_chinese() {
+            "Header 名称不能为空"
+        } else {
+            "Header name must not be empty"
+        }
+    }
+
+    pub fn tui_override_header_invalid_name(name: &str) -> String {
+        if is_chinese() {
+            format!("Header \"{name}\" 的名称不是有效的 HTTP token")
+        } else {
+            format!("Header \"{name}\" name is not a valid HTTP token")
+        }
+    }
+
+    pub fn tui_override_header_non_string(name: &str) -> String {
+        if is_chinese() {
+            format!("Header \"{name}\" 的值必须是字符串")
+        } else {
+            format!("Header \"{name}\" value must be a string")
+        }
+    }
+
+    pub fn tui_override_header_control_chars(name: &str) -> String {
+        if is_chinese() {
+            format!("Header \"{name}\" 的值不能包含控制字符")
+        } else {
+            format!("Header \"{name}\" value must not contain control characters")
+        }
+    }
+
+    pub fn tui_override_header_duplicate(name: &str) -> String {
+        if is_chinese() {
+            format!("Header \"{name}\" 与另一个 Header 规范化后的名称重复")
+        } else {
+            format!("Header \"{name}\" duplicates another header after case normalization")
+        }
+    }
+
+    pub fn tui_override_header_protected(name: &str) -> String {
+        if is_chinese() {
+            format!("Header \"{name}\" 由本地代理管理，不能覆盖")
+        } else {
+            format!("Header \"{name}\" is managed by the local proxy and cannot be overridden")
+        }
+    }
+
+    pub fn tui_override_body_stream_protected() -> &'static str {
+        if is_chinese() {
+            "Body 覆盖不能包含协议字段 \"stream\""
+        } else {
+            "Body override must not include protocol field \"stream\""
+        }
+    }
+
     pub fn tui_label_claude_api_format() -> &'static str {
         if is_chinese() {
             "API 格式"
@@ -1521,11 +1851,37 @@ pub mod texts {
                     "OpenAI Responses API (Requires proxy)"
                 }
             }
+            "gemini_native" => {
+                if is_chinese() {
+                    "Gemini Native generateContent (需开启代理)"
+                } else {
+                    "Gemini Native generateContent (Requires proxy)"
+                }
+            }
             _ => {
                 if is_chinese() {
                     "Anthropic Messages (原生)"
                 } else {
                     "Anthropic Messages (Native)"
+                }
+            }
+        }
+    }
+
+    pub fn tui_codex_api_format_value(api_format: &str) -> &'static str {
+        match api_format {
+            "openai_chat" => {
+                if is_chinese() {
+                    "OpenAI Chat Completions (需本地路由)"
+                } else {
+                    "OpenAI Chat Completions (Local routing)"
+                }
+            }
+            _ => {
+                if is_chinese() {
+                    "OpenAI Responses API (原生)"
+                } else {
+                    "OpenAI Responses API (Native)"
                 }
             }
         }
@@ -1548,6 +1904,176 @@ pub mod texts {
         }
     }
 
+    pub fn tui_codex_api_format_requires_proxy_message(api_format: &str) -> String {
+        let label = tui_codex_api_format_value(api_format);
+        if is_chinese() {
+            format!(
+                "已切换为 {label}。\n该格式需要本地路由映射。\n使用此供应商时请保持本地代理开启。"
+            )
+        } else {
+            format!("Switched to {label}.\nThis format requires local route mapping.\nKeep the local proxy enabled while using this provider.")
+        }
+    }
+
+    pub fn tui_label_codex_local_routing() -> &'static str {
+        if is_chinese() {
+            "本地路由"
+        } else {
+            "Local Routing"
+        }
+    }
+
+    pub fn tui_label_codex_upstream_format() -> &'static str {
+        if is_chinese() {
+            "上游格式"
+        } else {
+            "Upstream format"
+        }
+    }
+
+    pub fn tui_label_codex_model_mapping() -> &'static str {
+        if is_chinese() {
+            "模型映射"
+        } else {
+            "Model mapping"
+        }
+    }
+
+    pub fn tui_codex_local_routing_title(provider: &str) -> String {
+        let title = tui_label_codex_local_routing();
+        if provider.trim().is_empty() {
+            title.to_string()
+        } else {
+            format!("{title} - {provider}")
+        }
+    }
+
+    pub fn tui_codex_local_routing_enable() -> &'static str {
+        if is_chinese() {
+            "需要本地路由映射"
+        } else {
+            "Needs local routing mapping"
+        }
+    }
+
+    pub fn tui_toggle_on() -> &'static str {
+        if is_chinese() {
+            "打开"
+        } else {
+            "On"
+        }
+    }
+
+    pub fn tui_toggle_off() -> &'static str {
+        if is_chinese() {
+            "关闭"
+        } else {
+            "Off"
+        }
+    }
+
+    pub fn tui_codex_reasoning_supports_thinking() -> &'static str {
+        if is_chinese() {
+            "支持思考模式"
+        } else {
+            "Supports Thinking"
+        }
+    }
+
+    pub fn tui_codex_reasoning_supports_effort() -> &'static str {
+        if is_chinese() {
+            "支持思考等级"
+        } else {
+            "Supports Reasoning Effort"
+        }
+    }
+
+    pub fn tui_codex_model_catalog() -> &'static str {
+        if is_chinese() {
+            "模型映射"
+        } else {
+            "Model Mapping"
+        }
+    }
+
+    pub fn tui_codex_model_catalog_title(provider: &str) -> String {
+        if is_chinese() {
+            if provider.trim().is_empty() {
+                "模型映射".to_string()
+            } else {
+                format!("模型映射 - {provider}")
+            }
+        } else if provider.trim().is_empty() {
+            "Model Mapping".to_string()
+        } else {
+            format!("Model Mapping - {provider}")
+        }
+    }
+
+    pub fn tui_codex_model_catalog_model_header() -> &'static str {
+        if is_chinese() {
+            "模型"
+        } else {
+            "Model"
+        }
+    }
+
+    pub fn tui_codex_model_catalog_display_header() -> &'static str {
+        if is_chinese() {
+            "显示名称"
+        } else {
+            "Display"
+        }
+    }
+
+    pub fn tui_codex_model_catalog_context_header() -> &'static str {
+        if is_chinese() {
+            "上下文"
+        } else {
+            "Context"
+        }
+    }
+
+    pub fn tui_codex_model_catalog_empty() -> &'static str {
+        if is_chinese() {
+            "暂无模型映射"
+        } else {
+            "No model mappings"
+        }
+    }
+
+    pub fn tui_codex_model_catalog_model_prompt() -> &'static str {
+        if is_chinese() {
+            "模型 ID"
+        } else {
+            "Model ID"
+        }
+    }
+
+    pub fn tui_codex_model_catalog_display_prompt() -> &'static str {
+        if is_chinese() {
+            "显示名称"
+        } else {
+            "Display Name"
+        }
+    }
+
+    pub fn tui_codex_model_catalog_context_prompt() -> &'static str {
+        if is_chinese() {
+            "上下文窗口"
+        } else {
+            "Context Window"
+        }
+    }
+
+    pub fn tui_codex_model_catalog_preview_title() -> &'static str {
+        if is_chinese() {
+            "模型映射"
+        } else {
+            "Model Mapping"
+        }
+    }
+
     pub fn tui_claude_api_format_popup_title() -> &'static str {
         if is_chinese() {
             "API 格式"
@@ -1558,9 +2084,113 @@ pub mod texts {
 
     pub fn tui_label_claude_model_config() -> &'static str {
         if is_chinese() {
-            "Claude 模型配置"
+            "模型映射"
         } else {
-            "Claude Model Config"
+            "Model Mapping"
+        }
+    }
+
+    pub fn tui_label_claude_fallback_model() -> &'static str {
+        if is_chinese() {
+            "默认兜底模型"
+        } else {
+            "Default fallback model"
+        }
+    }
+
+    pub fn tui_label_claude_quick_config() -> &'static str {
+        if is_chinese() {
+            "快捷配置菜单"
+        } else {
+            "Quick Config Menu"
+        }
+    }
+
+    pub fn tui_claude_quick_config_summary(enabled: usize) -> String {
+        if is_chinese() {
+            format!("已启用 {}/4", enabled)
+        } else {
+            format!("{}/4 enabled", enabled)
+        }
+    }
+
+    pub fn tui_label_codex_quick_config() -> &'static str {
+        if is_chinese() {
+            "快捷配置菜单"
+        } else {
+            "Quick Config Menu"
+        }
+    }
+
+    pub fn tui_codex_quick_config_summary(enabled: usize, total: usize) -> String {
+        if is_chinese() {
+            format!("已启用 {}/{}", enabled, total)
+        } else {
+            format!("{}/{} enabled", enabled, total)
+        }
+    }
+
+    pub fn tui_label_codex_goal_mode() -> &'static str {
+        if is_chinese() {
+            "启用 Goal mode"
+        } else {
+            "Enable Goal mode"
+        }
+    }
+
+    pub fn tui_label_codex_remote_compaction() -> &'static str {
+        if is_chinese() {
+            "启用远程压缩"
+        } else {
+            "Enable remote compaction"
+        }
+    }
+
+    pub fn tui_label_claude_hide_attribution() -> &'static str {
+        if is_chinese() {
+            "隐藏 AI 署名"
+        } else {
+            "Hide AI Attribution"
+        }
+    }
+
+    pub fn tui_label_claude_teammates() -> &'static str {
+        if is_chinese() {
+            "Teammates 模式"
+        } else {
+            "Teammates Mode"
+        }
+    }
+
+    pub fn tui_label_claude_tool_search() -> &'static str {
+        if is_chinese() {
+            "启用 Tool Search"
+        } else {
+            "Enable Tool Search"
+        }
+    }
+
+    pub fn tui_label_claude_disable_auto_upgrade() -> &'static str {
+        if is_chinese() {
+            "禁用自动升级"
+        } else {
+            "Disable Auto-Upgrade"
+        }
+    }
+
+    pub fn tui_label_chatgpt_account() -> &'static str {
+        if is_chinese() {
+            "ChatGPT 账号"
+        } else {
+            "ChatGPT Account"
+        }
+    }
+
+    pub fn tui_label_codex_fast_mode() -> &'static str {
+        if is_chinese() {
+            "FAST 模式"
+        } else {
+            "FAST mode"
         }
     }
 
@@ -1593,6 +2223,127 @@ pub mod texts {
             "模型列表"
         } else {
             "Models"
+        }
+    }
+
+    pub fn tui_label_hermes_api_mode() -> &'static str {
+        if is_chinese() {
+            "API 模式"
+        } else {
+            "API Mode"
+        }
+    }
+
+    pub fn tui_label_hermes_provider_key() -> &'static str {
+        if is_chinese() {
+            "供应商标识"
+        } else {
+            "Provider Key"
+        }
+    }
+
+    pub fn tui_label_hermes_base_url() -> &'static str {
+        if is_chinese() {
+            "API 端点"
+        } else {
+            "API Endpoint"
+        }
+    }
+
+    pub fn tui_label_hermes_models() -> &'static str {
+        if is_chinese() {
+            "模型列表"
+        } else {
+            "Models"
+        }
+    }
+
+    pub fn tui_label_hermes_rate_limit_delay() -> &'static str {
+        if is_chinese() {
+            "请求间隔（秒）"
+        } else {
+            "Rate limit delay (seconds)"
+        }
+    }
+
+    pub fn tui_hint_hermes_rate_limit_delay() -> &'static str {
+        if is_chinese() {
+            "连续请求间的最小间隔秒数（可选）。留空表示无限制。"
+        } else {
+            "Minimum delay in seconds between consecutive requests (optional). Leave empty for no limit."
+        }
+    }
+
+    pub fn tui_hermes_rate_limit_delay_invalid() -> &'static str {
+        if is_chinese() {
+            "请求间隔必须是大于等于 0 的数字"
+        } else {
+            "Rate limit delay must be a number greater than or equal to 0"
+        }
+    }
+
+    pub fn tui_hermes_provider_key_invalid() -> &'static str {
+        if is_chinese() {
+            "供应商标识只能包含小写字母、数字和连字符"
+        } else {
+            "Provider key can only contain lowercase letters, numbers, and hyphens"
+        }
+    }
+
+    pub fn tui_hermes_base_url_required() -> &'static str {
+        if is_chinese() {
+            "API 端点不能为空"
+        } else {
+            "API endpoint is required"
+        }
+    }
+
+    pub fn tui_hermes_base_url_scheme() -> &'static str {
+        if is_chinese() {
+            "请使用 http:// 或 https:// 开头的地址"
+        } else {
+            "Use an http:// or https:// address"
+        }
+    }
+
+    pub fn tui_hermes_base_url_invalid() -> &'static str {
+        if is_chinese() {
+            "API 端点不是有效的 URL"
+        } else {
+            "API endpoint is not a valid URL"
+        }
+    }
+
+    pub fn tui_hermes_api_mode_value(api_mode: &str) -> &'static str {
+        match api_mode {
+            "codex_responses" => {
+                if is_chinese() {
+                    "OpenAI Responses"
+                } else {
+                    "OpenAI Responses"
+                }
+            }
+            "anthropic_messages" => {
+                if is_chinese() {
+                    "Anthropic Messages"
+                } else {
+                    "Anthropic Messages"
+                }
+            }
+            "bedrock_converse" => {
+                if is_chinese() {
+                    "AWS Bedrock Converse"
+                } else {
+                    "AWS Bedrock Converse"
+                }
+            }
+            _ => {
+                if is_chinese() {
+                    "OpenAI Chat Completions"
+                } else {
+                    "OpenAI Chat Completions"
+                }
+            }
         }
     }
 
@@ -1668,6 +2419,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_provider_status_in_use() -> &'static str {
+        if is_chinese() {
+            "已在用"
+        } else {
+            "in use"
+        }
+    }
+
     pub fn tui_openclaw_status_in_config_and_saved() -> &'static str {
         if is_chinese() {
             "配置中 + 已保存"
@@ -1736,11 +2495,244 @@ pub mod texts {
         }
     }
 
+    pub fn tui_hermes_models_summary(total: usize) -> String {
+        if is_chinese() {
+            if total == 0 {
+                "未配置模型".to_string()
+            } else {
+                format!("已配置 {total} 个模型")
+            }
+        } else if total == 0 {
+            "No models configured".to_string()
+        } else {
+            format!("{total} models configured")
+        }
+    }
+
+    pub fn tui_hermes_models_open_hint() -> &'static str {
+        if is_chinese() {
+            "Enter 编辑模型列表"
+        } else {
+            "Enter to edit models"
+        }
+    }
+
+    pub fn tui_hermes_models_title(provider_name: &str) -> String {
+        let name = provider_name.trim();
+        if is_chinese() {
+            if name.is_empty() {
+                "Hermes 模型列表".to_string()
+            } else {
+                format!("Hermes 模型列表: {name}")
+            }
+        } else if name.is_empty() {
+            "Hermes Models".to_string()
+        } else {
+            format!("Hermes Models: {name}")
+        }
+    }
+
+    pub fn tui_hermes_models_no_models() -> &'static str {
+        if is_chinese() {
+            "暂无模型配置。切换到此供应商时将不会更新默认模型。"
+        } else {
+            "No models configured. Switching to this provider won't change the default model."
+        }
+    }
+
+    pub fn tui_hermes_models_hint() -> &'static str {
+        if is_chinese() {
+            "切换到此供应商时，第一个模型会写入顶层 model.default。"
+        } else {
+            "On switch, the first model is written to top-level model.default."
+        }
+    }
+
+    pub fn tui_hermes_model_id_label(index: usize) -> String {
+        if is_chinese() {
+            if index == 1 {
+                format!("模型 {index} ID（默认模型）")
+            } else {
+                format!("模型 {index} ID（备选模型）")
+            }
+        } else if index == 1 {
+            format!("Model {index} ID (Default)")
+        } else {
+            format!("Model {index} ID (Alternate)")
+        }
+    }
+
+    pub fn tui_hermes_model_name_label(index: usize) -> String {
+        if is_chinese() {
+            format!("模型 {index} 显示名称")
+        } else {
+            format!("Model {index} Display Name")
+        }
+    }
+
+    pub fn tui_hermes_model_context_length_label(index: usize) -> String {
+        if is_chinese() {
+            format!("模型 {index} 上下文长度")
+        } else {
+            format!("Model {index} Context Length")
+        }
+    }
+
+    pub fn tui_hermes_models_fetch_hint() -> &'static str {
+        if is_chinese() {
+            "获取模型列表后，可在当前模型 ID 行选择模型"
+        } else {
+            "Fetch models, then select a model for the current model ID row"
+        }
+    }
+
+    pub fn tui_hermes_models_add_hint() -> &'static str {
+        if is_chinese() {
+            "添加一个空模型行"
+        } else {
+            "Add an empty model row"
+        }
+    }
+
+    pub fn tui_model_fetch_need_config() -> &'static str {
+        if is_chinese() {
+            "请先填写 API 端点和 API Key"
+        } else {
+            "Please fill in API endpoint and API Key first"
+        }
+    }
+
+    pub fn tui_model_fetch_need_api_key() -> &'static str {
+        if is_chinese() {
+            "请先填写 API Key"
+        } else {
+            "Please fill in API Key first"
+        }
+    }
+
+    pub fn tui_model_fetch_need_endpoint() -> &'static str {
+        if is_chinese() {
+            "请先填写 API 端点"
+        } else {
+            "Please fill in API endpoint first"
+        }
+    }
+
+    pub fn tui_hermes_memory_title() -> &'static str {
+        if is_chinese() {
+            "Hermes 记忆管理"
+        } else {
+            "Hermes Memory"
+        }
+    }
+
+    pub fn tui_hermes_memory_agent_tab() -> &'static str {
+        if is_chinese() {
+            "Agent 记忆"
+        } else {
+            "Agent Memory"
+        }
+    }
+
+    pub fn tui_hermes_memory_user_tab() -> &'static str {
+        if is_chinese() {
+            "用户记忆"
+        } else {
+            "User Memory"
+        }
+    }
+
+    pub fn tui_hermes_memory_directory_label() -> &'static str {
+        if is_chinese() {
+            "记忆目录"
+        } else {
+            "Memory directory"
+        }
+    }
+
+    pub fn tui_hermes_memory_file_label() -> &'static str {
+        if is_chinese() {
+            "文件"
+        } else {
+            "File"
+        }
+    }
+
+    pub fn tui_hermes_memory_status_label() -> &'static str {
+        if is_chinese() {
+            "状态"
+        } else {
+            "Status"
+        }
+    }
+
+    pub fn tui_hermes_memory_usage_label() -> &'static str {
+        if is_chinese() {
+            "用量"
+        } else {
+            "Usage"
+        }
+    }
+
+    pub fn tui_hermes_memory_preview_label() -> &'static str {
+        if is_chinese() {
+            "预览"
+        } else {
+            "Preview"
+        }
+    }
+
+    pub fn tui_hermes_memory_editor_title(label: &str) -> String {
+        if is_chinese() {
+            format!("编辑 {label}")
+        } else {
+            format!("Edit {label}")
+        }
+    }
+
+    pub fn tui_hermes_memory_saved(label: &str) -> String {
+        if is_chinese() {
+            format!("已保存 {label}")
+        } else {
+            format!("Saved {label}")
+        }
+    }
+
+    pub fn tui_hermes_memory_toggle_saved(label: &str, enabled: bool) -> String {
+        if is_chinese() {
+            if enabled {
+                format!("已启用 {label}")
+            } else {
+                format!("已禁用 {label}")
+            }
+        } else if enabled {
+            format!("Enabled {label}")
+        } else {
+            format!("Disabled {label}")
+        }
+    }
+
+    pub fn tui_hermes_memory_directory_open_failed(detail: &str) -> String {
+        if is_chinese() {
+            format!("打开记忆目录失败: {detail}")
+        } else {
+            format!("Failed to open memory directory: {detail}")
+        }
+    }
+
     pub fn tui_toast_json_must_be_array() -> &'static str {
         if is_chinese() {
             "JSON 必须是数组"
         } else {
             "JSON must be an array"
+        }
+    }
+
+    pub fn tui_toast_json_must_be_object_or_array() -> &'static str {
+        if is_chinese() {
+            "JSON 必须是对象或数组"
+        } else {
+            "JSON must be an object or array"
         }
     }
 
@@ -1784,6 +2776,18 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_mcp_type() -> &'static str {
+        if is_chinese() {
+            "连接类型"
+        } else {
+            "Transport"
+        }
+    }
+
+    pub fn tui_label_url() -> &'static str {
+        "URL"
+    }
+
     pub fn tui_label_args() -> &'static str {
         if is_chinese() {
             "参数"
@@ -1815,6 +2819,14 @@ pub mod texts {
             "按 Enter 管理环境变量"
         } else {
             "Press Enter to manage env entries"
+        }
+    }
+
+    pub fn tui_mcp_type_editor_hint() -> &'static str {
+        if is_chinese() {
+            "按 Enter 选择连接类型"
+        } else {
+            "Press Enter to choose transport"
         }
     }
 
@@ -1858,6 +2870,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_app_opencode() -> &'static str {
+        if is_chinese() {
+            "应用: OpenCode"
+        } else {
+            "App: OpenCode"
+        }
+    }
+
+    pub fn tui_label_app_hermes() -> &'static str {
+        if is_chinese() {
+            "应用: Hermes"
+        } else {
+            "App: Hermes"
+        }
+    }
+
     pub fn tui_form_templates_title() -> &'static str {
         if is_chinese() {
             "模板"
@@ -1887,6 +2915,346 @@ pub mod texts {
             "字段"
         } else {
             "Fields"
+        }
+    }
+
+    pub fn tui_usage_query_title(provider: &str) -> String {
+        if provider.trim().is_empty() {
+            tui_usage_query_configure_title().to_string()
+        } else {
+            format!("{} - {provider}", tui_usage_query_configure_title())
+        }
+    }
+
+    pub fn tui_usage_query_configure_title() -> &'static str {
+        if is_chinese() {
+            "配置用量查询"
+        } else {
+            "Configure Usage Query"
+        }
+    }
+
+    pub fn tui_usage_query_notice_title() -> &'static str {
+        tui_usage_query_configure_title()
+    }
+
+    pub fn tui_usage_query_notice_message() -> &'static str {
+        if is_chinese() {
+            "用量查询需要配置专用的查询脚本或 API 参数，请确保您已从供应商处获取相关信息。\n\n如不确定如何配置，请先查阅供应商文档。"
+        } else {
+            "Usage query requires a custom script or API parameters. Please make sure you have obtained the necessary information from your provider.\n\nIf unsure how to configure, please consult your provider's documentation first."
+        }
+    }
+
+    pub fn tui_usage_query_enable() -> &'static str {
+        if is_chinese() {
+            "启用用量查询"
+        } else {
+            "Enable usage query"
+        }
+    }
+
+    pub fn tui_usage_query_template() -> &'static str {
+        if is_chinese() {
+            "预设模板"
+        } else {
+            "Preset template"
+        }
+    }
+
+    pub fn tui_usage_query_access_token() -> &'static str {
+        if is_chinese() {
+            "访问令牌（在个人安全设置里获取）"
+        } else {
+            "Access Token"
+        }
+    }
+
+    pub fn tui_usage_query_user_id() -> &'static str {
+        if is_chinese() {
+            "用户 ID"
+        } else {
+            "User ID"
+        }
+    }
+
+    pub fn tui_usage_query_timeout_seconds() -> &'static str {
+        if is_chinese() {
+            "超时时间（秒）"
+        } else {
+            "Timeout (seconds)"
+        }
+    }
+
+    pub fn tui_usage_query_auto_interval() -> &'static str {
+        if is_chinese() {
+            "自动查询间隔（分钟，0 表示不自动查询）"
+        } else {
+            "Auto query interval (minutes, 0 to disable)"
+        }
+    }
+
+    pub fn tui_usage_query_script() -> &'static str {
+        if is_chinese() {
+            "提取器代码"
+        } else {
+            "Extractor Code"
+        }
+    }
+
+    pub fn tui_usage_query_script_preview_title() -> &'static str {
+        if is_chinese() {
+            "提取器代码 | 返回对象需包含剩余额度等字段"
+        } else {
+            "Extractor code | Return object should include remaining quota fields"
+        }
+    }
+
+    pub fn tui_usage_query_script_help_title() -> &'static str {
+        if is_chinese() {
+            "脚本编写说明："
+        } else {
+            "Script writing instructions:"
+        }
+    }
+
+    pub fn tui_usage_query_copilot_auto_auth() -> &'static str {
+        if is_chinese() {
+            "自动使用 OAuth 认证，无需手动配置凭证"
+        } else {
+            "Auto OAuth authentication, no manual credentials needed"
+        }
+    }
+
+    pub fn tui_usage_query_token_plan_hint() -> &'static str {
+        if is_chinese() {
+            "自动使用供应商的 API Key 和 Base URL 查询 Token Plan 额度"
+        } else {
+            "Automatically uses the provider's API Key and Base URL to query Token Plan quota"
+        }
+    }
+
+    pub fn tui_usage_query_balance_hint() -> &'static str {
+        if is_chinese() {
+            "自动使用供应商的 API Key 查询账户余额"
+        } else {
+            "Automatically uses the provider's API Key to query account balance"
+        }
+    }
+
+    pub fn tui_usage_query_script_empty() -> &'static str {
+        if is_chinese() {
+            "脚本配置不能为空"
+        } else {
+            "Script configuration cannot be empty"
+        }
+    }
+
+    pub fn tui_usage_query_must_have_return() -> &'static str {
+        if is_chinese() {
+            "脚本必须包含 return 语句"
+        } else {
+            "Script must contain return statement"
+        }
+    }
+
+    pub fn tui_usage_query_coding_plan_provider() -> &'static str {
+        if is_chinese() {
+            "Coding Plan 供应商"
+        } else {
+            "Coding Plan Provider"
+        }
+    }
+
+    pub fn tui_usage_query_info() -> &'static str {
+        if is_chinese() {
+            "说明"
+        } else {
+            "Info"
+        }
+    }
+
+    pub fn tui_usage_query_custom_hint() -> &'static str {
+        if is_chinese() {
+            "支持变量: {{apiKey}}, {{baseUrl}} | extractor 函数接收 API 响应的 JSON 对象"
+        } else {
+            "Supported variables: {{apiKey}}, {{baseUrl}} | extractor function receives API response JSON object"
+        }
+    }
+
+    pub fn tui_usage_query_credentials_config() -> &'static str {
+        if is_chinese() {
+            "凭证配置"
+        } else {
+            "Credentials"
+        }
+    }
+
+    pub fn tui_usage_query_credentials_hint() -> &'static str {
+        if is_chinese() {
+            "留空则自动使用供应商配置"
+        } else {
+            "Leave empty to use provider config"
+        }
+    }
+
+    pub fn tui_usage_query_optional() -> &'static str {
+        if is_chinese() {
+            "可选"
+        } else {
+            "optional"
+        }
+    }
+
+    pub fn tui_usage_query_base_url() -> &'static str {
+        if is_chinese() {
+            "请求地址"
+        } else {
+            "Base URL"
+        }
+    }
+
+    pub fn tui_usage_query_api_key_placeholder() -> &'static str {
+        if is_chinese() {
+            "留空则使用供应商的 API Key"
+        } else {
+            "Leave empty to use provider's API Key"
+        }
+    }
+
+    pub fn tui_usage_query_base_url_placeholder() -> &'static str {
+        if is_chinese() {
+            "留空则使用供应商的请求地址"
+        } else {
+            "Leave empty to use provider's base URL"
+        }
+    }
+
+    pub fn tui_usage_query_access_token_placeholder() -> &'static str {
+        if is_chinese() {
+            "在'安全设置'里生成"
+        } else {
+            "Generate in 'Security Settings'"
+        }
+    }
+
+    pub fn tui_usage_query_user_id_placeholder() -> &'static str {
+        if is_chinese() {
+            "例如：114514"
+        } else {
+            "e.g., 114514"
+        }
+    }
+
+    pub fn tui_usage_query_config_format() -> &'static str {
+        if is_chinese() {
+            "配置格式："
+        } else {
+            "Configuration format:"
+        }
+    }
+
+    pub fn tui_usage_query_extractor_format() -> &'static str {
+        if is_chinese() {
+            "extractor 返回格式（所有字段均为可选）："
+        } else {
+            "Extractor return format (all fields optional):"
+        }
+    }
+
+    pub fn tui_usage_query_tips() -> &'static str {
+        if is_chinese() {
+            "💡 提示："
+        } else {
+            "💡 Tips:"
+        }
+    }
+
+    pub fn tui_usage_query_field_is_valid() -> &'static str {
+        if is_chinese() {
+            "• isValid: 布尔值，套餐是否有效"
+        } else {
+            "• isValid: Boolean, whether plan is valid"
+        }
+    }
+
+    pub fn tui_usage_query_field_invalid_message() -> &'static str {
+        if is_chinese() {
+            "• invalidMessage: 字符串，失效原因说明（当 isValid 为 false 时显示）"
+        } else {
+            "• invalidMessage: String, reason for expiration (shown when isValid is false)"
+        }
+    }
+
+    pub fn tui_usage_query_field_remaining() -> &'static str {
+        if is_chinese() {
+            "• remaining: 数字，剩余额度"
+        } else {
+            "• remaining: Number, remaining quota"
+        }
+    }
+
+    pub fn tui_usage_query_field_unit() -> &'static str {
+        if is_chinese() {
+            "• unit: 字符串，单位（如 \"USD\"）"
+        } else {
+            "• unit: String, unit (e.g., \"USD\")"
+        }
+    }
+
+    pub fn tui_usage_query_field_plan_name() -> &'static str {
+        if is_chinese() {
+            "• planName: 字符串，套餐名称"
+        } else {
+            "• planName: String, plan name"
+        }
+    }
+
+    pub fn tui_usage_query_field_total() -> &'static str {
+        if is_chinese() {
+            "• total: 数字，总额度"
+        } else {
+            "• total: Number, total quota"
+        }
+    }
+
+    pub fn tui_usage_query_field_used() -> &'static str {
+        if is_chinese() {
+            "• used: 数字，已用额度"
+        } else {
+            "• used: Number, used quota"
+        }
+    }
+
+    pub fn tui_usage_query_field_extra() -> &'static str {
+        if is_chinese() {
+            "• extra: 字符串，扩展字段，可自由补充需要展示的文本"
+        } else {
+            "• extra: String, custom display text"
+        }
+    }
+
+    pub fn tui_usage_query_tip1() -> &'static str {
+        if is_chinese() {
+            "• 变量 {{apiKey}} 和 {{baseUrl}} 会自动替换"
+        } else {
+            "• Variables {{apiKey}} and {{baseUrl}} are automatically replaced"
+        }
+    }
+
+    pub fn tui_usage_query_tip2() -> &'static str {
+        if is_chinese() {
+            "• extractor 函数在沙箱环境中执行，支持 ES2020+ 语法"
+        } else {
+            "• Extractor function runs in sandbox environment, supports ES2020+ syntax"
+        }
+    }
+
+    pub fn tui_usage_query_tip3() -> &'static str {
+        if is_chinese() {
+            "• 整个配置必须用 () 包裹，形成对象字面量表达式"
+        } else {
+            "• Entire config must be wrapped in () to form object literal expression"
         }
     }
 
@@ -1928,9 +3296,9 @@ pub mod texts {
 
     pub fn tui_claude_model_config_popup_title() -> &'static str {
         if is_chinese() {
-            "Claude 模型配置"
+            "模型映射"
         } else {
-            "Claude Model Configuration"
+            "Model Mapping"
         }
     }
 
@@ -1976,9 +3344,9 @@ pub mod texts {
 
     pub fn tui_claude_model_config_summary(configured_count: usize) -> String {
         if is_chinese() {
-            format!("已配置 {configured_count}/5")
+            format!("已配置 {configured_count}/4")
         } else {
-            format!("Configured {configured_count}/5")
+            format!("Configured {configured_count}/4")
         }
     }
 
@@ -1987,6 +3355,62 @@ pub mod texts {
             "按 Enter 配置 Claude 模型"
         } else {
             "Press Enter to configure Claude models"
+        }
+    }
+
+    pub fn tui_form_open_editor_hint() -> &'static str {
+        if is_chinese() {
+            "按 Enter 打开编辑器"
+        } else {
+            "Press Enter to open editor"
+        }
+    }
+
+    pub fn tui_form_open_page_hint() -> &'static str {
+        if is_chinese() {
+            "按 Enter 打开"
+        } else {
+            "Press Enter to open"
+        }
+    }
+
+    pub fn tui_claude_model_label_for_index(idx: usize) -> &'static str {
+        match idx {
+            0 => tui_claude_reasoning_model_label(),
+            1 => tui_claude_default_haiku_model_label(),
+            2 => tui_claude_default_sonnet_model_label(),
+            3 => tui_claude_default_opus_model_label(),
+            _ => "",
+        }
+    }
+
+    pub fn tui_claude_model_fill_all_title() -> &'static str {
+        if is_chinese() {
+            "填充全部模型"
+        } else {
+            "Fill All Models"
+        }
+    }
+
+    pub fn tui_claude_model_fill_all_message(source_label: &str) -> String {
+        if is_chinese() {
+            format!(
+                "将「{}」的值填充到所有 Claude 模型字段？\n现有值将被覆盖。",
+                source_label
+            )
+        } else {
+            format!(
+                "Fill all Claude model fields from \"{}\"?\nExisting values will be overwritten.",
+                source_label
+            )
+        }
+    }
+
+    pub fn tui_claude_model_fill_all_empty_source() -> &'static str {
+        if is_chinese() {
+            "当前字段为空，无法填充"
+        } else {
+            "Selected field is empty, nothing to fill"
         }
     }
 
@@ -2013,12 +3437,10 @@ pub mod texts {
             } else {
                 "选择模型".to_string()
             }
+        } else if fetching {
+            "Select Model (Fetching...)".to_string()
         } else {
-            if fetching {
-                "Select Model (Fetching...)".to_string()
-            } else {
-                "Select Model".to_string()
-            }
+            "Select Model".to_string()
         }
     }
 
@@ -2078,19 +3500,83 @@ pub mod texts {
         }
     }
 
-    pub fn tui_provider_detail_title() -> &'static str {
-        if is_chinese() {
-            "供应商详情"
-        } else {
-            "Provider Detail"
-        }
-    }
-
     pub fn tui_provider_add_title() -> &'static str {
         if is_chinese() {
             "新增供应商"
         } else {
             "Add Provider"
+        }
+    }
+
+    pub fn tui_provider_empty_title() -> &'static str {
+        if is_chinese() {
+            "还没有添加任何供应商"
+        } else {
+            "No providers have been added yet"
+        }
+    }
+
+    pub fn tui_provider_loading() -> &'static str {
+        if is_chinese() {
+            "加载中…"
+        } else {
+            "Loading…"
+        }
+    }
+
+    pub fn tui_provider_empty_subtitle() -> &'static str {
+        if is_chinese() {
+            "如果你已有配置，请点击\"导入当前配置\"，所有数据将安全保存在 default 供应商中"
+        } else {
+            "If you already have a config, use \"Import Current Config\". Everything will be safely stored in the default provider."
+        }
+    }
+
+    pub fn tui_mcp_empty_title() -> &'static str {
+        if is_chinese() {
+            "还没有 MCP 服务器"
+        } else {
+            "No MCP servers yet"
+        }
+    }
+
+    pub fn tui_mcp_empty_subtitle() -> &'static str {
+        if is_chinese() {
+            "新增一个服务器，或从各应用的现有配置中导入"
+        } else {
+            "Add a server, or import the ones already configured in your apps"
+        }
+    }
+
+    pub fn tui_prompts_empty_title() -> &'static str {
+        if is_chinese() {
+            "还没有提示词"
+        } else {
+            "No prompts yet"
+        }
+    }
+
+    pub fn tui_prompts_empty_subtitle() -> &'static str {
+        if is_chinese() {
+            "新增提示词后可在应用间一键切换系统提示"
+        } else {
+            "Add a prompt to switch system prompts with one key"
+        }
+    }
+
+    pub fn tui_key_import_current_config() -> &'static str {
+        if is_chinese() {
+            "导入当前配置"
+        } else {
+            "import current config"
+        }
+    }
+
+    pub fn tui_key_add_provider() -> &'static str {
+        if is_chinese() {
+            "添加供应商"
+        } else {
+            "add provider"
         }
     }
 
@@ -2118,14 +3604,6 @@ pub mod texts {
         }
     }
 
-    pub fn tui_provider_detail_keys() -> &'static str {
-        if is_chinese() {
-            "按键：s=切换  e=编辑  t=测速  c=健康检查"
-        } else {
-            "Keys: s=switch  e=edit  t=speedtest  c=stream check"
-        }
-    }
-
     pub fn tui_key_switch() -> &'static str {
         if is_chinese() {
             "切换"
@@ -2150,6 +3628,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_enable() -> &'static str {
+        if is_chinese() {
+            "启用"
+        } else {
+            "enable"
+        }
+    }
+
     pub fn tui_key_edit() -> &'static str {
         if is_chinese() {
             "编辑"
@@ -2163,6 +3649,14 @@ pub mod texts {
             "测速"
         } else {
             "speedtest"
+        }
+    }
+
+    pub fn tui_key_test() -> &'static str {
+        if is_chinese() {
+            "测试"
+        } else {
+            "test"
         }
     }
 
@@ -2230,6 +3724,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_add_account() -> &'static str {
+        if is_chinese() {
+            "新增账号"
+        } else {
+            "add account"
+        }
+    }
+
+    pub fn tui_key_copy() -> &'static str {
+        if is_chinese() {
+            "复制"
+        } else {
+            "copy"
+        }
+    }
+
     pub fn tui_key_delete() -> &'static str {
         if is_chinese() {
             "删除"
@@ -2243,6 +3753,14 @@ pub mod texts {
             "导入"
         } else {
             "import"
+        }
+    }
+
+    pub fn tui_key_failover() -> &'static str {
+        if is_chinese() {
+            "管理故障转移"
+        } else {
+            "manage failover"
         }
     }
 
@@ -2267,6 +3785,14 @@ pub mod texts {
             "发现"
         } else {
             "discover"
+        }
+    }
+
+    pub fn tui_key_more() -> &'static str {
+        if is_chinese() {
+            "更多"
+        } else {
+            "more"
         }
     }
 
@@ -2307,6 +3833,22 @@ pub mod texts {
             "搜索"
         } else {
             "search"
+        }
+    }
+
+    pub fn tui_key_source() -> &'static str {
+        if is_chinese() {
+            "来源"
+        } else {
+            "Source"
+        }
+    }
+
+    pub fn tui_key_repo_manager() -> &'static str {
+        if is_chinese() {
+            "仓库管理"
+        } else {
+            "Manage repos"
         }
     }
 
@@ -2358,6 +3900,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_pane() -> &'static str {
+        if is_chinese() {
+            "切换面板"
+        } else {
+            "switch panel"
+        }
+    }
+
     pub fn tui_key_toggle() -> &'static str {
         if is_chinese() {
             "启用/禁用"
@@ -2398,6 +3948,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_login() -> &'static str {
+        if is_chinese() {
+            "登录"
+        } else {
+            "login"
+        }
+    }
+
     pub fn tui_key_open_directory() -> &'static str {
         if is_chinese() {
             "打开目录"
@@ -2414,11 +3972,35 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_rename() -> &'static str {
+        if is_chinese() {
+            "重命名"
+        } else {
+            "rename"
+        }
+    }
+
     pub fn tui_key_apply() -> &'static str {
         if is_chinese() {
             "应用"
         } else {
             "apply"
+        }
+    }
+
+    pub fn tui_key_extract() -> &'static str {
+        if is_chinese() {
+            "提取"
+        } else {
+            "extract"
+        }
+    }
+
+    pub fn tui_key_format() -> &'static str {
+        if is_chinese() {
+            "格式化"
+        } else {
+            "format"
         }
     }
 
@@ -2454,6 +4036,22 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_cancel_login() -> &'static str {
+        if is_chinese() {
+            "取消登录"
+        } else {
+            "cancel login"
+        }
+    }
+
+    pub fn tui_key_keep_waiting() -> &'static str {
+        if is_chinese() {
+            "继续等待"
+        } else {
+            "keep waiting"
+        }
+    }
+
     pub fn tui_key_submit() -> &'static str {
         if is_chinese() {
             "提交"
@@ -2467,6 +4065,30 @@ pub mod texts {
             "确认"
         } else {
             "confirm"
+        }
+    }
+
+    pub fn tui_key_use_auto() -> &'static str {
+        if is_chinese() {
+            "使用自动"
+        } else {
+            "use auto"
+        }
+    }
+
+    pub fn tui_key_keep_current() -> &'static str {
+        if is_chinese() {
+            "保留当前"
+        } else {
+            "keep current"
+        }
+    }
+
+    pub fn tui_key_switch_to_manual() -> &'static str {
+        if is_chinese() {
+            "切到手动"
+        } else {
+            "switch to manual"
         }
     }
 
@@ -2491,6 +4113,30 @@ pub mod texts {
             "恢复"
         } else {
             "restore"
+        }
+    }
+
+    pub fn tui_key_sessions_all() -> &'static str {
+        if is_chinese() {
+            "全部"
+        } else {
+            "show all"
+        }
+    }
+
+    pub fn tui_key_sessions_all_active() -> &'static str {
+        if is_chinese() {
+            "全部 (Esc返回)"
+        } else {
+            "showing all (Esc back)"
+        }
+    }
+
+    pub fn tui_sessions_searching(query: &str) -> String {
+        if is_chinese() {
+            format!("搜索中: \"{query}\"...")
+        } else {
+            format!("Searching: \"{query}\"...")
         }
     }
 
@@ -2582,6 +4228,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_key_fill_all() -> &'static str {
+        if is_chinese() {
+            "填充全部"
+        } else {
+            "fill all"
+        }
+    }
+
     pub fn tui_key_deactivate_active() -> &'static str {
         if is_chinese() {
             "取消激活(当前)"
@@ -2590,11 +4244,27 @@ pub mod texts {
         }
     }
 
+    pub fn tui_prompt_no_active_summary() -> &'static str {
+        if is_chinese() {
+            "未激活"
+        } else {
+            "no active prompt"
+        }
+    }
+
+    pub fn tui_prompts_summary(count: usize, active: &str) -> String {
+        if is_chinese() {
+            format!("{count} 个提示词 · 当前: {active}")
+        } else {
+            format!("{count} prompts · active: {active}")
+        }
+    }
+
     pub fn tui_provider_list_keys() -> &'static str {
         if is_chinese() {
-            "按键：a=新增  e=编辑  Enter=详情  s=切换  /=搜索"
+            "按键：a=新增  e=编辑  Space=切换  /=搜索"
         } else {
-            "Keys: a=add  e=edit  Enter=details  s=switch  /=filter"
+            "Keys: a=add  e=edit  Space=switch  /=filter"
         }
     }
 
@@ -2672,6 +4342,72 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_theme_label() -> &'static str {
+        if is_chinese() {
+            "主题"
+        } else {
+            "Theme"
+        }
+    }
+
+    pub fn tui_settings_theme_mode_name(mode: crate::cli::tui::theme::ThemeMode) -> &'static str {
+        use crate::cli::tui::theme::ThemeMode;
+        if is_chinese() {
+            match mode {
+                ThemeMode::Auto => "自动",
+                ThemeMode::Dark => "深色",
+                ThemeMode::Light => "浅色",
+            }
+        } else {
+            match mode {
+                ThemeMode::Auto => "Auto",
+                ThemeMode::Dark => "Dark",
+                ThemeMode::Light => "Light",
+            }
+        }
+    }
+
+    pub fn tui_toast_theme_changed(mode_name: &str) -> String {
+        if is_chinese() {
+            format!("主题已切换为{mode_name}")
+        } else {
+            format!("Theme set to {mode_name}")
+        }
+    }
+
+    pub fn tui_settings_icons_label() -> &'static str {
+        if is_chinese() {
+            "图标"
+        } else {
+            "Icons"
+        }
+    }
+
+    pub fn tui_settings_icon_mode_name(mode: crate::cli::tui::icons::IconMode) -> &'static str {
+        use crate::cli::tui::icons::IconMode;
+        if is_chinese() {
+            match mode {
+                IconMode::Auto => "自动",
+                IconMode::Emoji => "表情",
+                IconMode::Ascii => "ASCII",
+            }
+        } else {
+            match mode {
+                IconMode::Auto => "Auto",
+                IconMode::Emoji => "Emoji",
+                IconMode::Ascii => "ASCII",
+            }
+        }
+    }
+
+    pub fn tui_toast_icons_changed(mode_name: &str) -> String {
+        if is_chinese() {
+            format!("图标已切换为{mode_name}")
+        } else {
+            format!("Icons set to {mode_name}")
+        }
+    }
+
     pub fn tui_settings_header_setting() -> &'static str {
         if is_chinese() {
             "设置项"
@@ -2696,11 +4432,267 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_managed_accounts_title() -> &'static str {
+        if is_chinese() {
+            "托管账号"
+        } else {
+            "Managed Accounts"
+        }
+    }
+
+    pub fn tui_managed_accounts_follow_default() -> &'static str {
+        if is_chinese() {
+            "跟随默认账号"
+        } else {
+            "Follow default"
+        }
+    }
+
+    pub fn tui_managed_accounts_not_loaded() -> &'static str {
+        if is_chinese() {
+            "未加载"
+        } else {
+            "Not loaded"
+        }
+    }
+
+    pub fn tui_managed_accounts_not_authenticated() -> &'static str {
+        if is_chinese() {
+            "未认证"
+        } else {
+            "Not authenticated"
+        }
+    }
+
+    pub fn tui_managed_accounts_count(count: usize) -> String {
+        if is_chinese() {
+            format!("{count} 个账号")
+        } else if count == 1 {
+            "1 account".to_string()
+        } else {
+            format!("{count} accounts")
+        }
+    }
+
+    pub fn tui_managed_accounts_summary_loading() -> &'static str {
+        if is_chinese() {
+            "ChatGPT · 正在加载"
+        } else {
+            "ChatGPT · loading"
+        }
+    }
+
+    pub fn tui_managed_accounts_summary_not_loaded() -> &'static str {
+        if is_chinese() {
+            "ChatGPT · 未加载"
+        } else {
+            "ChatGPT · not loaded"
+        }
+    }
+
+    pub fn tui_managed_accounts_summary_empty() -> &'static str {
+        if is_chinese() {
+            "ChatGPT · 未认证 · 按 a 新增账号"
+        } else {
+            "ChatGPT · not authenticated · press a to add account"
+        }
+    }
+
+    pub fn tui_managed_accounts_summary_loaded(count: usize, default_account: &str) -> String {
+        if is_chinese() {
+            format!(
+                "ChatGPT · {} · 默认: {default_account}",
+                tui_managed_accounts_count(count)
+            )
+        } else {
+            format!(
+                "ChatGPT · {} · default: {default_account}",
+                tui_managed_accounts_count(count)
+            )
+        }
+    }
+
+    pub fn tui_managed_accounts_chatgpt_provider() -> &'static str {
+        if is_chinese() {
+            "ChatGPT"
+        } else {
+            "ChatGPT"
+        }
+    }
+
+    pub fn tui_managed_accounts_provider_column() -> &'static str {
+        if is_chinese() {
+            "服务"
+        } else {
+            "Service"
+        }
+    }
+
+    pub fn tui_managed_accounts_list_title() -> &'static str {
+        if is_chinese() {
+            "账号列表"
+        } else {
+            "Accounts"
+        }
+    }
+
+    pub fn tui_managed_accounts_details_title() -> &'static str {
+        if is_chinese() {
+            "账号详情"
+        } else {
+            "Account Details"
+        }
+    }
+
+    pub fn tui_managed_accounts_account_label() -> &'static str {
+        if is_chinese() {
+            "账号"
+        } else {
+            "Account"
+        }
+    }
+
+    pub fn tui_managed_accounts_account_id_label() -> &'static str {
+        if is_chinese() {
+            "账号 ID"
+        } else {
+            "Account ID"
+        }
+    }
+
+    pub fn tui_managed_accounts_auth_status_label() -> &'static str {
+        if is_chinese() {
+            "状态"
+        } else {
+            "Status"
+        }
+    }
+
+    pub fn tui_managed_accounts_authenticated() -> &'static str {
+        if is_chinese() {
+            "已认证"
+        } else {
+            "Authenticated"
+        }
+    }
+
+    pub fn tui_managed_accounts_default() -> &'static str {
+        if is_chinese() {
+            "默认"
+        } else {
+            "default"
+        }
+    }
+
+    pub fn tui_managed_accounts_default_account_label() -> &'static str {
+        if is_chinese() {
+            "默认账号"
+        } else {
+            "Default Account"
+        }
+    }
+
+    pub fn tui_managed_accounts_authenticated_at_label() -> &'static str {
+        if is_chinese() {
+            "认证时间"
+        } else {
+            "Authenticated At"
+        }
+    }
+
+    pub fn tui_managed_accounts_login_with_chatgpt() -> &'static str {
+        if is_chinese() {
+            "登录 ChatGPT"
+        } else {
+            "Log in with ChatGPT"
+        }
+    }
+
+    pub fn tui_managed_accounts_login_status() -> &'static str {
+        if is_chinese() {
+            "登录状态"
+        } else {
+            "Login Status"
+        }
+    }
+
+    pub fn tui_managed_accounts_login_waiting() -> &'static str {
+        if is_chinese() {
+            "等待浏览器确认..."
+        } else {
+            "Waiting for browser confirmation..."
+        }
+    }
+
+    pub fn tui_managed_accounts_user_code(code: &str) -> String {
+        if is_chinese() {
+            format!("用户代码: {code}")
+        } else {
+            format!("User code: {code}")
+        }
+    }
+
+    pub fn tui_managed_accounts_verification_url(url: &str) -> String {
+        if is_chinese() {
+            format!("验证地址: {url}")
+        } else {
+            format!("Verification URL: {url}")
+        }
+    }
+
+    pub fn tui_managed_accounts_login_idle() -> &'static str {
+        if is_chinese() {
+            "未进行登录。"
+        } else {
+            "No login in progress."
+        }
+    }
+
+    pub fn tui_confirm_managed_auth_cancel_title() -> &'static str {
+        if is_chinese() {
+            "取消登录？"
+        } else {
+            "Cancel Login?"
+        }
+    }
+
+    pub fn tui_confirm_managed_auth_cancel_message() -> &'static str {
+        if is_chinese() {
+            "当前 ChatGPT 登录流程仍在等待浏览器确认。按 Enter 确认取消，按 Esc 返回继续等待。"
+        } else {
+            "The ChatGPT login flow is still waiting for browser confirmation. Press Enter to cancel, or Esc to keep waiting."
+        }
+    }
+
     pub fn tui_settings_visible_apps_label() -> &'static str {
         if is_chinese() {
             "可见应用"
         } else {
             "Visible Apps"
+        }
+    }
+
+    pub fn tui_settings_visible_apps_mode_label() -> &'static str {
+        if is_chinese() {
+            "可见应用模式"
+        } else {
+            "Visible Apps Mode"
+        }
+    }
+
+    pub fn tui_settings_visible_apps_mode_auto() -> &'static str {
+        if is_chinese() {
+            "自动"
+        } else {
+            "auto"
+        }
+    }
+
+    pub fn tui_settings_visible_apps_mode_manual() -> &'static str {
+        if is_chinese() {
+            "手动"
+        } else {
+            "manual"
         }
     }
 
@@ -2780,11 +4772,17 @@ pub mod texts {
         }
     }
 
-    pub fn tui_settings_proxy_stop_before_edit_hint() -> &'static str {
+    pub fn tui_settings_proxy_stop_before_edit_hint(current_app_is_active: bool) -> &'static str {
         if is_chinese() {
-            "请先停止本地代理，再修改监听地址或端口"
+            if current_app_is_active {
+                "修改监听地址：需先停止本地代理。修改监听端口：需先停止当前应用的代理路由。改完后重新启动路由生效。"
+            } else {
+                "修改监听地址：需先停止本地代理。监听端口可以修改。改完后重新启动路由生效。"
+            }
+        } else if current_app_is_active {
+            "Listen address: stop the proxy to edit. Listen port: stop this app's route to edit. Restart routing after changes."
         } else {
-            "Stop the local proxy before editing listen address or port"
+            "Listen address: stop the proxy to edit. Listen port can be edited. Restart routing after changes."
         }
     }
 
@@ -2820,11 +4818,19 @@ pub mod texts {
         }
     }
 
-    pub fn tui_toast_proxy_settings_stop_before_edit() -> &'static str {
+    pub fn tui_toast_proxy_settings_stop_proxy_before_edit_address() -> &'static str {
         if is_chinese() {
-            "本地代理正在运行。请先停止代理，再修改监听地址或端口。"
+            "本地代理正在运行。请先停止代理，再修改监听地址。"
         } else {
-            "The local proxy is running. Stop it before editing listen address or port."
+            "The local proxy is running. Stop it before editing listen address."
+        }
+    }
+
+    pub fn tui_toast_proxy_settings_stop_app_route_before_edit_port() -> &'static str {
+        if is_chinese() {
+            "当前应用正在使用代理。请先停止当前应用的代理路由，再修改监听端口。"
+        } else {
+            "This app is using the proxy. Stop this app's proxy route before editing listen port."
         }
     }
 
@@ -2865,6 +4871,62 @@ pub mod texts {
             "可见应用已保存。"
         } else {
             "Visible apps saved."
+        }
+    }
+
+    pub fn tui_toast_visible_apps_mode_saved(mode: &str) -> String {
+        if is_chinese() {
+            format!("可见应用模式已设为{mode}。")
+        } else {
+            format!("Visible apps mode set to {mode}.")
+        }
+    }
+
+    pub fn tui_toast_visible_apps_auto_updated(apps: &str) -> String {
+        if is_chinese() {
+            format!("已更新可见应用：{apps}")
+        } else {
+            format!("Visible apps updated: {apps}")
+        }
+    }
+
+    pub fn tui_toast_visible_apps_manual_hidden_installed(app: &str) -> String {
+        if is_chinese() {
+            format!("{app} 已安装但被隐藏。可在设置 > 可见应用中启用。")
+        } else {
+            format!("Installed but hidden: {app}. Enable them in Settings > Visible Apps.")
+        }
+    }
+
+    pub fn tui_visible_apps_auto_prompt_title() -> &'static str {
+        if is_chinese() {
+            "可见应用自动检测"
+        } else {
+            "Visible App Auto Detection"
+        }
+    }
+
+    pub fn tui_visible_apps_auto_prompt_message() -> &'static str {
+        if is_chinese() {
+            "CC Switch 可以根据已安装的本地 CLI 显示应用，并隐藏未安装的应用。"
+        } else {
+            "CC Switch can show installed apps and hide apps that are not installed."
+        }
+    }
+
+    pub fn tui_visible_apps_manual_switch_prompt_title() -> &'static str {
+        if is_chinese() {
+            "切换到手动模式"
+        } else {
+            "Switch to Manual Mode"
+        }
+    }
+
+    pub fn tui_visible_apps_manual_switch_prompt_message() -> &'static str {
+        if is_chinese() {
+            "自动模式下不可直接调整可见应用。切换到手动模式并应用这次更改？"
+        } else {
+            "Visible apps cannot be changed directly in auto mode. Switch to manual mode and apply this change?"
         }
     }
 
@@ -2938,9 +5000,45 @@ pub mod texts {
 
     pub fn tui_skills_discover_hint() -> &'static str {
         if is_chinese() {
-            "按 f 搜索仓库里的技能，按 r 管理技能仓库。"
+            "按 Tab 切换仓库/skills.sh，按 f 搜索，按 r 管理技能仓库。"
         } else {
-            "Press f to search skills from enabled repositories, or r to manage repositories."
+            "Press Tab to switch repositories/skills.sh, f to search, or r to manage repositories."
+        }
+    }
+
+    pub fn tui_skills_discover_empty() -> &'static str {
+        if is_chinese() {
+            "暂无结果"
+        } else {
+            "No results"
+        }
+    }
+
+    pub fn tui_skills_skillssh_search_prompt() -> &'static str {
+        if is_chinese() {
+            "搜索 skills.sh（至少 2 个字符）..."
+        } else {
+            "Search skills.sh (at least 2 characters)..."
+        }
+    }
+
+    pub fn tui_skills_source_repos() -> &'static str {
+        if is_chinese() {
+            "仓库"
+        } else {
+            "Repos"
+        }
+    }
+
+    pub fn tui_skills_source_marketplace() -> &'static str {
+        "skills.sh"
+    }
+
+    pub fn tui_skills_source_switch_hint() -> &'static str {
+        if is_chinese() {
+            "Tab 切换来源"
+        } else {
+            "Tab to switch source"
         }
     }
 
@@ -3104,14 +5202,15 @@ pub mod texts {
         codex: usize,
         gemini: usize,
         opencode: usize,
+        hermes: usize,
     ) -> String {
         if is_chinese() {
             format!(
-                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
             )
         } else {
             format!(
-                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
             )
         }
     }
@@ -3121,14 +5220,15 @@ pub mod texts {
         codex: usize,
         gemini: usize,
         opencode: usize,
+        hermes: usize,
     ) -> String {
         if is_chinese() {
             format!(
-                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+                "已安装 · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
             )
         } else {
             format!(
-                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode}"
+                "Installed · Claude: {claude} · Codex: {codex} · Gemini: {gemini} · OpenCode: {opencode} · Hermes: {hermes}"
             )
         }
     }
@@ -3218,6 +5318,14 @@ pub mod texts {
             "通用配置片段"
         } else {
             "Common Config Snippet"
+        }
+    }
+
+    pub fn tui_config_item_usage_query() -> &'static str {
+        if is_chinese() {
+            "用量查询"
+        } else {
+            "Usage Query"
         }
     }
 
@@ -4279,6 +6387,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_provider_managed_by_hermes() -> &'static str {
+        if is_chinese() {
+            "该供应商由 Hermes 管理，请在 Hermes Web UI 中编辑。"
+        } else {
+            "This provider is managed by Hermes. Edit it in the Hermes Web UI."
+        }
+    }
+
     pub fn tui_toast_provider_cannot_remove_default_model() -> &'static str {
         if is_chinese() {
             "被当前默认模型引用的供应商不能直接从配置中移除。"
@@ -4335,6 +6451,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_provider_enabled(provider: &str) -> String {
+        if is_chinese() {
+            format!("已启用供应商: {}", provider)
+        } else {
+            format!("Provider enabled: {}", provider)
+        }
+    }
+
     pub fn tui_temp_launch_failed(message: &str) -> String {
         if is_chinese() {
             format!("临时启动失败: {}", message)
@@ -4359,6 +6483,43 @@ pub mod texts {
         }
     }
 
+    pub fn tui_confirm_copy_provider_title() -> &'static str {
+        if is_chinese() {
+            "复制供应商"
+        } else {
+            // On the provider form we use "copy", however we use "duplicate" here to make it more clear.
+            "Duplicate(copy) Provider"
+        }
+    }
+
+    pub fn tui_confirm_copy_provider_message(name: &str, id: &str) -> String {
+        if is_chinese() {
+            format!("确定复制供应商 '{}' ({})？", name, id)
+        } else {
+            format!("Duplicate(copy) provider '{}' ({})?", name, id)
+        }
+    }
+
+    pub fn tui_confirm_remove_provider_title() -> &'static str {
+        if is_chinese() {
+            "移除供应商"
+        } else {
+            "Remove Provider"
+        }
+    }
+
+    pub fn tui_confirm_remove_provider_message(name: &str) -> String {
+        if is_chinese() {
+            format!(
+                "确定要从配置中移除供应商 \"{name}\" 吗？\n\n移除后该供应商将不再生效，但配置数据会保留在 CC Switch 中，您可以随时重新添加。"
+            )
+        } else {
+            format!(
+                "Are you sure you want to remove provider \"{name}\" from the configuration?\n\nAfter removal, this provider will no longer be active, but the configuration data will be retained in CC Switch. You can re-add it at any time."
+            )
+        }
+    }
+
     pub fn tui_mcp_add_title() -> &'static str {
         if is_chinese() {
             "新增 MCP 服务器"
@@ -4380,6 +6541,14 @@ pub mod texts {
             format!("选择 MCP 应用: {}", name)
         } else {
             format!("Select MCP Apps: {}", name)
+        }
+    }
+
+    pub fn tui_mcp_type_title() -> &'static str {
+        if is_chinese() {
+            "选择 MCP 连接类型"
+        } else {
+            "Select MCP Transport"
         }
     }
 
@@ -4455,6 +6624,46 @@ pub mod texts {
         }
     }
 
+    pub fn tui_prompt_rename_title() -> &'static str {
+        if is_chinese() {
+            "编辑提示词"
+        } else {
+            "Edit Prompt"
+        }
+    }
+
+    pub fn tui_prompt_create_title() -> &'static str {
+        if is_chinese() {
+            "创建提示词"
+        } else {
+            "Create Prompt"
+        }
+    }
+
+    pub fn tui_prompt_create_prompt() -> &'static str {
+        if is_chinese() {
+            "输入提示词名称："
+        } else {
+            "Enter a prompt name:"
+        }
+    }
+
+    pub fn tui_prompt_rename_prompt() -> &'static str {
+        if is_chinese() {
+            "输入新的提示词名称："
+        } else {
+            "Enter a new prompt name:"
+        }
+    }
+
+    pub fn tui_label_prompt_metadata() -> &'static str {
+        if is_chinese() {
+            "提示词元信息"
+        } else {
+            "Prompt Metadata"
+        }
+    }
+
     pub fn tui_toast_prompt_no_active_to_deactivate() -> &'static str {
         if is_chinese() {
             "没有可停用的活动提示词。"
@@ -4487,6 +6696,48 @@ pub mod texts {
         }
     }
 
+    pub fn tui_confirm_import_prompt_title() -> &'static str {
+        if is_chinese() {
+            "导入现有提示词"
+        } else {
+            "Import Existing Prompt"
+        }
+    }
+
+    pub fn tui_confirm_import_prompt_message(filename: &str) -> String {
+        if is_chinese() {
+            format!("当前提示词列表为空，检测到已有 {filename}。是否把它作为新提示词打开编辑？")
+        } else {
+            format!(
+                "The prompt list is empty and {filename} already exists. Open it as a new editable prompt?"
+            )
+        }
+    }
+
+    pub fn tui_prompt_default_name() -> &'static str {
+        if is_chinese() {
+            "默认提示词"
+        } else {
+            "Default Prompt"
+        }
+    }
+
+    pub fn tui_prompt_imported_description(filename: &str) -> String {
+        if is_chinese() {
+            format!("从现有 {filename} 预填")
+        } else {
+            format!("Prefilled from existing {filename}")
+        }
+    }
+
+    pub fn tui_toast_prompt_import_candidate_missing() -> &'static str {
+        if is_chinese() {
+            "没有可导入的现有提示词文件。"
+        } else {
+            "No existing prompt file is available to import."
+        }
+    }
+
     pub fn tui_toast_prompt_edit_not_implemented() -> &'static str {
         if is_chinese() {
             "提示词编辑尚未实现。"
@@ -4500,6 +6751,14 @@ pub mod texts {
             "提示词编辑完成"
         } else {
             "Prompt edit finished"
+        }
+    }
+
+    pub fn tui_toast_prompt_name_empty() -> &'static str {
+        if is_chinese() {
+            "提示词名称不能为空。"
+        } else {
+            "Prompt name cannot be empty."
         }
     }
 
@@ -4660,6 +6919,14 @@ pub mod texts {
             "命令为空。"
         } else {
             "Command is empty."
+        }
+    }
+
+    pub fn tui_toast_url_empty() -> &'static str {
+        if is_chinese() {
+            "URL 为空。"
+        } else {
+            "URL is empty."
         }
     }
 
@@ -4955,6 +7222,118 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_managed_auth_worker_unavailable(err: &str) -> String {
+        if is_chinese() {
+            format!("托管账号后台任务不可用: {err}")
+        } else {
+            format!("Managed accounts worker unavailable: {err}")
+        }
+    }
+
+    pub fn tui_error_managed_auth_worker_unavailable() -> &'static str {
+        if is_chinese() {
+            "托管账号后台任务不可用。"
+        } else {
+            "Managed accounts worker unavailable."
+        }
+    }
+
+    pub fn tui_toast_managed_auth_request_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("托管账号请求发送失败: {err}")
+        } else {
+            format!("Managed accounts request failed: {err}")
+        }
+    }
+
+    pub fn tui_toast_managed_auth_login_expired() -> &'static str {
+        if is_chinese() {
+            "登录已过期。"
+        } else {
+            "Login expired."
+        }
+    }
+
+    pub fn tui_toast_managed_auth_refresh_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("刷新托管账号失败: {err}")
+        } else {
+            format!("Failed to refresh managed accounts: {err}")
+        }
+    }
+
+    pub fn tui_toast_managed_auth_login_started() -> &'static str {
+        if is_chinese() {
+            "ChatGPT 登录已开始。"
+        } else {
+            "ChatGPT login started."
+        }
+    }
+
+    pub fn tui_toast_managed_auth_login_in_progress(code: &str, url: &str) -> String {
+        if is_chinese() {
+            format!("ChatGPT 登录中\n代码: {code}\n验证地址: {url}\n按 Esc 取消")
+        } else {
+            format!("ChatGPT login in progress\nCode: {code}\nVerification URL: {url}\nPress Esc to cancel")
+        }
+    }
+
+    pub fn tui_toast_managed_auth_login_cancelled() -> &'static str {
+        if is_chinese() {
+            "ChatGPT 登录已取消。"
+        } else {
+            "ChatGPT login cancelled."
+        }
+    }
+
+    pub fn tui_toast_managed_auth_login_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("ChatGPT 登录失败: {err}")
+        } else {
+            format!("ChatGPT login failed: {err}")
+        }
+    }
+
+    pub fn tui_toast_managed_auth_login_finished(login: &str) -> String {
+        if is_chinese() {
+            format!("ChatGPT 登录完成: {login}")
+        } else {
+            format!("ChatGPT login finished: {login}")
+        }
+    }
+
+    pub fn tui_toast_managed_auth_default_updated() -> &'static str {
+        if is_chinese() {
+            "默认账号已更新。"
+        } else {
+            "Default account updated."
+        }
+    }
+
+    pub fn tui_toast_managed_auth_default_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("设置默认账号失败: {err}")
+        } else {
+            format!("Failed to set default account: {err}")
+        }
+    }
+
+    pub fn tui_toast_managed_auth_account_removed() -> &'static str {
+        if is_chinese() {
+            "账号已移除。"
+        } else {
+            "Account removed."
+        }
+    }
+
+    pub fn tui_toast_managed_auth_remove_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("移除账号失败: {err}")
+        } else {
+            format!("Failed to remove account: {err}")
+        }
+    }
+
     pub fn tui_toast_webdav_worker_disabled() -> &'static str {
         if is_chinese() {
             "本次会话 WebDAV 后台任务不可用。"
@@ -5109,12 +7488,10 @@ pub mod texts {
             } else {
                 "仓库已禁用。".to_string()
             }
+        } else if enabled {
+            "Repository enabled.".to_string()
         } else {
-            if enabled {
-                "Repository enabled.".to_string()
-            } else {
-                "Repository disabled.".to_string()
-            }
+            "Repository disabled.".to_string()
         }
     }
 
@@ -5125,12 +7502,10 @@ pub mod texts {
             } else {
                 "已恢复 Claude Code 初次安装确认。".to_string()
             }
+        } else if enabled {
+            "Claude Code onboarding confirmation will be skipped.".to_string()
         } else {
-            if enabled {
-                "Claude Code onboarding confirmation will be skipped.".to_string()
-            } else {
-                "Claude Code onboarding confirmation restored.".to_string()
-            }
+            "Claude Code onboarding confirmation restored.".to_string()
         }
     }
 
@@ -5141,12 +7516,10 @@ pub mod texts {
             } else {
                 "已关闭 Claude Code for VSCode 插件联动。".to_string()
             }
+        } else if enabled {
+            "Claude Code for VSCode integration enabled.".to_string()
         } else {
-            if enabled {
-                "Claude Code for VSCode integration enabled.".to_string()
-            } else {
-                "Claude Code for VSCode integration disabled.".to_string()
-            }
+            "Claude Code for VSCode integration disabled.".to_string()
         }
     }
 
@@ -5155,6 +7528,34 @@ pub mod texts {
             format!("同步 Claude Code for VSCode 插件失败: {err}")
         } else {
             format!("Failed to sync Claude Code for VSCode integration: {err}")
+        }
+    }
+
+    pub fn tui_toast_codex_unified_session_history_toggled(enabled: bool) -> String {
+        if is_chinese() {
+            if enabled {
+                "已启用统一 Codex 会话历史。".to_string()
+            } else {
+                "已关闭统一 Codex 会话历史。".to_string()
+            }
+        } else if enabled {
+            "Unified Codex session history enabled.".to_string()
+        } else {
+            "Unified Codex session history disabled.".to_string()
+        }
+    }
+
+    pub fn tui_toast_codex_unified_session_history_already(enabled: bool) -> String {
+        if is_chinese() {
+            if enabled {
+                "统一 Codex 会话历史已经开启。".to_string()
+            } else {
+                "统一 Codex 会话历史已经关闭。".to_string()
+            }
+        } else if enabled {
+            "Unified Codex session history is already enabled.".to_string()
+        } else {
+            "Unified Codex session history is already disabled.".to_string()
         }
     }
 
@@ -5327,6 +7728,22 @@ pub mod texts {
             "提示词已删除。"
         } else {
             "Prompt deleted."
+        }
+    }
+
+    pub fn tui_toast_prompt_created() -> &'static str {
+        if is_chinese() {
+            "提示词已创建。"
+        } else {
+            "Prompt created."
+        }
+    }
+
+    pub fn tui_toast_prompt_renamed() -> &'static str {
+        if is_chinese() {
+            "提示词已重命名。"
+        } else {
+            "Prompt renamed."
         }
     }
 
@@ -5672,6 +8089,45 @@ pub mod texts {
         ("🔑 Providers", "🔑 供应商")
     }
 
+    pub fn menu_usage() -> &'static str {
+        let (en, zh) = menu_usage_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_usage_variants() -> (&'static str, &'static str) {
+        ("📊 Usage", "📊 使用统计")
+    }
+
+    pub fn menu_pricing() -> &'static str {
+        let (en, zh) = menu_pricing_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_pricing_variants() -> (&'static str, &'static str) {
+        ("💵 Pricing", "💵 模型定价")
+    }
+
+    pub fn menu_manage_sessions() -> &'static str {
+        let (en, zh) = menu_manage_sessions_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_manage_sessions_variants() -> (&'static str, &'static str) {
+        ("🕘 Sessions", "🕘 会话")
+    }
+
     pub fn menu_manage_mcp() -> &'static str {
         let (en, zh) = menu_manage_mcp_variants();
         if is_chinese() {
@@ -5776,6 +8232,19 @@ pub mod texts {
         ("🤖 Agents Config", "🤖 Agents 配置")
     }
 
+    pub fn menu_hermes_memory() -> &'static str {
+        let (en, zh) = menu_hermes_memory_variants();
+        if is_chinese() {
+            zh
+        } else {
+            en
+        }
+    }
+
+    pub fn menu_hermes_memory_variants() -> (&'static str, &'static str) {
+        ("🧠 Memory", "🧠 记忆管理")
+    }
+
     pub fn menu_settings() -> &'static str {
         let (en, zh) = menu_settings_variants();
         if is_chinese() {
@@ -5800,6 +8269,380 @@ pub mod texts {
 
     pub fn menu_exit_variants() -> (&'static str, &'static str) {
         ("🚪 Exit", "🚪 退出")
+    }
+
+    pub fn tui_sessions_title() -> &'static str {
+        if is_chinese() {
+            "会话管理"
+        } else {
+            "Sessions"
+        }
+    }
+
+    pub fn tui_sessions_actions_title() -> &'static str {
+        if is_chinese() {
+            "操作"
+        } else {
+            "Actions"
+        }
+    }
+
+    pub fn tui_sessions_overview_title() -> &'static str {
+        if is_chinese() {
+            "概述"
+        } else {
+            "Overview"
+        }
+    }
+
+    pub fn tui_sessions_overview_time_label() -> &'static str {
+        if is_chinese() {
+            "时间"
+        } else {
+            "Time"
+        }
+    }
+
+    pub fn tui_sessions_overview_workdir_label() -> &'static str {
+        if is_chinese() {
+            "工作目录"
+        } else {
+            "Work Dir"
+        }
+    }
+
+    pub fn tui_sessions_overview_summary_label() -> &'static str {
+        if is_chinese() {
+            "标题"
+        } else {
+            "Title"
+        }
+    }
+
+    pub fn tui_sessions_messages_title() -> &'static str {
+        if is_chinese() {
+            "消息"
+        } else {
+            "Messages"
+        }
+    }
+
+    pub fn tui_sessions_messages_title_with_filter(query: Option<&str>) -> String {
+        let mut title = tui_sessions_messages_title().to_string();
+        if let Some(query) = query.filter(|value| !value.trim().is_empty()) {
+            if is_chinese() {
+                title.push_str(&format!(" · 搜索: {}", query.trim()));
+            } else {
+                title.push_str(&format!(" · Search: {}", query.trim()));
+            }
+        }
+        title
+    }
+
+    pub fn tui_sessions_empty_title() -> &'static str {
+        if is_chinese() {
+            "未找到本地会话"
+        } else {
+            "No local sessions found"
+        }
+    }
+
+    pub fn tui_sessions_empty_subtitle() -> &'static str {
+        if is_chinese() {
+            "进入此页会从本机会话文件扫描，不需要数据库。"
+        } else {
+            "This page scans local session files without using the database."
+        }
+    }
+
+    pub fn tui_sessions_error_title() -> &'static str {
+        if is_chinese() {
+            "会话扫描失败"
+        } else {
+            "Session scan failed"
+        }
+    }
+
+    pub fn tui_sessions_summary(total: usize, visible: usize) -> String {
+        if is_chinese() {
+            if total == visible {
+                format!("{total} 个会话")
+            } else {
+                format!("{visible} / {total} 个会话")
+            }
+        } else if total == visible {
+            format!("{total} sessions")
+        } else {
+            format!("{visible} / {total} sessions")
+        }
+    }
+
+    pub fn tui_sessions_loading_summary() -> &'static str {
+        if is_chinese() {
+            "正在扫描本地会话…"
+        } else {
+            "Scanning local sessions…"
+        }
+    }
+
+    pub fn tui_sessions_header_provider() -> &'static str {
+        if is_chinese() {
+            "来源"
+        } else {
+            "Provider"
+        }
+    }
+
+    pub fn tui_sessions_header_title() -> &'static str {
+        if is_chinese() {
+            "标题"
+        } else {
+            "Title"
+        }
+    }
+
+    pub fn tui_sessions_header_time() -> &'static str {
+        if is_chinese() {
+            "时间"
+        } else {
+            "Time"
+        }
+    }
+
+    pub fn tui_sessions_just_now() -> &'static str {
+        if is_chinese() {
+            "刚刚"
+        } else {
+            "Just now"
+        }
+    }
+
+    pub fn tui_sessions_minutes_ago(count: i64) -> String {
+        if is_chinese() {
+            format!("{count} 分钟前")
+        } else {
+            format!("{count} min ago")
+        }
+    }
+
+    pub fn tui_sessions_hours_ago(count: i64) -> String {
+        if is_chinese() {
+            format!("{count} 小时前")
+        } else {
+            format!("{count} hr ago")
+        }
+    }
+
+    pub fn tui_sessions_days_ago(count: i64) -> String {
+        if is_chinese() {
+            format!("{count} 天前")
+        } else if count == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{count} days ago")
+        }
+    }
+
+    pub fn tui_sessions_resume_command() -> &'static str {
+        if is_chinese() {
+            "恢复命令"
+        } else {
+            "Resume Command"
+        }
+    }
+
+    pub fn tui_sessions_project_directory() -> &'static str {
+        if is_chinese() {
+            "项目目录"
+        } else {
+            "Project Directory"
+        }
+    }
+
+    pub fn tui_sessions_action_open() -> &'static str {
+        if is_chinese() {
+            "打开"
+        } else {
+            "open"
+        }
+    }
+
+    pub fn tui_sessions_action_unavailable() -> &'static str {
+        if is_chinese() {
+            "不可用"
+        } else {
+            "unavailable"
+        }
+    }
+
+    pub fn tui_sessions_no_session_selected() -> &'static str {
+        if is_chinese() {
+            "选择左侧会话查看详情。"
+        } else {
+            "Select a session to view details."
+        }
+    }
+
+    pub fn tui_sessions_messages_loading() -> &'static str {
+        if is_chinese() {
+            "正在加载消息…"
+        } else {
+            "Loading messages…"
+        }
+    }
+
+    pub fn tui_sessions_messages_empty() -> &'static str {
+        if is_chinese() {
+            "此会话没有可显示的消息。"
+        } else {
+            "No messages available for this session."
+        }
+    }
+
+    pub fn tui_sessions_messages_filtered_empty() -> &'static str {
+        if is_chinese() {
+            "没有符合当前筛选/搜索的消息。"
+        } else {
+            "No messages match the current filters."
+        }
+    }
+
+    pub fn tui_sessions_messages_not_loaded() -> &'static str {
+        if is_chinese() {
+            "在左侧选择会话后加载消息。"
+        } else {
+            "Select a session on the left to load messages."
+        }
+    }
+
+    pub fn tui_sessions_delete_confirm_title() -> &'static str {
+        if is_chinese() {
+            "删除会话"
+        } else {
+            "Delete Session"
+        }
+    }
+
+    pub fn tui_sessions_delete_confirm_message(title: &str) -> String {
+        if is_chinese() {
+            format!("确认删除本地会话“{title}”？此操作不可撤销。")
+        } else {
+            format!("Delete local session \"{title}\"? This cannot be undone.")
+        }
+    }
+
+    pub fn tui_sessions_message_detail_title(role: &str) -> String {
+        if is_chinese() {
+            format!("消息 · {}", tui_sessions_role_label(role))
+        } else {
+            format!("Message · {}", tui_sessions_role_label(role))
+        }
+    }
+
+    pub fn tui_sessions_role_label(role: &str) -> String {
+        match role.to_lowercase().as_str() {
+            "assistant" => {
+                if is_chinese() {
+                    "助手".to_string()
+                } else {
+                    "AI".to_string()
+                }
+            }
+            "user" => {
+                if is_chinese() {
+                    "用户".to_string()
+                } else {
+                    "User".to_string()
+                }
+            }
+            "system" => {
+                if is_chinese() {
+                    "系统".to_string()
+                } else {
+                    "System".to_string()
+                }
+            }
+            "tool" => {
+                if is_chinese() {
+                    "工具".to_string()
+                } else {
+                    "Tool".to_string()
+                }
+            }
+            other => other.to_string(),
+        }
+    }
+
+    pub fn tui_sessions_toast_worker_unavailable(err: &str) -> String {
+        if is_chinese() {
+            format!("会话后台任务不可用：{err}")
+        } else {
+            format!("Sessions worker unavailable: {err}")
+        }
+    }
+
+    pub fn tui_sessions_toast_refresh_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("会话扫描失败：{err}")
+        } else {
+            format!("Session scan failed: {err}")
+        }
+    }
+
+    pub fn tui_sessions_toast_messages_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("消息加载失败：{err}")
+        } else {
+            format!("Message load failed: {err}")
+        }
+    }
+
+    pub fn tui_sessions_toast_source_missing() -> &'static str {
+        if is_chinese() {
+            "此会话缺少来源路径。"
+        } else {
+            "This session has no source path."
+        }
+    }
+
+    pub fn tui_sessions_toast_action_unavailable() -> &'static str {
+        if is_chinese() {
+            "当前操作不可用。"
+        } else {
+            "This action is not available."
+        }
+    }
+
+    pub fn tui_sessions_toast_terminal_launched() -> &'static str {
+        if is_chinese() {
+            "已打开终端恢复会话。"
+        } else {
+            "Terminal launched for session resume."
+        }
+    }
+
+    pub fn tui_sessions_toast_resume_fallback(err: &str) -> String {
+        if is_chinese() {
+            format!("无法自动打开终端，已显示恢复命令：{err}")
+        } else {
+            format!("Could not open a terminal; showing the resume command instead: {err}")
+        }
+    }
+
+    pub fn tui_sessions_toast_delete_finished() -> &'static str {
+        if is_chinese() {
+            "会话已删除。"
+        } else {
+            "Session deleted."
+        }
+    }
+
+    pub fn tui_sessions_toast_delete_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("会话删除失败：{err}")
+        } else {
+            format!("Session delete failed: {err}")
+        }
     }
 
     // ============================================
@@ -6516,6 +9359,26 @@ pub mod texts {
         }
     }
 
+    pub fn claude_auth_field_label() -> &'static str {
+        if is_chinese() {
+            "认证字段："
+        } else {
+            "Auth Field:"
+        }
+    }
+
+    pub fn claude_auth_field_auth_token() -> &'static str {
+        if is_chinese() {
+            "ANTHROPIC_AUTH_TOKEN（默认）"
+        } else {
+            "ANTHROPIC_AUTH_TOKEN (Default)"
+        }
+    }
+
+    pub fn claude_auth_field_api_key() -> &'static str {
+        "ANTHROPIC_API_KEY"
+    }
+
     pub fn base_url_label() -> &'static str {
         if is_chinese() {
             "Base URL："
@@ -6846,6 +9709,78 @@ pub mod texts {
             "配置 Gemini 供应商："
         } else {
             "Configure Gemini Provider:"
+        }
+    }
+
+    pub fn config_openclaw_header() -> &'static str {
+        if is_chinese() {
+            "配置 OpenClaw 供应商："
+        } else {
+            "Configure OpenClaw Provider:"
+        }
+    }
+
+    pub fn openclaw_api_protocol_label() -> &'static str {
+        if is_chinese() {
+            "API 协议："
+        } else {
+            "API Protocol:"
+        }
+    }
+
+    pub fn openclaw_api_protocol_help() -> &'static str {
+        if is_chinese() {
+            "选择与供应商接口兼容的协议"
+        } else {
+            "Select the protocol compatible with the provider API"
+        }
+    }
+
+    pub fn openclaw_base_url_help() -> &'static str {
+        if is_chinese() {
+            "供应商 API 端点，留空则不写入"
+        } else {
+            "Provider API endpoint; leave empty to omit it"
+        }
+    }
+
+    pub fn openclaw_user_agent_prompt() -> &'static str {
+        if is_chinese() {
+            "发送默认 User-Agent？"
+        } else {
+            "Send the default User-Agent?"
+        }
+    }
+
+    pub fn openclaw_user_agent_help() -> &'static str {
+        if is_chinese() {
+            "启用后写入 headers.User-Agent；关闭后移除该请求头"
+        } else {
+            "When enabled, writes headers.User-Agent; when disabled, removes it"
+        }
+    }
+
+    pub fn openclaw_models_json_label() -> &'static str {
+        if is_chinese() {
+            "模型列表 JSON："
+        } else {
+            "Models JSON:"
+        }
+    }
+
+    pub fn openclaw_models_json_help() -> &'static str {
+        if is_chinese() {
+            "输入非空 JSON 数组，例如 [{\"id\":\"gpt-4.1\",\"name\":\"GPT 4.1\"}]"
+        } else {
+            "Enter a non-empty JSON array, for example [{\"id\":\"gpt-4.1\",\"name\":\"GPT 4.1\"}]"
+        }
+    }
+
+    pub fn openclaw_models_invalid_schema_error(err: &str) -> String {
+        if is_chinese() {
+            format!("OpenClaw 模型列表格式无效: {err}")
+        } else {
+            format!("OpenClaw models schema is invalid: {err}")
         }
     }
 
@@ -7440,6 +10375,14 @@ pub mod texts {
         }
     }
 
+    pub fn provider_id_empty_error() -> &'static str {
+        if is_chinese() {
+            "供应商 ID 不能为空"
+        } else {
+            "Provider ID cannot be empty"
+        }
+    }
+
     pub fn retry_editing() -> &'static str {
         if is_chinese() {
             "是否重新编辑？"
@@ -7793,10 +10736,11 @@ pub mod texts {
     }
 
     pub fn language_changed() -> &'static str {
+        // Rendered as a success toast, which already prepends a checkmark.
         if is_chinese() {
-            "✓ 语言已更改"
+            "语言已更改"
         } else {
-            "✓ Language changed"
+            "Language changed"
         }
     }
 
@@ -7827,16 +10771,14 @@ pub mod texts {
                     "确认恢复 Claude Code 初次安装确认？\n将从 {path} 删除 hasCompletedOnboarding"
                 )
             }
+        } else if enable {
+            format!(
+                "Enable skipping Claude Code onboarding confirmation?\nWrites hasCompletedOnboarding=true to {path}"
+            )
         } else {
-            if enable {
-                format!(
-                    "Enable skipping Claude Code onboarding confirmation?\nWrites hasCompletedOnboarding=true to {path}"
-                )
-            } else {
-                format!(
-                    "Disable skipping Claude Code onboarding confirmation?\nRemoves hasCompletedOnboarding from {path}"
-                )
-            }
+            format!(
+                "Disable skipping Claude Code onboarding confirmation?\nRemoves hasCompletedOnboarding from {path}"
+            )
         }
     }
 
@@ -7847,12 +10789,10 @@ pub mod texts {
             } else {
                 "✓ 已恢复 Claude Code 初次安装确认".to_string()
             }
+        } else if enable {
+            "✓ Skip Claude Code onboarding confirmation enabled".to_string()
         } else {
-            if enable {
-                "✓ Skip Claude Code onboarding confirmation enabled".to_string()
-            } else {
-                "✓ Claude Code onboarding confirmation restored".to_string()
-            }
+            "✓ Claude Code onboarding confirmation restored".to_string()
         }
     }
 
@@ -7881,16 +10821,14 @@ pub mod texts {
             } else {
                 "确认关闭 Claude Code for VSCode 插件联动？".to_string()
             }
+        } else if enable {
+            format!(
+                "Enable Claude Code for VSCode integration?\nWrites primaryApiKey=\"any\" to {path}"
+            )
         } else {
-            if enable {
-                format!(
-                    "Enable Claude Code for VSCode integration?\nWrites primaryApiKey=\"any\" to {path}"
-                )
-            } else {
-                format!(
-                    "Disable Claude Code for VSCode integration?\nRemoves primaryApiKey from {path}"
-                )
-            }
+            format!(
+                "Disable Claude Code for VSCode integration?\nRemoves primaryApiKey from {path}"
+            )
         }
     }
 
@@ -7901,12 +10839,10 @@ pub mod texts {
             } else {
                 "✓ 已关闭 Claude Code for VSCode 插件联动".to_string()
             }
+        } else if enable {
+            "✓ Claude Code for VSCode integration enabled".to_string()
         } else {
-            if enable {
-                "✓ Claude Code for VSCode integration enabled".to_string()
-            } else {
-                "✓ Claude Code for VSCode integration disabled".to_string()
-            }
+            "✓ Claude Code for VSCode integration disabled".to_string()
         }
     }
 
@@ -7915,6 +10851,28 @@ pub mod texts {
             format!("⚠ Claude Code for VSCode 插件联动失败: {err}")
         } else {
             format!("⚠ Claude Code for VSCode integration failed: {err}")
+        }
+    }
+
+    pub fn codex_unified_session_history_label() -> &'static str {
+        if is_chinese() {
+            "统一 Codex 会话历史"
+        } else {
+            "Unified Codex session history"
+        }
+    }
+
+    pub fn codex_unified_session_history_confirm(enable: bool) -> String {
+        if is_chinese() {
+            if enable {
+                "确认开启统一 Codex 会话历史？\n官方订阅将使用共享 custom 供应商标识运行；已有官方会话不会自动迁移，可用 CLI 命令 settings codex-history migrate-existing 单独迁移。".to_string()
+            } else {
+                "确认关闭统一 Codex 会话历史？\n不会自动恢复已迁移的会话；如需恢复，请使用 CLI 命令 settings codex-history restore。".to_string()
+            }
+        } else if enable {
+            "Enable unified Codex session history?\nOfficial subscriptions will use the shared custom provider id. Existing official sessions are not migrated automatically; use settings codex-history migrate-existing from the CLI if needed.".to_string()
+        } else {
+            "Disable unified Codex session history?\nMigrated sessions are not restored automatically; use settings codex-history restore from the CLI if needed.".to_string()
         }
     }
 
@@ -8138,12 +11096,10 @@ pub mod texts {
             } else {
                 format!("编辑 {app} 的通用配置片段（JSON 对象，留空则清除）：")
             }
+        } else if is_codex {
+            format!("Edit common config snippet for {app} (TOML; empty to clear):")
         } else {
-            if is_codex {
-                format!("Edit common config snippet for {app} (TOML; empty to clear):")
-            } else {
-                format!("Edit common config snippet for {app} (JSON object; empty to clear):")
-            }
+            format!("Edit common config snippet for {app} (JSON object; empty to clear):")
         }
     }
 
@@ -8180,18 +11136,20 @@ pub mod texts {
     }
 
     pub fn common_config_snippet_saved() -> &'static str {
+        // Rendered as a success toast, which already prepends a checkmark.
         if is_chinese() {
-            "✓ 已保存通用配置片段"
+            "已保存通用配置片段"
         } else {
-            "✓ Common config snippet saved"
+            "Common config snippet saved"
         }
     }
 
     pub fn common_config_snippet_cleared() -> &'static str {
+        // Rendered as a success toast, which already prepends a checkmark.
         if is_chinese() {
-            "✓ 已清除通用配置片段"
+            "已清除通用配置片段"
         } else {
-            "✓ Common config snippet cleared"
+            "Common config snippet cleared"
         }
     }
 
@@ -8232,6 +11190,54 @@ pub mod texts {
             "提示：切换一次供应商即可重新写入 live 配置。"
         } else {
             "Tip: switch provider once to re-write the live config."
+        }
+    }
+
+    pub fn common_config_snippet_extracted() -> &'static str {
+        if is_chinese() {
+            "已从当前编辑内容提取通用配置片段"
+        } else {
+            "Extracted common config snippet from current edits"
+        }
+    }
+
+    pub fn common_config_snippet_formatted() -> &'static str {
+        if is_chinese() {
+            "已格式化通用配置片段"
+        } else {
+            "Formatted common config snippet"
+        }
+    }
+
+    pub fn common_config_snippet_extract_empty() -> &'static str {
+        if is_chinese() {
+            "当前编辑内容没有可提取的通用配置"
+        } else {
+            "No common config found in the current edits"
+        }
+    }
+
+    pub fn tui_common_config_notice_title() -> &'static str {
+        if is_chinese() {
+            "关于通用配置"
+        } else {
+            "About Common Config"
+        }
+    }
+
+    pub fn tui_common_config_notice_message(app: &str) -> String {
+        if is_chinese() {
+            format!(
+                "通用配置适合保存多个 {app} 供应商共享的插件、环境变量和工具配置。\
+                 \n\n有可用片段时，新建供应商会默认勾选“添加通用配置”。\
+                 \n\n如果在当前表单里新增了插件、hooks 或环境变量，可以在“通用配置”编辑器里按 F4 从当前编辑内容提取，再按 Ctrl+S 保存片段。"
+            )
+        } else {
+            format!(
+                "Common Config is for plugin, environment, and tool settings shared by multiple {app} providers.\
+                 \n\nWhen a usable snippet exists, new providers will default to attaching it.\
+                 \n\nAfter adding plugins, hooks, or environment variables in this form, open Common Config, press F4 to extract from the current edits, then press Ctrl+S to save the snippet."
+            )
         }
     }
 
@@ -8666,6 +11672,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_update_homebrew_required(current: &str, target: &str) -> String {
+        if is_chinese() {
+            format!("发现新版本 {target}（当前 v{current}）\n请使用 brew upgrade cc-switch 更新")
+        } else {
+            format!("Update {target} is available (current v{current}).\nPlease update with: brew upgrade cc-switch")
+        }
+    }
+
     pub fn tui_toast_update_check_failed(err: &str) -> String {
         if is_chinese() {
             format!("检查更新失败: {err}")
@@ -8698,22 +11712,6 @@ pub mod texts {
         }
     }
 
-    pub fn tui_provider_imported_live_config_name() -> &'static str {
-        if is_chinese() {
-            "导入的 Live 配置"
-        } else {
-            "Imported Live Config"
-        }
-    }
-
-    pub fn tui_codex_imported_live_config_name() -> &'static str {
-        if is_chinese() {
-            "导入的 Codex Live 配置"
-        } else {
-            "Imported Codex Live Config"
-        }
-    }
-
     pub fn tui_toast_provider_live_config_imported() -> &'static str {
         if is_chinese() {
             "已将当前 live 配置导入为供应商"
@@ -8730,87 +11728,113 @@ pub mod texts {
         }
     }
 
-    pub fn tui_provider_switch_first_use_title() -> &'static str {
+    pub fn tui_toast_no_live_config_imported() -> &'static str {
         if is_chinese() {
-            "检测到现有 live 配置"
+            "没有可导入的 live 供应商"
         } else {
-            "Existing live config detected"
+            "No live providers were imported"
         }
     }
 
-    pub fn tui_provider_switch_first_use_message(path: &str) -> String {
+    // -----------------------------------------------------------------
+    // config.rs - validate_config_dir & prompt_fix_permissions
+    // -----------------------------------------------------------------
+
+    pub fn config_dir_is_system_dir(dir: &str, resolved: &str) -> String {
         if is_chinese() {
-            format!("首次切换前，检测到 {path} 已存在配置。你可以先导入当前 live 配置，或继续切换并覆盖它。")
+            format!("CC_SWITCH_CONFIG_DIR 不能设置为系统目录: {dir}（解析后: {resolved}）")
         } else {
-            format!("Before the first switch, an existing config was found at {path}. You can import the current live config first, or continue and overwrite it.")
+            format!(
+                "CC_SWITCH_CONFIG_DIR must not be a system directory: {dir} (resolved: {resolved})"
+            )
         }
     }
 
-    pub fn tui_codex_provider_switch_first_use_title() -> &'static str {
+    pub fn config_dir_invalid_last_component(path: &str) -> String {
         if is_chinese() {
-            "检测到现有 Codex live 配置"
+            format!("配置目录路径无效，无法解析最后一层目录: {path}")
         } else {
-            "Existing Codex live config detected"
+            format!("Invalid config directory path; unable to resolve the final directory component: {path}")
         }
     }
 
-    pub fn tui_codex_provider_switch_first_use_message(paths: &str) -> String {
+    pub fn config_dir_only_final_component_may_be_missing(path: &str) -> String {
         if is_chinese() {
-            format!("首次切换前，检测到 {paths} 已存在配置。你可以先导入当前 live 配置，或继续切换并覆盖它。")
+            format!("配置目录路径无效，仅允许最后一层目录不存在: {path}")
         } else {
-            format!("Before the first switch, existing config was found in {paths}. You can import the current live config first, or continue and overwrite it.")
+            format!("Invalid config directory path; only the final directory component may be missing: {path}")
         }
     }
 
-    pub fn tui_provider_switch_first_use_import_button() -> &'static str {
+    pub fn config_permissions_insecure_header() -> &'static str {
         if is_chinese() {
-            "导入当前配置"
+            "⚠ 检测到以下文件/目录权限不安全："
         } else {
-            "Import Current Config"
+            "⚠ Insecure file/directory permissions detected:"
         }
     }
 
-    pub fn tui_provider_switch_first_use_continue_button() -> &'static str {
+    pub fn config_permissions_detail(path: &str, current: u32, expected: u32) -> String {
         if is_chinese() {
-            "继续切换"
+            format!("  {path}  当前 {current:04o}，期望 {expected:04o}")
         } else {
-            "Continue Switching"
+            format!("  {path}  current {current:04o}, expected {expected:04o}")
         }
     }
 
-    pub fn tui_provider_switch_first_use_cancel_button() -> &'static str {
+    pub fn config_permissions_fix_prompt() -> &'static str {
         if is_chinese() {
-            "取消"
+            "是否现在修复权限？（仅所有者可访问）"
         } else {
-            "Cancel"
+            "Fix permissions now? (owner-only access)"
         }
     }
 
-    pub fn tui_provider_switch_shared_config_tip_title() -> &'static str {
+    pub fn config_permissions_fixed() -> &'static str {
         if is_chinese() {
-            "已切换供应商"
+            "✓ 权限已修复"
         } else {
-            "Provider Switched"
+            "✓ Permissions fixed"
         }
     }
 
-    pub fn tui_provider_switch_shared_config_tip_message() -> String {
+    pub fn config_permissions_fix_warn_interactive() -> &'static str {
         if is_chinese() {
-            "当前 live 配置还会叠加通用配置片段；如果结果和预期不同，请检查 Common Snippet。"
-                .to_string()
+            "⚠ 未来版本将拒绝在权限不安全的情况下启动，请尽快修复。"
         } else {
-            "The live config still applies the shared common snippet; if the result looks different than expected, check Common Snippet."
-                .to_string()
+            "⚠ Future versions will refuse to start with insecure permissions. Please fix soon."
         }
     }
 
-    pub fn tui_codex_provider_switch_shared_config_tip_message() -> String {
+    pub fn config_permissions_fix_warn_noninteractive() -> &'static str {
         if is_chinese() {
-            "当前 Codex live 配置还会叠加通用配置片段；如果结果和预期不同，请检查 Common Snippet。"
-                .to_string()
+            "⚠ 检测到配置文件权限不安全（非交互模式），跳过修复。未来版本将拒绝启动。"
         } else {
-            "The Codex live config still applies the shared common snippet; if the result looks different than expected, check Common Snippet."
-                .to_string()
+            "⚠ Insecure config permissions detected (non-interactive). Skipped. Future versions will refuse to start."
+        }
+    }
+
+    pub fn config_permissions_custom_dir_notice(path: &str) -> String {
+        if is_chinese() {
+            format!("检测到自定义配置目录: {path}，请核实此目录不是关键系统目录")
+        } else {
+            format!("Custom config directory detected: {path}, please verify this is not a critical system directory")
+        }
+    }
+
+    pub fn config_permissions_confirm_custom_dir() -> &'static str {
+        if is_chinese() {
+            "确认要修改此目录的权限吗？"
+        } else {
+            "Confirm modifying permissions on this directory?"
+        }
+    }
+
+    pub fn config_permissions_custom_dir_skipped() -> &'static str {
+        if is_chinese() {
+            "已跳过权限修复。"
+        } else {
+            "Skipped permission fix."
         }
     }
 }
@@ -8833,6 +11857,10 @@ mod tests {
     fn chinese_tui_copy_avoids_key_mixed_english_labels() {
         let _lang = use_test_language(Language::Chinese);
 
+        assert_eq!(
+            texts::provider_duplicated_success("source", "source-copy"),
+            "✓ 已复制供应商 'source' 为 'source-copy'"
+        );
         assert_eq!(texts::tui_home_section_connection(), "连接信息");
         assert_eq!(texts::tui_home_status_online(), "在线");
         assert_eq!(texts::tui_home_status_offline(), "离线");
@@ -8840,18 +11868,49 @@ mod tests {
         assert_eq!(texts::skills_management(), "技能管理");
         assert_eq!(texts::menu_manage_mcp(), "🔌 MCP 服务器");
 
-        let help = texts::tui_help_text();
-        assert!(help.contains("供应商：Enter 详情"));
-        assert!(help.contains("供应商详情：s 切换/添加移除"));
-        assert!(help.contains("提示词：Enter 查看"));
-        assert!(help.contains("技能：Enter 详情"));
-        assert!(help.contains("配置：Enter 打开/执行"));
-        assert!(help.contains("设置：Enter 应用"));
-        assert!(!help.contains("Providers:"));
-        assert!(!help.contains("Provider Detail:"));
-        assert!(!help.contains("Skills:"));
-        assert!(!help.contains("Config:"));
-        assert!(!help.contains("Settings:"));
+        // The per-page bullets for MCP/Prompts/Sessions/Skills/Usage are now
+        // generated from the keymap registry (covered in cli::tui::help
+        // tests); here we pin the static Chinese pieces the help sheet still
+        // owns: the prelude and the hand-written Providers/Config/Settings
+        // lines.
+        let prelude = texts::tui_help_prelude();
+        assert!(prelude.contains("文本输入：Ctrl+A/E 行首/行尾"));
+        assert!(!prelude.contains("Text input:"));
+        let providers = texts::tui_help_line_providers(&crate::app_config::AppType::Claude);
+        assert!(providers.contains("供应商：Space 切换"));
+        assert!(!providers.contains("供应商详情："));
+        assert!(!providers.contains("Providers:"));
+        assert!(texts::tui_help_line_config().contains("配置：Enter 打开/执行"));
+        assert!(!texts::tui_help_line_config().contains("Config:"));
+        assert!(texts::tui_help_line_settings().contains("设置：Enter 应用"));
+        assert!(!texts::tui_help_line_settings().contains("Settings:"));
+    }
+
+    #[test]
+    fn config_dir_validation_messages_are_localized() {
+        {
+            let _lang = use_test_language(Language::English);
+            assert_eq!(
+                texts::config_dir_invalid_last_component("/tmp/child/.."),
+                "Invalid config directory path; unable to resolve the final directory component: /tmp/child/.."
+            );
+            assert_eq!(
+                texts::config_dir_only_final_component_may_be_missing("/tmp/child/.."),
+                "Invalid config directory path; only the final directory component may be missing: /tmp/child/.."
+            );
+        }
+
+        {
+            let _lang = use_test_language(Language::Chinese);
+            assert_eq!(
+                texts::config_dir_invalid_last_component("/tmp/child/.."),
+                "配置目录路径无效，无法解析最后一层目录: /tmp/child/.."
+            );
+            assert_eq!(
+                texts::config_dir_only_final_component_may_be_missing("/tmp/child/.."),
+                "配置目录路径无效，仅允许最后一层目录不存在: /tmp/child/.."
+            );
+        }
     }
 
     #[test]

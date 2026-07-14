@@ -38,6 +38,13 @@ impl Database {
         Ok(())
     }
 
+    /// 获取一次性布尔 flag。兼容历史写法 `"1"`。
+    pub fn get_bool_flag(&self, key: &str) -> Result<bool, AppError> {
+        Ok(self
+            .get_setting(key)?
+            .is_some_and(|value| value == "true" || value == "1"))
+    }
+
     /// 删除设置值
     pub fn delete_setting(&self, key: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
@@ -65,6 +72,40 @@ impl Database {
         } else {
             self.delete_setting(&key)
         }
+    }
+
+    /// 通用配置片段“已被用户显式清空”标记的键名
+    fn config_snippet_cleared_key(app_type: &str) -> String {
+        format!("common_config_{app_type}_cleared")
+    }
+
+    /// 通用配置片段是否被用户显式清空
+    pub fn is_config_snippet_cleared(&self, app_type: &str) -> Result<bool, AppError> {
+        Ok(self
+            .get_setting(&Self::config_snippet_cleared_key(app_type))?
+            .as_deref()
+            == Some("true"))
+    }
+
+    /// 设置/清除“通用配置片段已被显式清空”标记
+    pub fn set_config_snippet_cleared(
+        &self,
+        app_type: &str,
+        cleared: bool,
+    ) -> Result<(), AppError> {
+        let key = Self::config_snippet_cleared_key(app_type);
+        if cleared {
+            self.set_setting(&key, "true")
+        } else {
+            self.delete_setting(&key)
+        }
+    }
+
+    /// 当前是否允许从 live 配置自动播种通用配置片段：
+    /// 片段为空且未被用户显式清空时返回 true
+    pub fn should_auto_extract_config_snippet(&self, app_type: &str) -> Result<bool, AppError> {
+        Ok(self.get_config_snippet(app_type)?.is_none()
+            && !self.is_config_snippet_cleared(app_type)?)
     }
 
     // --- 全局出站代理 ---
@@ -210,6 +251,27 @@ impl Database {
         self.set_setting("optimizer_config", &json)
     }
 
+    // --- Copilot 优化器配置 ---
+
+    pub fn get_copilot_optimizer_config(
+        &self,
+    ) -> Result<crate::proxy::types::CopilotOptimizerConfig, AppError> {
+        match self.get_setting("copilot_optimizer_config")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析 Copilot 优化器配置失败: {e}"))),
+            None => Ok(crate::proxy::types::CopilotOptimizerConfig::default()),
+        }
+    }
+
+    pub fn set_copilot_optimizer_config(
+        &self,
+        config: &crate::proxy::types::CopilotOptimizerConfig,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| AppError::Database(format!("序列化 Copilot 优化器配置失败: {e}")))?;
+        self.set_setting("copilot_optimizer_config", &json)
+    }
+
     // --- 日志配置 ---
 
     /// 获取日志配置
@@ -252,5 +314,57 @@ mod tests {
         assert!(!loaded.thinking_optimizer);
         assert!(loaded.cache_injection);
         assert_eq!(loaded.cache_ttl, "5m");
+    }
+
+    #[test]
+    fn copilot_optimizer_config_defaults_when_missing() {
+        let db = Database::memory().expect("create memory db");
+
+        let loaded = db
+            .get_copilot_optimizer_config()
+            .expect("load default copilot optimizer config");
+
+        assert!(loaded.enabled);
+        assert!(loaded.request_classification);
+        assert!(loaded.tool_result_merging);
+        assert!(loaded.compact_detection);
+        assert!(loaded.deterministic_request_id);
+        assert!(loaded.subagent_detection);
+        assert!(loaded.warmup_downgrade);
+        assert_eq!(loaded.warmup_model, "gpt-5-mini");
+        assert!(loaded.strip_thinking);
+    }
+
+    #[test]
+    fn copilot_optimizer_config_roundtrip_uses_settings_storage() {
+        let db = Database::memory().expect("create memory db");
+        let config = crate::proxy::types::CopilotOptimizerConfig {
+            enabled: false,
+            request_classification: false,
+            tool_result_merging: false,
+            compact_detection: false,
+            deterministic_request_id: false,
+            subagent_detection: false,
+            warmup_downgrade: false,
+            warmup_model: "gpt-test-mini".to_string(),
+            strip_thinking: false,
+        };
+
+        db.set_copilot_optimizer_config(&config)
+            .expect("persist copilot optimizer config");
+
+        let loaded = db
+            .get_copilot_optimizer_config()
+            .expect("load copilot optimizer config");
+
+        assert!(!loaded.enabled);
+        assert!(!loaded.request_classification);
+        assert!(!loaded.tool_result_merging);
+        assert!(!loaded.compact_detection);
+        assert!(!loaded.deterministic_request_id);
+        assert!(!loaded.subagent_detection);
+        assert!(!loaded.warmup_downgrade);
+        assert_eq!(loaded.warmup_model, "gpt-test-mini");
+        assert!(!loaded.strip_thinking);
     }
 }

@@ -39,33 +39,20 @@ pub(super) fn render_prompts(
         ])
     });
 
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(texts::menu_manage_prompts());
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(inner);
-
-    if app.focus == Focus::Content {
-        render_key_bar_center(
-            frame,
-            chunks[0],
-            theme,
-            &[
-                ("Enter", texts::tui_key_view()),
-                ("a", texts::tui_key_activate()),
-                ("x", texts::tui_key_deactivate_active()),
-                ("e", texts::tui_key_edit()),
-                ("d", texts::tui_key_delete()),
-            ],
-        );
-    }
+    let keys = crate::cli::tui::keymap::prompts::key_bar_items(app, data);
+    let body = render_page_frame(
+        frame,
+        area,
+        theme,
+        app,
+        &format!(
+            "{} · {}",
+            texts::menu_manage_prompts(),
+            app.app_type.as_str()
+        ),
+        &keys,
+        Some(prompts_summary(data)),
+    );
 
     let table = Table::new(
         rows,
@@ -80,7 +67,32 @@ pub(super) fn render_prompts(
     .row_highlight_style(selection_style(theme))
     .highlight_symbol(highlight_symbol(theme));
 
+    if data.prompts.rows.is_empty() {
+        render_empty_state(
+            frame,
+            body,
+            theme,
+            texts::tui_prompts_empty_title(),
+            texts::tui_prompts_empty_subtitle(),
+            &[("a", texts::tui_key_add())],
+        );
+        return;
+    }
+
     let mut state = TableState::default();
     state.select(Some(app.prompt_idx));
-    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(table, inset_left(body, CONTENT_INSET_LEFT), &mut state);
+}
+
+fn prompts_summary(data: &UiData) -> String {
+    let count = data.prompts.rows.len();
+    let active = data
+        .prompts
+        .rows
+        .iter()
+        .find(|row| row.prompt.enabled)
+        .map(|row| row.prompt.name.as_str())
+        .unwrap_or_else(|| texts::tui_prompt_no_active_summary());
+
+    texts::tui_prompts_summary(count, active)
 }

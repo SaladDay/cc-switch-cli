@@ -114,8 +114,8 @@ fn sync_codex_provider_writes_auth_and_config() {
     let config_path = cc_switch_lib::get_codex_config_path();
 
     assert!(
-        auth_path.exists(),
-        "auth.json should exist at {}",
+        !auth_path.exists(),
+        "auth.json should not be created by third-party provider sync at {}",
         auth_path.display()
     );
     assert!(
@@ -124,16 +124,14 @@ fn sync_codex_provider_writes_auth_and_config() {
         config_path.display()
     );
 
-    let auth_value: serde_json::Value = read_json_file(&auth_path).expect("read auth");
-    assert_eq!(
-        auth_value,
-        provider_config.get("auth").cloned().expect("auth object")
-    );
-
     let toml_text = fs::read_to_string(&config_path).expect("read config.toml");
     assert!(
         toml_text.contains("command = \"echo\""),
         "config.toml should contain serialized enabled MCP server"
+    );
+    assert!(
+        toml_text.contains("experimental_bearer_token"),
+        "config.toml should contain provider-scoped bearer token"
     );
 
     // 当前供应商应同步最新 config 文本
@@ -144,7 +142,93 @@ fn sync_codex_provider_writes_auth_and_config() {
         .get("config")
         .and_then(|v| v.as_str())
         .expect("config string");
-    assert_eq!(synced_cfg, toml_text);
+    assert!(
+        !synced_cfg.contains("experimental_bearer_token"),
+        "provider storage should not persist generated live bearer token"
+    );
+}
+
+#[test]
+fn sync_codex_provider_preserves_provider_model_provider_after_history_migration() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+
+    let legacy_auth = json!({ "OPENAI_API_KEY": "rightcode-key" });
+    let legacy_config = r#"model_provider = "rightcode"
+model = "gpt-5.4"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    cc_switch_lib::write_codex_live_atomic(&legacy_auth, Some(legacy_config))
+        .expect("seed existing Codex live config");
+
+    let mut config = MultiAppConfig::default();
+    let provider_config = json!({
+        "auth": {
+            "OPENAI_API_KEY": "fresh-key"
+        },
+        "config": r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+
+[model_providers.aihubmix]
+name = "AiHubMix"
+base_url = "https://aihubmix.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+    });
+
+    let provider = Provider::with_id(
+        "codex-1".to_string(),
+        "Codex Test".to_string(),
+        provider_config,
+        None,
+    );
+
+    let manager = config
+        .get_manager_mut(&AppType::Codex)
+        .expect("codex manager");
+    manager.providers.insert("codex-1".to_string(), provider);
+    manager.current = "codex-1".to_string();
+
+    ConfigService::sync_current_providers_to_live(&mut config).expect("sync codex live");
+
+    let toml_text =
+        fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
+    let parsed: toml::Value = toml::from_str(&toml_text).expect("parse config.toml");
+
+    assert_eq!(
+        parsed.get("model_provider").and_then(|v| v.as_str()),
+        Some("aihubmix"),
+        "ConfigService sync should preserve the provider template's model_provider"
+    );
+
+    let model_providers = parsed
+        .get("model_providers")
+        .and_then(|v| v.as_table())
+        .expect("model_providers should exist");
+    assert_eq!(
+        model_providers
+            .get("aihubmix")
+            .and_then(|v| v.get("base_url"))
+            .and_then(|v| v.as_str()),
+        Some("https://aihubmix.example/v1")
+    );
+
+    let synced_cfg = config
+        .get_manager(&AppType::Codex)
+        .and_then(|manager| manager.providers.get("codex-1"))
+        .and_then(|provider| provider.settings_config.get("config"))
+        .and_then(|v| v.as_str())
+        .expect("synced config string");
+    assert!(
+        synced_cfg.contains("[model_providers.aihubmix]"),
+        "ConfigService keeps syncing provider-specific config from live"
+    );
 }
 
 #[test]

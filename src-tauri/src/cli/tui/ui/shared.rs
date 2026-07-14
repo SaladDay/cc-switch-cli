@@ -16,7 +16,7 @@ pub(super) fn selection_style(theme: &super::theme::Theme) -> Style {
         Style::default().add_modifier(Modifier::REVERSED)
     } else {
         Style::default()
-            .fg(Color::Black)
+            .fg(theme.on_accent)
             .bg(theme.accent)
             .add_modifier(Modifier::BOLD)
     }
@@ -26,7 +26,7 @@ pub(super) fn inactive_chip_style(theme: &super::theme::Theme) -> Style {
     if theme.no_color {
         Style::default()
     } else {
-        Style::default().fg(Color::White).bg(theme.surface)
+        Style::default().fg(theme.fg_strong).bg(theme.surface)
     }
 }
 
@@ -35,7 +35,7 @@ pub(super) fn active_chip_style(theme: &super::theme::Theme) -> Style {
         Style::default().add_modifier(Modifier::REVERSED)
     } else {
         Style::default()
-            .fg(Color::Black)
+            .fg(theme.on_accent)
             .bg(theme.accent)
             .add_modifier(Modifier::BOLD)
     }
@@ -105,6 +105,143 @@ pub(super) fn truncate_to_display_width(text: &str, width: u16) -> String {
     }
     out.push('…');
     out
+}
+
+/// Standard page shell: the outer bordered block with a padded title, the
+/// page key bar (always visible, dimmed without content focus), and an
+/// optional summary bar. Returns the body rect below them.
+pub(super) fn render_page_frame(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &super::theme::Theme,
+    app: &App,
+    title: &str,
+    keys: &[(&str, &str)],
+    summary: Option<String>,
+) -> Rect {
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(format!(" {} ", icons::strip_icon(title)));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let constraints = if summary.is_some() {
+        vec![
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ]
+    } else {
+        vec![Constraint::Length(1), Constraint::Min(0)]
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    render_page_key_bar(frame, chunks[0], theme, keys, app.focus == Focus::Content);
+    if let Some(summary) = summary {
+        render_summary_bar(frame, chunks[1], theme, summary);
+    }
+
+    *chunks.last().expect("page frame always has a body chunk")
+}
+
+/// Sub-page titles show their place in the hierarchy (" Usage › Details ")
+/// so nesting depth stays visible and Esc's destination is predictable.
+pub(super) fn breadcrumb_title(segments: &[&str]) -> String {
+    // Hand-rolled callers don't pass through `render_page_frame`, so strip the
+    // leading emoji here too (no-op in emoji mode / for non-emoji segments).
+    format!(" {} ", icons::strip_icon(&breadcrumb_path(segments)))
+}
+
+/// Breadcrumb path without the surrounding padding that `breadcrumb_title`
+/// adds. Use with `render_page_frame`, which wraps the title itself.
+pub(super) fn breadcrumb_path(segments: &[&str]) -> String {
+    segments.join(" › ")
+}
+
+/// Centered guidance for empty list screens: a bold title, a muted
+/// subtitle, and key chips for the actions that create the first entry.
+/// The first action renders as the primary (accent) chip.
+pub(super) fn render_empty_state(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &super::theme::Theme,
+    title: &str,
+    subtitle: &str,
+    actions: &[(&str, &str)],
+) {
+    let title_style = Style::default().add_modifier(Modifier::BOLD);
+    let subtitle_style = Style::default().fg(theme.comment);
+    let primary_style = if theme.no_color {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.on_accent)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    };
+    let secondary_style = if theme.no_color {
+        Style::default()
+    } else {
+        Style::default()
+            .fg(theme.dim)
+            .bg(theme.surface)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let mut content_lines = vec![
+        Line::styled(title.to_string(), title_style),
+        Line::raw(""),
+        Line::styled(subtitle.to_string(), subtitle_style),
+        Line::raw(""),
+    ];
+    for (idx, (key, label)) in actions.iter().enumerate() {
+        let style = if idx == 0 {
+            primary_style
+        } else {
+            secondary_style
+        };
+        content_lines.push(Line::from(vec![Span::styled(
+            format!("  {key}  {label}  "),
+            style,
+        )]));
+    }
+
+    let top_padding = area.height.saturating_sub(content_lines.len() as u16) / 2;
+    let mut lines = Vec::with_capacity(top_padding as usize + content_lines.len());
+    for _ in 0..top_padding {
+        lines.push(Line::raw(""));
+    }
+    lines.extend(content_lines);
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// Two-column field tables clip the value cell silently at the pane edge;
+/// pre-truncate the value with an ellipsis so a cut-off reads as one.
+pub(super) fn truncated_value_cell(
+    value: &str,
+    table_width: u16,
+    label_col_width: u16,
+    theme: &super::theme::Theme,
+) -> String {
+    let symbol_width = UnicodeWidthStr::width(highlight_symbol(theme)) as u16;
+    // Chrome left of the value column: label column + 1 column spacing +
+    // the selection highlight symbol.
+    let value_width = table_width
+        .saturating_sub(label_col_width)
+        .saturating_sub(1)
+        .saturating_sub(symbol_width);
+    truncate_to_display_width(value, value_width)
 }
 
 pub(super) fn format_sync_time_local_to_minute(ts: i64) -> Option<String> {
@@ -190,30 +327,10 @@ fn quota_utilization_style(theme: &super::theme::Theme, utilization: f64) -> Sty
     }
 }
 
-fn quota_countdown(resets_at: Option<&str>) -> Option<String> {
-    let resets_at = resets_at?;
-    let reset = chrono::DateTime::parse_from_rfc3339(resets_at).ok()?;
-    let diff_ms = reset.timestamp_millis() - chrono::Utc::now().timestamp_millis();
-    if diff_ms <= 0 {
-        return None;
-    }
-
-    let total_minutes = diff_ms / 60_000;
-    let hours = total_minutes / 60;
-    let minutes = total_minutes % 60;
-    if hours > 24 {
-        Some(format!("{}d{}h", hours / 24, hours % 24))
-    } else if hours > 0 {
-        Some(format!("{hours}h{minutes}m"))
-    } else {
-        Some(format!("{minutes}m"))
-    }
-}
-
 fn quota_relative_time(timestamp_ms: i64) -> String {
     let diff_secs = ((chrono::Utc::now().timestamp_millis() - timestamp_ms).max(0)) / 1000;
     if diff_secs < 60 {
-        texts::tui_quota_just_now().to_string()
+        texts::tui_quota_seconds_ago(diff_secs.max(1))
     } else if diff_secs < 3600 {
         texts::tui_quota_minutes_ago(diff_secs / 60)
     } else if diff_secs < 86_400 {
@@ -247,9 +364,7 @@ pub(super) fn quota_compact_line(
     theme: &super::theme::Theme,
     quiet_missing: bool,
 ) -> Option<Line<'static>> {
-    let Some(state) = state else {
-        return None;
-    };
+    let state = state?;
 
     if state.loading && state.quota.is_none() {
         return Some(Line::from(Span::styled(
@@ -266,6 +381,19 @@ pub(super) fn quota_compact_line(
     }
 
     let quota = state.quota.as_ref()?;
+    if let data::ProviderUsageQuota::Script(result) = quota {
+        return script_usage_compact_line(
+            result,
+            state.loading,
+            state.updated_at,
+            theme,
+            quiet_missing,
+        );
+    }
+
+    let data::ProviderUsageQuota::Subscription(quota) = quota else {
+        return None;
+    };
     match quota.credential_status {
         crate::services::CredentialStatus::NotFound => {
             if quiet_missing {
@@ -349,210 +477,105 @@ pub(super) fn quota_compact_line(
     Some(Line::from(spans))
 }
 
-pub(super) fn quota_detail_lines(
-    app: &App,
-    data: &UiData,
-    row: &ProviderRow,
+fn script_usage_compact_line(
+    result: &crate::provider::UsageResult,
+    loading: bool,
+    updated_at: Option<i64>,
     theme: &super::theme::Theme,
-) -> Vec<Line<'static>> {
-    if data::quota_target_for_provider(&app.app_type, row).is_none() {
-        return Vec::new();
+    quiet_missing: bool,
+) -> Option<Line<'static>> {
+    if !result.success {
+        return Some(Line::from(Span::styled(
+            texts::tui_quota_query_failed().to_string(),
+            Style::default().fg(theme.err),
+        )));
     }
 
-    let label_style = Style::default().fg(theme.accent);
-    let value_style = Style::default().fg(theme.cyan);
-    let muted_style = Style::default().fg(theme.surface);
-    let state = data.quota.state_for(&row.id);
-    let mut lines = Vec::new();
-    lines.push(Line::raw(""));
-
-    let mut push_kv = |label: String, spans: Vec<Span<'static>>| {
-        let mut line_spans = vec![Span::styled(label, label_style), Span::raw(": ")];
-        line_spans.extend(spans);
-        lines.push(Line::from(line_spans));
-    };
-
-    let Some(state) = state else {
-        push_kv(
-            texts::tui_label_quota().to_string(),
-            vec![
-                Span::styled(texts::tui_quota_not_queried().to_string(), muted_style),
-                Span::raw("  "),
-                Span::styled(texts::tui_quota_refresh_hint().to_string(), muted_style),
-            ],
-        );
-        return lines;
-    };
-
-    if state.loading && state.quota.is_none() {
-        push_kv(
-            texts::tui_label_quota().to_string(),
-            vec![Span::styled(
-                texts::tui_quota_loading().to_string(),
-                muted_style,
-            )],
-        );
-        return lines;
-    }
-
-    if let Some(error) = state
-        .last_error
-        .as_deref()
-        .filter(|_| state.quota.is_none())
-    {
-        push_kv(
-            texts::tui_label_quota().to_string(),
-            vec![
-                Span::styled(
-                    texts::tui_quota_query_failed().to_string(),
-                    Style::default().fg(theme.warn),
-                ),
-                Span::raw("  "),
-                Span::raw(error.to_string()),
-            ],
-        );
-        return lines;
-    }
-
-    let Some(quota) = state.quota.as_ref() else {
-        push_kv(
-            texts::tui_label_quota().to_string(),
-            vec![Span::styled(
-                texts::tui_quota_not_queried().to_string(),
-                muted_style,
-            )],
-        );
-        return lines;
-    };
-
-    match quota.credential_status {
-        crate::services::CredentialStatus::NotFound => {
-            push_kv(
-                texts::tui_label_quota().to_string(),
-                vec![Span::styled(
-                    texts::tui_quota_not_available().to_string(),
-                    muted_style,
-                )],
-            );
-            return lines;
-        }
-        crate::services::CredentialStatus::ParseError => {
-            push_kv(
-                texts::tui_label_quota().to_string(),
-                vec![
-                    Span::styled(
-                        texts::tui_quota_parse_error().to_string(),
-                        Style::default().fg(theme.warn),
-                    ),
-                    Span::raw("  "),
-                    Span::raw(
-                        quota
-                            .credential_message
-                            .clone()
-                            .or_else(|| quota.error.clone())
-                            .unwrap_or_default(),
-                    ),
-                ],
-            );
-            return lines;
-        }
-        crate::services::CredentialStatus::Expired if !quota.success => {
-            push_kv(
-                texts::tui_label_quota().to_string(),
-                vec![
-                    Span::styled(
-                        texts::tui_quota_expired().to_string(),
-                        Style::default().fg(theme.warn),
-                    ),
-                    Span::raw("  "),
-                    Span::raw(
-                        quota
-                            .credential_message
-                            .clone()
-                            .or_else(|| quota.error.clone())
-                            .unwrap_or_default(),
-                    ),
-                ],
-            );
-            return lines;
-        }
-        _ => {}
-    }
-
-    if !quota.success {
-        push_kv(
-            texts::tui_label_quota().to_string(),
-            vec![
-                Span::styled(
-                    texts::tui_quota_query_failed().to_string(),
-                    Style::default().fg(theme.err),
-                ),
-                Span::raw("  "),
-                Span::raw(quota.error.clone().unwrap_or_default()),
-            ],
-        );
-        return lines;
-    }
-
-    let checked = quota
-        .queried_at
-        .map(quota_relative_time)
-        .unwrap_or_else(|| texts::tui_na().to_string());
-    push_kv(
-        texts::tui_label_quota().to_string(),
-        vec![
-            Span::styled(
-                texts::tui_quota_ok().to_string(),
-                Style::default().fg(theme.ok),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                texts::tui_quota_last_checked(),
-                Style::default().fg(theme.comment),
-            ),
-            Span::raw(" "),
-            Span::styled(checked, value_style),
-        ],
-    );
-
-    for tier in &quota.tiers {
-        let mut spans = vec![Span::styled(
-            quota_percent_text(tier.utilization),
-            quota_utilization_style(theme, tier.utilization),
-        )];
-        if let Some(reset) = quota_countdown(tier.resets_at.as_deref()) {
+    let data = result.data.as_ref()?;
+    let mut spans = Vec::new();
+    for (idx, item) in data.iter().take(2).enumerate() {
+        if idx > 0 {
             spans.push(Span::raw("  "));
+        }
+        if let Some(name) = display_usage_plan_name(item) {
             spans.push(Span::styled(
-                texts::tui_quota_resets_in(&reset),
+                format!("{} ", name.trim()),
                 Style::default().fg(theme.comment),
             ));
         }
-        push_kv(quota_tier_label(&tier.name), spans);
+        spans.push(Span::styled(
+            usage_value_summary(item).unwrap_or_else(|| texts::tui_quota_ok().to_string()),
+            Style::default().fg(theme.cyan),
+        ));
     }
 
-    if let Some(extra) = quota.extra_usage.as_ref().filter(|extra| extra.is_enabled) {
-        let mut parts = Vec::new();
-        if let Some(used) = extra.used_credits {
-            parts.push(format!("{used:.1}"));
+    if spans.is_empty() {
+        if quiet_missing {
+            return None;
         }
-        if let Some(limit) = extra.monthly_limit {
-            parts.push(format!("/ {limit:.1}"));
-        }
-        if let Some(currency) = extra.currency.as_deref() {
-            parts.push(currency.to_string());
-        }
-        if let Some(utilization) = extra.utilization {
-            parts.push(format!("({})", quota_percent_text(utilization)));
-        }
-        if !parts.is_empty() {
-            push_kv(
-                texts::tui_quota_extra_usage().to_string(),
-                vec![Span::styled(parts.join(" "), value_style)],
-            );
-        }
+        return Some(Line::from(Span::styled(
+            texts::tui_quota_not_available().to_string(),
+            Style::default().fg(theme.surface),
+        )));
     }
 
-    lines
+    if loading {
+        spans.push(Span::styled(" | ", Style::default().fg(theme.comment)));
+        spans.push(Span::styled(
+            texts::tui_quota_loading().to_string(),
+            Style::default().fg(theme.surface),
+        ));
+    } else if let Some(checked) = updated_at.map(quota_relative_time) {
+        spans.push(Span::styled(" | ", Style::default().fg(theme.comment)));
+        spans.push(Span::styled(checked, Style::default().fg(theme.surface)));
+    }
+
+    Some(Line::from(spans))
+}
+
+fn display_usage_plan_name(item: &crate::provider::UsageData) -> Option<&str> {
+    item.plan_name.as_deref().filter(|value| {
+        let trimmed = value.trim();
+        !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("default")
+    })
+}
+
+fn usage_value_summary(item: &crate::provider::UsageData) -> Option<String> {
+    let unit = item.unit.as_deref().unwrap_or("");
+    match (item.remaining, item.total, item.used) {
+        (Some(remaining), Some(total), Some(used)) => Some(format!(
+            "{} / {} {} left, {} used",
+            usage_number(remaining),
+            usage_number(total),
+            unit,
+            usage_number(used)
+        )),
+        (Some(remaining), Some(total), None) => Some(format!(
+            "{} / {} {} left",
+            usage_number(remaining),
+            usage_number(total),
+            unit
+        )),
+        (Some(remaining), None, _) => Some(format!("{} {}", usage_number(remaining), unit)),
+        (None, Some(total), Some(used)) => Some(format!(
+            "{} / {} {} used",
+            usage_number(used),
+            usage_number(total),
+            unit
+        )),
+        (None, Some(total), None) => Some(format!("total {} {}", usage_number(total), unit)),
+        (None, None, Some(used)) => Some(format!("used {} {}", usage_number(used), unit)),
+        _ => None,
+    }
+    .map(|value| value.trim().to_string())
+}
+
+fn usage_number(value: f64) -> String {
+    if (value.fract()).abs() < f64::EPSILON {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    }
 }
 
 pub(super) fn kv_line<'a>(
@@ -621,6 +644,89 @@ pub(super) fn key_bar_line(theme: &super::theme::Theme, items: &[(&str, &str)]) 
     Line::from(spans)
 }
 
+fn key_bar_chip_width(key: &str, value: &str) -> usize {
+    UnicodeWidthStr::width(key) + 1 + UnicodeWidthStr::width(value)
+}
+
+/// How many leading chips fit into `width`, mirroring key_bar_line's
+/// layout: 1-column padding on each side, 2 columns between chips.
+fn key_bar_fit_count(items: &[(&str, &str)], width: u16) -> usize {
+    let width = width as usize;
+    let mut used = 2usize;
+    let mut count = 0usize;
+    for (idx, (key, value)) in items.iter().enumerate() {
+        let mut chip = key_bar_chip_width(key, value);
+        if idx > 0 {
+            chip += 2;
+        }
+        if used + chip > width {
+            break;
+        }
+        used += chip;
+        count += 1;
+    }
+    count
+}
+
+/// Key bars are single-row: chips past the available width used to be
+/// silently cut off mid-list. Keep the leading (highest-priority) chips
+/// that fit and close with a "? more" hint pointing at the help sheet.
+fn key_bar_items_for_width<'a>(
+    items: &'a [(&'a str, &'a str)],
+    width: u16,
+) -> Vec<(&'a str, &'a str)> {
+    if key_bar_fit_count(items, width) == items.len() {
+        return items.to_vec();
+    }
+
+    let more = texts::tui_key_more();
+    let reserved = (key_bar_chip_width("?", more) + 2) as u16;
+    let count = key_bar_fit_count(items, width.saturating_sub(reserved));
+    let mut fitted = items[..count].to_vec();
+    fitted.push(("?", more));
+    fitted
+}
+
+fn key_bar_line_dimmed(theme: &super::theme::Theme, items: &[(&str, &str)]) -> Line<'static> {
+    if theme.no_color {
+        return key_bar_line(theme, items);
+    }
+
+    let base = Style::default().fg(theme.comment);
+    let key = base.add_modifier(Modifier::BOLD);
+
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(" ", base)];
+    for (idx, (k, v)) in items.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled("  ", base));
+        }
+        spans.push(Span::styled((*k).to_string(), key));
+        spans.push(Span::styled(" ", base));
+        spans.push(Span::styled((*v).to_string(), base));
+    }
+    spans.push(Span::styled(" ", base));
+    Line::from(spans)
+}
+
+/// Page-level key bar: always visible so the available actions can be
+/// discovered while the nav pane has focus; rendered muted (no chip
+/// background) until the content pane is focused.
+pub(super) fn render_page_key_bar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &super::theme::Theme,
+    items: &[(&str, &str)],
+    focused: bool,
+) {
+    let fitted = key_bar_items_for_width(items, area.width);
+    let line = if focused {
+        key_bar_line(theme, &fitted)
+    } else {
+        key_bar_line_dimmed(theme, &fitted)
+    };
+    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+}
+
 /// Render a left-aligned key bar. Used for main-screen footers where keys
 /// are read left-to-right in priority order.
 pub(super) fn render_key_bar(
@@ -629,10 +735,9 @@ pub(super) fn render_key_bar(
     theme: &super::theme::Theme,
     items: &[(&str, &str)],
 ) {
+    let fitted = key_bar_items_for_width(items, area.width);
     frame.render_widget(
-        Paragraph::new(key_bar_line(theme, items))
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(key_bar_line(theme, &fitted)).alignment(Alignment::Left),
         area,
     );
 }
@@ -645,10 +750,9 @@ pub(super) fn render_key_bar_center(
     theme: &super::theme::Theme,
     items: &[(&str, &str)],
 ) {
+    let fitted = key_bar_items_for_width(items, area.width);
     frame.render_widget(
-        Paragraph::new(key_bar_line(theme, items))
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(key_bar_line(theme, &fitted)).alignment(Alignment::Center),
         area,
     );
 }
@@ -689,6 +793,19 @@ pub(super) fn inset_left(area: Rect, left: u16) -> Rect {
     }
 }
 
+pub(super) fn inset_horizontal(area: Rect, inset: u16) -> Rect {
+    let shrink = inset.saturating_mul(2);
+    if area.width <= shrink {
+        return area;
+    }
+    Rect {
+        x: area.x + inset,
+        y: area.y,
+        width: area.width - shrink,
+        height: area.height,
+    }
+}
+
 pub(super) fn inset_top(area: Rect, top: u16) -> Rect {
     if area.height <= top {
         return Rect {
@@ -716,16 +833,6 @@ where
         .max()
         .unwrap_or(0);
     max.saturating_add(left_padding)
-}
-
-pub(super) fn mask_api_key(key: &str) -> String {
-    let mut iter = key.chars();
-    let prefix: String = iter.by_ref().take(8).collect();
-    if iter.next().is_some() {
-        format!("{prefix}...")
-    } else {
-        prefix
-    }
 }
 
 pub(super) fn redacted_secret_placeholder() -> &'static str {

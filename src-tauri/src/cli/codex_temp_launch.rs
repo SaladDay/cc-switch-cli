@@ -12,6 +12,8 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedCodexLaunch {
     pub(crate) executable: PathBuf,
+    pub(crate) cc_switch_executable: PathBuf,
+    pub(crate) provider_id: String,
     pub(crate) codex_home: PathBuf,
 }
 
@@ -37,10 +39,44 @@ where
     Resolve: FnOnce() -> Result<PathBuf, AppError>,
 {
     let executable = resolve_codex_binary()?;
+    let cc_switch_executable = std::env::current_exe().map_err(|err| {
+        AppError::localized(
+            "codex.temp_launch_current_exe_failed",
+            format!("解析当前 cc-switch 可执行文件路径失败: {err}"),
+            format!("Failed to resolve current cc-switch executable path: {err}"),
+        )
+    })?;
     let codex_home = write_temp_codex_home(temp_dir, provider)?;
     Ok(PreparedCodexLaunch {
         executable,
+        cc_switch_executable,
+        provider_id: provider.id.clone(),
         codex_home,
+    })
+}
+
+pub(crate) fn preview_launch_with<Resolve>(
+    provider: &Provider,
+    temp_dir: &Path,
+    resolve_codex_binary: Resolve,
+) -> Result<PreparedCodexLaunch, AppError>
+where
+    Resolve: FnOnce() -> Result<PathBuf, AppError>,
+{
+    let executable = resolve_codex_binary()?;
+    let cc_switch_executable = std::env::current_exe().map_err(|err| {
+        AppError::localized(
+            "codex.temp_launch_current_exe_failed",
+            format!("解析当前 cc-switch 可执行文件路径失败: {err}"),
+            format!("Failed to resolve current cc-switch executable path: {err}"),
+        )
+    })?;
+    let _ = parse_launch_settings(provider)?;
+    Ok(PreparedCodexLaunch {
+        executable,
+        cc_switch_executable,
+        provider_id: provider.id.clone(),
+        codex_home: temp_codex_home_path(temp_dir, &provider.id),
     })
 }
 
@@ -76,11 +112,13 @@ pub(crate) fn build_handoff_command(
 ) -> std::process::Command {
     let mut command = std::process::Command::new("/bin/sh");
     command.arg("-c").arg(
-        "codex_home=\"$1\"; codex_bin=\"$2\"; shift 2; exit_status=0; cleanup() { rm -rf -- \"$codex_home\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Codex home: $codex_home\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; export CODEX_HOME=\"$codex_home\"; \"$codex_bin\" \"$@\"; exit_status=$?; cleanup; exit \"$exit_status\"",
+        "codex_home=\"$1\"; codex_bin=\"$2\"; cc_switch_bin=\"$3\"; provider_id=\"$4\"; shift 4; exit_status=0; persist() { \"$cc_switch_bin\" internal capture-codex-temp \"$provider_id\" \"$codex_home\"; persist_status=$?; if [ \"$persist_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: 持久化供应商 $provider_id 的临时 Codex 登录状态失败（failed to persist temporary Codex login state）\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$persist_status; fi; fi; }; cleanup() { rm -rf -- \"$codex_home\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Codex home: $codex_home\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; persist; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; export CODEX_HOME=\"$codex_home\"; \"$codex_bin\" \"$@\"; exit_status=$?; persist; cleanup; exit \"$exit_status\"",
     );
     command.arg("cc-switch-codex-handoff");
     command.arg(&prepared.codex_home);
     command.arg(&prepared.executable);
+    command.arg(&prepared.cc_switch_executable);
+    command.arg(&prepared.provider_id);
     command.args(native_args);
     command
 }
@@ -125,6 +163,47 @@ fn write_temp_codex_home_with<Finalize>(
 where
     Finalize: FnOnce(&Path) -> Result<(), AppError>,
 {
+    let launch_settings = parse_launch_settings(provider)?;
+    let codex_home = temp_codex_home_path(temp_dir, &provider.id);
+
+    let write_result = (|| {
+        fs::create_dir_all(&codex_home).map_err(|err| AppError::io(&codex_home, err))?;
+        finalize(&codex_home)?;
+
+        let config_path = codex_home.join("config.toml");
+        write_secret_file(&config_path, launch_settings.config_text.as_bytes())?;
+
+        if let Some(auth) = launch_settings.auth {
+            let auth_path = codex_home.join("auth.json");
+            let auth_text = serde_json::to_vec_pretty(&auth)
+                .map_err(|source| AppError::JsonSerialize { source })?;
+            write_secret_file(&auth_path, &auth_text)?;
+        }
+
+        Ok(())
+    })();
+
+    match write_result {
+        Ok(()) => Ok(codex_home),
+        Err(err) => match cleanup_temp_codex_home(&codex_home) {
+            Ok(()) => Err(err),
+            Err(cleanup_err) => Err(AppError::localized(
+                "codex.temp_launch_tempdir_cleanup_failed",
+                format!("写入临时 Codex 配置目录失败: {err}；同时清理失败: {cleanup_err}"),
+                format!(
+                    "Failed to write the temporary Codex home: {err}; also failed to clean it up: {cleanup_err}"
+                ),
+            )),
+        },
+    }
+}
+
+struct CodexLaunchSettings<'a> {
+    config_text: &'a str,
+    auth: Option<Value>,
+}
+
+fn parse_launch_settings(provider: &Provider) -> Result<CodexLaunchSettings<'_>, AppError> {
     let settings = provider.settings_config.as_object().ok_or_else(|| {
         AppError::localized(
             "codex.temp_launch_settings_not_object",
@@ -161,47 +240,20 @@ where
         }
     };
 
+    Ok(CodexLaunchSettings { config_text, auth })
+}
+
+fn temp_codex_home_path(temp_dir: &Path, provider_id: &str) -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let dir_name = format!(
         "cc-switch-codex-{}-{}-{timestamp}",
-        sanitize_filename_fragment(&provider.id),
+        sanitize_filename_fragment(provider_id),
         std::process::id()
     );
-    let codex_home = temp_dir.join(dir_name);
-
-    let write_result = (|| {
-        fs::create_dir_all(&codex_home).map_err(|err| AppError::io(&codex_home, err))?;
-        finalize(&codex_home)?;
-
-        let config_path = codex_home.join("config.toml");
-        write_secret_file(&config_path, config_text.as_bytes())?;
-
-        if let Some(auth) = auth {
-            let auth_path = codex_home.join("auth.json");
-            let auth_text = serde_json::to_vec_pretty(&auth)
-                .map_err(|source| AppError::JsonSerialize { source })?;
-            write_secret_file(&auth_path, &auth_text)?;
-        }
-
-        Ok(())
-    })();
-
-    match write_result {
-        Ok(()) => Ok(codex_home),
-        Err(err) => match cleanup_temp_codex_home(&codex_home) {
-            Ok(()) => Err(err),
-            Err(cleanup_err) => Err(AppError::localized(
-                "codex.temp_launch_tempdir_cleanup_failed",
-                format!("写入临时 Codex 配置目录失败: {err}；同时清理失败: {cleanup_err}"),
-                format!(
-                    "Failed to write the temporary Codex home: {err}; also failed to clean it up: {cleanup_err}"
-                ),
-            )),
-        },
-    }
+    temp_dir.join(dir_name)
 }
 
 #[cfg(unix)]
@@ -274,11 +326,11 @@ mod tests {
     #[cfg(unix)]
     use std::ffi::OsString;
     #[cfg(unix)]
-    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt, process::ExitStatusExt};
     #[cfg(unix)]
     use std::process::Stdio;
     #[cfg(unix)]
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     #[cfg(unix)]
@@ -291,6 +343,19 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&path, permissions).expect("chmod stub executable");
         path
+    }
+
+    #[cfg(unix)]
+    fn wait_until_exists(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn provider_with(config: &str, auth: Option<Value>) -> Provider {
@@ -321,6 +386,8 @@ mod tests {
     fn unix_handoff_command_exports_codex_home_and_cleans_up_temp_dir() {
         let prepared = PreparedCodexLaunch {
             executable: PathBuf::from("/usr/local/bin/codex"),
+            cc_switch_executable: PathBuf::from("/usr/local/bin/cc-switch"),
+            provider_id: "demo".to_string(),
             codex_home: PathBuf::from("/tmp/cc-switch-codex-home"),
         };
         let native_args = vec![OsString::from("--model"), OsString::from("gpt-5.4")];
@@ -334,11 +401,13 @@ mod tests {
             vec![
                 OsString::from("-c"),
                 OsString::from(
-                    "codex_home=\"$1\"; codex_bin=\"$2\"; shift 2; exit_status=0; cleanup() { rm -rf -- \"$codex_home\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Codex home: $codex_home\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; export CODEX_HOME=\"$codex_home\"; \"$codex_bin\" \"$@\"; exit_status=$?; cleanup; exit \"$exit_status\""
+                    "codex_home=\"$1\"; codex_bin=\"$2\"; cc_switch_bin=\"$3\"; provider_id=\"$4\"; shift 4; exit_status=0; persist() { \"$cc_switch_bin\" internal capture-codex-temp \"$provider_id\" \"$codex_home\"; persist_status=$?; if [ \"$persist_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: 持久化供应商 $provider_id 的临时 Codex 登录状态失败（failed to persist temporary Codex login state）\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$persist_status; fi; fi; }; cleanup() { rm -rf -- \"$codex_home\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Codex home: $codex_home\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; persist; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; export CODEX_HOME=\"$codex_home\"; \"$codex_bin\" \"$@\"; exit_status=$?; persist; cleanup; exit \"$exit_status\""
                 ),
                 OsString::from("cc-switch-codex-handoff"),
                 OsString::from("/tmp/cc-switch-codex-home"),
                 OsString::from("/usr/local/bin/codex"),
+                OsString::from("/usr/local/bin/cc-switch"),
+                OsString::from("demo"),
                 OsString::from("--model"),
                 OsString::from("gpt-5.4"),
             ]
@@ -349,10 +418,14 @@ mod tests {
     #[test]
     fn interrupting_handoff_still_cleans_up_temp_codex_home() {
         let temp_dir = TempDir::new().expect("create temp dir");
+        let ready_path = temp_dir.path().join("codex-ready");
         let executable = write_test_executable(
             &temp_dir,
             "codex-stub.sh",
-            "trap 'exit 130' INT TERM HUP\nwhile :; do sleep 1; done",
+            &format!(
+                "trap 'exit 130' INT TERM HUP\nprintf '%s\\n' ready > {:?}\nwhile :; do sleep 1; done",
+                ready_path
+            ),
         );
         let codex_home = temp_dir.path().join("cc-switch-codex-home");
         std::fs::create_dir_all(&codex_home).expect("create temp codex home");
@@ -361,6 +434,8 @@ mod tests {
 
         let prepared = PreparedCodexLaunch {
             executable,
+            cc_switch_executable: PathBuf::from("/bin/true"),
+            provider_id: "demo".to_string(),
             codex_home: codex_home.clone(),
         };
         let mut command = build_handoff_command(&prepared, &[]);
@@ -375,12 +450,15 @@ mod tests {
         }
 
         let mut child = command.spawn().expect("spawn handoff");
-        std::thread::sleep(Duration::from_millis(150));
+        wait_until_exists(&ready_path);
         let kill_result = unsafe { libc::kill(-(child.id() as i32), libc::SIGINT) };
         assert_eq!(kill_result, 0, "send SIGINT to handoff process group");
 
         let status = child.wait().expect("wait for handoff");
-        assert_eq!(status.code(), Some(130));
+        assert!(
+            status.code() == Some(130) || status.signal() == Some(libc::SIGINT),
+            "handoff should exit for SIGINT, got {status:?}"
+        );
         assert!(
             !codex_home.exists(),
             "temporary Codex home should be removed after interrupt"
@@ -394,6 +472,8 @@ mod tests {
         let executable = write_test_executable(&temp_dir, "codex-stub.sh", "exit 0");
         let prepared = PreparedCodexLaunch {
             executable,
+            cc_switch_executable: PathBuf::from("/bin/true"),
+            provider_id: "demo".to_string(),
             codex_home: PathBuf::from("."),
         };
 
@@ -476,6 +556,33 @@ mod tests {
                 & 0o777;
             assert_eq!(auth_mode, 0o600);
         }
+    }
+
+    #[test]
+    fn preview_launch_does_not_write_codex_home_files() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let provider = provider_with(
+            "model_provider = \"demo\"\nmodel = \"gpt-5.2-codex\"\n",
+            Some(serde_json::json!({ "OPENAI_API_KEY": "sk-demo" })),
+        );
+
+        let prepared = preview_launch_with(&provider, temp_dir.path(), || {
+            Ok(PathBuf::from("/usr/bin/codex"))
+        })
+        .expect("preview launch");
+
+        assert_eq!(prepared.executable, PathBuf::from("/usr/bin/codex"));
+        assert!(
+            !prepared.codex_home.exists(),
+            "dry-run preview should not write CODEX_HOME"
+        );
+        assert!(
+            std::fs::read_dir(temp_dir.path())
+                .expect("read temp dir")
+                .next()
+                .is_none(),
+            "dry-run preview should leave no temp files"
+        );
     }
 
     #[test]

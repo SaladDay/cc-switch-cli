@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 use std::{
     collections::VecDeque,
     env,
@@ -43,6 +45,19 @@ async fn bind_test_listener() -> tokio::net::TcpListener {
     );
 }
 
+fn free_loopback_port() -> u16 {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
+    listener
+        .local_addr()
+        .expect("read ephemeral address")
+        .port()
+}
+
+#[derive(Clone, Default)]
+struct CountingUpstreamState {
+    attempts: Arc<AtomicUsize>,
+}
+
 #[derive(Clone, Default)]
 struct UpstreamState {
     request_body: Arc<Mutex<Option<Value>>>,
@@ -79,7 +94,6 @@ impl ProxyEnvGuard {
         let saved = proxy_keys
             .into_iter()
             .chain(bypass_keys)
-            .into_iter()
             .map(|key| {
                 let old = env::var(key).ok();
                 if bypass_keys.contains(&key) {
@@ -193,6 +207,43 @@ async fn handle_anthropic_messages(
             "content": [{
                 "type": "text",
                 "text": "ok"
+            }],
+            "model": body.get("model").cloned().unwrap_or_else(|| json!("")),
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1
+            }
+        })),
+    )
+}
+
+async fn handle_failing_anthropic_messages(
+    State(state): State<CountingUpstreamState>,
+    Json(_body): Json<Value>,
+) -> impl IntoResponse {
+    state.attempts.fetch_add(1, Ordering::SeqCst);
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": {"message": "primary unavailable"}})),
+    )
+}
+
+async fn handle_successful_anthropic_messages(
+    State(state): State<CountingUpstreamState>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    state.attempts.fetch_add(1, Ordering::SeqCst);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "id": "msg_failover_success",
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "text",
+                "text": "failover ok"
             }],
             "model": body.get("model").cloned().unwrap_or_else(|| json!("")),
             "stop_reason": "end_turn",
@@ -336,15 +387,23 @@ async fn start_proxy_service(
     db.set_current_provider("claude", &provider.id)
         .expect("set current provider");
 
+    let app_proxy = db
+        .get_proxy_config_for_app("claude")
+        .await
+        .expect("read claude app proxy config");
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
+    db.update_proxy_config_for_app(app_proxy)
+        .await
+        .expect("update claude app proxy config");
+
     let service = ProxyService::new(db);
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
     service
-        .update_config(&config)
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     service
 }
 
@@ -383,15 +442,23 @@ async fn start_proxy_service_with_rectifier_config(
     )
     .expect("store rectifier config");
 
+    let app_proxy = db
+        .get_proxy_config_for_app("claude")
+        .await
+        .expect("read claude app proxy config");
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
+    db.update_proxy_config_for_app(app_proxy)
+        .await
+        .expect("update claude app proxy config");
+
     let service = ProxyService::new(db);
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
     service
-        .update_config(&config)
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-
-    service.start().await.expect("start proxy service");
+        .expect("start proxy service");
     service
 }
 
@@ -410,6 +477,170 @@ async fn send_claude_request(service: &ProxyService, body: &Value) -> reqwest::R
         .send()
         .await
         .expect("send request to proxy")
+}
+
+#[tokio::test]
+#[serial]
+async fn proxy_claude_auto_failover_uses_activated_queue_providers() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let primary_state = CountingUpstreamState::default();
+    let primary_listener = bind_test_listener().await;
+    let primary_addr = primary_listener
+        .local_addr()
+        .expect("read primary upstream address");
+    let primary_state_for_server = primary_state.clone();
+    let primary_handle = tokio::spawn(async move {
+        let _ = axum::serve(
+            primary_listener,
+            Router::new()
+                .route("/v1/messages", post(handle_failing_anthropic_messages))
+                .with_state(primary_state_for_server),
+        )
+        .await;
+    });
+
+    let secondary_state = CountingUpstreamState::default();
+    let secondary_listener = bind_test_listener().await;
+    let secondary_addr = secondary_listener
+        .local_addr()
+        .expect("read secondary upstream address");
+    let secondary_state_for_server = secondary_state.clone();
+    let secondary_handle = tokio::spawn(async move {
+        let _ = axum::serve(
+            secondary_listener,
+            Router::new()
+                .route("/v1/messages", post(handle_successful_anthropic_messages))
+                .with_state(secondary_state_for_server),
+        )
+        .await;
+    });
+
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    let primary_provider = Provider {
+        id: "primary".to_string(),
+        name: "Primary".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": format!("http://{}", primary_addr),
+                "ANTHROPIC_API_KEY": "sk-test-primary"
+            }
+        }),
+        website_url: None,
+        category: Some("claude".to_string()),
+        created_at: None,
+        sort_index: Some(0),
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    let secondary_provider = Provider {
+        id: "secondary".to_string(),
+        name: "Secondary".to_string(),
+        settings_config: json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": format!("http://{}", secondary_addr),
+                "ANTHROPIC_API_KEY": "sk-test-secondary"
+            }
+        }),
+        website_url: None,
+        category: Some("claude".to_string()),
+        created_at: None,
+        sort_index: Some(1),
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+
+    db.save_provider("claude", &primary_provider)
+        .expect("save primary provider");
+    db.save_provider("claude", &secondary_provider)
+        .expect("save secondary provider");
+    db.set_current_provider("claude", "primary")
+        .expect("set current provider");
+    db.add_to_failover_queue("claude", "primary")
+        .expect("activate primary failover queue entry");
+    db.add_to_failover_queue("claude", "secondary")
+        .expect("activate secondary failover queue entry");
+
+    let queue_before = db
+        .get_failover_queue("claude")
+        .expect("read queue before request");
+    assert_eq!(queue_before[0].provider_id, "primary");
+    assert_eq!(queue_before[1].provider_id, "secondary");
+
+    let mut app_proxy = db
+        .get_proxy_config_for_app("claude")
+        .await
+        .expect("read claude app proxy config");
+    app_proxy.enabled = true;
+    app_proxy.auto_failover_enabled = true;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
+    db.update_proxy_config_for_app(app_proxy)
+        .await
+        .expect("enable auto failover");
+    db.set_app_proxy_preferred_port("claude", free_loopback_port())
+        .expect("set claude preferred proxy port");
+
+    let service = ProxyService::new(db.clone());
+    let mut config = service.get_config().await.expect("read proxy config");
+    config.listen_port = 0;
+    service
+        .start_with_runtime_config(config)
+        .await
+        .expect("start proxy service");
+
+    let response = send_claude_request(
+        &service,
+        &json!({
+            "model": "claude-3-7-sonnet-20250219",
+            "max_tokens": 64,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "hello"
+                }]
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("read failover response body");
+    assert_eq!(body["content"][0]["text"], json!("failover ok"));
+
+    assert_eq!(primary_state.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(secondary_state.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        db.get_current_provider("claude")
+            .expect("read current provider after request")
+            .as_deref(),
+        Some("secondary")
+    );
+
+    let status = service.get_status().await;
+    assert_eq!(status.current_provider_id.as_deref(), Some("secondary"));
+    assert_eq!(status.current_provider.as_deref(), Some("Secondary"));
+    assert_eq!(status.failover_count, 1);
+    assert_eq!(status.active_targets.len(), 1);
+    assert_eq!(status.active_targets[0].provider_id, "secondary");
+
+    let queue_after = db
+        .get_failover_queue("claude")
+        .expect("read queue after request");
+    assert_eq!(queue_after[0].provider_id, "primary");
+    assert_eq!(queue_after[1].provider_id, "secondary");
+
+    service.stop().await.expect("stop proxy service");
+    primary_handle.abort();
+    secondary_handle.abort();
 }
 
 #[tokio::test]
@@ -485,7 +716,10 @@ async fn proxy_claude_successful_failover_syncs_current_provider_and_status() {
         .get_proxy_config_for_app("claude")
         .await
         .expect("read claude app proxy config");
+    app_proxy.enabled = true;
     app_proxy.auto_failover_enabled = true;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(app_proxy)
         .await
         .expect("enable auto failover");
@@ -494,10 +728,9 @@ async fn proxy_claude_successful_failover_syncs_current_provider_and_status() {
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
     service
-        .update_config(&config)
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-    service.start().await.expect("start proxy service");
+        .expect("start proxy service");
 
     let response = send_claude_request(
         &service,
@@ -622,8 +855,11 @@ async fn proxy_claude_failed_failover_keeps_state_unsynced() {
         .get_proxy_config_for_app("claude")
         .await
         .expect("read claude app proxy config");
+    app_proxy.enabled = true;
     app_proxy.auto_failover_enabled = true;
     app_proxy.max_retries = 0;
+    db.set_app_proxy_preferred_port("claude", 0)
+        .expect("update claude app proxy port");
     db.update_proxy_config_for_app(app_proxy)
         .await
         .expect("enable auto failover");
@@ -632,10 +868,9 @@ async fn proxy_claude_failed_failover_keeps_state_unsynced() {
     let mut config = service.get_config().await.expect("read proxy config");
     config.listen_port = 0;
     service
-        .update_config(&config)
+        .start_with_runtime_config(config)
         .await
-        .expect("update proxy config");
-    service.start().await.expect("start proxy service");
+        .expect("start proxy service");
 
     let response = send_claude_request(
         &service,

@@ -6,10 +6,6 @@ impl App {
         key: KeyEvent,
         data: &UiData,
     ) -> Option<Action> {
-        if let Some(action) = self.handle_provider_switch_first_use_overlay_key(key) {
-            return Some(action);
-        }
-
         if let Some(action) = self.handle_confirm_overlay_key(key, data) {
             return Some(action);
         }
@@ -19,44 +15,6 @@ impl App {
         }
 
         None
-    }
-
-    fn handle_provider_switch_first_use_overlay_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let Overlay::ProviderSwitchFirstUseConfirm {
-            provider_id,
-            selected,
-            ..
-        } = &mut self.overlay
-        else {
-            return None;
-        };
-
-        Some(match key.code {
-            KeyCode::Left | KeyCode::BackTab => {
-                *selected = selected.saturating_sub(1);
-                Action::None
-            }
-            KeyCode::Right | KeyCode::Tab => {
-                *selected = (*selected + 1).min(2);
-                Action::None
-            }
-            KeyCode::Enter => {
-                let action = match *selected {
-                    0 => Action::ProviderImportLiveConfig,
-                    1 => Action::ProviderSwitchForce {
-                        id: provider_id.clone(),
-                    },
-                    _ => Action::None,
-                };
-                self.close_overlay();
-                action
-            }
-            KeyCode::Esc => {
-                self.close_overlay();
-                Action::None
-            }
-            _ => Action::None,
-        })
     }
 
     fn handle_confirm_overlay_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
@@ -72,8 +30,32 @@ impl App {
                     ConfirmAction::ProviderDelete { id } => {
                         Action::ProviderDelete { id: id.clone() }
                     }
+                    ConfirmAction::ProviderCopy { id } => {
+                        if let Some(row) = data.providers.rows.iter().find(|r| &r.id == id) {
+                            self.open_provider_copy_form(row, data);
+                        }
+                        // No action as we open a new form immediately
+                        return Some(Action::None);
+                    }
+                    ConfirmAction::ProviderRemoveFromConfig { id } => {
+                        Action::ProviderRemoveFromConfig { id: id.clone() }
+                    }
                     ConfirmAction::McpDelete { id } => Action::McpDelete { id: id.clone() },
                     ConfirmAction::PromptDelete { id } => Action::PromptDelete { id: id.clone() },
+                    ConfirmAction::PricingDelete { model_id } => Action::PricingDelete {
+                        model_id: model_id.clone(),
+                    },
+                    ConfirmAction::SessionDelete {
+                        key,
+                        provider_id,
+                        session_id,
+                        source_path,
+                    } => Action::SessionDelete {
+                        key: key.clone(),
+                        provider_id: provider_id.clone(),
+                        session_id: session_id.clone(),
+                        source_path: source_path.clone(),
+                    },
                     ConfirmAction::SkillsUninstall { directory } => Action::SkillsUninstall {
                         directory: directory.clone(),
                     },
@@ -94,8 +76,36 @@ impl App {
                     ConfirmAction::SettingsSetClaudePluginIntegration { enabled } => {
                         Action::SetClaudePluginIntegration { enabled: *enabled }
                     }
+                    ConfirmAction::SettingsSetCodexUnifiedSessionHistory { enabled } => {
+                        Action::SetCodexUnifiedSessionHistory { enabled: *enabled }
+                    }
+                    ConfirmAction::VisibleAppsAutoDetection => {
+                        Action::ConfirmVisibleAppsAutoDetection { use_auto: true }
+                    }
+                    ConfirmAction::VisibleAppsSwitchToManual { apps, selected } => {
+                        Action::SwitchVisibleAppsToManual {
+                            apps: apps.clone(),
+                            selected: *selected,
+                        }
+                    }
                     ConfirmAction::ProviderApiFormatProxyNotice => Action::None,
-                    ConfirmAction::ProviderSwitchSharedConfigNotice => Action::None,
+                    ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
+                    ConfirmAction::UsageQueryNotice => Action::ConfirmUsageQueryNotice,
+                    ConfirmAction::ManagedAuthCancelLogin => {
+                        self.cancel_managed_auth_login();
+                        Action::None
+                    }
+                    ConfirmAction::ProxyEnableAndAutoFailover { app_type } => {
+                        Action::EnableProxyAndAutoFailover {
+                            app_type: app_type.clone(),
+                        }
+                    }
+                    ConfirmAction::PromptOpenImportCandidate { filename, content } => {
+                        Action::PromptOpenImportCandidate {
+                            filename: filename.clone(),
+                            content: content.clone(),
+                        }
+                    }
                     ConfirmAction::OpenClawDailyMemoryDelete { filename } => {
                         Action::OpenClawDailyMemoryDelete {
                             filename: filename.clone(),
@@ -114,11 +124,62 @@ impl App {
                         }
                     }
                     ConfirmAction::WebDavMigrateV1ToV2 => Action::ConfigWebDavMigrateV1ToV2,
+                    ConfirmAction::ClaudeModelFillAll { source_idx } => {
+                        let source_idx = *source_idx;
+                        if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                            let value = provider
+                                .claude_model_input(source_idx)
+                                .map(|input| input.value.clone())
+                                .unwrap_or_default();
+                            for idx in 0..4 {
+                                if idx != source_idx {
+                                    if let Some(input) = provider.claude_model_input_mut(idx) {
+                                        input.set(value.clone());
+                                    }
+                                }
+                            }
+                            provider.mark_claude_model_config_touched();
+                        }
+                        self.overlay = Overlay::ClaudeModelPicker {
+                            selected: source_idx,
+                            editing: false,
+                        };
+                        return Some(Action::None);
+                    }
                 };
                 self.close_overlay();
                 action
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
+                if let ConfirmAction::ClaudeModelFillAll { source_idx } = confirm.action {
+                    self.overlay = Overlay::ClaudeModelPicker {
+                        selected: source_idx,
+                        editing: false,
+                    };
+                    return Some(Action::None);
+                }
+                if matches!(confirm.action, ConfirmAction::VisibleAppsAutoDetection) {
+                    self.close_overlay();
+                    return Some(Action::ConfirmVisibleAppsAutoDetection { use_auto: false });
+                }
+                if let ConfirmAction::VisibleAppsSwitchToManual { selected, .. } = &confirm.action {
+                    self.overlay = Overlay::VisibleAppsPicker {
+                        selected: *selected,
+                        apps: crate::settings::get_visible_apps(),
+                    };
+                    return Some(Action::None);
+                }
+                if matches!(
+                    confirm.action,
+                    ConfirmAction::CommonConfigNotice | ConfirmAction::UsageQueryNotice
+                ) {
+                    self.close_overlay();
+                    return Some(match confirm.action {
+                        ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
+                        ConfirmAction::UsageQueryNotice => Action::ConfirmUsageQueryNotice,
+                        _ => Action::None,
+                    });
+                }
                 if matches!(confirm.action, ConfirmAction::EditorSaveBeforeClose) {
                     self.editor = None;
                 }
@@ -130,7 +191,28 @@ impl App {
             }
             KeyCode::Esc => {
                 self.close_overlay();
-                Action::None
+                match confirm.action {
+                    ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
+                    ConfirmAction::UsageQueryNotice => Action::ConfirmUsageQueryNotice,
+                    ConfirmAction::VisibleAppsAutoDetection => {
+                        Action::ConfirmVisibleAppsAutoDetection { use_auto: false }
+                    }
+                    ConfirmAction::VisibleAppsSwitchToManual { selected, .. } => {
+                        self.overlay = Overlay::VisibleAppsPicker {
+                            selected,
+                            apps: crate::settings::get_visible_apps(),
+                        };
+                        Action::None
+                    }
+                    ConfirmAction::ClaudeModelFillAll { source_idx } => {
+                        self.overlay = Overlay::ClaudeModelPicker {
+                            selected: source_idx,
+                            editing: false,
+                        };
+                        Action::None
+                    }
+                    _ => Action::None,
+                }
             }
             _ => Action::None,
         };
@@ -142,7 +224,7 @@ impl App {
         let Overlay::TextInput(input) = &self.overlay else {
             return None;
         };
-        let submit = input.submit;
+        let submit = input.submit.clone();
 
         let action = match key.code {
             KeyCode::Esc => {
@@ -157,27 +239,18 @@ impl App {
             }
             KeyCode::Enter => {
                 let raw = match &self.overlay {
-                    Overlay::TextInput(input) => input.buffer.trim().to_string(),
+                    Overlay::TextInput(input) => input.input.value.trim().to_string(),
                     _ => String::new(),
                 };
                 self.overlay = Overlay::None;
                 self.handle_text_input_submit(submit, raw, data)
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Overlay::TextInput(input) = &mut self.overlay {
-                    input.buffer.pop();
+                    let _ = input.input.apply_key(key);
                 }
                 Action::None
             }
-            KeyCode::Char(c) => {
-                if !c.is_control() && !key.modifiers.contains(KeyModifiers::CONTROL) {
-                    if let Overlay::TextInput(input) = &mut self.overlay {
-                        input.buffer.push(c);
-                    }
-                }
-                Action::None
-            }
-            _ => Action::None,
         };
 
         Some(action)
@@ -237,7 +310,11 @@ impl App {
             }
             TextSubmit::SkillsDiscoverQuery => {
                 self.skills_discover_query = raw.clone();
-                Action::SkillsDiscover { query: raw }
+                Action::SkillsDiscover {
+                    query: raw,
+                    source: self.skills_discover_source,
+                    force: false,
+                }
             }
             TextSubmit::SkillsRepoAdd => {
                 if raw.is_empty() {
@@ -266,9 +343,70 @@ impl App {
             TextSubmit::OpenClawToolsRule { section, row } => {
                 self.handle_openclaw_tools_rule_submit(section, row, raw, data)
             }
+            TextSubmit::UsageCustomRange => match data::parse_usage_custom_range(&raw) {
+                Ok(range) => Action::UsageCustomRange { range },
+                Err(err) => {
+                    self.push_toast(format!("Invalid custom range: {err}"), ToastKind::Warning);
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: if crate::cli::i18n::is_chinese() {
+                            "自定义时间区间".to_string()
+                        } else {
+                            "Custom Range".to_string()
+                        },
+                        prompt: if crate::cli::i18n::is_chinese() {
+                            "格式：YYYY-MM-DD..YYYY-MM-DD".to_string()
+                        } else {
+                            "Format: YYYY-MM-DD..YYYY-MM-DD".to_string()
+                        },
+                        input: TextInput::new(raw),
+                        submit: TextSubmit::UsageCustomRange,
+                        secret: false,
+                    });
+                    Action::None
+                }
+            },
+            TextSubmit::ProviderCustomUserAgent => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.custom_user_agent.set(raw);
+                }
+                Action::None
+            }
+            TextSubmit::CodexModelCatalogField { row, field } => {
+                self.handle_codex_model_catalog_field_submit(row, field, raw)
+            }
             TextSubmit::WebDavJianguoyunUsername => self.handle_webdav_username_submit(raw),
             TextSubmit::WebDavJianguoyunPassword => self.handle_webdav_password_submit(raw),
         }
+    }
+
+    fn handle_codex_model_catalog_field_submit(
+        &mut self,
+        row: Option<usize>,
+        field: form::CodexModelCatalogField,
+        raw: String,
+    ) -> Action {
+        let trimmed = raw.trim().to_string();
+        if matches!(field, form::CodexModelCatalogField::Model) && trimmed.is_empty() {
+            self.push_toast(
+                texts::tui_toast_provider_add_missing_fields(),
+                ToastKind::Warning,
+            );
+            self.overlay = Overlay::TextInput(TextInputState {
+                title: texts::tui_codex_model_catalog().to_string(),
+                prompt: codex_model_catalog_field_prompt(field).to_string(),
+                input: TextInput::new(trimmed),
+                submit: TextSubmit::CodexModelCatalogField { row, field },
+                secret: false,
+            });
+            return Action::None;
+        }
+
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+            return Action::None;
+        };
+        provider.codex_model_catalog_field = field;
+        provider.set_codex_model_catalog_field(row, field, &trimmed);
+        Action::None
     }
 
     fn handle_openclaw_agents_runtime_submit(
@@ -308,7 +446,7 @@ impl App {
             self.overlay = Overlay::TextInput(TextInputState {
                 title: texts::tui_webdav_jianguoyun_setup_title().to_string(),
                 prompt: texts::tui_webdav_jianguoyun_username_prompt().to_string(),
-                buffer: String::new(),
+                input: TextInput::new(""),
                 submit: TextSubmit::WebDavJianguoyunUsername,
                 secret: false,
             });
@@ -319,7 +457,7 @@ impl App {
         self.overlay = Overlay::TextInput(TextInputState {
             title: texts::tui_webdav_jianguoyun_setup_title().to_string(),
             prompt: texts::tui_webdav_jianguoyun_app_password_prompt().to_string(),
-            buffer: String::new(),
+            input: TextInput::new(""),
             submit: TextSubmit::WebDavJianguoyunPassword,
             secret: true,
         });
@@ -332,7 +470,7 @@ impl App {
             self.overlay = Overlay::TextInput(TextInputState {
                 title: texts::tui_webdav_jianguoyun_setup_title().to_string(),
                 prompt: texts::tui_webdav_jianguoyun_app_password_prompt().to_string(),
-                buffer: String::new(),
+                input: TextInput::new(""),
                 submit: TextSubmit::WebDavJianguoyunPassword,
                 secret: true,
             });
@@ -358,14 +496,14 @@ impl App {
     ) -> Action {
         if data.proxy.running {
             self.push_toast(
-                texts::tui_toast_proxy_settings_stop_before_edit(),
+                texts::tui_toast_proxy_settings_stop_proxy_before_edit_address(),
                 ToastKind::Info,
             );
             return Action::None;
         }
 
         let trimmed = raw.trim().to_string();
-        if !is_valid_proxy_listen_address(&trimmed) {
+        if !crate::cli::proxy_settings::is_valid_proxy_listen_address(&trimmed) {
             self.push_toast(
                 texts::tui_toast_proxy_listen_address_invalid(),
                 ToastKind::Warning,
@@ -373,7 +511,7 @@ impl App {
             self.overlay = Overlay::TextInput(TextInputState {
                 title: texts::tui_settings_proxy_title().to_string(),
                 prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
-                buffer: trimmed,
+                input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenAddress,
                 secret: false,
             });
@@ -384,9 +522,9 @@ impl App {
     }
 
     fn handle_settings_proxy_listen_port_submit(&mut self, data: &UiData, raw: String) -> Action {
-        if data.proxy.running {
+        if data.proxy.has_active_worker_for(&self.app_type) {
             self.push_toast(
-                texts::tui_toast_proxy_settings_stop_before_edit(),
+                texts::tui_toast_proxy_settings_stop_app_route_before_edit_port(),
                 ToastKind::Info,
             );
             return Action::None;
@@ -401,14 +539,14 @@ impl App {
             self.overlay = Overlay::TextInput(TextInputState {
                 title: texts::tui_settings_proxy_title().to_string(),
                 prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
-                buffer: trimmed,
+                input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenPort,
                 secret: false,
             });
             return Action::None;
         };
 
-        if !(1024..=65535).contains(&port) {
+        if crate::cli::proxy_settings::validate_proxy_listen_port(port).is_err() {
             self.push_toast(
                 texts::tui_toast_proxy_listen_port_invalid(),
                 ToastKind::Warning,
@@ -416,7 +554,7 @@ impl App {
             self.overlay = Overlay::TextInput(TextInputState {
                 title: texts::tui_settings_proxy_title().to_string(),
                 prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
-                buffer: trimmed,
+                input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenPort,
                 secret: false,
             });
@@ -427,20 +565,14 @@ impl App {
     }
 }
 
-fn is_valid_proxy_listen_address(value: &str) -> bool {
-    if value.is_empty() {
-        return false;
+fn codex_model_catalog_field_prompt(field: form::CodexModelCatalogField) -> &'static str {
+    match field {
+        form::CodexModelCatalogField::Model => texts::tui_codex_model_catalog_model_prompt(),
+        form::CodexModelCatalogField::DisplayName => {
+            texts::tui_codex_model_catalog_display_prompt()
+        }
+        form::CodexModelCatalogField::ContextWindow => {
+            texts::tui_codex_model_catalog_context_prompt()
+        }
     }
-    if matches!(value, "localhost" | "0.0.0.0") {
-        return true;
-    }
-
-    let parts = value.split('.').collect::<Vec<_>>();
-    if parts.len() != 4 {
-        return false;
-    }
-
-    parts
-        .iter()
-        .all(|part| !part.is_empty() && part.parse::<u8>().is_ok())
 }

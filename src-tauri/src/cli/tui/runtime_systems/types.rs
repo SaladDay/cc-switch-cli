@@ -7,11 +7,24 @@ use serde_json::Value;
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
+use crate::cli::tui::data::ProxySnapshot;
 use crate::cli::tui::data::QuotaTarget;
 use crate::provider::Provider;
 use crate::services::{EndpointLatency, HealthStatus, StreamCheckResult, SyncDecision};
 
 use super::super::form::ProviderAddField;
+
+const KNOWN_COMPAT_SUFFIXES: &[&str] = &[
+    "/api/claudecode",
+    "/api/anthropic",
+    "/apps/anthropic",
+    "/api/coding",
+    "/claudecode",
+    "/anthropic",
+    "/step_plan",
+    "/coding",
+    "/claude",
+];
 
 pub(crate) fn next_model_fetch_request_id() -> u64 {
     static NEXT_MODEL_FETCH_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -50,6 +63,74 @@ pub(crate) enum LocalEnvMsg {
     },
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum SessionReq {
+    Refresh {
+        request_id: u64,
+        provider_id: String,
+        /// When true (manual `r` reload), ignore the cached `(mtime, size)`
+        /// snapshot and re-parse every file; the fresh results still refresh the
+        /// persistent cache.
+        force: bool,
+    },
+    LoadMessages {
+        request_id: u64,
+        key: String,
+        provider_id: String,
+        source_path: String,
+    },
+    Delete {
+        request_id: u64,
+        key: String,
+        provider_id: String,
+        session_id: String,
+        source_path: String,
+    },
+    Search {
+        request_id: u64,
+        query: String,
+        sessions: Vec<crate::session_manager::SessionMeta>,
+    },
+}
+
+pub(crate) enum SessionMsg {
+    /// Stale-while-revalidate first paint: the list built straight from the
+    /// persistent cache, sent before the (slower) revalidating scan finishes so
+    /// the page renders immediately while the refresh indicator stays on.
+    ScanCachedSnapshot {
+        request_id: u64,
+        rows: Vec<crate::session_manager::SessionMeta>,
+    },
+    /// Progressive fill for the "all providers" scan: one provider's freshly
+    /// revalidated list, sent as soon as that provider finishes so a genuine
+    /// full scan (first-ever run, manual reload) paints provider by provider
+    /// instead of all at once. The refresh indicator stays on until
+    /// `ScanFinished`.
+    ScanPartial {
+        request_id: u64,
+        provider_id: String,
+        rows: Vec<crate::session_manager::SessionMeta>,
+    },
+    ScanFinished {
+        request_id: u64,
+        result: Result<Vec<crate::session_manager::SessionMeta>, String>,
+    },
+    MessagesLoaded {
+        request_id: u64,
+        key: String,
+        result: Result<Vec<crate::session_manager::SessionMessage>, String>,
+    },
+    DeleteFinished {
+        request_id: u64,
+        key: String,
+        result: Result<(), String>,
+    },
+    SearchFinished {
+        request_id: u64,
+        result: Result<Vec<crate::session_manager::SessionSearchHit>, String>,
+    },
+}
+
 pub(crate) enum QuotaReq {
     Refresh { target: QuotaTarget },
 }
@@ -57,18 +138,112 @@ pub(crate) enum QuotaReq {
 pub(crate) enum QuotaMsg {
     Finished {
         target: QuotaTarget,
-        result: Result<crate::services::SubscriptionQuota, String>,
+        result: Result<crate::cli::tui::data::ProviderUsageQuota, String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AppDataLoadKind {
+    Initial,
+    Snapshot,
+    Full,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum AppDataReq {
+    InitialLoad {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+        /// Other visible apps to pre-seed from the same in-memory snapshot, each
+        /// paired with its own request_id (matching a pending entry registered by
+        /// the cache). Lets one initial request warm every visible app so the first
+        /// switch renders real data instead of an empty placeholder.
+        extras: Vec<(AppType, u64)>,
+    },
+    Load {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+    },
+    FullLoad {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+    },
+    DropState {
+        ack: mpsc::Sender<()>,
+    },
+}
+
+pub(crate) enum AppDataMsg {
+    Loaded {
+        kind: AppDataLoadKind,
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+        result: Result<crate::cli::tui::data::UiData, String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum UsagePricingReq {
+    Load {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+    },
+    DropState {
+        ack: mpsc::Sender<()>,
+    },
+}
+
+pub(crate) enum UsagePricingMsg {
+    Loaded {
+        request_id: u64,
+        generation: u64,
+        app_state_epoch: u64,
+        app_type: AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+        result: Result<crate::cli::tui::data::UsagePricingData, String>,
+    },
+}
+
+pub(crate) enum SessionUsageSyncReq {
+    Run { request_id: u64 },
+}
+
+pub(crate) enum SessionUsageSyncMsg {
+    Finished {
+        request_id: u64,
+        result: Result<(), String>,
     },
 }
 
 pub(crate) enum SkillsReq {
-    Discover { query: String },
-    Install { spec: String, app: AppType },
+    Discover {
+        request_id: u64,
+        query: String,
+        source: crate::cli::tui::app::SkillsDiscoverSource,
+        force: bool,
+    },
+    Install {
+        spec: String,
+        app: AppType,
+    },
 }
 
 pub(crate) enum SkillsMsg {
     DiscoverFinished {
+        request_id: u64,
         query: String,
+        source: crate::cli::tui::app::SkillsDiscoverSource,
         result: Result<Vec<crate::services::skill::Skill>, String>,
     },
     InstallFinished {
@@ -103,6 +278,7 @@ pub(crate) enum WebDavDone {
         decision: SyncDecision,
         message: String,
     },
+    #[allow(dead_code)]
     V1Migrated {
         message: String,
     },
@@ -124,6 +300,56 @@ pub(crate) enum WebDavMsg {
     },
 }
 
+pub(crate) enum ManagedAuthReq {
+    Refresh {
+        auth_provider: String,
+    },
+    StartLogin {
+        auth_provider: String,
+    },
+    PollLogin {
+        auth_provider: String,
+        device_code: String,
+    },
+    SetDefault {
+        auth_provider: String,
+        account_id: String,
+    },
+    Remove {
+        auth_provider: String,
+        account_id: String,
+    },
+}
+
+pub(crate) enum ManagedAuthMsg {
+    Status {
+        auth_provider: String,
+        result: Result<crate::services::ManagedAuthStatus, String>,
+    },
+    LoginStarted {
+        auth_provider: String,
+        result: Result<crate::services::ManagedAuthDeviceCodeResponse, String>,
+    },
+    LoginPolled {
+        auth_provider: String,
+        device_code: String,
+        result: Result<Option<crate::services::ManagedAuthAccount>, String>,
+    },
+    DefaultSet {
+        #[allow(dead_code)]
+        auth_provider: String,
+        #[allow(dead_code)]
+        account_id: String,
+        result: Result<crate::services::ManagedAuthStatus, String>,
+    },
+    Removed {
+        #[allow(dead_code)]
+        auth_provider: String,
+        account_id: String,
+        result: Result<crate::services::ManagedAuthStatus, String>,
+    },
+}
+
 pub(crate) struct SpeedtestSystem {
     pub(crate) req_tx: mpsc::Sender<String>,
     pub(crate) result_rx: mpsc::Receiver<SpeedtestMsg>,
@@ -142,9 +368,33 @@ pub(crate) struct LocalEnvSystem {
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 
+pub(crate) struct SessionSystem {
+    pub(crate) req_tx: mpsc::Sender<SessionReq>,
+    pub(crate) result_rx: mpsc::Receiver<SessionMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
 pub(crate) struct QuotaSystem {
     pub(crate) req_tx: mpsc::Sender<QuotaReq>,
     pub(crate) result_rx: mpsc::Receiver<QuotaMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct AppDataSystem {
+    pub(crate) req_tx: mpsc::Sender<AppDataReq>,
+    pub(crate) result_rx: mpsc::Receiver<AppDataMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct UsagePricingSystem {
+    pub(crate) req_tx: mpsc::Sender<UsagePricingReq>,
+    pub(crate) result_rx: mpsc::Receiver<UsagePricingMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct SessionUsageSyncSystem {
+    pub(crate) req_tx: mpsc::Sender<SessionUsageSyncReq>,
+    pub(crate) result_rx: mpsc::Receiver<SessionUsageSyncMsg>,
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 
@@ -155,6 +405,10 @@ pub(crate) enum ProxyReq {
         app_type: AppType,
         enabled: bool,
     },
+    RefreshSnapshot {
+        request_id: u64,
+        app_type: AppType,
+    },
 }
 
 pub(crate) enum ProxyMsg {
@@ -163,6 +417,11 @@ pub(crate) enum ProxyMsg {
         app_type: AppType,
         enabled: bool,
         result: Result<(), String>,
+    },
+    SnapshotRefreshed {
+        request_id: u64,
+        app_type: AppType,
+        result: Result<ProxySnapshot, String>,
     },
 }
 
@@ -181,6 +440,12 @@ pub(crate) struct SkillsSystem {
 pub(crate) struct WebDavSystem {
     pub(crate) req_tx: mpsc::Sender<WebDavReq>,
     pub(crate) result_rx: mpsc::Receiver<WebDavMsg>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
+}
+
+pub(crate) struct ManagedAuthSystem {
+    pub(crate) req_tx: mpsc::Sender<ManagedAuthReq>,
+    pub(crate) result_rx: mpsc::Receiver<ManagedAuthMsg>,
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 
@@ -212,6 +477,9 @@ pub(crate) enum ModelFetchReq {
         request_id: u64,
         base_url: String,
         api_key: Option<String>,
+        custom_user_agent: Option<String>,
+        codex_oauth: bool,
+        codex_oauth_account_id: Option<String>,
         field: ProviderAddField,
         claude_idx: Option<usize>,
     },
@@ -260,7 +528,7 @@ pub(crate) fn build_model_fetch_candidate_urls(
     }
 
     let append_models = format!("{base}/models");
-    let append_v1_models = if base.ends_with("/v1") || base.ends_with("/v1beta") {
+    let append_versioned_models = if base.ends_with("/v1") || base.ends_with("/v1beta") {
         None
     } else {
         Some(format!("{base}/v1/models"))
@@ -269,14 +537,25 @@ pub(crate) fn build_model_fetch_candidate_urls(
     let mut urls: Vec<String> = Vec::new();
     match strategy {
         ModelFetchStrategy::Anthropic => {
-            if let Some(v1) = append_v1_models.as_ref() {
-                urls.push(v1.clone());
+            if let Some(versioned) = append_versioned_models.as_ref() {
+                urls.push(versioned.clone());
+            } else {
+                urls.push(append_models.clone());
             }
-            urls.push(append_models);
+
+            if let Some(stripped) = strip_compat_suffix(base) {
+                let root = stripped.trim_end_matches('/');
+                if !root.is_empty() && root.contains("://") {
+                    urls.push(format!("{root}/v1/models"));
+                    urls.push(format!("{root}/models"));
+                }
+            } else if append_versioned_models.is_some() {
+                urls.push(append_models);
+            }
         }
         ModelFetchStrategy::Bearer | ModelFetchStrategy::GoogleApiKey => {
             urls.push(append_models);
-            if let Some(v1) = append_v1_models.as_ref() {
+            if let Some(v1) = append_versioned_models.as_ref() {
                 urls.push(v1.clone());
             }
         }
@@ -285,6 +564,15 @@ pub(crate) fn build_model_fetch_candidate_urls(
     let mut seen = HashSet::new();
     urls.retain(|url| seen.insert(url.clone()));
     urls
+}
+
+fn strip_compat_suffix(base: &str) -> Option<&str> {
+    let lower = base.to_ascii_lowercase();
+    KNOWN_COMPAT_SUFFIXES.iter().find_map(|suffix| {
+        lower
+            .ends_with(suffix)
+            .then(|| &base[..base.len() - suffix.len()])
+    })
 }
 
 pub(crate) fn parse_model_ids_from_response(payload: &Value) -> Vec<String> {
@@ -326,6 +614,7 @@ pub(crate) fn parse_model_ids_from_response(payload: &Value) -> Vec<String> {
 pub(crate) async fn fetch_provider_models_for_tui(
     base_url: &str,
     api_key: Option<&str>,
+    custom_user_agent: Option<&str>,
     strategy: ModelFetchStrategy,
 ) -> Result<Vec<String>, String> {
     let candidate_urls = build_model_fetch_candidate_urls(base_url, strategy);
@@ -339,6 +628,9 @@ pub(crate) async fn fetch_provider_models_for_tui(
         .map_err(|e| format!("build http client failed: {e}"))?;
 
     let key = api_key.map(str::trim).filter(|k| !k.is_empty());
+    let custom_user_agent = crate::provider::parse_custom_user_agent(custom_user_agent)
+        .ok()
+        .flatten();
     let mut last_err = String::from("unknown error");
 
     for url in candidate_urls {
@@ -353,11 +645,20 @@ pub(crate) async fn fetch_provider_models_for_tui(
                 ModelFetchStrategy::GoogleApiKey => req.header("x-goog-api-key", key),
             };
         }
+        if let Some(user_agent) = &custom_user_agent {
+            req = req.header(reqwest::header::USER_AGENT, user_agent.clone());
+        }
 
         match req.send().await {
             Ok(resp) => {
-                if !resp.status().is_success() {
-                    last_err = format!("HTTP {} ({url})", resp.status());
+                let status = resp.status();
+                if !status.is_success() {
+                    last_err = format!("HTTP {status} ({url})");
+                    if status != reqwest::StatusCode::NOT_FOUND
+                        && status != reqwest::StatusCode::METHOD_NOT_ALLOWED
+                    {
+                        return Err(last_err);
+                    }
                     continue;
                 }
                 match resp.json::<Value>().await {

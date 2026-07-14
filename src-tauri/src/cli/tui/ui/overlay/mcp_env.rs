@@ -1,5 +1,6 @@
 use super::super::theme;
 use super::super::*;
+use super::frame::{overlay_frame, OverlaySize};
 
 pub(super) fn render_mcp_env_picker_overlay(
     frame: &mut Frame<'_>,
@@ -8,25 +9,11 @@ pub(super) fn render_mcp_env_picker_overlay(
     theme: &theme::Theme,
     selected: usize,
 ) {
-    let area = centered_rect_fixed(64, 16, content_area);
-    frame.render_widget(Clear, area);
-
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(overlay_border_style(theme, false))
-        .title(texts::tui_mcp_env_title());
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(inner);
-
-    render_key_bar_center(
+    let body = overlay_frame(
         frame,
-        chunks[0],
+        content_area,
         theme,
+        texts::tui_mcp_env_title(),
         &[
             ("↑↓", texts::tui_key_select()),
             ("a", texts::tui_key_add()),
@@ -34,6 +21,8 @@ pub(super) fn render_mcp_env_picker_overlay(
             ("Del/Backspace", texts::tui_key_delete()),
             ("Esc", texts::tui_key_close()),
         ],
+        OverlaySize::Fixed(64, 16),
+        overlay_border_style(theme, false),
     );
 
     let Some(FormState::McpAdd(mcp)) = app.form.as_ref() else {
@@ -44,7 +33,7 @@ pub(super) fn render_mcp_env_picker_overlay(
         frame.render_widget(
             Paragraph::new(Line::raw(texts::tui_mcp_env_empty_state()))
                 .alignment(Alignment::Center),
-            inset_top(chunks[1], 1),
+            body,
         );
         return;
     }
@@ -60,7 +49,7 @@ pub(super) fn render_mcp_env_picker_overlay(
 
     let mut state = ListState::default();
     state.select(Some(selected.min(mcp.env_rows.len().saturating_sub(1))));
-    frame.render_stateful_widget(list, inset_top(chunks[1], 1), &mut state);
+    frame.render_stateful_widget(list, body, &mut state);
 }
 
 pub(super) fn render_mcp_env_entry_editor_overlay(
@@ -73,40 +62,34 @@ pub(super) fn render_mcp_env_entry_editor_overlay(
         return;
     };
 
-    let area = centered_rect_fixed(64, 12, content_area);
-    frame.render_widget(Clear, area);
+    let title = if editor.row.is_some() {
+        texts::tui_mcp_env_edit_entry_title()
+    } else {
+        texts::tui_mcp_env_add_entry_title()
+    };
 
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(overlay_border_style(theme, false))
-        .title(if editor.row.is_some() {
-            texts::tui_mcp_env_edit_entry_title()
-        } else {
-            texts::tui_mcp_env_add_entry_title()
-        });
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(0),
-        ])
-        .split(inner);
-
-    render_key_bar_center(
+    let body = overlay_frame(
         frame,
-        chunks[0],
+        content_area,
         theme,
+        title,
         &[
             ("Tab", texts::tui_key_select()),
             ("Enter", texts::tui_key_apply()),
             ("Esc", texts::tui_key_cancel()),
         ],
+        OverlaySize::Fixed(64, 12),
+        overlay_border_style(theme, false),
     );
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .split(body);
 
     let fields = [
         (
@@ -132,8 +115,8 @@ pub(super) fn render_mcp_env_entry_editor_overlay(
             } else {
                 Style::default().fg(theme.dim)
             })
-            .title(label);
-        let input_area = chunks[idx + 1];
+            .title(format!(" {} ", label));
+        let input_area = chunks[idx];
         let input_inner = block.inner(input_area);
         frame.render_widget(block, input_area);
 
