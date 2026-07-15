@@ -795,6 +795,73 @@ fn tui_usage_loading_state_keeps_existing_data_visible() {
 }
 
 #[test]
+fn tui_usage_zero_cost_metric_does_not_hide_real_usage() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d = UsageSummarySnapshot {
+        total_requests: 2,
+        success_count: 2,
+        total_tokens: 800,
+        ..UsageSummarySnapshot::default()
+    };
+    data.usage.trends_7d = vec![UsageTrendBucket {
+        key: "2026-06-05".to_string(),
+        label: "06/05".to_string(),
+        request_count: 2,
+        total_tokens: 800,
+        ..UsageTrendBucket::default()
+    }];
+
+    let all = all_text(&render_with_size(&app, &data, 160, 40));
+
+    assert!(all.contains("06/05"), "{all}");
+    assert!(!all.contains("No usage recorded"), "{all}");
+}
+
+#[test]
+fn tui_usage_marks_unreported_cache_writes_without_hiding_reported_values() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d = UsageSummarySnapshot {
+        total_requests: 1,
+        success_count: 1,
+        total_tokens: 1_000,
+        cache_read_tokens: 500,
+        ..UsageSummarySnapshot::default()
+    };
+    data.usage.trends_7d = vec![UsageTrendBucket {
+        key: "2026-06-05".to_string(),
+        label: "06/05".to_string(),
+        request_count: 1,
+        total_tokens: 1_000,
+        ..UsageTrendBucket::default()
+    }];
+
+    let unavailable = all_text(&render_with_size(&app, &data, 180, 42));
+    assert!(unavailable.contains("Cache Write"), "{unavailable}");
+    assert!(unavailable.contains("N/A"), "{unavailable}");
+
+    data.usage.summary_7d.cache_creation_tokens = 1_250;
+    let reported = all_text(&render_with_size(&app, &data, 180, 42));
+    assert!(reported.contains("1.2k"), "{reported}");
+    assert!(!reported.contains("N/A"), "{reported}");
+
+    app.app_type = AppType::Claude;
+    data.usage.summary_7d.cache_creation_tokens = 0;
+    let reported_zero = all_text(&render_with_size(&app, &data, 180, 42));
+    assert!(reported_zero.contains("Cache Write"), "{reported_zero}");
+    assert!(!reported_zero.contains("N/A"), "{reported_zero}");
+}
+
+#[test]
 fn tui_usage_renders_summary_and_trend() {
     let _lang = use_test_language(Language::English);
 

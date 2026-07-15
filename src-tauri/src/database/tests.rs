@@ -2634,6 +2634,87 @@ fn model_pricing_delete_survives_reseed_until_user_upserts() {
 }
 
 #[test]
+fn model_pricing_seeds_gpt_5_6_family_and_aliases() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let expected = [
+        ("gpt-5.6-sol", "5", "30", "0.50", "6.25"),
+        ("gpt-5.6-terra", "2.50", "15", "0.25", "3.125"),
+        ("gpt-5.6-luna", "1", "6", "0.10", "1.25"),
+        ("gpt-5.6", "5", "30", "0.50", "6.25"),
+        ("gpt-5.6-high", "5", "30", "0.50", "6.25"),
+    ];
+
+    for (model_id, input, output, cache_read, cache_write) in expected {
+        let pricing: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap_or_else(|error| panic!("query {model_id} pricing: {error}"));
+        assert_eq!(
+            pricing,
+            (
+                input.to_string(),
+                output.to_string(),
+                cache_read.to_string(),
+                cache_write.to_string(),
+            ),
+            "unexpected pricing for {model_id}"
+        );
+    }
+}
+
+#[test]
+fn model_pricing_repairs_only_untouched_upstream_gpt_5_6_seeds() {
+    let db = Database::memory().expect("create memory db");
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "UPDATE model_pricing SET cache_creation_cost_per_million = '0'
+             WHERE model_id = 'gpt-5.6-sol'",
+            [],
+        )
+        .expect("restore upstream zero cache-write seed");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '9', cache_creation_cost_per_million = '0'
+             WHERE model_id = 'gpt-5.6-terra'",
+            [],
+        )
+        .expect("set custom Terra pricing");
+    }
+
+    db.ensure_model_pricing_seeded()
+        .expect("ensure pricing seeded");
+
+    let conn = db.conn.lock().expect("lock conn");
+    let sol_cache_write: String = conn
+        .query_row(
+            "SELECT cache_creation_cost_per_million FROM model_pricing
+             WHERE model_id = 'gpt-5.6-sol'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query repaired Sol pricing");
+    assert_eq!(sol_cache_write, "6.25");
+
+    let terra_custom: (String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'gpt-5.6-terra'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query custom Terra pricing");
+    assert_eq!(terra_custom, ("9".to_string(), "0".to_string()));
+}
+
+#[test]
 fn model_pricing_upsert_rejects_invalid_values() {
     let db = Database::memory().expect("create memory db");
     let invalid = ModelPricingUpdate {

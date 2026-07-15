@@ -211,7 +211,12 @@ fn render_usage_metrics(
             .split(inner);
 
         render_usage_metric_row(frame, rows[0], &usage_primary_metrics(summary), theme);
-        render_usage_metric_row(frame, rows[1], &usage_secondary_metrics(summary), theme);
+        render_usage_metric_row(
+            frame,
+            rows[1],
+            &usage_secondary_metrics(summary, app.app_type.as_str()),
+            theme,
+        );
         render_usage_metric_row(frame, rows[2], &usage_tertiary_metrics(summary), theme);
         render_usage_cache_hit_line(frame, summary, rows[3], theme);
         return;
@@ -228,7 +233,12 @@ fn render_usage_metrics(
             .split(inner);
 
         render_usage_metric_row(frame, rows[0], &usage_primary_metrics(summary), theme);
-        render_usage_metric_row(frame, rows[1], &usage_secondary_metrics(summary), theme);
+        render_usage_metric_row(
+            frame,
+            rows[1],
+            &usage_secondary_metrics(summary, app.app_type.as_str()),
+            theme,
+        );
         render_usage_cache_hit_line(frame, summary, rows[2], theme);
         return;
     }
@@ -277,7 +287,7 @@ fn usage_primary_metrics(summary: &UsageSummarySnapshot) -> [UsageMetricCard; 4]
     ]
 }
 
-fn usage_secondary_metrics(summary: &UsageSummarySnapshot) -> [UsageMetricCard; 4] {
+fn usage_secondary_metrics(summary: &UsageSummarySnapshot, app_type: &str) -> [UsageMetricCard; 4] {
     [
         UsageMetricCard {
             label: usage_text("Input", "输入"),
@@ -293,9 +303,23 @@ fn usage_secondary_metrics(summary: &UsageSummarySnapshot) -> [UsageMetricCard; 
         },
         UsageMetricCard {
             label: usage_text("Cache Write", "缓存写入"),
-            value: format_token_compact(summary.cache_creation_tokens),
+            value: format_cache_write_tokens(app_type, summary.cache_creation_tokens, true),
         },
     ]
+}
+
+fn format_cache_write_tokens(app_type: &str, tokens: u64, compact: bool) -> String {
+    let protocol_does_not_report_writes =
+        app_type.eq_ignore_ascii_case("codex") || app_type.eq_ignore_ascii_case("gemini");
+    if protocol_does_not_report_writes && tokens == 0 {
+        return "N/A".to_string();
+    }
+
+    if compact {
+        format_token_compact(tokens)
+    } else {
+        tokens.to_string()
+    }
 }
 
 fn usage_tertiary_metrics(summary: &UsageSummarySnapshot) -> [UsageMetricCard; 4] {
@@ -623,10 +647,7 @@ fn render_usage_trend(
     }
 
     let trend = data.usage.trend_for(app.usage.range);
-    if trend
-        .iter()
-        .all(|bucket| usage_bucket_value(bucket, app.usage.metric) == 0.0)
-    {
+    if !data.usage.has_data_for(app.usage.range) {
         render_centered_usage_lines(
             frame,
             inner,
@@ -1276,7 +1297,7 @@ fn render_usage_detail_body(
         ),
         detail_line(
             usage_text("Cache Create", "缓存创建"),
-            row.cache_creation_tokens.to_string(),
+            format_cache_write_tokens(&row.app_type, row.cache_creation_tokens, false),
             theme,
         ),
         detail_line(

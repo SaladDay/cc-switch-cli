@@ -2180,6 +2180,45 @@ mod tests {
     }
 
     #[test]
+    fn test_backfill_missing_usage_costs_uses_gpt_5_6_sol_pricing() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "codex-gpt-5-6-sol-zero-cost",
+                "codex",
+                "_codex_session",
+                "gpt-5.6-sol",
+                "codex_session",
+                1000,
+                1_000_000,
+                1_000_000,
+                0,
+                0,
+                200,
+                "0",
+            )?;
+        }
+
+        assert_eq!(db.backfill_missing_usage_costs()?, 1);
+
+        let conn = lock_conn!(db.conn);
+        let (input_cost, output_cost, total_cost): (String, String, String) = conn.query_row(
+            "SELECT input_cost_usd, output_cost_usd, total_cost_usd
+             FROM proxy_request_logs WHERE request_id = 'codex-gpt-5-6-sol-zero-cost'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(input_cost, "5.000000");
+        assert_eq!(output_cost, "30.000000");
+        assert_eq!(total_cost, "35.000000");
+
+        Ok(())
+    }
+
+    #[test]
     fn test_backfill_distinguishes_legacy_and_total_cache_semantics() -> Result<(), AppError> {
         let db = Database::memory()?;
 
