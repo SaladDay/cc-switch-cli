@@ -2035,6 +2035,145 @@ async fn switch_provider_under_takeover_refreshes_claude_restore_backup_to_selec
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn updating_claude_common_config_under_takeover_refreshes_active_live_settings() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let settings_path = get_claude_settings_path();
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).expect("create claude settings dir");
+    }
+
+    let provider_live = json!({
+        "env": {
+            "ANTHROPIC_API_KEY": "provider-key"
+        },
+        "workspace": {
+            "path": "/tmp/provider-workspace"
+        }
+    });
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&provider_live).expect("serialize provider live"),
+    )
+    .expect("seed claude live config");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "glm-provider".to_string();
+        let mut provider = Provider::with_id(
+            "glm-provider".to_string(),
+            "GLM Claude".to_string(),
+            json!({
+                "env": { "ANTHROPIC_API_KEY": "provider-key" },
+                "workspace": { "path": "/tmp/provider-workspace" }
+            }),
+            None,
+        );
+        provider.meta = Some(cc_switch_lib::ProviderMeta {
+            apply_common_config: Some(true),
+            ..Default::default()
+        });
+        manager.providers.insert("glm-provider".to_string(), provider);
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist provider state to db");
+
+    let proxy_port = find_free_port();
+    state
+        .db
+        .set_app_proxy_preferred_port("claude", proxy_port)
+        .expect("update claude proxy port");
+
+    state
+        .proxy_service
+        .set_takeover_for_app("claude", true)
+        .await
+        .expect("enable claude takeover");
+
+    let snippet = serde_json::json!({
+        "env": {
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+        },
+        "statusLine": {
+            "type": "command",
+            "command": "~/.claude/statusline.sh"
+        }
+    })
+    .to_string();
+
+    ProviderService::set_common_config_snippet(&state, AppType::Claude, Some(snippet))
+        .expect("set common config under takeover");
+
+    let live_during_takeover: serde_json::Value =
+        read_json_file(&settings_path).expect("read claude live settings under takeover");
+    assert_eq!(
+        live_during_takeover
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .and_then(|value| value.as_str()),
+        Some(format!("http://127.0.0.1:{proxy_port}").as_str()),
+        "common config apply under takeover should keep Claude live config pointed at the local proxy"
+    );
+    assert_eq!(
+        live_during_takeover
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("PROXY_MANAGED"),
+        "common config apply under takeover should keep the managed placeholder in Claude live config"
+    );
+    assert_eq!(
+        live_during_takeover
+            .get("env")
+            .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .and_then(|value| value.as_str()),
+        Some("1"),
+        "common config apply under takeover should refresh active live config with snippet-owned env keys"
+    );
+    assert_eq!(
+        live_during_takeover
+            .get("statusLine")
+            .and_then(|value| value.get("command"))
+            .and_then(|value| value.as_str()),
+        Some("~/.claude/statusline.sh"),
+        "common config apply under takeover should refresh active live config with snippet-owned nested keys"
+    );
+
+    let backup_after_apply = state
+        .db
+        .get_live_backup("claude")
+        .await
+        .expect("read claude live backup after common config apply")
+        .expect("claude takeover backup should exist after common config apply");
+    let backup_after_apply: serde_json::Value =
+        serde_json::from_str(&backup_after_apply.original_config)
+            .expect("parse claude live backup after common config apply");
+    assert_eq!(
+        backup_after_apply
+            .get("env")
+            .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .and_then(|value| value.as_str()),
+        Some("1"),
+        "common config apply under takeover should refresh the restore backup too"
+    );
+    assert_eq!(
+        backup_after_apply
+            .get("statusLine")
+            .and_then(|value| value.get("command"))
+            .and_then(|value| value.as_str()),
+        Some("~/.claude/statusline.sh"),
+        "common config apply under takeover should store nested snippet keys in the restore backup"
+    );
+}
+
 fn seed_claude_provider(config: &mut MultiAppConfig, id: &str, name: &str) {
     let manager = config
         .get_manager_mut(&AppType::Claude)

@@ -1591,7 +1591,7 @@ impl ProxyService {
         original_live: &Value,
         provider: &Provider,
     ) -> Result<Value, String> {
-        let mut provider_snapshot = self.build_live_snapshot_from_provider(app_type, provider)?;
+        let mut provider_snapshot = self.build_live_snapshot_from_provider(app_type, provider, None)?;
         Self::apply_codex_unified_session_bucket_to_backup(
             app_type,
             provider,
@@ -2086,7 +2086,7 @@ impl ProxyService {
     ) -> Result<(), String> {
         let app_type_enum = Self::takeover_app_from_str(app_type)?;
         let mut backup_snapshot =
-            self.build_live_snapshot_from_provider(&app_type_enum, provider)?;
+            self.build_live_snapshot_from_provider(&app_type_enum, provider, None)?;
         Self::apply_codex_unified_session_bucket_to_backup(
             &app_type_enum,
             provider,
@@ -2108,9 +2108,11 @@ impl ProxyService {
         app_type: &str,
         provider: &Provider,
         previous_provider: Option<&Provider>,
+        snippet_override: Option<&str>,
     ) -> Result<Value, String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
-        let mut backup_snapshot = self.build_live_snapshot_from_provider(&app_type, provider)?;
+        let mut backup_snapshot =
+            self.build_live_snapshot_from_provider(&app_type, provider, snippet_override)?;
         Self::apply_codex_unified_session_bucket_to_backup(
             &app_type,
             provider,
@@ -2118,7 +2120,8 @@ impl ProxyService {
         )?;
         let previous_backup_snapshot = previous_provider
             .map(|provider| {
-                let mut snapshot = self.build_live_snapshot_from_provider(&app_type, provider)?;
+                let mut snapshot =
+                    self.build_live_snapshot_from_provider(&app_type, provider, snippet_override)?;
                 Self::apply_codex_unified_session_bucket_to_backup(
                     &app_type,
                     provider,
@@ -2382,6 +2385,7 @@ impl ProxyService {
                     app_type_enum.as_str(),
                     &provider,
                     previous_provider.as_ref(),
+                    None,
                 )
                 .await?;
             self.save_live_backup_snapshot(app_type_enum.as_str(), &backup_snapshot)
@@ -2407,7 +2411,7 @@ impl ProxyService {
     ) -> Result<(), String> {
         let mut effective_provider = provider.clone();
         effective_provider.settings_config =
-            self.build_live_snapshot_from_provider(&AppType::Claude, provider)?;
+            self.build_live_snapshot_from_provider(&AppType::Claude, provider, None)?;
         let mut effective_settings = effective_provider.settings_config.clone();
         let (proxy_url, _) = self.build_proxy_urls_for_app(&AppType::Claude).await?;
 
@@ -3099,7 +3103,7 @@ impl ProxyService {
                 if let Some(provider) = provider_for_write {
                     let mut effective_provider = provider.clone();
                     effective_provider.settings_config =
-                        self.build_live_snapshot_from_provider(app_type, provider)?;
+                        self.build_live_snapshot_from_provider(app_type, provider, None)?;
                     Self::apply_claude_takeover_fields_for_provider(
                         live,
                         proxy_url,
@@ -3457,16 +3461,19 @@ impl ProxyService {
         &self,
         app_type: &AppType,
         provider: &Provider,
+        snippet_override: Option<&str>,
     ) -> Result<Value, String> {
-        let common_config_snippet =
-            self.db
+        let common_config_snippet = match snippet_override {
+            Some(override_snippet) => Some(override_snippet.to_string()),
+            None => self.db
                 .get_config_snippet(app_type.as_str())
                 .map_err(|error| {
                     format!(
                         "load common config snippet for {} failed: {error}",
                         app_type.as_str()
                     )
-                })?;
+                })?,
+        };
         let apply_common_config =
             crate::services::provider::ProviderService::provider_uses_common_config_for_app(
                 app_type,
