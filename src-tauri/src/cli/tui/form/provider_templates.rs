@@ -18,12 +18,25 @@ base_url = "https://api.deepseek.com"
 wire_api = "responses"
 requires_openai_auth = true"#;
 
+const ATLASCLOUD_CODEX_CONFIG: &str = r#"model_provider = "atlascloud"
+model = "qwen/qwen3.5-flash"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.atlascloud]
+name = "Atlas Cloud"
+base_url = "https://api.atlascloud.ai/v1"
+wire_api = "responses"
+requires_openai_auth = false
+env_key = "ATLASCLOUD_API_KEY""#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderTemplateId {
     Custom,
     ClaudeOfficial,
     CodexOAuth,
     OpenAiOfficial,
+    AtlasCloud,
     DeepSeek,
     GoogleOAuth,
 }
@@ -262,11 +275,16 @@ static PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 2] = [
     },
 ];
 
-static PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS: [ProviderTemplateDef; 1] =
-    [ProviderTemplateDef {
+static PROVIDER_TEMPLATE_DEFS_CODEX_AFTER_SPONSORS: [ProviderTemplateDef; 2] = [
+    ProviderTemplateDef {
+        id: ProviderTemplateId::AtlasCloud,
+        label: "Atlas Cloud",
+    },
+    ProviderTemplateDef {
         id: ProviderTemplateId::DeepSeek,
         label: "DeepSeek",
-    }];
+    },
+];
 
 static PROVIDER_TEMPLATE_DEFS_GEMINI: [ProviderTemplateDef; 2] = [
     ProviderTemplateDef {
@@ -660,6 +678,72 @@ impl ProviderAddFormState {
                     self.codex_requires_openai_auth = true;
                     self.codex_env_key.set("");
                     self.reset_codex_local_routing_state();
+                }
+                ProviderTemplateId::AtlasCloud => {
+                    self.extra = json!({
+                        "category": "aggregator",
+                        "icon": "atlascloud",
+                        "iconColor": "#2563EB",
+                        "meta": {
+                            "apiFormat": "openai_chat",
+                            "codexChatReasoning": {
+                                "supportsThinking": false,
+                                "supportsEffort": false,
+                                "thinkingParam": "none",
+                                "effortParam": "none",
+                                "outputFormat": "auto",
+                            },
+                        },
+                        "settingsConfig": {
+                            "config": ATLASCLOUD_CODEX_CONFIG,
+                            "modelCatalog": {
+                                "models": [
+                                    {
+                                        "model": "qwen/qwen3.5-flash",
+                                        "displayName": "Qwen3.5 Flash",
+                                        "contextWindow": 1000000,
+                                    },
+                                    {
+                                        "model": "deepseek-ai/deepseek-v4-pro",
+                                        "displayName": "DeepSeek V4 Pro",
+                                        "contextWindow": 1000000,
+                                    },
+                                ],
+                            },
+                        },
+                    });
+                    self.name.set("Atlas Cloud");
+                    self.website_url.set("https://www.atlascloud.ai");
+                    self.codex_api_key.set("");
+                    self.codex_base_url.set("https://api.atlascloud.ai/v1");
+                    self.codex_model.set("qwen/qwen3.5-flash");
+                    self.codex_wire_api = CodexWireApi::Responses;
+                    self.codex_requires_openai_auth = false;
+                    self.codex_env_key.set("ATLASCLOUD_API_KEY");
+                    self.claude_api_format = ClaudeApiFormat::OpenAiChat;
+                    self.codex_chat_reasoning = CodexChatReasoningConfig {
+                        supports_thinking: Some(false),
+                        supports_effort: Some(false),
+                        thinking_param: Some("none".to_string()),
+                        effort_param: Some("none".to_string()),
+                        effort_value_mode: None,
+                        output_format: Some("auto".to_string()),
+                    };
+                    self.codex_model_catalog = vec![
+                        CodexModelCatalogRow {
+                            model: "qwen/qwen3.5-flash".to_string(),
+                            display_name: "Qwen3.5 Flash".to_string(),
+                            context_window: "1000000".to_string(),
+                        },
+                        CodexModelCatalogRow {
+                            model: "deepseek-ai/deepseek-v4-pro".to_string(),
+                            display_name: "DeepSeek V4 Pro".to_string(),
+                            context_window: "1000000".to_string(),
+                        },
+                    ];
+                    self.codex_local_routing_field_idx = 0;
+                    self.codex_model_catalog_idx = 0;
+                    self.codex_model_catalog_field = CodexModelCatalogField::Model;
                 }
                 ProviderTemplateId::DeepSeek => {
                     self.extra = json!({

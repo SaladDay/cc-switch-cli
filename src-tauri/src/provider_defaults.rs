@@ -58,6 +58,20 @@ pub static DEFAULT_PROVIDER_ICONS: Lazy<HashMap<&'static str, ProviderIcon>> = L
         },
     );
     m.insert(
+        "atlascloud",
+        ProviderIcon {
+            name: "atlascloud",
+            color: "#2563EB",
+        },
+    );
+    m.insert(
+        "atlas cloud",
+        ProviderIcon {
+            name: "atlascloud",
+            color: "#2563EB",
+        },
+    );
+    m.insert(
         "kimi",
         ProviderIcon {
             name: "kimi",
@@ -228,6 +242,15 @@ mod tests {
         let icon = infer_provider_icon("ANTHROPIC");
         assert!(icon.is_some());
         assert_eq!(icon.unwrap().name, "anthropic");
+    }
+
+    #[test]
+    fn test_atlascloud_aliases() {
+        let icon = infer_provider_icon("Atlas Cloud");
+        assert!(icon.is_some());
+        let icon = icon.unwrap();
+        assert_eq!(icon.name, "atlascloud");
+        assert_eq!(icon.color, "#2563EB");
     }
 
     #[test]

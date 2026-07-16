@@ -23,6 +23,7 @@ pub enum ProviderAddTemplate {
     ClaudeOfficial,
     CodexOauth,
     OpenaiOfficial,
+    Atlascloud,
     GoogleOauth,
     Claudeapi,
     Packycode,
@@ -42,6 +43,7 @@ impl ProviderAddTemplate {
             Self::ClaudeOfficial => "claude-official",
             Self::CodexOauth => "codex-oauth",
             Self::OpenaiOfficial => "openai-official",
+            Self::Atlascloud => "atlascloud",
             Self::GoogleOauth => "google-oauth",
             Self::Claudeapi => "claudeapi",
             Self::Packycode => "packycode",
@@ -85,6 +87,18 @@ name = "deepseek"
 base_url = "https://api.deepseek.com"
 wire_api = "responses"
 requires_openai_auth = true"#;
+
+const ATLASCLOUD_CODEX_CONFIG: &str = r#"model_provider = "atlascloud"
+model = "qwen/qwen3.5-flash"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.atlascloud]
+name = "Atlas Cloud"
+base_url = "https://api.atlascloud.ai/v1"
+wire_api = "responses"
+requires_openai_auth = false
+env_key = "ATLASCLOUD_API_KEY""#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderAddTemplateChoice {
@@ -338,7 +352,7 @@ const PROVIDER_TEMPLATE_CHOICES_CLAUDE: [ProviderAddTemplateChoice; 11] = [
     },
 ];
 
-const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 10] = [
+const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 11] = [
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Custom,
         label: "Custom",
@@ -374,6 +388,10 @@ const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 10] = [
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Dds,
         label: SPONSOR_PROVIDER_PRESETS[5].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Atlascloud,
+        label: "Atlas Cloud",
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Deepseek,
@@ -589,6 +607,7 @@ fn template_default_name(template: ProviderAddTemplate) -> Result<&'static str, 
         ProviderAddTemplate::CodexOauth => "Codex",
         ProviderAddTemplate::OpenaiOfficial => "OpenAI Official",
         ProviderAddTemplate::GoogleOauth => "Google OAuth",
+        ProviderAddTemplate::Atlascloud => "Atlas Cloud",
         ProviderAddTemplate::Deepseek => "DeepSeek",
         ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
@@ -610,6 +629,7 @@ fn template_default_website_url(template: ProviderAddTemplate) -> Option<&'stati
         ProviderAddTemplate::CodexOauth => Some("https://openai.com/chatgpt/pricing"),
         ProviderAddTemplate::OpenaiOfficial => Some("https://chatgpt.com/codex"),
         ProviderAddTemplate::GoogleOauth => Some("https://ai.google.dev"),
+        ProviderAddTemplate::Atlascloud => Some("https://www.atlascloud.ai"),
         ProviderAddTemplate::Deepseek => Some("https://platform.deepseek.com"),
         ProviderAddTemplate::Claudeapi
         | ProviderAddTemplate::Packycode
@@ -629,6 +649,7 @@ fn template_default_category(template: ProviderAddTemplate) -> Option<&'static s
         | ProviderAddTemplate::OpenaiOfficial
         | ProviderAddTemplate::GoogleOauth => Some("official"),
         ProviderAddTemplate::Deepseek => Some("cn_official"),
+        ProviderAddTemplate::Atlascloud => Some("aggregator"),
         ProviderAddTemplate::Runapi | ProviderAddTemplate::Qiniu | ProviderAddTemplate::Fenno => {
             Some("aggregator")
         }
@@ -674,6 +695,18 @@ fn template_default_meta(
             }),
             ..Default::default()
         }),
+        ProviderAddTemplate::Atlascloud => Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            codex_chat_reasoning: Some(CodexChatReasoningConfig {
+                supports_thinking: Some(false),
+                supports_effort: Some(false),
+                thinking_param: Some("none".to_string()),
+                effort_param: Some("none".to_string()),
+                effort_value_mode: None,
+                output_format: Some("auto".to_string()),
+            }),
+            ..Default::default()
+        }),
         ProviderAddTemplate::GoogleOauth => Some(ProviderMeta {
             partner_promotion_key: Some("google-official".to_string()),
             ..Default::default()
@@ -702,6 +735,7 @@ fn template_default_meta(
 
 fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> {
     match template {
+        ProviderAddTemplate::Atlascloud => Some("atlascloud"),
         ProviderAddTemplate::Deepseek => Some("deepseek"),
         ProviderAddTemplate::Runapi => Some("runapi"),
         ProviderAddTemplate::Qiniu => Some("qiniu"),
@@ -721,6 +755,7 @@ fn template_default_icon(template: ProviderAddTemplate) -> Option<&'static str> 
 
 fn template_default_icon_color(template: ProviderAddTemplate) -> Option<&'static str> {
     match template {
+        ProviderAddTemplate::Atlascloud => Some("#2563EB"),
         ProviderAddTemplate::Deepseek => Some("#1E88E5"),
         ProviderAddTemplate::Custom
         | ProviderAddTemplate::ClaudeOfficial
@@ -760,6 +795,7 @@ fn build_provider_template_settings_config(
             }
         })),
         ProviderAddTemplate::OpenaiOfficial => build_codex_official_settings_config(None),
+        ProviderAddTemplate::Atlascloud => Ok(build_codex_atlascloud_settings_config()),
         ProviderAddTemplate::Deepseek => Ok(build_codex_deepseek_settings_config()),
         ProviderAddTemplate::GoogleOauth => Ok(json!({ "env": {} })),
         ProviderAddTemplate::Claudeapi
@@ -776,6 +812,26 @@ fn build_provider_template_settings_config(
         ),
         ProviderAddTemplate::Custom => Err(unsupported_template_error(template)),
     }
+}
+
+fn build_codex_atlascloud_settings_config() -> Value {
+    json!({
+        "config": ATLASCLOUD_CODEX_CONFIG,
+        "modelCatalog": {
+            "models": [
+                {
+                    "model": "qwen/qwen3.5-flash",
+                    "displayName": "Qwen3.5 Flash",
+                    "contextWindow": 1000000,
+                },
+                {
+                    "model": "deepseek-ai/deepseek-v4-pro",
+                    "displayName": "DeepSeek V4 Pro",
+                    "contextWindow": 1000000,
+                },
+            ],
+        },
+    })
 }
 
 fn build_codex_deepseek_settings_config() -> Value {
@@ -1458,6 +1514,7 @@ requires_openai_auth = true
                 "* PackyCode",
                 "* AICodeMirror",
                 "* DDS",
+                "Atlas Cloud",
                 "DeepSeek",
             ]
         );
@@ -1914,6 +1971,85 @@ requires_openai_auth = true
                 .as_ref()
                 .and_then(|meta| meta.partner_promotion_key.as_deref()),
             Some("google-official")
+        );
+    }
+
+    #[test]
+    fn cli_codex_atlascloud_template_matches_openai_compatible_preset_values() {
+        let provider =
+            build_provider_template_seed(&AppType::Codex, ProviderAddTemplate::Atlascloud, &[])
+                .expect("build Atlas Cloud Codex provider");
+
+        assert_eq!(provider.id, "atlas-cloud");
+        assert_eq!(provider.name, "Atlas Cloud");
+        assert_eq!(
+            provider.website_url.as_deref(),
+            Some("https://www.atlascloud.ai")
+        );
+        assert_eq!(provider.category.as_deref(), Some("aggregator"));
+        assert_eq!(provider.icon.as_deref(), Some("atlascloud"));
+        assert_eq!(provider.icon_color.as_deref(), Some("#2563EB"));
+        assert!(
+            provider.settings_config.get("auth").is_none(),
+            "Atlas Cloud preset should use ATLASCLOUD_API_KEY from env, not persist an API key snapshot"
+        );
+
+        let config = provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("Atlas Cloud Codex config should be TOML string");
+        assert!(config.contains("model_provider = \"atlascloud\""));
+        assert!(config.contains("model = \"qwen/qwen3.5-flash\""));
+        assert!(config.contains("disable_response_storage = true"));
+        assert!(config.contains("[model_providers.atlascloud]"));
+        assert!(config.contains("name = \"Atlas Cloud\""));
+        assert!(config.contains("base_url = \"https://api.atlascloud.ai/v1\""));
+        assert!(config.contains("wire_api = \"responses\""));
+        assert!(config.contains("requires_openai_auth = false"));
+        assert!(config.contains("env_key = \"ATLASCLOUD_API_KEY\""));
+
+        assert_eq!(
+            provider.settings_config["modelCatalog"],
+            json!({
+                "models": [
+                    {
+                        "model": "qwen/qwen3.5-flash",
+                        "displayName": "Qwen3.5 Flash",
+                        "contextWindow": 1000000,
+                    },
+                    {
+                        "model": "deepseek-ai/deepseek-v4-pro",
+                        "displayName": "DeepSeek V4 Pro",
+                        "contextWindow": 1000000,
+                    },
+                ],
+            })
+        );
+
+        let meta = provider
+            .meta
+            .expect("Atlas Cloud metadata should be present");
+        assert_eq!(meta.api_format.as_deref(), Some("openai_chat"));
+        let reasoning = meta
+            .codex_chat_reasoning
+            .expect("Atlas Cloud reasoning metadata should be present");
+        assert_eq!(reasoning.supports_thinking, Some(false));
+        assert_eq!(reasoning.supports_effort, Some(false));
+        assert_eq!(reasoning.thinking_param.as_deref(), Some("none"));
+        assert_eq!(reasoning.effort_param.as_deref(), Some("none"));
+        assert_eq!(reasoning.output_format.as_deref(), Some("auto"));
+        assert!(
+            reasoning.effort_value_mode.is_none(),
+            "Atlas Cloud should not use provider-specific reasoning effort mapping"
+        );
+        assert!(
+            meta.is_partner.is_none(),
+            "Atlas Cloud should not be flagged as a sponsor/partner preset"
+        );
+        assert!(
+            meta.partner_promotion_key.is_none(),
+            "Atlas Cloud should not carry partner promotion metadata"
         );
     }
 

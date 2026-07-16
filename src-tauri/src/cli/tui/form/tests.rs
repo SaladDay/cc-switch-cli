@@ -39,6 +39,10 @@ fn deepseek_template_index(app_type: AppType) -> usize {
     template_index_by_label(app_type, "DeepSeek")
 }
 
+fn atlascloud_template_index(app_type: AppType) -> usize {
+    template_index_by_label(app_type, "Atlas Cloud")
+}
+
 fn normalize_template_provider_json(mut value: serde_json::Value) -> serde_json::Value {
     if let Some(obj) = value.as_object_mut() {
         obj.remove("inFailoverQueue");
@@ -127,6 +131,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "* PackyCode",
             "* AICodeMirror",
             "* DDS",
+            "Atlas Cloud",
             "DeepSeek",
         ]
     );
@@ -258,9 +263,83 @@ fn cli_provider_templates_match_tui_serializer_output() {
         (AppType::OpenCode, ProviderAddTemplate::Fenno, "* FennoAI"),
         (AppType::Hermes, ProviderAddTemplate::Fenno, "* FennoAI"),
         (AppType::OpenClaw, ProviderAddTemplate::Fenno, "* FennoAI"),
+        (
+            AppType::Codex,
+            ProviderAddTemplate::Atlascloud,
+            "Atlas Cloud",
+        ),
     ] {
         assert_cli_template_matches_tui_serializer(app_type, template, label);
     }
+}
+
+#[test]
+fn provider_add_form_codex_atlascloud_template_matches_openai_compatible_preset_values() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+
+    form.apply_template(atlascloud_template_index(AppType::Codex), &[]);
+
+    assert_eq!(form.id.value, "atlas-cloud");
+    assert_eq!(form.name.value, "Atlas Cloud");
+    assert_eq!(form.website_url.value, "https://www.atlascloud.ai");
+    assert_eq!(form.codex_base_url.value, "https://api.atlascloud.ai/v1");
+    assert_eq!(form.codex_model.value, "qwen/qwen3.5-flash");
+    assert_eq!(form.codex_wire_api, CodexWireApi::Responses);
+    assert!(!form.codex_requires_openai_auth);
+    assert_eq!(form.codex_env_key.value, "ATLASCLOUD_API_KEY");
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["category"], "aggregator");
+    assert_eq!(provider["icon"], "atlascloud");
+    assert_eq!(provider["iconColor"], "#2563EB");
+    assert_eq!(provider["meta"]["apiFormat"], "openai_chat");
+    assert_eq!(
+        provider["meta"]["codexChatReasoning"],
+        json!({
+            "supportsThinking": false,
+            "supportsEffort": false,
+            "thinkingParam": "none",
+            "effortParam": "none",
+            "outputFormat": "auto",
+        })
+    );
+    assert!(
+        provider["meta"].get("isPartner").is_none(),
+        "Atlas Cloud preset should stay a normal provider template, not a sponsor preset"
+    );
+    assert!(
+        provider["meta"].get("partnerPromotionKey").is_none(),
+        "Atlas Cloud preset should not carry partner promotion metadata"
+    );
+
+    let cfg = provider["settingsConfig"]["config"]
+        .as_str()
+        .expect("settingsConfig.config should be TOML string");
+    assert!(cfg.contains("model_provider = \"atlascloud\""));
+    assert!(cfg.contains("model = \"qwen/qwen3.5-flash\""));
+    assert!(cfg.contains("[model_providers.atlascloud]"));
+    assert!(cfg.contains("name = \"Atlas Cloud\""));
+    assert!(cfg.contains("base_url = \"https://api.atlascloud.ai/v1\""));
+    assert!(cfg.contains("wire_api = \"responses\""));
+    assert!(cfg.contains("requires_openai_auth = false"));
+    assert!(cfg.contains("env_key = \"ATLASCLOUD_API_KEY\""));
+    assert_eq!(
+        provider["settingsConfig"]["modelCatalog"],
+        json!({
+            "models": [
+                {
+                    "model": "qwen/qwen3.5-flash",
+                    "displayName": "Qwen3.5 Flash",
+                    "contextWindow": 1000000,
+                },
+                {
+                    "model": "deepseek-ai/deepseek-v4-pro",
+                    "displayName": "DeepSeek V4 Pro",
+                    "contextWindow": 1000000,
+                },
+            ],
+        })
+    );
 }
 
 #[test]

@@ -460,7 +460,7 @@ Inspect and control daemon-managed per-app proxy routes for supported apps.
 
 **Features:** independent enable/disable per app, per-app listen ports, daemon-managed workers, current route inspection, dashboard telemetry, token accounting, and foreground serve mode for debugging.
 
-The local proxy can route Claude Code, Codex, and Gemini through CC-Switch, adapt OpenAI Responses API and Chat Completions providers, and connect mainstream OpenAI-compatible models such as DeepSeek, Kimi, Qwen, OpenRouter, xAI, Groq, and Mistral where the target app supports that route.
+The local proxy can route Claude Code, Codex, and Gemini through CC-Switch, adapt OpenAI Responses API and Chat Completions providers, and connect mainstream OpenAI-compatible models and providers such as DeepSeek, Atlas Cloud, Kimi, Qwen, OpenRouter, xAI, Groq, and Mistral where the target app supports that route.
 
 ```bash
 cc-switch proxy show                              # Show proxy configuration, routes, and daemon worker status
