@@ -358,3 +358,71 @@ fn migrate_legacy_codex_config_preserves_extra_keys() {
         "should preserve disable_response_storage: {result}"
     );
 }
+
+#[test]
+#[serial]
+fn codex_model_catalog_survives_round_trip_switch() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+    std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+        .expect("create ~/.codex (initialized)");
+
+    let catalog = json!({
+        "models": [{ "model": "gpt-4o", "displayName": "GPT-4o" }]
+    });
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Codex);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.providers.insert(
+            "alpha".to_string(),
+            Provider::with_id(
+                "alpha".to_string(),
+                "Alpha".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-alpha" },
+                    "config": "model_provider = \"alpha\"\nmodel = \"gpt-4o\"\n\n[model_providers.alpha]\nbase_url = \"https://alpha.example/v1\"\nwire_api = \"chat\"\n",
+                    "modelCatalog": catalog,
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "beta".to_string(),
+            Provider::with_id(
+                "beta".to_string(),
+                "Beta".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-beta" },
+                    "config": "model_provider = \"beta\"\nmodel = \"gpt-4o\"\n\n[model_providers.beta]\nbase_url = \"https://beta.example/v1\"\nwire_api = \"chat\"\n",
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+
+    // Switch to alpha: config.toml should install the model_catalog_json reference.
+    ProviderService::switch(&state, AppType::Codex, "alpha").expect("switch to alpha");
+    let after_alpha =
+        std::fs::read_to_string(get_codex_config_path()).expect("read config after alpha");
+    assert!(
+        after_alpha.contains("model_catalog_json"),
+        "alpha switch should install model_catalog_json: {after_alpha}"
+    );
+
+    // Round-trip: away to beta, then back to alpha.
+    ProviderService::switch(&state, AppType::Codex, "beta").expect("switch to beta");
+    ProviderService::switch(&state, AppType::Codex, "alpha").expect("switch back to alpha");
+
+    let after_round_trip =
+        std::fs::read_to_string(get_codex_config_path()).expect("read config after round trip");
+    assert!(
+        after_round_trip.contains("model_catalog_json"),
+        "model_catalog_json must survive a round-trip switch: {after_round_trip}"
+    );
+}

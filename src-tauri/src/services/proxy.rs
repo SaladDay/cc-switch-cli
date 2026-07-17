@@ -1597,7 +1597,37 @@ impl ProxyService {
             provider,
             &mut provider_snapshot,
         )?;
-        Self::merge_live_backup_snapshot(app_type, Some(original_live), None, provider_snapshot)
+
+        // For Codex, the user's live config carries the currently-active
+        // provider's routing (`model_provider` + `[model_providers.*]`). Strip it
+        // before the 2-way merge so it cannot contaminate another provider's
+        // failover snapshot; each target brings its own routing via
+        // `provider_snapshot`. Without this a failover to the official provider
+        // inherits the previous third-party `model_provider` and keeps routing to
+        // the old endpoint.
+        let stripped;
+        let existing: &Value = if matches!(app_type, AppType::Codex) {
+            stripped = Self::codex_live_backup_without_routing(original_live);
+            &stripped
+        } else {
+            original_live
+        };
+
+        Self::merge_live_backup_snapshot(app_type, Some(existing), None, provider_snapshot)
+    }
+
+    /// Return a copy of a Codex live backup with provider-routing fields removed
+    /// from its embedded `config` text. Non-routing keys are left untouched.
+    fn codex_live_backup_without_routing(original_live: &Value) -> Value {
+        let Some(config_text) = original_live.get("config").and_then(Value::as_str) else {
+            return original_live.clone();
+        };
+        let stripped = crate::codex_config::strip_codex_provider_routing(config_text);
+        let mut clone = original_live.clone();
+        if let Some(obj) = clone.as_object_mut() {
+            obj.insert("config".to_string(), Value::String(stripped));
+        }
+        clone
     }
 
     async fn save_failover_live_snapshot(
@@ -4031,6 +4061,121 @@ mod tests {
 
     fn assert_env_str(env: &Map<String, Value>, key: &str, expected: Option<&str>) {
         assert_eq!(env.get(key).and_then(Value::as_str), expected, "{key}");
+    }
+
+    #[test]
+    fn codex_failover_snapshot_excludes_foreign_provider_routing() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db);
+
+        // The currently-live provider (alpha) carries its own routing in config.toml.
+        let original_live = json!({
+            "config": "\nmodel_provider = \"alpha\"\n\n[model_providers.alpha]\nbase_url = \"https://alpha.example/v1\"\nwire_api = \"chat\"\n",
+            "auth": {}
+        });
+        // The failover target (beta) has its own routing.
+        let provider_beta = Provider::with_id(
+            "beta".to_string(),
+            "Beta".to_string(),
+            json!({
+                "auth": {},
+                "config": "\nmodel_provider = \"beta\"\n\n[model_providers.beta]\nbase_url = \"https://beta.example/v1\"\nwire_api = \"chat\"\n",
+            }),
+            None,
+        );
+
+        let merged = service
+            .build_failover_live_snapshot(&AppType::Codex, &original_live, &provider_beta)
+            .expect("build beta failover snapshot");
+
+        let cfg = merged
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("merged config text");
+        assert!(
+            cfg.contains("model_providers.beta"),
+            "beta's own routing must be present: {cfg}"
+        );
+        assert!(
+            !cfg.contains("alpha"),
+            "beta's failover snapshot leaked alpha's routing: {cfg}"
+        );
+    }
+
+    #[test]
+    fn codex_failover_snapshot_to_official_drops_third_party_routing() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db);
+
+        // Currently-live third-party provider carries its own routing.
+        let original_live = json!({
+            "config": "\nmodel_provider = \"alpha\"\n\n[model_providers.alpha]\nbase_url = \"https://alpha.example/v1\"\nwire_api = \"chat\"\n",
+            "auth": {}
+        });
+        // The failover target is the official provider, which carries NO routing
+        // (no `model_provider`, no `[model_providers]` section) in config.toml.
+        let official = Provider::with_id(
+            "codex-official".to_string(),
+            "Codex Official".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "official-key" },
+                "config": "\n# official codex: no model_provider routing\n",
+            }),
+            None,
+        );
+
+        let merged = service
+            .build_failover_live_snapshot(&AppType::Codex, &original_live, &official)
+            .expect("build official failover snapshot");
+
+        let cfg = merged
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("merged config text");
+        assert!(
+            !cfg.contains("model_provider"),
+            "official failover snapshot must not keep third-party model_provider routing: {cfg}"
+        );
+        assert!(
+            !cfg.contains("alpha"),
+            "official failover snapshot leaked alpha's routing: {cfg}"
+        );
+    }
+
+    #[test]
+    fn codex_failover_snapshot_does_not_leak_bearer_token() {
+        // With preserve_codex_official_auth_on_switch the active provider's API
+        // key rides in config.toml as experimental_bearer_token. It must not leak
+        // into another provider's failover snapshot.
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db);
+
+        let original_live = json!({
+            "config": "\nmodel_provider = \"alpha\"\nexperimental_bearer_token = \"sk-alpha-secret\"\n\n[model_providers.alpha]\nbase_url = \"https://alpha.example/v1\"\nwire_api = \"chat\"\n",
+            "auth": {}
+        });
+        let provider_beta = Provider::with_id(
+            "beta".to_string(),
+            "Beta".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-beta" },
+                "config": "\nmodel_provider = \"beta\"\n\n[model_providers.beta]\nbase_url = \"https://beta.example/v1\"\nwire_api = \"chat\"\n",
+            }),
+            None,
+        );
+
+        let merged = service
+            .build_failover_live_snapshot(&AppType::Codex, &original_live, &provider_beta)
+            .expect("build beta failover snapshot");
+
+        let cfg = merged
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("merged config text");
+        assert!(
+            !cfg.contains("sk-alpha-secret"),
+            "beta's failover snapshot leaked alpha's bearer token: {cfg}"
+        );
     }
 
     #[test]
