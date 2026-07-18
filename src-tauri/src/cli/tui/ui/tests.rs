@@ -3955,6 +3955,101 @@ fn settings_page_shows_openclaw_config_dir_override_value() {
 }
 
 #[test]
+#[serial(home_settings)]
+fn settings_page_shows_preferred_editor_and_truncates_long_command() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    let command = format!(
+        "code --wait --reuse-window --profile {}UNSEEN_TAIL",
+        "x".repeat(160)
+    );
+    crate::settings::set_preferred_editor(Some(command)).expect("save preferred editor");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 72, 32);
+    let editor_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("External Editor"))
+        .expect("settings should render the External Editor row");
+
+    assert!(editor_line.contains('…'), "{editor_line}");
+    assert!(!editor_line.contains("UNSEEN_TAIL"), "{editor_line}");
+}
+
+#[test]
+#[serial(home_settings)]
+fn settings_page_shows_external_editor_as_not_set_by_default() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let buf = render_with_size(&app, &minimal_data(&app.app_type), 96, 32);
+    let editor_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("External Editor"))
+        .expect("settings should render the External Editor row");
+
+    assert!(editor_line.contains("Not set"), "{editor_line}");
+    assert!(!editor_line.contains("Automatic"), "{editor_line}");
+}
+
+#[test]
+#[serial(home_settings)]
+fn external_editor_picker_renders_detected_and_fallback_options() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::set("NO_COLOR", "1");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    crate::settings::set_preferred_editor(Some("code --wait".to_string()))
+        .expect("save preferred editor");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::ExternalEditorPicker {
+        selected: 0,
+        editors: vec![
+            crate::cli::editor::DetectedEditor {
+                label: "Visual Studio Code".to_string(),
+                command: "code --wait".to_string(),
+            },
+            crate::cli::editor::DetectedEditor {
+                label: "Neovim".to_string(),
+                command: "nvim".to_string(),
+            },
+        ],
+    };
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        100,
+        28,
+    ));
+
+    assert!(all.contains("External Editor"), "{all}");
+    assert!(!all.contains("Automatic"), "{all}");
+    assert!(all.contains("Visual Studio Code  ·  code --wait"), "{all}");
+    assert!(all.contains("Neovim  ·  nvim"), "{all}");
+    assert!(all.contains("Custom command…"), "{all}");
+    assert!(all.contains("Enter=apply"), "{all}");
+    assert!(!all.contains("j/k"), "{all}");
+}
+
+#[test]
 fn settings_page_shows_managed_accounts_summary() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);

@@ -4843,6 +4843,38 @@ pub mod texts {
         "Default (~/.openclaw)"
     }
 
+    pub fn tui_settings_preferred_editor_label() -> &'static str {
+        if is_chinese() {
+            "外部编辑器"
+        } else {
+            "External Editor"
+        }
+    }
+
+    pub fn tui_settings_preferred_editor_prompt() -> &'static str {
+        if is_chinese() {
+            "输入编辑器命令（如 nvim 或 code --wait）；留空清除当前选择"
+        } else {
+            "Enter an editor command (for example nvim or code --wait); leave empty to clear the selection"
+        }
+    }
+
+    pub fn tui_settings_preferred_editor_not_set() -> &'static str {
+        if is_chinese() {
+            "未设置"
+        } else {
+            "Not set"
+        }
+    }
+
+    pub fn tui_settings_preferred_editor_custom() -> &'static str {
+        if is_chinese() {
+            "自定义命令…"
+        } else {
+            "Custom command…"
+        }
+    }
+
     pub fn tui_settings_proxy_restart_hint() -> &'static str {
         if is_chinese() {
             "修改监听地址或端口后，需先停止并重新开启本地代理才能生效"
@@ -4918,6 +4950,14 @@ pub mod texts {
             "OpenClaw 配置目录已保存。"
         } else {
             "OpenClaw config directory saved."
+        }
+    }
+
+    pub fn tui_toast_preferred_editor_saved() -> &'static str {
+        if is_chinese() {
+            "外部编辑器设置已保存。"
+        } else {
+            "External editor setting saved."
         }
     }
 

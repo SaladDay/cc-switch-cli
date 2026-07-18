@@ -1821,6 +1821,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::SetSkipClaudeOnboarding { .. }
         | Action::SetClaudePluginIntegration { .. }
         | Action::SetCodexUnifiedSessionHistory { .. }
+        | Action::SetPreferredEditor { .. }
         | Action::SetManagedProxyForCurrentApp { .. }
         | Action::SetLanguage(_)
         | Action::CheckUpdate

@@ -944,6 +944,7 @@ pub(crate) fn handle_action(
             settings::enable_proxy_and_auto_failover(&mut ctx, app_type)
         }
         Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
+        Action::SetPreferredEditor { command } => settings::set_preferred_editor(&mut ctx, command),
         Action::SetManagedProxyForCurrentApp { app_type, enabled } => queue_managed_proxy_action(
             ctx.app,
             ctx.proxy_req_tx,

@@ -584,6 +584,9 @@ pub struct AppSettings {
     /// 首选终端应用，用于会话恢复。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_terminal: Option<String>,
+    /// Preferred external editor command. When absent, no editor is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_editor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_migrations: Option<LocalMigrations>,
     /// Claude 自定义端点列表
@@ -638,6 +641,7 @@ impl Default for AppSettings {
             s3_sync: None,
             backup_retain_count: None,
             preferred_terminal: None,
+            preferred_editor: None,
             local_migrations: None,
             custom_endpoints_claude: HashMap::new(),
             custom_endpoints_codex: HashMap::new(),
@@ -721,6 +725,13 @@ impl AppSettings {
 
         self.preferred_terminal = self
             .preferred_terminal
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        self.preferred_editor = self
+            .preferred_editor
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
@@ -969,6 +980,19 @@ pub fn get_preferred_terminal() -> Option<String> {
         .read()
         .ok()
         .and_then(|settings| settings.preferred_terminal.clone())
+}
+
+pub fn get_preferred_editor() -> Option<String> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|settings| settings.preferred_editor.clone())
+}
+
+pub fn set_preferred_editor(preferred_editor: Option<String>) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.preferred_editor = preferred_editor;
+    update_settings(settings)
 }
 
 pub fn ensure_security_auth_selected_type(selected_type: &str) -> Result<(), AppError> {
@@ -1311,9 +1335,9 @@ pub fn set_skip_claude_onboarding(enabled: bool) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_s3_sync_settings, get_webdav_sync_settings, set_s3_sync_settings,
-        set_webdav_sync_settings, update_settings, AppSettings, LocalMigrations, S3SyncSettings,
-        WebDavSyncSettings,
+        get_preferred_editor, get_s3_sync_settings, get_webdav_sync_settings, set_preferred_editor,
+        set_s3_sync_settings, set_webdav_sync_settings, update_settings, AppSettings,
+        LocalMigrations, S3SyncSettings, WebDavSyncSettings,
     };
     use crate::test_support::TestEnvGuard;
     use serde_json::json;
@@ -1323,6 +1347,44 @@ mod tests {
         let settings = AppSettings::default();
         assert!(!settings.unify_codex_session_history);
         assert_eq!(settings.unify_codex_migrate_existing, None);
+    }
+
+    #[test]
+    fn preferred_editor_defaults_none_and_uses_camel_case() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+
+        let settings = AppSettings::default();
+        assert_eq!(settings.preferred_editor, None);
+        let default_json = serde_json::to_value(&settings).expect("serialize default settings");
+        assert!(default_json.get("preferredEditor").is_none());
+
+        let configured = AppSettings {
+            preferred_editor: Some("code --wait".to_string()),
+            ..settings
+        };
+        let configured_json =
+            serde_json::to_value(configured).expect("serialize configured editor");
+        assert_eq!(configured_json["preferredEditor"], "code --wait");
+    }
+
+    #[test]
+    fn preferred_editor_normalizes_trimmed_and_blank_values() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+        update_settings(AppSettings::default()).expect("reset isolated settings");
+
+        set_preferred_editor(Some("  code --wait  ".to_string())).expect("save preferred editor");
+        assert_eq!(get_preferred_editor().as_deref(), Some("code --wait"));
+
+        set_preferred_editor(Some(" \t ".to_string())).expect("clear preferred editor");
+        assert_eq!(get_preferred_editor(), None);
+
+        let persisted = std::fs::read_to_string(home.path().join(".cc-switch/settings.json"))
+            .expect("read isolated settings");
+        let persisted: serde_json::Value =
+            serde_json::from_str(&persisted).expect("parse isolated settings");
+        assert!(persisted.get("preferredEditor").is_none());
     }
 
     #[test]

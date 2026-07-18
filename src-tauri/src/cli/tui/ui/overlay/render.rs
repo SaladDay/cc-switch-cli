@@ -88,6 +88,15 @@ pub(crate) fn render_overlay(
             theme,
             *selected,
         ),
+        Overlay::ExternalEditorPicker { selected, editors } => {
+            super::pickers::render_external_editor_picker_overlay(
+                frame,
+                content_area,
+                theme,
+                *selected,
+                editors,
+            )
+        }
         Overlay::UsageQueryTemplatePicker { selected } => {
             super::pickers::render_usage_query_template_picker_overlay(
                 frame,

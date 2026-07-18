@@ -511,6 +511,73 @@ pub(super) fn render_user_agent_picker_overlay(
     frame.render_stateful_widget(list, body_area, &mut state);
 }
 
+pub(super) fn render_external_editor_picker_overlay(
+    frame: &mut Frame<'_>,
+    content_area: Rect,
+    theme: &theme::Theme,
+    selected: usize,
+    editors: &[crate::cli::editor::DetectedEditor],
+) {
+    let body_rows = u16::try_from(editors.len().saturating_add(1)).unwrap_or(u16::MAX);
+    let body_area = overlay_frame(
+        frame,
+        content_area,
+        theme,
+        texts::tui_settings_preferred_editor_label(),
+        &[
+            ("↑↓", texts::tui_key_select()),
+            ("Enter", texts::tui_key_apply()),
+            ("Esc", texts::tui_key_cancel()),
+        ],
+        OverlaySize::FitRows {
+            width: 72,
+            body_rows,
+        },
+        overlay_border_style(theme, false),
+    );
+
+    let configured = crate::settings::get_preferred_editor();
+    let detected_selection = configured
+        .as_deref()
+        .and_then(|command| editors.iter().position(|editor| editor.command == command));
+    let custom_active = configured.is_some() && detected_selection.is_none();
+    let symbol_width =
+        u16::try_from(UnicodeWidthStr::width(highlight_symbol(theme))).unwrap_or(u16::MAX);
+    let available_width = body_area.width.saturating_sub(symbol_width);
+    let option = |active: bool, label: String| {
+        let marker = if active {
+            texts::tui_marker_active()
+        } else {
+            texts::tui_marker_inactive()
+        };
+        ListItem::new(Line::raw(truncate_to_display_width(
+            &format!("{marker}  {label}"),
+            available_width,
+        )))
+    };
+
+    let mut items = Vec::with_capacity(editors.len().saturating_add(1));
+    items.extend(editors.iter().enumerate().map(|(index, editor)| {
+        let label = bounded_trimmed_text_for_display(&editor.label);
+        let command = bounded_trimmed_text_for_display(&editor.command);
+        option(
+            detected_selection == Some(index),
+            format!("{label}  ·  {command}"),
+        )
+    }));
+    items.push(option(
+        custom_active,
+        texts::tui_settings_preferred_editor_custom().to_string(),
+    ));
+
+    let list = List::new(items)
+        .highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
+    let mut state = ListState::default();
+    state.select(Some(selected.min(editors.len())));
+    frame.render_stateful_widget(list, body_area, &mut state);
+}
+
 pub(super) fn render_managed_account_picker_overlay(
     frame: &mut Frame<'_>,
     app: &App,

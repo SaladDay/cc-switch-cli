@@ -898,6 +898,18 @@ impl App {
                     }
                     Action::None
                 }
+                Some(SettingsItem::PreferredEditor) => {
+                    let editors = crate::cli::editor::detect_external_editors();
+                    let configured = crate::settings::get_preferred_editor();
+                    let selected = configured.as_deref().map_or(0, |command| {
+                        editors
+                            .iter()
+                            .position(|editor| editor.command == command)
+                            .unwrap_or(editors.len())
+                    });
+                    self.overlay = Overlay::ExternalEditorPicker { selected, editors };
+                    Action::None
+                }
                 Some(SettingsItem::VisibleAppsMode) => {
                     let current = crate::settings::get_visible_apps_settings().mode;
                     let next = match current {

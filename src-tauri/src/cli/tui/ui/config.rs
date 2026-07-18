@@ -3327,6 +3327,7 @@ pub(super) fn render_settings(
     let skip_claude_onboarding = crate::settings::get_skip_claude_onboarding();
     let claude_plugin_integration = crate::settings::get_enable_claude_plugin_integration();
     let codex_unified_session_history = crate::settings::unify_codex_session_history();
+    let preferred_editor = crate::settings::get_preferred_editor();
 
     let rows_data = super::app::SettingsItem::ALL
         .iter()
@@ -3348,6 +3349,12 @@ pub(super) fn render_settings(
                 texts::tui_settings_icons_label().to_string(),
                 texts::tui_settings_icon_mode_name(crate::cli::tui::icons::configured_icon_mode())
                     .to_string(),
+            ),
+            super::app::SettingsItem::PreferredEditor => (
+                texts::tui_settings_preferred_editor_label().to_string(),
+                preferred_editor
+                    .clone()
+                    .unwrap_or_else(|| texts::tui_settings_preferred_editor_not_set().to_string()),
             ),
             super::app::SettingsItem::VisibleAppsMode => (
                 texts::tui_settings_visible_apps_mode_label().to_string(),
@@ -3412,24 +3419,6 @@ pub(super) fn render_settings(
         })
         .collect::<Vec<_>>();
 
-    let label_col_width = field_label_column_width(
-        rows_data
-            .iter()
-            .map(|(label, _value)| label.as_str())
-            .chain(std::iter::once(texts::tui_settings_header_setting())),
-        0,
-    );
-
-    let header = Row::new(vec![
-        Cell::from(texts::tui_settings_header_setting()),
-        Cell::from(texts::tui_settings_header_value()),
-    ])
-    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
-
-    let rows = rows_data
-        .iter()
-        .map(|(label, value)| Row::new(vec![Cell::from(label.clone()), Cell::from(value.clone())]));
-
     let body = render_page_frame(
         frame,
         area,
@@ -3439,6 +3428,35 @@ pub(super) fn render_settings(
         &[("Enter", texts::tui_key_apply())],
         None,
     );
+    let table_area = inset_left(body, CONTENT_INSET_LEFT);
+
+    let raw_label_col_width = field_label_column_width(
+        rows_data
+            .iter()
+            .map(|(label, _value)| label.as_str())
+            .chain(std::iter::once(texts::tui_settings_header_setting())),
+        0,
+    );
+    let label_col_width = raw_label_col_width.min(table_area.width.saturating_sub(9));
+
+    let header = Row::new(vec![
+        Cell::from(texts::tui_settings_header_setting()),
+        Cell::from(texts::tui_settings_header_value()),
+    ])
+    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+
+    let rows = rows_data.iter().map(|(label, value)| {
+        let value = bounded_trimmed_text_for_display(value);
+        Row::new(vec![
+            Cell::from(truncate_to_display_width(label, label_col_width)),
+            Cell::from(truncated_value_cell(
+                &value,
+                table_area.width,
+                label_col_width,
+                theme,
+            )),
+        ])
+    });
 
     let table = Table::new(
         rows,
@@ -3451,7 +3469,7 @@ pub(super) fn render_settings(
 
     let mut state = TableState::default();
     state.select(Some(app.settings_idx));
-    frame.render_stateful_widget(table, inset_left(body, CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(table, table_area, &mut state);
 }
 
 fn managed_accounts_summary(app: &App) -> String {

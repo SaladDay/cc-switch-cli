@@ -2,7 +2,7 @@ use crate::app_config::AppType;
 use crate::cli::i18n;
 use crate::cli::i18n::texts;
 
-use super::app::{App, Overlay};
+use super::app::{App, Focus, Overlay, SettingsItem};
 use super::data::UiData;
 use super::form::{
     CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, FormFocus, FormMode,
@@ -51,6 +51,7 @@ enum HelpTarget {
     Global,
     Sessions,
     FailoverQueue,
+    PreferredEditor,
     ProviderTemplate,
     ProviderField {
         app_type: AppType,
@@ -103,6 +104,7 @@ fn current_help_target(app: &App) -> HelpTarget {
             Overlay::UserAgentPicker { .. } => {
                 provider_local_proxy_overlay_target(app, LocalProxySettingsField::UserAgent)
             }
+            Overlay::ExternalEditorPicker { .. } => HelpTarget::PreferredEditor,
             Overlay::ClaudeModelPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::ClaudeModelConfig)
             }
@@ -127,6 +129,16 @@ fn current_help_target(app: &App) -> HelpTarget {
 
     if matches!(app.route, super::route::Route::Sessions) {
         return HelpTarget::Sessions;
+    }
+
+    if matches!(app.route, super::route::Route::Settings)
+        && matches!(app.focus, Focus::Content)
+        && matches!(
+            SettingsItem::ALL.get(app.settings_idx),
+            Some(SettingsItem::PreferredEditor)
+        )
+    {
+        return HelpTarget::PreferredEditor;
     }
 
     if let Some(FormState::S3Sync(form)) = app.form.as_ref() {
@@ -267,6 +279,13 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
             help_lines(
                 "Enter 将当前供应商加入或移出队列。Ctrl+↑/↓ 调整已加入供应商的优先级；J/K 是移动的备用键。按 f 开关自动故障转移。\nP1、P2… 就是实际尝试顺序。开启自动故障转移后，供应商主页的普通切换会停用，由此队列控制路由。\n“当前目标”来自正在运行的代理。健康状态来自历史请求结果：“无记录”不代表健康检查失败，“失败”是尚未达到不健康阈值的连续失败；这里不显示实时断路器状态。",
                 "Press Enter to add or remove the focused provider. Ctrl+Up/Down changes the priority of queued providers; J/K are secondary move aliases. Press f to toggle automatic failover.\nP1, P2, and so on are the actual attempt order. While automatic failover is on, ordinary switching on the Providers page is disabled and this queue controls routing.\nActive target comes from the running proxy. Health is passive history from past request attempts: no record is not a failed health check, and failures means consecutive failures below the unhealthy threshold. This view does not claim to show the live circuit-breaker state.",
+            ),
+        ),
+        HelpTarget::PreferredEditor => HelpContent::new(
+            texts::tui_settings_preferred_editor_label(),
+            help_lines(
+                "打开设置项时，cc-switch 才会检测当前系统中可执行的常见编辑器；检测不会启动任何程序，也不影响启动速度。检测结果只作为候选，必须按 Enter 明确选择后才会保存，不会自动替你选择。有效的 VISUAL 和 EDITOR 命令也会出现在候选中。\n自定义命令会按参数直接执行，不经过 shell，临时文件路径会追加为最后一个参数。带空格的路径或参数需要加引号；自定义输入留空可清除当前选择。\n图形编辑器必须使用等待参数（例如 code --wait），否则进程提前退出后临时文件会被回收。已配置的命令如果启动失败会直接报错，不会静默换用其他编辑器。",
+                "cc-switch detects executable common editors only when you open this setting; detection launches nothing and does not affect startup time. Results are choices only: nothing is saved until you explicitly press Enter, and no editor is selected automatically. Valid VISUAL and EDITOR commands also appear in the list.\nCustom commands are executed directly without a shell, with the temporary file path appended as the final argument. Quote paths or arguments that contain spaces; leave custom input empty to clear the selection.\nGUI editors need a wait flag, such as code --wait, or the temporary file could be removed when the launcher exits early. A configured command reports launch failures instead of silently switching editors.",
             ),
         ),
         HelpTarget::ProviderTemplate => HelpContent::new(

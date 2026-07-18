@@ -518,7 +518,6 @@ dependencies = [
  "console",
  "crossterm",
  "dirs",
- "edit",
  "env_logger",
  "flate2",
  "futures",
@@ -560,7 +559,7 @@ dependencies = [
  "unicode-width 0.1.14",
  "url",
  "uuid",
- "which 6.0.3",
+ "which",
  "windows-sys 0.61.1",
  "winreg",
  "zip",
@@ -964,16 +963,6 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
-
-[[package]]
-name = "edit"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f364860e764787163c8c8f58231003839be31276e821e2ad2092ddf496b1aa09"
-dependencies = [
- "tempfile",
- "which 4.4.2",
-]
 
 [[package]]
 name = "either"
@@ -4135,18 +4124,6 @@ dependencies = [
  "lazy_static",
  "serde",
  "wezterm-dynamic",
-]
-
-[[package]]
-name = "which"
-version = "4.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87ba24419a2078cd2b0f2ede2691b6c66d8e47836da3b6db8265ebad47afbfc7"
-dependencies = [
- "either",
- "home",
- "once_cell",
- "rustix 0.38.44",
 ]
 
 [[package]]

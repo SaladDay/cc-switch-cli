@@ -313,6 +313,27 @@ impl App {
                 };
                 Action::SetOpenClawConfigDir { path }
             }
+            TextSubmit::SettingsPreferredEditor => {
+                let trimmed = raw.trim().to_string();
+                let command = if trimmed.is_empty() {
+                    None
+                } else {
+                    if let Err(err) =
+                        crate::cli::editor::validate_preferred_editor_command(&trimmed)
+                    {
+                        self.overlay = Overlay::TextInput(TextInputState {
+                            title: texts::tui_settings_preferred_editor_label().to_string(),
+                            prompt: texts::tui_settings_preferred_editor_prompt().to_string(),
+                            input: TextInput::new(trimmed),
+                            submit: TextSubmit::SettingsPreferredEditor,
+                        });
+                        self.push_toast(err.to_string(), ToastKind::Error);
+                        return Action::None;
+                    }
+                    Some(trimmed)
+                };
+                Action::SetPreferredEditor { command }
+            }
             TextSubmit::SkillsInstallSpec => {
                 if raw.is_empty() {
                     self.push_toast(texts::tui_toast_skill_spec_empty(), ToastKind::Warning);

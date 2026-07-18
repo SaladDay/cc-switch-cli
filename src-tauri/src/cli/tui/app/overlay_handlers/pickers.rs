@@ -91,6 +91,9 @@ impl App {
         if let Some(action) = self.handle_user_agent_picker_key(key) {
             return Some(action);
         }
+        if let Some(action) = self.handle_external_editor_picker_key(key) {
+            return Some(action);
+        }
         if let Some(action) = self.handle_usage_query_template_picker_key(key) {
             return Some(action);
         }
@@ -481,6 +484,53 @@ impl App {
                     self.overlay = Overlay::None;
                 }
                 Action::None
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn handle_external_editor_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let Overlay::ExternalEditorPicker { selected, editors } = &mut self.overlay else {
+            return None;
+        };
+        let max = editors.len();
+        *selected = (*selected).min(max);
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                self.overlay = Overlay::None;
+                Action::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                *selected = selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                *selected = selected.saturating_add(1).min(max);
+                Action::None
+            }
+            KeyCode::Enter => {
+                let configured = crate::settings::get_preferred_editor();
+                let selected = *selected;
+                if let Some(editor) = editors.get(selected) {
+                    let command = editor.command.clone();
+                    self.overlay = Overlay::None;
+                    if configured.as_deref() == Some(command.as_str()) {
+                        Action::None
+                    } else {
+                        Action::SetPreferredEditor {
+                            command: Some(command),
+                        }
+                    }
+                } else {
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_settings_preferred_editor_custom().to_string(),
+                        prompt: texts::tui_settings_preferred_editor_prompt().to_string(),
+                        input: TextInput::new(configured.unwrap_or_default()),
+                        submit: TextSubmit::SettingsPreferredEditor,
+                    });
+                    Action::None
+                }
             }
             _ => Action::None,
         })

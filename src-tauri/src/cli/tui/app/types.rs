@@ -3295,6 +3295,7 @@ pub enum TextSubmit {
     SettingsProxyListenAddress,
     SettingsProxyListenPort,
     SettingsOpenClawConfigDir,
+    SettingsPreferredEditor,
     #[allow(dead_code)]
     SkillsInstallSpec,
     SkillsDiscoverQuery,
@@ -3445,6 +3446,10 @@ pub enum Overlay {
     },
     UserAgentPicker {
         selected: usize,
+    },
+    ExternalEditorPicker {
+        selected: usize,
+        editors: Vec<crate::cli::editor::DetectedEditor>,
     },
     UsageQueryTemplatePicker {
         selected: usize,
@@ -3675,6 +3680,7 @@ impl Overlay {
                 | Overlay::FailoverQueueManager { .. }
                 | Overlay::ClaudeApiFormatPicker { .. }
                 | Overlay::UserAgentPicker { .. }
+                | Overlay::ExternalEditorPicker { .. }
                 | Overlay::UsageQueryTemplatePicker { .. }
                 | Overlay::S3PresetPicker { .. }
                 | Overlay::ManagedAccountPicker { .. }
@@ -3718,6 +3724,7 @@ impl Overlay {
             | Overlay::FailoverQueueManager { .. }
             | Overlay::ClaudeApiFormatPicker { .. }
             | Overlay::UserAgentPicker { .. }
+            | Overlay::ExternalEditorPicker { .. }
             | Overlay::UsageQueryTemplatePicker { .. }
             | Overlay::S3PresetPicker { .. }
             | Overlay::ManagedAccountPicker { .. }

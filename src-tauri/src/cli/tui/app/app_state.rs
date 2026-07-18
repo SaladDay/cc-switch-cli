@@ -306,6 +306,9 @@ pub enum Action {
     SetOpenClawConfigDir {
         path: Option<String>,
     },
+    SetPreferredEditor {
+        command: Option<String>,
+    },
     SetManagedProxyForCurrentApp {
         app_type: AppType,
         enabled: bool,
@@ -477,6 +480,7 @@ pub enum SettingsItem {
     Language,
     Theme,
     Icons,
+    PreferredEditor,
     VisibleAppsMode,
     VisibleApps,
     OpenClawConfigDir,
@@ -489,11 +493,12 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 12] = [
+    pub const ALL: [SettingsItem; 13] = [
         SettingsItem::ManagedAccounts,
         SettingsItem::Language,
         SettingsItem::Theme,
         SettingsItem::Icons,
+        SettingsItem::PreferredEditor,
         SettingsItem::VisibleAppsMode,
         SettingsItem::VisibleApps,
         SettingsItem::OpenClawConfigDir,

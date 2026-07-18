@@ -9716,6 +9716,204 @@ mod tests {
     }
 
     #[test]
+    fn settings_menu_places_preferred_editor_after_icons() {
+        let editor_index = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::PreferredEditor))
+            .expect("PreferredEditor missing from SettingsItem::ALL");
+
+        assert!(editor_index > 0);
+        assert!(matches!(
+            SettingsItem::ALL.get(editor_index - 1),
+            Some(SettingsItem::Icons)
+        ));
+    }
+
+    #[test]
+    fn settings_preferred_editor_has_contextual_help() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::PreferredEditor))
+            .expect("PreferredEditor missing from SettingsItem::ALL");
+
+        let help = crate::cli::tui::help::context_help_for_app(&app, &UiData::default());
+        let body = help.lines.join("\n");
+
+        assert_eq!(help.title, "External Editor");
+        assert!(body.contains("VISUAL"), "{body}");
+        assert!(body.contains("EDITOR"), "{body}");
+        assert!(body.contains("without a shell"), "{body}");
+        assert!(body.contains("code --wait"), "{body}");
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn settings_preferred_editor_opens_detected_picker_with_custom_selected() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        crate::settings::set_preferred_editor(Some(
+            "cc-switch-unrecognized-editor --wait".to_string(),
+        ))
+        .expect("save custom editor");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::PreferredEditor))
+            .expect("PreferredEditor missing from SettingsItem::ALL");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::ExternalEditorPicker { selected, editors }
+                if *selected == editors.len()
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn opening_external_editor_picker_does_not_choose_an_editor_automatically() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        crate::settings::set_preferred_editor(None).expect("clear preferred editor");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::PreferredEditor))
+            .expect("PreferredEditor missing from SettingsItem::ALL");
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::ExternalEditorPicker { selected: 0, .. }
+        ));
+        assert_eq!(crate::settings::get_preferred_editor(), None);
+    }
+
+    fn detected_editor(label: &str, command: &str) -> crate::cli::editor::DetectedEditor {
+        crate::cli::editor::DetectedEditor {
+            label: label.to_string(),
+            command: command.to_string(),
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn external_editor_picker_applies_only_an_explicit_detected_choice() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        crate::settings::set_preferred_editor(Some("nvim".to_string()))
+            .expect("save initial editor");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::ExternalEditorPicker {
+            selected: 0,
+            editors: vec![detected_editor("Visual Studio Code", "code --wait")],
+        };
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::SetPreferredEditor {
+                command: Some(command)
+            } if command == "code --wait"
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn external_editor_picker_custom_choice_reuses_text_input() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        crate::settings::set_preferred_editor(Some("my-editor --block".to_string()))
+            .expect("save initial editor");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::ExternalEditorPicker {
+            selected: 1,
+            editors: vec![detected_editor("Neovim", "nvim")],
+        };
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsPreferredEditor,
+                input,
+                ..
+            }) if input.value == "my-editor --block"
+        ));
+    }
+
+    #[test]
+    fn settings_preferred_editor_custom_submit_validates_and_clears() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "External Editor".to_string(),
+            prompt: "command".to_string(),
+            input: TextInput::new("code --wait"),
+            submit: TextSubmit::SettingsPreferredEditor,
+        });
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::SetPreferredEditor {
+                command: Some(command)
+            } if command == "code --wait"
+        ));
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "External Editor".to_string(),
+            prompt: "command".to_string(),
+            input: TextInput::new("   "),
+            submit: TextSubmit::SettingsPreferredEditor,
+        });
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::SetPreferredEditor { command: None }
+        ));
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "External Editor".to_string(),
+            prompt: "command".to_string(),
+            input: TextInput::new("\"unterminated"),
+            submit: TextSubmit::SettingsPreferredEditor,
+        });
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::None
+        ));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsPreferredEditor,
+                ..
+            })
+        ));
+        assert!(matches!(
+            app.toast,
+            Some(Toast {
+                kind: ToastKind::Error,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn settings_managed_accounts_item_opens_page_and_refreshes_when_status_missing() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Settings;
