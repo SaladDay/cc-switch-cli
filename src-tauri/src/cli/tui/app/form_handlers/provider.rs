@@ -528,6 +528,13 @@ impl App {
                 provider.toggle_codex_fast_mode();
                 Action::None
             }
+            ProviderAddField::ClaudeIsFullUrl => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.toggle_claude_is_full_url();
+                Action::None
+            }
             ProviderAddField::OpenClawModels => {
                 if matches!(key.code, KeyCode::Enter) {
                     let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {

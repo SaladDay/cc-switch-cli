@@ -137,6 +137,11 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
             .map(|meta| meta.codex_fast_mode_enabled())
             .unwrap_or(false);
     }
+    form.claude_is_full_url = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.is_full_url)
+        .unwrap_or(false);
     if let Some(env) = provider
         .settings_config
         .get("env")

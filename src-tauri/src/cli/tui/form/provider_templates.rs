@@ -540,6 +540,7 @@ impl ProviderAddFormState {
                     self.claude_teammates = defaults.claude_teammates;
                     self.claude_tool_search = defaults.claude_tool_search;
                     self.claude_disable_auto_upgrade = defaults.claude_disable_auto_upgrade;
+                    self.claude_is_full_url = defaults.claude_is_full_url;
                     self.codex_oauth_account_id = defaults.codex_oauth_account_id;
                     self.codex_fast_mode = defaults.codex_fast_mode;
                     self.codex_base_url = defaults.codex_base_url;

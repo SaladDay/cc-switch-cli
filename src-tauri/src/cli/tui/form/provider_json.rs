@@ -601,6 +601,7 @@ impl ProviderAddFormState {
             && !is_codex_oauth
             && !should_write_local_proxy_settings
             && !self.has_usage_script_meta()
+            && !self.claude_is_full_url
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
             return;
@@ -656,6 +657,12 @@ impl ProviderAddFormState {
                 );
             } else {
                 meta_obj.remove("apiKeyField");
+            }
+
+            if self.claude_is_full_url {
+                meta_obj.insert("isFullUrl".to_string(), json!(true));
+            } else {
+                meta_obj.remove("isFullUrl");
             }
         }
 

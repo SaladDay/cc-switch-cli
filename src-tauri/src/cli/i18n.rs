@@ -2218,6 +2218,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_claude_is_full_url() -> &'static str {
+        if is_chinese() {
+            "使用完整 URL（不拼接路径）"
+        } else {
+            "Use full URL (no path append)"
+        }
+    }
+
     pub fn tui_label_provider_package() -> &'static str {
         if is_chinese() {
             "Provider / npm 包"

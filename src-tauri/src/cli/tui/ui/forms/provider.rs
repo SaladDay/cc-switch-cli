@@ -1873,6 +1873,7 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::ClaudeDisableAutoUpgrade => {
             texts::tui_label_claude_disable_auto_upgrade().to_string()
         }
+        ProviderAddField::ClaudeIsFullUrl => texts::tui_label_claude_is_full_url().to_string(),
         ProviderAddField::CodexOAuthAccount => texts::tui_label_chatgpt_account().to_string(),
         ProviderAddField::CodexFastMode => texts::tui_label_codex_fast_mode().to_string(),
         ProviderAddField::CodexBaseUrl => texts::tui_label_base_url().to_string(),
@@ -1985,6 +1986,13 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::ClaudeDisableAutoUpgrade => {
             if provider.claude_disable_auto_upgrade {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        ProviderAddField::ClaudeIsFullUrl => {
+            if provider.claude_is_full_url {
                 format!("[{}]", texts::tui_marker_active())
             } else {
                 "[ ]".to_string()
